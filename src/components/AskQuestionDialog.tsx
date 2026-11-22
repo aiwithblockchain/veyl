@@ -6,7 +6,7 @@ import type {
 } from "../agent/bridge";
 import { isConfirmQuestionKind } from "../agent/bridge";
 import type { ConfigConnectMode } from "../agent/protocol";
-import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { formatByteSize, upgradeEffectText } from "../format";
 import { useFocusTrap } from "../ui/focus";
 import { t as translate, useT } from "../i18n";
@@ -121,12 +121,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
       try {
         await onAnswer(value);
       } catch (failure) {
-        const bridgeError = toBridgeError(failure);
-        setError(
-          bridgeError.hasMessage
-            ? bridgeError.message
-            : t("ask.error.answer"),
-        );
+        setError(errorText(failure, t("ask.error.answer")));
         submittingRef.current = false;
         setSubmitting(false);
       }

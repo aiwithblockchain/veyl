@@ -82,6 +82,7 @@ import { usePaneLayout } from "./ui/usePaneLayout";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { t as translate, useT } from "./i18n";
 import type { MessageKey } from "./i18n";
+import { errorText } from "./i18n/errorText";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -1410,14 +1411,9 @@ export default function App() {
           setQuitOpen(false);
         })
         .catch((failure) => {
-          const error = toBridgeError(failure);
           quitBusyRef.current = false;
           setQuitBusy(false);
-          setQuitError(
-            error.hasMessage
-              ? error.message
-              : translate("app.quitDeliverFailed"),
-          );
+          setQuitError(errorText(failure, translate("app.quitDeliverFailed")));
         });
     },
     [bridge],
@@ -1504,14 +1500,13 @@ export default function App() {
       if (bridgeError.code === "PRECONDITION_FAILED") {
         return { ok: false, message: translate("app.deleteActive") };
       }
+      // 这条匹配的是 Tauri 未注册命令时的字符串错误，不是我们的错误信封。
       if (/not found|unknown command/i.test(bridgeError.message)) {
         return { ok: false, message: translate("app.deleteUnsupported") };
       }
       return {
         ok: false,
-        message: bridgeError.hasMessage
-          ? bridgeError.message
-          : translate("app.deleteFailed"),
+        message: errorText(bridgeError, translate("app.deleteFailed")),
       };
     }
 
@@ -1649,9 +1644,7 @@ export default function App() {
       dispatch({
         type: "request_failed",
         sessionId,
-        message: bridgeError.hasMessage
-          ? bridgeError.message
-          : translate("app.sendFailed"),
+        message: errorText(bridgeError, translate("app.sendFailed")),
       });
       return true;
     }
@@ -1702,9 +1695,7 @@ export default function App() {
         message:
           failure.code === "NOT_FOUND"
             ? translate("app.displayNotFound")
-            : failure.hasMessage
-            ? failure.message
-            : translate("tool.action.openFailed"),
+            : errorText(failure, translate("tool.action.openFailed")),
       };
     }
   };
@@ -1959,9 +1950,7 @@ export default function App() {
         ok: false,
         restored,
         actualMode,
-        message: bridgeError.hasMessage
-          ? bridgeError.message
-          : translate("app.modeSwitchFailed"),
+        message: errorText(bridgeError, translate("app.modeSwitchFailed")),
       };
     }
   };
@@ -2244,15 +2233,11 @@ export default function App() {
       const status = await bridge.defaultProfileStatus();
       if (status.nodeCount === 0) await bridge.defaultProfileRefresh();
     } catch (error) {
-      // 不看后端文案：hasMessage=false 表示只有本地占位，直接给纯后缀句。
-      // 批次 4 后端稳定错误码落地后，这里改成按 code 取文案。
-      const failure = toBridgeError(error);
+      // 只按稳定错误码取句；映射不到用本地兜底，不拼后端文案。
       failTrial(
         trialFlowRef.current ?? start,
         "fetch",
-        failure.hasMessage
-          ? translate("trial.error.fetchWith", { message: failure.message })
-          : translate("trial.error.fetch"),
+        errorText(error, translate("trial.error.fetch")),
       );
       return;
     }
@@ -3044,12 +3029,11 @@ export default function App() {
 
 function describeCommandError(error: unknown, label: string): string {
   const bridgeError = toBridgeError(error);
+  // 这条匹配的是 Tauri 未注册命令时的字符串错误，不是我们的错误信封。
   if (/not found|unknown command/i.test(bridgeError.message)) {
     return translate("app.commandUnavailable", { label });
   }
-  return bridgeError.hasMessage
-    ? bridgeError.message
-    : translate("app.commandFailed", { label });
+  return errorText(bridgeError, translate("app.commandFailed", { label }));
 }
 
 interface AppNotice {

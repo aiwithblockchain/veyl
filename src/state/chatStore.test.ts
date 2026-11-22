@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "../agent/protocol";
-import type { AgentEvent } from "../agent/protocol";
+import type { AgentEvent, AivpnErrorCode } from "../agent/protocol";
 import type { ChatState, ChatMessage } from "./chatStore";
 import {
   activeSession,
@@ -16,6 +16,53 @@ function withOneSession(): ChatState {
     type: "add_session",
     session,
   });
+}
+
+/** 跑一条失败请求，返回追加的系统消息文本。 */
+function failWith(error: {
+  code: AivpnErrorCode;
+  details: Record<string, unknown> | null;
+}): string {
+  let state = withOneSession();
+  const sessionId = state.activeSessionId;
+  state = chatReducer(state, {
+    type: "send_user_message",
+    sessionId,
+    text: "连到日本",
+    localRequestId: "local_fail",
+  });
+  state = chatReducer(state, {
+    type: "request_started",
+    sessionId,
+    requestId: "req_fail",
+  });
+  state = chatReducer(state, {
+    type: "agent_event",
+    event: {
+      name: AGENT_EVENTS.requestEnd,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_fail",
+        assistant_message_id: "asst_fail",
+        result: "error",
+        final_text: null,
+        error: {
+          contract_version: CONTRACT_VERSION,
+          code: error.code,
+          message: "",
+          retryable: true,
+          details: error.details,
+          request_id: "req_fail",
+        },
+        usage: null,
+        duration_ms: 50,
+        emitted_at: "2026-11-04T00:00:01Z",
+      },
+    },
+  });
+  const messages = activeSession(state)!.messages;
+  const last = messages[messages.length - 1];
+  return last && last.role === "system" ? last.text : "";
 }
 
 describe("chatReducer", () => {
@@ -134,7 +181,7 @@ describe("chatReducer", () => {
           error: {
             contract_version: CONTRACT_VERSION,
             code: "UPSTREAM_ERROR",
-            message: "模型服务不可用",
+            message: "",
             retryable: true,
             details: null,
             request_id: "req_2",
@@ -152,8 +199,20 @@ describe("chatReducer", () => {
     expect(session.messages[session.messages.length - 1]).toMatchObject({
       role: "system",
       level: "error",
-      text: "模型服务不可用",
+      text: "服务器服务暂时不可用，稍后再试。",
     });
+  });
+
+  it("budget 超限按 reason 给文案，不渲染空行", () => {
+    const text = failWith({
+      code: "PRECONDITION_FAILED",
+      details: { reason: "budget_exceeded", cost_usd: 0.2, limit_usd: 0.1 },
+    });
+    expect(text).toBe("这次请求超出了用量上限。");
+  });
+
+  it("panic / INTERNAL 落兜底文案，不渲染空行", () => {
+    expect(failWith({ code: "INTERNAL", details: null })).toBe("本轮请求失败");
   });
 
   it("切到别的会话后，request_started / request_failed 仍落到目标会话", () => {

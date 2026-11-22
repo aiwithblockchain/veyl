@@ -9,6 +9,7 @@ import type {
 } from "../agent/protocol";
 import { readToolDisplay, toolCopy } from "../components/toolDisplay";
 import { t } from "../i18n";
+import { errorText } from "../i18n/errorText";
 import type { ToolDisplayInfo } from "../components/toolDisplay";
 
 export type ToolCallState = "running" | "ok" | "error";
@@ -716,7 +717,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               const text =
                 result === "cancelled"
                   ? t("chat.status.stopped")
-                  : error?.message ?? t("chat.status.requestFailed");
+                  : error
+                    ? errorText(error, t("chat.status.requestFailed"))
+                    : t("chat.status.requestFailed");
               return {
                 ...patched,
                 activeRequestId: null,

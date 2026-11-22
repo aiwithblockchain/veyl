@@ -25,6 +25,7 @@ import type {
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
+import { errorText } from "../i18n/errorText";
 import type { MessageKey } from "../i18n";
 import { formatUsdCents } from "../myservers/labels";
 import type { WalletTrigger } from "../myservers/useMyServers";
@@ -685,9 +686,7 @@ function describeFileImportError(error: unknown): string {
   if (bridgeError.code === "NOT_FOUND") {
     return translate("settings.error.configGone");
   }
-  return bridgeError.hasMessage
-    ? bridgeError.message
-    : translate("settings.error.importFailed");
+  return errorText(error, translate("settings.error.importFailed"));
 }
 
 /** 只把数字送进 mono；中文和单位保持正文。 */
@@ -975,11 +974,7 @@ export function Settings({
       setPortEditing(false);
       onProxyPortSaved?.(result.port);
     } catch (error) {
-      const failure = toBridgeError(error);
-      // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
-      setPortError(
-        failure.hasMessage ? failure.message : t("settings.port.saveFailed"),
-      );
+      setPortError(errorText(error, t("settings.port.saveFailed")));
     } finally {
       portSavingRef.current = false;
       setPortSaving(false);
@@ -1093,14 +1088,7 @@ export function Settings({
           onConnectModeChanged?.(next);
         }
       } catch (error) {
-        setModeError(
-          (() => {
-            const failure = toBridgeError(error);
-            return failure.hasMessage
-              ? failure.message
-              : t("settings.error.modeSwitch");
-          })(),
-        );
+        setModeError(errorText(error, t("settings.error.modeSwitch")));
       } finally {
         setModeBusy(false);
       }
@@ -1463,10 +1451,7 @@ export function Settings({
           : await bridge.nodeImportText(text),
       );
     } catch (error) {
-      const failure = toBridgeError(error);
-      setImportError(
-        failure.hasMessage ? failure.message : t("settings.import.addFailed"),
-      );
+      setImportError(errorText(error, t("settings.import.addFailed")));
     } finally {
       setImportBusy(false);
     }
@@ -3201,19 +3186,19 @@ export function describeProviderError(error: unknown): string {
     if (reason === "no_active_provider") {
       return translate("settings.error.noActiveProvider");
     }
-    return bridgeError.hasMessage
-      ? bridgeError.message
-      : translate("settings.error.actionUnavailable");
+    return errorText(error, translate("settings.error.actionUnavailable"));
   }
-  return bridgeError.hasMessage
-    ? bridgeError.message
-    : translate("settings.error.generic");
+  return errorText(error, translate("settings.error.generic"));
 }
 
 export function describeKeyError(error: unknown): string {
-  const code = readCode(error);
+  const problem = toBridgeError(error);
+  const reason =
+    typeof problem.details?.reason === "string" ? problem.details.reason : "";
+  // 2.55.0 起 DeepSeek 鉴权失败并入 INVALID_ARGUMENT / provider_key_invalid。
+  if (reason === "provider_key_invalid") return translate("settings.key.authFailed");
 
-  switch (code) {
+  switch (problem.code) {
     case "INVALID_ARGUMENT":
       return translate("settings.key.invalidFormat");
     case "INVALID_KEY":
@@ -3227,26 +3212,7 @@ export function describeKeyError(error: unknown): string {
       break;
   }
 
-  const message = readMessage(error);
-  return message
-    ? translate("settings.key.saveFailedWith", { message })
-    : translate("settings.key.saveFailed");
-}
-
-function readCode(error: unknown): string {
-  if (error && typeof error === "object" && "code" in error) {
-    return String((error as { code: unknown }).code);
-  }
-  return "";
-}
-
-function readMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return "";
+  return errorText(error, translate("settings.key.saveFailed"));
 }
 
 export function describeImportError(error: unknown): string {
@@ -3283,7 +3249,5 @@ export function describeImportError(error: unknown): string {
     return translate("settings.import.secretStore");
   }
 
-  return bridgeError.hasMessage
-    ? bridgeError.message
-    : translate("settings.import.failed");
+  return errorText(error, translate("settings.import.failed"));
 }

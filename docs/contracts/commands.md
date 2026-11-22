@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.54.0`
+> 契约版本：`2.55.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -103,6 +103,7 @@ Rust 侧从嵌套结构体里按什么名字取 `baseUrl`，取决于它有没�
 - 成功：返回该命令定义的 data 对象，**不含 `ok` 外层信封**（工具调用才有 `ToolEnvelope`）。
 - 失败：`Err(AivpnError)`，结构见 `runtime.md` §2.6（`code` / `message` / `retryable` / `details` / `request_id`）。
 - `details.reason` 用于细分同一错误码下的不同场景，取值在每条命令的表格里固定。
+- **界面可见的错误 `message` 恒为空串**（2.55.0）：文案由 UI 按 `code` + `details.reason` 查表（§1.6），Host 只把诊断文本写进日志。写给模型的错误（工具信封，`tools.md`）不受此约束。
 
 ### 1.3 来源标记
 
@@ -122,6 +123,65 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | **id** | 不透明字符串，前缀区分类型：`cfg_` / `nod_` / `iss_` / `prb_` / `q_` / `p_`，后接 16 位小写十六进制。**UI 不得从 id 推导任何信息**，也不得跨类型混用 |
 
 > 为什么实体时间用毫秒：这些值直接来自 SQLite 列，用 ISO 要在 Host 里做两次转换、在前端再做一次解析，且排序与「第几次出现」的算术都在毫秒上更直接。唯一需要人读的地方是 UI，由 UI 格式化。
+
+### 1.6 错误文案与 `details.reason`（2.55.0）
+
+界面不显示 Host 给的 `message`。`message` 恒为 `""`，UI 用 `code` + `details.reason` 查自己的字典；诊断文本（`io error…`、上游原文）只写进 Host 日志，不随错误出网、不出现在界面。
+
+规则：
+
+1. **只使用 `runtime.md` §6.1 的通用码**，不新增错误码。同一码下的区分全部靠 `details.reason`。既有的命令层码 `AI_NOT_CONFIGURED`（§9.1）与 `BUSY`（§9.1 / 节点同步 / 运行库升级）保留原名，不并入通用码。
+2. `reason` 是稳定的 ASCII 标识，**一经发布不改名**；新增场景只能加新值。
+3. UI 的查表顺序：`code + reason` → 该 `code` 的通用文案 → 调用点兜底。任何一层都不读取 `message`。
+4. 上游（Worker）给的 `message` 也不向下透传：Host 只保留它的 `code` / `details.reason` / `details` 字段。
+5. 工具信封（`tool-call-end.error.message` / `ToolEnvelope.error.message`）是写给模型的，仍带文本；它不进界面主文案，卡片只读 `error_code` 与前端映射表。工具层不是界面，历史上在用的码（如 `SECRET_STORE`）可以在工具信封里保留；界面命令出界前由 Host 归一（见 §16 2.55.0 第 6 条）。
+
+界面可见的 `reason` 词表（按命令族；`details` 列是与文案一起渲染的参数）：
+
+| 命令族 | `code` | `reason` | `details` |
+|---|---|---|---|
+| 登录 / 账号 | `UNAUTHENTICATED` | `auth_required` / `token_invalid` | — |
+| 登录 / 账号 | `PRECONDITION_FAILED` | `code_invalid` | `attempts_remaining` |
+| 登录 / 账号 | `PRECONDITION_FAILED` | `code_expired` / `too_many_attempts` / `account_conflict` | — |
+| 登录 / 账号 | `RATE_LIMITED` | `email_cooldown` / `email_rate_limited` / `rate_limited` | `retry_after_seconds` |
+| 登录 / 账号 | `PERMISSION_DENIED` | `device_revoked` / `account_blocked` / `account_frozen` | — |
+| 登录 / 账号 | `INVALID_ARGUMENT` | `email_invalid` / `invalid_name` | `min_length` `max_length` |
+| 服务器 | `PRECONDITION_FAILED` | `insufficient_balance` | `required_cents` `shortfall_cents` `min_days` |
+| 服务器 | `PRECONDITION_FAILED` | `settle_insufficient` / `confirm_required` / `confirmation_required`（同一句，历史两个写法都保留）/ `idempotency_in_flight` / `conflict` / `server_busy` | — |
+| 服务器 | `NOT_FOUND` | `server_gone` | — |
+| 服务器 | `BUSY` | `sync_in_flight` | — |
+| 服务器 | `INVALID_ARGUMENT` | `invalid_denomination` | — |
+| 控制面网络 | `UPSTREAM_ERROR` | `provider_unavailable` / `unexpected_status` / `unexpected_code` / `invalid_response` | `status` / `upstream_code` |
+| 控制面网络 | `TIMEOUT` | `timeout` | — |
+| 凭据 | `PRECONDITION_FAILED` | `credential_key_unknown` / `credential_key_invalid` / `credential_key_missing` / `credential_signature_invalid` / `credential_expired` / `credential_server_mismatch` | `key_id` |
+| AI 会话 | `BUSY` | `request_in_flight` | `active_request_id` |
+| AI 会话 | `NOT_FOUND` | `session_gone` | — |
+| AI 会话 | `INVALID_ARGUMENT` | `empty_text` / `empty_title` / `title_too_long` / `invalid_payload` / `invalid_config_id` / `connect_mode_immutable` / `url_not_allowed` | `max_chars` |
+| AI 会话 | `PRECONDITION_FAILED` | `active_request` / `no_logs` / `budget_exceeded` | `cost_usd` `limit_usd` |
+| AI 配置 | `INVALID_ARGUMENT` | `name_required` / `model_required` / `protocol_unsupported` / `base_url_invalid` / `base_url_scheme` / `base_url_credentials` / `base_url_http_local_only` / `key_required` | — |
+| AI 配置 | `INVALID_ARGUMENT` | `provider_key_invalid` | — |
+| AI 未配置 | `AI_NOT_CONFIGURED` | `ai_not_configured` | — |
+| 本地存储 | `INTERNAL` | `store_unavailable` / `store_error` / `job_read_failed` | — |
+| 本地动作 | `INTERNAL` | `open_browser_failed` / `checkout_open_failed` / `keychain_failed` / `internal` | — |
+| 节点删除 | `INVALID_ARGUMENT` | `not_owned` | — |
+| 节点删除 | `UPSTREAM_ERROR` | `dismiss_failed` | — |
+| 节点重置 | `PRECONDITION_FAILED` | `reset_in_flight` | — |
+| 连接 / 接管 | `PRECONDITION_FAILED` | `no_config` / `no_nodes` / `tun_denied` / `helper_missing` / `helper_admin_cancelled` / `helper_start_failed` / `dev_unbundled` / `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid` / `proxy_restore_failed` / `cancelled` / `config_launching` / `config_not_running` / `config_unknown` / `connected` | —（语义见 §7.1） |
+| 连接 / 接管 | `CONFLICT` | `switch_in_progress` | — |
+| 连接 / 接管 | `TIMEOUT` | `runtime_busy` | — |
+| 配置 / 节点 | `INVALID_ARGUMENT` | `invalid_cidr` / `seed_unavailable` / `source_required` / `use_config_set_mode` / `insecure_url` / `fetch_failed` / `not_node_text` / `unsupported_method` / `invalid_argument` | — |
+| 配置 / 节点 | `CONFLICT` | `duplicate_name` | — |
+| 配置 / 节点 | `NOT_FOUND` | `node_not_in_config` | — |
+| 设置 | `INVALID_ARGUMENT` | `invalid_port` / `invalid_language` / `invalid_interval` / `invalid_action` | — |
+| 移动端导出 | `PRECONDITION_FAILED` | `login_required` / `insecure_profile_origin` | — |
+| 移动端导出 | `NOT_FOUND` | `unknown_client` | — |
+| 移动端导出 | `INTERNAL` | `mobile_token_corrupt` / `qr_encode_failed` | — |
+| 运行时 | `RUNTIME_*`（§6.2） | — | 见 `runtime.md` §6.2 |
+
+补充：
+
+- `deepseek_save_key` 的 `INVALID_KEY` 并入 `INVALID_ARGUMENT / provider_key_invalid`；UI 保留对旧码的兼容分支一版。
+- `runtime-state-changed.last_error` 不在此约束内：它的 `message` 仍是诊断文本（`runtime.md` §2.6），**UI 同样不渲染**，只按 `code` 查 `runtime.md` §6.2 的词表；字段保留供日志与排障对照。
 
 ---
 
@@ -643,7 +703,7 @@ type ImportSkipReason =
 - 返回值与日志**永不含密码**，不回显订阅内容。
 - 本阶段**只做 Shadowsocks**，method 白名单由 Host 常量维护（`nodes::SUPPORTED_METHODS`，覆盖 sing-box 支持的 Shadowsocks 方法）；白名单变化不要求改表结构。
 
-错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`SECRET_STORE`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
 
 ### 4.1.1 `node_import_text { text, configId? }` → `NodeImportResult`
 
@@ -666,7 +726,7 @@ type ImportSkipReason =
 - 返回值与日志**永不含密码**，也不回显粘贴内容。
 - 本阶段只做 Shadowsocks，方法白名单同 §4.1。
 
-错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`（`configId`）、`SECRET_STORE`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`（`not_node_text`）、`NOT_FOUND`（`configId`）、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
 
 ### 4.1.2 `node_import_file { path, configId? }` → `NodeImportResult`
 
@@ -723,7 +783,7 @@ type ImportSkipReason =
 | `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MiB，`details.max_bytes` |
 | `INVALID_ARGUMENT` | `not_node_text` | 解析后没有可用节点 |
 | `NOT_FOUND` | — | `configId` 不存在 |
-| `SECRET_STORE` | — | `secrets.enc` 写入失败 |
+| `INTERNAL` | `keychain_failed` | `secrets.enc` 写入失败 |
 | `INTERNAL` | — | 内部错误 |
 
 - 部分成功不算失败：与文本导入一致。
@@ -748,7 +808,7 @@ type ImportSkipReason =
 - **连接中新增 → 重建运行配置**（2.42.0）：返回对象在 `NodeSummary` 之外多一个 `runtime_rebuild`（§4.0.1），语义与 `node_attach` 完全一致；同一个节点被 `config_set_mode` 占着时是 `skipped / switch_in_progress`。重建失败**不回滚节点**，也不改返回的命令结果。
 - **不自动连接**，不触发探测。
 
-错误：`INVALID_ARGUMENT`（`invalid_argument`、`unsupported_method`）、`NOT_FOUND`、`SECRET_STORE`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`（`invalid_argument`、`unsupported_method`）、`NOT_FOUND`、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
 
 - **具体校验由前端先做**：名字非空/≤64、地址不带 scheme 与端口、端口 1–65535、密码非空/≤256。Host 侧不区分具体原因，一律 `details.reason = "invalid_argument"`；只有 method 不在白名单时是 `unsupported_method`。
 - **`port` 在 Host 侧是 `u16`**：`70000`、非整数或缺字段会**在反序列化阶段直接失败**，拿不到本契约的结构化错误——前端必须先校验，不要指望 Host 兜住。
@@ -1156,14 +1216,14 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 
 **两个等待上限（20 秒 / 20 秒）是实现常量，不是契约承诺。** 运行期锁的方案仍可能调整（例如把长启动移出锁、取消等待），调整只改数值、不改「超时即 `runtime_busy`、可重试」的语义。界面不要按秒数自己做超时判断或倒计时。
 
-**`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`，`message` 已是可直接展示的中文）：
+**`tun` 连接在换新后台组件这一步失败时的 `details.reason`**（错误码均为 `PRECONDITION_FAILED`；2.55.0 起 `message` 为空串，界面按 `reason` 查表，见 §1.6）：
 
 | `details.reason` | 含义 | 界面 |
 |---|---|---|
 | `tun_denied` | 系统还没批准后台助手（未批准 / 用户拒绝） | **只有这一类弹「打开系统设置」引导**；用户允许后原地重试连接 |
 | `helper_admin_cancelled` | 旧组件换新要一次管理员授权，用户取消了密码框（或授权没给到） | 普通错误提示：这次没有授权，可以再试一次；**不弹系统设置引导**——系统开关本来就不决定这件事 |
-| `helper_start_failed` | 换新命令成功但 daemon 没起来（launchd 拉不起、崩溃循环），或换新失败但没有更具体的原因 | 普通错误提示，显示 `message` |
-| `helper_missing` | 组件缺失、安装失败、验签不过，或连不上特权助手；**保留底层原因**，不得合并成「未批准」 | 普通错误提示，显示 `message` |
+| `helper_start_failed` | 换新命令成功但 daemon 没起来（launchd 拉不起、崩溃循环），或换新失败但没有更具体的原因 | 普通错误提示，按 `reason` 显示文案 |
+| `helper_missing` | 组件缺失、安装失败、验签不过，或连不上特权助手；**保留底层原因**，不得合并成「未批准」 | 普通错误提示，按 `reason` 显示文案 |
 | `dev_unbundled` | 当前进程不是打包后的 `.app`（`tauri dev` 的裸二进制），系统按 main bundle 解析不到这份 daemon | 普通错误提示；文案给出 `bash scripts/dev/tun-dev.sh`，**不要再弹「打开系统设置」** |
 | `helper_busy` / `helper_lease_unavailable` / `helper_file_invalid` | 组件正在启动 / 会话租约建不起来 / 文件验签不通过 | 普通错误提示 |
 | `cancelled` | 这次连接已被切配置 / 断开取代，请求作废（不再请求 helper、也不再拉起隧道） | 普通提示即可，不需要用户处理 |
@@ -1860,7 +1920,7 @@ type MyServerTopup = {
 | `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出**。服务端明确拒绝（401 `token_invalid`、403 `device_revoked` / `account_blocked`）时清本地令牌与账户标记并返回未登录态——账户被停用时用户也必须能退出去，同时发 `my-server-account-cleared`（`events.md` §4.27） |
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
 | `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自产品表键）。`updated_at` 由 Host 本地取时间，控制面不提供。余额与扣费都由 Host 计算，前端不做金额运算 |
-| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`fake` 通道已于 2026-11-20 删除，充值只有 Dodo 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id`、`checkout_url` 与 `open_error`，界面据此给「重新打开」和可复制的链接 |
+| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Dodo 充值会话，返回 `checkout_url` 由系统浏览器打开；`fake` 通道已于 2026-11-20 删除，充值只有 Dodo 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id` 与 `checkout_url`，界面据此给「重新打开」和可复制的链接 |
 | `my_server_checkout { orderId }` | **2.39.0 起：确认下单并开始建机，不扣费**，返回 `MyServerOrder`（`state = "provisioning"`）。余额 ≥ 日价 × 7 只是预检；不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不建机、订单保持 `pending_payment`；该档位的 `regions` 不含订单地区 → `plan_unavailable_in_region`。就绪后由控制面在 enroll 回调里扣第 0 天，之后每天由 Cron 扣一天 |
 
 - **计费单位是「天」**（2026-11-16 拍板）：就绪时扣第 0 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
@@ -2164,7 +2224,7 @@ type ServerSyncChanged = {
   port_changed: boolean;
   password_changed: boolean;
 };
-type ServerSyncFailure = { server_id: string; code: string; message: string };
+type ServerSyncFailure = { server_id: string; code: string };
 type ServerSyncData = {
   servers: MyServer[];          // 与 my_server_list 同结构，前端据此刷新列表
   changed: ServerSyncChanged[];
@@ -2296,7 +2356,7 @@ type SeedImportResult = {
 | `INVALID_ARGUMENT` | `invalid_json` | 不是合法 JSON / 结构不符（不是 seed 格式） |
 | `INVALID_ARGUMENT` | `no_importable_nodes` | 解析成功但无可导入节点，`details.skipped` |
 | `UNSUPPORTED` | — | method 不在白名单，`details.method` |
-| `SECRET_STORE` | — | `secrets.enc` 写入失败 |
+| `INTERNAL` | `keychain_failed` | `secrets.enc` 写入失败 |
 
 ---
 
@@ -2316,7 +2376,7 @@ type SeedImportResult = {
 
 **未配置 AI 时（2.52.0 新增）**：直接命令调用在没有任何可用 AI 时返回结构化错误，**不占槽、不落库、不启动请求**：
 
-- `code = AI_NOT_CONFIGURED`，`message = "还没有配置 AI 服务"`，`retryable = false`，`details = { "reason": "ai_not_configured" }`；
+- `code = AI_NOT_CONFIGURED`，`message = ""`（2.55.0 起；界面按 `code` 映射文案），`retryable = false`，`details = { "reason": "ai_not_configured" }`；
 - **判定口径：只回答「有没有配」，不回答「Key 有没有效」**。当前 active 服务商存在、Key 非空（本机端点免 Key）即算已配置。Key 是否有效不在闸门内：系统不持久化有效性，Key 也可能临时连不上服务商；无效 Key 由发送时的服务商错误反馈，不在发送前联网探测；
 - 界面 `isAiReady` 与后端 `has_credentials()` 同语义（2.52.0 起去掉「旧 DeepSeek Key 单独算配置」的分支），不存在界面与后端两套口径；
 - **优先级**：输入校验在前（`context` 非法 / `empty_text` → 各自既有错误），`AI_NOT_CONFIGURED` 在后；即只有「本来能发」的请求才会被配置状态拦下；
@@ -2928,10 +2988,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.54.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** |
-| `contracts/events.md` | **2.22.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** |
+| `contracts/commands.md` | **2.55.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** |
+| `contracts/events.md` | **2.23.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.23.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** |
+| `contracts/tools.md` | **3.24.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -2946,6 +3006,18 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.55.0（未发布，2026-11-22：界面错误只回稳定码）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.55.0`；§1.2 / §1.6：界面可见错误的 `message` 恒为空串，文案由 UI 按 `code` + `details.reason` 查表，Host 只把诊断文本写日志 | 语义变更 | `docs/design/i18n.md` Q4（2026-11-21）；PM 2026-11-22 定范围 |
+| 2 | §1.6 登记界面可见的 `reason` 词表；只使用 `runtime.md` §6.1 的通用码，不新增错误码 | 约束 | 同上 |
+| 3 | `deepseek_save_key` 的 `INVALID_KEY` 并入 `INVALID_ARGUMENT / provider_key_invalid`；UI 保留旧码兼容一版 | 错误语义 | 码表统一 |
+| 4 | `runtime-state-changed.last_error.message` 仍是诊断文本，但 UI 不渲染，按 `code` 查 `runtime.md` §6.2；`runtime.md` 版本不变 | 错误语义 | 同一口径，不动 runtime 契约 |
+| 5 | §7.28 `ServerSyncFailure` 删除 `message`（前端只读 `code`）；§7.19 `checkout_open_failed` 的 `details` 删除 `open_error`——诊断文本只进 Host 日志 | 结构调整 | PM 2026-11-22：不把上游原文白送给界面 |
+| 6 | 钥匙串读写失败统一为 `INTERNAL / keychain_failed`（保存、清除、`llm_error` 三条路径，加上所有经 `error_value` 出界的服务错误）；界面命令不再返回 `SECRET_STORE`；工具通道（`tools.md`）仍保留它，模型不需要界面文案 | 错误语义 | PM 2026-11-22 |
+| 7 | 工具信封写给模型的 `message` 不变；本批不涉及 `tools/*` 与 `reports/*` 的模型面向错误 | 边界 | PM 2026-11-22：范围只到界面可见命令 |
 
 ### 2.54.0（未发布，2026-11-22：节点配置同步）
 

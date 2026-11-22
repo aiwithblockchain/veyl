@@ -10,6 +10,7 @@ import type {
   MyServerWallet,
 } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { AGENT_EVENTS } from "../agent/protocol";
 import { uiLog } from "../log/uiLog";
 import { isProvisioning } from "./labels";
@@ -820,11 +821,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         problem.code === "NETWORK";
       const message = offline
         ? t("myservers.error.logoutOffline")
-        : problem.hasMessage
-          ? `${problem.message}${
-              /[.。!?！？]$/.test(problem.message) ? "" : "。"
-            }${t("myservers.error.logoutTail")}`
-          : t("myservers.error.logoutFailed");
+        : errorText(error, t("myservers.error.logoutFailed"));
       return { ok: false, message };
     }
   };

@@ -350,7 +350,9 @@ describe("连接舞台", () => {
       />,
     );
 
-    expect(await screen.findByText(/装环境超时/)).toBeTruthy();
+    // 后端 message 只进日志：未登记的码不追加原因行。
+    expect(await screen.findByText(/没有连上节点/)).toBeTruthy();
+    expect(screen.queryByText(/装环境超时/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "报告问题" }));
     expect(onReport).toHaveBeenCalledTimes(1);
   });

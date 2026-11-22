@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import type { MyServerLoginTicket } from "../agent/bridge";
 import { IconClose } from "./icons";
 import { t, useT } from "../i18n";
@@ -57,13 +58,16 @@ function startError(error: unknown): LoginError {
     return { message: t("login.error.rateLimited"), hint: t("login.hint.rateLimited") };
   }
   if (problem.code === "UNSUPPORTED") {
-    return { message: problem.message, hint: t("login.hint.otherVersion") };
+    return {
+      message: errorText(error, t("login.error.sendFailed")),
+      hint: t("login.hint.otherVersion"),
+    };
   }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
     return { message: t("login.error.sendFailed"), hint: t("login.hint.sendFailed") };
   }
   return {
-    message: problem.hasMessage ? problem.message : t("login.error.sendFailed"),
+    message: errorText(error, t("login.error.sendFailed")),
     hint: t("login.hint.sendFailedLater"),
   };
 }
@@ -127,13 +131,16 @@ function verifyError(error: unknown): LoginError {
     };
   }
   if (problem.code === "UNSUPPORTED") {
-    return { message: problem.message, hint: t("login.hint.otherVersion") };
+    return {
+      message: errorText(error, t("login.error.failed")),
+      hint: t("login.hint.otherVersion"),
+    };
   }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
     return { message: t("login.error.network"), hint: t("login.hint.network") };
   }
   return {
-    message: problem.hasMessage ? problem.message : t("login.error.failed"),
+    message: errorText(error, t("login.error.failed")),
     hint: t("login.hint.failed"),
   };
 }

@@ -119,7 +119,10 @@ describe("退出确认", () => {
 
     await waitFor(() => expect(within(dialog()).getByRole("alert")).toBeTruthy());
     expect(document.querySelector(".quit-dialog")).not.toBeNull();
-    expect(within(dialog()).getByRole("alert").textContent).toContain("后台没有响应");
+    // 后端 message 只进日志：INTERNAL 没有码级文案，走调用点兜底。
+    const alert = within(dialog()).getByRole("alert").textContent ?? "";
+    expect(alert).toContain("没能把选择交给后台");
+    expect(alert).not.toContain("后台没有响应");
     expect(document.querySelector(".app-toast")).toBeNull();
 
     fireEvent.click(within(dialog()).getByRole("button", { name: "后台运行" }));

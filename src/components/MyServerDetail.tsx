@@ -22,6 +22,7 @@ import {
 import { updateConfigAndReconnect } from "../myservers/updateConfigAndReconnect";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
+import { errorText as describeError, failureText } from "../i18n/errorText";
 
 interface Props {
   bridge: AgentBridge;
@@ -62,12 +63,10 @@ export const DESTROY_RETRY_MS = 60_000;
 
 function errorText(error: unknown): string {
   const problem = toBridgeError(error);
-  // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
-  const message = problem.hasMessage ? problem.message : "";
   const tail = problem.retryable
     ? t("detail.error.noChangeRetry")
     : t("detail.error.noChange");
-  return message ? `${message}${tail}` : `${t("detail.error.incomplete")}${tail}`;
+  return `${describeError(problem, t("detail.error.incomplete"))}${tail}`;
 }
 
 /** 服务器详情：事实 + 底部操作行（销毁在左，主按钮在右）。 */
@@ -552,7 +551,7 @@ export function MyServerDetail({
           <p>
             {settleFailed
               ? tr("detail.settleFailed")
-              : server.failure.message}
+              : failureText(server.failure, t("error.failure.generic"))}
           </p>
           {settleFailed && onTopUp && !readOnly ? (
             <button type="button" className="btn btn--ghost" onClick={onTopUp}>

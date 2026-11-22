@@ -12,6 +12,7 @@ import type {
   RuntimeState,
 } from "./agent/protocol";
 import type { RuntimeStartResult } from "./agent/bridge";
+import { t } from "./i18n";
 
 const CONFIG_ID = "cfg_tun_1";
 
@@ -338,7 +339,7 @@ describe("TUN 启动成功后的界面状态", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   }, 15_000);
 
-  it("未知 reason 不打开引导", async () => {
+  it("helper_lease_unavailable 不打开引导，按 reason 给文案", async () => {
     const { container } = renderStartWithFailure({
       code: "PRECONDITION_FAILED",
       message: "无法建立后台组件会话租约，暂时不能接管全部流量。",
@@ -347,7 +348,29 @@ describe("TUN 启动成功后的界面状态", () => {
     fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
 
     await waitFor(() =>
-      expect(container.querySelector(".app-toast")?.textContent).toContain("租约"),
+      expect(container.querySelector(".app-toast")?.textContent).toContain(
+        t("error.reason.helperLeaseUnavailable"),
+      ),
+    );
+    // 旧后端术语不再出现在界面。
+    expect(container.querySelector(".app-toast")?.textContent).not.toContain("租约");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }, 15_000);
+
+  it("未知 reason 不打开引导", async () => {
+    const { container } = renderStartWithFailure({
+      code: "PRECONDITION_FAILED",
+      message: "未来才有的原因",
+      details: { reason: "future_unknown_reason" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
+
+    // 未登记的 reason 落到调用点兜底，原始诊断不进界面。
+    await waitFor(() =>
+      expect(container.querySelector(".app-toast")?.textContent).toContain("启动失败"),
+    );
+    expect(container.querySelector(".app-toast")?.textContent).not.toContain(
+      "未来才有的原因",
     );
     expect(screen.queryByRole("dialog")).toBeNull();
   }, 15_000);

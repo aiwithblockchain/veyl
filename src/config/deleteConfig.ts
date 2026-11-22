@@ -1,6 +1,6 @@
 import type { ConfigDeleteData } from "../agent/bridge";
-import { toBridgeError } from "../agent/errors";
 import { t as translate } from "../i18n";
+import { errorText } from "../i18n/errorText";
 
 export interface DeleteOutcome {
   ok: boolean;
@@ -47,11 +47,7 @@ export async function deleteConfigWithDisconnect(input: {
   } catch (err) {
     return {
       ok: false,
-      message: failure(
-        toBridgeError(err).hasMessage
-          ? toBridgeError(err).message
-          : translate("config.delete.failed"),
-      ),
+      message: failure(errorText(err, translate("config.delete.failed"))),
     };
   }
 }

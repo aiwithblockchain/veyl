@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentBridge, NodeProbeRun } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { t as translate } from "../i18n";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
@@ -66,8 +67,7 @@ function isMissingCommand(error: unknown): boolean {
 }
 
 function messageOf(error: unknown, fallback: string): string {
-  const bridgeError = toBridgeError(error);
-  return bridgeError.hasMessage ? bridgeError.message : fallback;
+  return errorText(error, fallback);
 }
 
 /**

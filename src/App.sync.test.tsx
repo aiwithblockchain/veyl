@@ -722,11 +722,10 @@ describe("节点配置同步", () => {
         }),
       { initialProps: { accountEpoch: 0, enabled: true } },
     );
-    await waitFor(() =>
-      expect(bridge.myServerSync).toHaveBeenCalledTimes(1),
-    );
-
-    expect(result.current.lastSyncedAt).not.toBeNull();
+    await waitFor(() => {
+      expect(bridge.myServerSync).toHaveBeenCalledTimes(1);
+      expect(result.current.lastSyncedAt).not.toBeNull();
+    });
 
     rerender({ accountEpoch: 1, enabled: false });
     await act(async () => {});

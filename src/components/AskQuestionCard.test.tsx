@@ -102,7 +102,9 @@ describe("AskQuestionCard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "浏览网页" }));
 
-    await waitFor(() => expect(screen.getByText("回答没送到")).toBeTruthy());
+    // 文案按错误码查表，不再显示后端 message。
+    await waitFor(() => expect(screen.getByText("回答失败，请重试")).toBeTruthy());
+    expect(screen.queryByText("回答没送到")).toBeNull();
     expect(
       (screen.getByRole("button", { name: "浏览网页" }) as HTMLButtonElement).disabled,
     ).toBe(false);

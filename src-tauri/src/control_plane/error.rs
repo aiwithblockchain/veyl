@@ -44,11 +44,15 @@ impl CpError {
     }
 
     /// 命令层原样返回的错误信封（字段与 `commands.md` §1 一致）。
+    ///
+    /// `message` 恒为空串（`commands.md` §1.2 / §1.6，2.55.0）：界面按
+    /// `code` + `details.reason` 查自己的字典，诊断文本只进 Host 日志。
+    /// `self.message` 仍是完整诊断（含上游原文），只给 `log::warn!` 用。
     pub fn envelope(&self) -> Value {
         json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": self.code,
-            "message": self.message,
+            "message": "",
             "retryable": self.retryable,
             "details": self.details,
             "request_id": self.request_id,
@@ -99,6 +103,8 @@ pub fn from_response(status: u16, body: &str) -> CpError {
         .and_then(|value| value.get("code"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    // 上游原文只作诊断用（留在 `CpError.message` → 日志）；`envelope()` 不输出它，
+    // 也不透传给界面（commands.md §1.6 第 4 条）。
     let message = parsed
         .as_ref()
         .and_then(|value| value.get("message"))
@@ -464,5 +470,29 @@ mod tests {
         for key in ["access_token", "refresh_token", "password", "device_secret"] {
             assert!(value.get(key).is_none(), "{key} 不能出现在错误信封里");
         }
+    }
+
+    /// 界面可见错误只带稳定码与 reason：信封里的 `message` 恒空（`commands.md` §1.6），
+    /// 上游原文留在内部字段里，只进日志。
+    #[test]
+    fn the_envelope_message_is_always_empty() {
+        let error = from_response(
+            400,
+            r#"{"code":"INVALID_ARGUMENT","message":"名字需要 1–24 个字符","retryable":false,"details":{"reason":"invalid_name","min_length":1,"max_length":24},"request_id":"r9"}"#,
+        );
+        assert_eq!(error.message, "名字需要 1–24 个字符", "诊断文本要留给日志");
+
+        let value = error.envelope();
+        assert_eq!(value["message"], "");
+        assert_eq!(value["code"], "INVALID_ARGUMENT");
+        assert_eq!(value["retryable"], false);
+        assert_eq!(value["details"]["reason"], "invalid_name");
+        assert_eq!(value["details"]["min_length"], 1);
+        assert_eq!(value["details"]["max_length"], 24);
+        assert_eq!(value["request_id"], "r9");
+        assert_eq!(
+            value["contract_version"],
+            crate::runtime::EVENT_CONTRACT_VERSION
+        );
     }
 }

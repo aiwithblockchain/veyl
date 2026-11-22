@@ -935,7 +935,6 @@ describe("结账返回订单（2.39.0）", () => {
       myServerCheckout: vi.fn(async () => {
         throw {
           code: "UPSTREAM_ERROR",
-          message: "服务器没建起来。",
           retryable: true,
         };
       }),
@@ -954,7 +953,7 @@ describe("结账返回订单（2.39.0）", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "创建" }));
     expect(
-      await screen.findByText(/服务器没建起来/),
+      await screen.findByText(/服务器服务暂时不可用/),
     ).toBeTruthy();
     expect(onOrdered).not.toHaveBeenCalled();
   });
@@ -1047,7 +1046,7 @@ describe("下单失败后的去向", () => {
     const bridge = {
       myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
       myServerCreate: vi.fn(async () => {
-        throw { code: "UPSTREAM_ERROR", message: "下单没成功。", retryable: true };
+        throw { code: "UPSTREAM_ERROR", retryable: true };
       }),
       myServerCheckout: vi.fn(),
       myServerCatalog: vi.fn(async () => CATALOG),
@@ -1064,7 +1063,7 @@ describe("下单失败后的去向", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "创建" }));
-    expect(await screen.findByText(/下单没成功/)).toBeTruthy();
+    expect(await screen.findByText(/服务器服务暂时不可用/)).toBeTruthy();
     expect(onOrdered).not.toHaveBeenCalled();
     // 仍在向导里，可以再点「创建」。
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();

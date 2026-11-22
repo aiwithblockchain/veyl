@@ -20,6 +20,7 @@ import { uiLog } from "../log/uiLog";
 import type { ActionCard } from "../ui/actionCard";
 import { useT } from "../i18n";
 import type { MessageKey } from "../i18n";
+import { errorText } from "../i18n/errorText";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 import { NodeRepairDialog } from "./NodeRepairDialog";
 
@@ -1488,7 +1489,7 @@ export function ConnectionStage({
         {failed ? (
           <p className="stage-note stage-note--error">
             {failureHeadline(failedAfterConnected)}
-            {runtime.last_error ? ` ${runtime.last_error.message}` : ""}
+            {runtime.last_error ? ` ${errorText(runtime.last_error, "")}` : ""}
             {onReportProblem ? (
               <button
                 type="button"

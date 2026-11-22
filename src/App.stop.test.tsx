@@ -278,7 +278,9 @@ describe("断开成功后的界面状态", () => {
     fireEvent.click(screen.getByRole("button", { name: "断开连接" }));
 
     await waitFor(() =>
-      expect(container.querySelector(".app-toast")?.textContent).toContain("断开失败"),
+      expect(container.querySelector(".app-toast")?.textContent).toContain(
+        "断开失败",
+      ),
     );
     expect(container.querySelector(".state-line__label")?.textContent).toContain("已连接");
     expect(container.querySelector(".state-word")).toBeNull();

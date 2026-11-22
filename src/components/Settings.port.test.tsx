@@ -427,16 +427,21 @@ describe("端口保存", () => {
     expect(screen.getByText("127.0.0.1:8080")).toBeTruthy();
   });
 
-  it("保存失败：留在编辑态，输入不丢，用后端 message", async () => {
+  it("保存失败：留在编辑态，输入不丢，按 reason 给文案", async () => {
     const { bridge } = makeBridge(async () => {
-      throw { code: "INVALID_ARGUMENT", message: "端口被系统拒绝" };
+      throw {
+        code: "INVALID_ARGUMENT",
+        details: { reason: "invalid_port" },
+      };
     });
     renderHarness({ bridge });
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
     save();
 
-    expect((await screen.findByRole("alert")).textContent).toBe("端口被系统拒绝");
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "端口要在 1 到 65535 之间。",
+    );
     expect(input().value).toBe("8081");
   });
 

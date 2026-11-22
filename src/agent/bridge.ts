@@ -624,7 +624,6 @@ export interface ServerSyncChanged {
 export interface ServerSyncFailure {
   server_id: string;
   code: string;
-  message: string;
 }
 
 export interface ServerSyncData {

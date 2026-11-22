@@ -566,10 +566,10 @@ describe("连接前告知后台组件授权", () => {
       result_ = await result.current.start();
     });
 
-    // 后端给的原因和文案都要原样到界面：它决定用户该做什么，不能被换成「去点允许」。
+    // 原因照旧带回界面：它决定用户该做什么，不能被换成「去点允许」。
     expect(result_).toEqual({
       ok: false,
-      message: "安装后台助手失败",
+      message: "安装后台助手失败，可以再试一次。",
       reason: "helper_missing",
     });
     expect(isHelperPermissionReason("helper_missing")).toBe(false);

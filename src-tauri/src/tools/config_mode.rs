@@ -20,11 +20,11 @@ const KIND: &str = "config_set_mode_confirm";
 const CONFIRM_OPTION: &str = "切换";
 const CANCEL_OPTION: &str = "取消";
 
-/// 左栏词汇：`tun` = 全部软件，`system_proxy` = 本机代理。
+/// 界面与文案用词（tools.md §4.49）：只说 `Tun 模式` / `Proxy 模式`。
 fn mode_label(mode: &str) -> &'static str {
     match mode {
-        "tun" => "全部软件",
-        "system_proxy" => "本机代理",
+        "tun" => "Tun 模式",
+        "system_proxy" => "Proxy 模式",
         _ => "未识别",
     }
 }
@@ -98,8 +98,8 @@ impl Tool for ConfigSetModeTool {
     fn description(&self) -> &str {
         "只在用户明确要求更换接管方式时调用（例如「让所有软件都走 VPN」「改回只让设了代理的软件走」）。\
          不得为了优化网络、不得在排障时顺手切换、不得在用户没提这件事时主动建议后自行执行。\
-         会把接管方式在「全部软件」与「本机代理」之间切换，可能短暂断开当前连接，Host 会弹确认卡。\n\
-         说「全部软件」「本机代理」，不出现 tun、system_proxy、config id。"
+         会把接管方式在「Tun 模式」与「Proxy 模式」之间切换，可能短暂断开当前连接，Host 会弹确认卡。\n\
+         说「Tun 模式」「Proxy 模式」；不出现 system_proxy、config id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -369,7 +369,7 @@ fn parse_input(input: &Value) -> Result<(Option<String>, String), AivpnError> {
         .ok_or_else(|| invalid("invalid_connect_mode", "缺少 mode"))?
         .to_string();
     if !matches!(mode.as_str(), "system_proxy" | "tun") {
-        return Err(invalid("invalid_connect_mode", "只支持「全部软件」与「本机代理」两种方式"));
+        return Err(invalid("invalid_connect_mode", "只支持「Tun 模式」与「Proxy 模式」两种方式"));
     }
     let config_id = match object.get("config_id") {
         None | Some(Value::Null) => None,
@@ -409,9 +409,9 @@ mod tests {
     }
 
     #[test]
-    fn mode_labels_use_the_left_panel_words() {
-        assert_eq!(mode_label("tun"), "全部软件");
-        assert_eq!(mode_label("system_proxy"), "本机代理");
+    fn mode_labels_use_the_contract_words() {
+        assert_eq!(mode_label("tun"), "Tun 模式");
+        assert_eq!(mode_label("system_proxy"), "Proxy 模式");
         assert_eq!(mode_label("other"), "未识别");
     }
 
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(relink_action(&error).unwrap().tool, "VpnConnect");
         let facts = error_facts(&error);
         assert!(
-            facts.iter().any(|fact| fact == "方式：全部软件"),
+            facts.iter().any(|fact| fact == "方式：Tun 模式"),
             "{facts:?}"
         );
         assert!(facts.iter().any(|fact| fact == "连接：未连接"), "{facts:?}");

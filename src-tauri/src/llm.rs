@@ -257,7 +257,7 @@ pub fn validate(input: &ProviderInput, has_existing_key: bool) -> Result<(), (St
     let parsed = reqwest::Url::parse(effective)
         .map_err(|_| invalid("base_url_invalid", "Base URL 不是合法地址"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(invalid("base_url_invalid", "Base URL 只允许 http / https"));
+        return Err(invalid("base_url_scheme", "Base URL 只允许 http / https"));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(invalid(
@@ -864,6 +864,19 @@ mod tests {
 
         // 本机端点免 Key。
         assert!(validate(&input("openai", Some("http://127.0.0.1:11434"), None), false).is_ok());
+    }
+
+    #[test]
+    fn a_non_http_scheme_has_its_own_reason() {
+        // 与「不是合法地址」分开（commands.md §1.6）：界面按 reason 给不同提示。
+        let error = validate(&input("openai", Some("ftp://example.com"), Some("k")), false)
+            .unwrap_err();
+        assert_eq!(error.0, "base_url_scheme");
+        // 文案只给测试与日志，不随错误出网。
+        assert!(error.1.contains("http / https"));
+
+        let error = validate(&input("openai", Some("not a url"), Some("k")), false).unwrap_err();
+        assert_eq!(error.0, "base_url_invalid");
     }
 
     #[test]

@@ -73,8 +73,28 @@ fn block_catalog(lang: &str) -> &'static str {
 /// 会话实际注册的工具：Veyl 自己的工具 + claurst 基础文件工具。
 ///
 /// 工具定义随请求一起发给模型，系统提示词里不再重复一份清单。
-fn session_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
+/// 英文会话把 Veyl 工具的 `description()` 换成英文表（`tools.md` §2.5）；
+/// 基础文件工具本来就是英文，不包。
+fn session_tools(services: Arc<dyn VpnToolServices>, lang: &str) -> Vec<Box<dyn Tool>> {
     let mut tools = crate::tools::vpn_tools(services);
+    if lang == "en" {
+        tools = tools
+            .into_iter()
+            .map(|tool| {
+                let name = tool.name();
+                match crate::tools::description::description_en(name) {
+                    Some(en) => Box::new(crate::tools::description::LocalizedTool::new(tool, en))
+                        as Box<dyn Tool>,
+                    // 新加的工具只写了中文：保持原样（宁可是中文描述也不要空描述），
+                    // 测试会拦住漏写。
+                    None => {
+                        log::warn!("工具 {name} 没有英文描述，英文会话里仍是中文");
+                        tool
+                    }
+                }
+            })
+            .collect();
+    }
     tools.extend(base_file_tools());
     tools
 }
@@ -341,10 +361,10 @@ impl AivpnSession {
         let mut query_config = QueryConfig::from_config(&core_config);
         query_config.model = credentials.model.clone();
         query_config.max_turns = MAX_TURNS;
-        // 工具定义随请求发给模型，提示词里不再重复一份清单。
-        let tools = session_tools(services);
         // 语言在创建时解析一次：切换设置只影响新会话（Q1）。
         let lang = current_language();
+        // 工具定义随请求发给模型，提示词里不再重复一份清单。
+        let tools = session_tools(services, lang);
         // 内容文档在启动时已释放；这里只记语言、版本、目录与工作目录，不记正文。
         let released = prompts::released(lang);
         log::info!(
@@ -754,24 +774,25 @@ impl AivpnSession {
                 emitter.request_end(
                     "error",
                     Some(final_text),
-                    Some(AivpnError::new("UPSTREAM_ERROR", error.to_string())),
+                    Some(upstream_error(&error)),
                     None,
                     duration_ms,
                 );
             }
             Ok(QueryOutcome::BudgetExceeded { cost_usd, limit_usd }) => {
-                let mut error = AivpnError::new(
-                    "PRECONDITION_FAILED",
-                    format!("已用 ${cost_usd:.4}，超过本轮上限 ${limit_usd:.2}"),
+                emitter.request_end(
+                    "error",
+                    Some(final_text),
+                    Some(budget_error(cost_usd, limit_usd)),
+                    None,
+                    duration_ms,
                 );
-                error.details = Some(serde_json::json!({ "reason": "budget_exceeded" }));
-                emitter.request_end("error", Some(final_text), Some(error), None, duration_ms);
             }
             Err(panic) => {
                 emitter.request_end(
                     "error",
                     Some(final_text),
-                    Some(AivpnError::new("INTERNAL", panic_message(panic))),
+                    Some(panic_error(panic)),
                     None,
                     duration_ms,
                 );
@@ -1085,6 +1106,27 @@ fn drop_dangling_tool_use(messages: &mut Vec<Message>) {
             break;
         }
     }
+}
+
+/// 上游错误的界面形状：只留 code，原文进日志（契约 §1.6）。
+fn upstream_error(error: &dyn std::fmt::Display) -> AivpnError {
+    log::warn!("[agent] 上游错误：{error}");
+    AivpnError::new("UPSTREAM_ERROR", "")
+}
+
+/// 预算超限：界面靠 `code + details.reason` 拼文案，金额随 details 下发。
+fn budget_error(cost_usd: f64, limit_usd: f64) -> AivpnError {
+    AivpnError::new("PRECONDITION_FAILED", "").with_details(serde_json::json!({
+        "reason": "budget_exceeded",
+        "cost_usd": cost_usd,
+        "limit_usd": limit_usd,
+    }))
+}
+
+/// 任务 panic：不拖垮应用，也不把内部文本送到界面。
+fn panic_error(payload: Box<dyn std::any::Any + Send>) -> AivpnError {
+    log::error!("[agent] 请求任务 panic：{}", panic_message(payload));
+    AivpnError::new("INTERNAL", "")
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -1453,6 +1495,17 @@ mod prompt_tests {
         )
     }
 
+    /// 按会话语言构建的实际工具集（未接服务的占位实现，只读描述与元数据）。
+    fn tools_for(lang: &str) -> Vec<Box<dyn Tool>> {
+        use crate::tools::services::NotWiredServices;
+        let services: Arc<dyn VpnToolServices> = Arc::new(NotWiredServices);
+        session_tools(services, lang)
+    }
+
+    fn has_cjk(text: &str) -> bool {
+        text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+
     /// 提示词是从文件编进来的，不是手写的常量。这条守住「确实加载了」。
     #[test]
     fn the_system_prompt_is_loaded_and_rendered() {
@@ -1499,6 +1552,8 @@ mod prompt_tests {
         for chinese in ["# 安全底线", "# 环境", "中国大陆", "用户所在/常用地区"] {
             assert!(!en.contains(chinese), "英文会话里不该有中文：{chinese}");
         }
+        // 只覆盖系统提示词本身：工具描述不在这里，由
+        // `every_tool_has_a_usable_first_description_line` 单独查英文工具集。
         assert!(
             !en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
             "英文系统提示词里仍混有中文"
@@ -1605,7 +1660,7 @@ mod prompt_tests {
     fn session_tools_include_veyl_and_base_file_tools() {
         use crate::tools::services::NotWiredServices;
         let services: Arc<dyn VpnToolServices> = Arc::new(NotWiredServices);
-        let tools = session_tools(services);
+        let tools = session_tools(services, "zh");
         for name in [
             "Read", "Edit", "Write", "Bash", "Glob", "Grep", "ConfigDetail", "VpnConnect",
             "CoreUpgrade",
@@ -1768,46 +1823,110 @@ mod prompt_tests {
     }
 
     /// 工具描述的第一行必须非空：模型选工具时看的就是这一行。
+    /// 中英各跑一遍；英文下额外要求整段描述不含中文（落盘文件名除外，见下）。
     #[test]
     fn every_tool_has_a_usable_first_description_line() {
-        use crate::tools::services::NotWiredServices;
-        let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
-        assert!(tools.len() >= 20, "工具太少：{}", tools.len());
-        for tool in &tools {
-            let first = tool.description().lines().next().unwrap_or_default().trim();
+        // IssueReport 描述里写的是落盘文件名与报告模板小标题（`报告.md`、`日志/`、
+        // `## 现象` 等）。中文名是文件格式的一部分，英文会话也照写：断言无 CJK 前
+        // 先把这些 token 剔除，剩下的正文必须一个中文都没有。
+        const ISSUE_REPORT_TEMPLATE_TOKENS: [&str; 9] = [
+            "报告.md",
+            "日志/",
+            "现场.json",
+            "# 问题报告",
+            "## 现象",
+            "## 环境",
+            "## 时间线",
+            "## 可疑点",
+            "## 下一步建议",
+        ];
+
+        for lang in ["zh", "en"] {
+            let tools = tools_for(lang);
+            assert!(tools.len() >= 20, "{lang} 工具太少：{}", tools.len());
+            for tool in &tools {
+                let first = tool.description().lines().next().unwrap_or_default().trim();
+                assert!(
+                    !first.is_empty(),
+                    "{lang}: {} 的第一行是空串，模型只能从名字猜用途",
+                    tool.name()
+                );
+                if lang == "en" {
+                    let mut prose = tool.description().to_string();
+                    for token in ISSUE_REPORT_TEMPLATE_TOKENS {
+                        prose = prose.replace(token, "");
+                    }
+                    assert!(
+                        !has_cjk(&prose),
+                        "en: {} 的描述里仍混有中文：{prose}",
+                        tool.name()
+                    );
+                }
+            }
+
+            // AI 代劳升级：用途边界写在工具描述第一行，确认要求写在安全底线里。
+            let upgrade = tools
+                .iter()
+                .find(|tool| tool.name() == "CoreUpgrade")
+                .expect("工具清单里缺少 CoreUpgrade");
+            let boundary = if lang == "en" {
+                "explicitly asks"
+            } else {
+                "明确要求"
+            };
             assert!(
-                !first.is_empty(),
-                "{} 的第一行是空串，模型只能从名字猜用途",
-                tool.name()
+                upgrade
+                    .description()
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains(boundary),
+                "{lang}: CoreUpgrade 描述没写用途边界"
             );
         }
+    }
 
-        // AI 代劳升级：用途边界写在工具描述第一行，确认要求写在安全底线里。
-        let upgrade = tools
-            .iter()
-            .find(|tool| tool.name() == "CoreUpgrade")
-            .expect("工具清单里缺少 CoreUpgrade");
+    /// 英文表必须覆盖全部 Veyl 工具：新增工具只写中文时这里先红，
+    /// 而不是等英文会话拿到中文描述。
+    #[test]
+    fn every_vpn_tool_has_an_english_description() {
+        use crate::tools::services::NotWiredServices;
+        let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
+        let mut missing = Vec::new();
+        for tool in &tools {
+            if crate::tools::description::description_en(tool.name()).is_none() {
+                missing.push(tool.name());
+            }
+        }
         assert!(
-            upgrade.description().lines().next().unwrap().contains("明确要求"),
-            "CoreUpgrade 描述没写用途边界"
+            missing.is_empty(),
+            "这些工具没有英文描述，英文会话会退回中文：{missing:?}"
+        );
+        assert_eq!(
+            tools.len(),
+            41,
+            "英文表条数与工具集不一致：新增/删除工具时同步改英文表"
         );
     }
 
     /// 免费节点来源门禁也要落在工具描述上：模型选工具时看的是 description。
     #[test]
     fn catalog_refresh_description_carries_the_source_gate() {
-        use crate::tools::services::NotWiredServices;
-        let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name() == "CatalogRefresh")
-            .expect("工具清单里缺少 CatalogRefresh");
-        assert!(
-            tool.description()
-                .contains("用户明确选过节点来源之前"),
-            "CatalogRefresh 描述缺了来源门禁：{}",
-            tool.description()
-        );
+        for (lang, gate) in [
+            ("zh", "用户明确选过节点来源之前"),
+            ("en", "before the user has explicitly chosen a node source"),
+        ] {
+            let tools = tools_for(lang);
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name() == "CatalogRefresh")
+                .expect("工具清单里缺少 CatalogRefresh");
+            assert!(
+                tool.description().contains(gate),
+                "{lang}: CatalogRefresh 描述缺了来源门禁：{}",
+                tool.description()
+            );
+        }
     }
 
     /// 系统提示词只放角色、指路与措辞：产品内容一律留在 `product.md`，
@@ -1855,22 +1974,9 @@ mod prompt_tests {
             assert!(prompt.contains(needle), "「怎么说话」缺了：{needle}");
         }
 
-        use crate::tools::services::NotWiredServices;
-        let tools = crate::tools::vpn_tools(std::sync::Arc::new(NotWiredServices));
-        let markers = [
-            "对用户说",
-            "不提",
-            "不说",
-            "不写",
-            "不出现",
-            "不要念",
-            "不复述",
-            "只说",
-            "说「",
-        ];
-        // 这些工具的结果最容易被模型原样转述，必须有专属约束；
+        // 这些工具的结果最容易被模型原样转述，必须有专属措辞约束；
         // 约束放在描述末尾，第一行保持一句用途摘要。
-        for name in [
+        let names = [
             "VpnConnect",
             "VpnDisconnect",
             "RuntimeStatus",
@@ -1893,8 +1999,23 @@ mod prompt_tests {
             "JobGet",
             "DeepseekSaveKey",
             "AskUserQuestion",
-        ] {
-            let tool = tools
+        ];
+
+        // 中文：约束标记一套（首行不得出现、末尾必须出现）。
+        let zh_markers = [
+            "对用户说",
+            "不提",
+            "不说",
+            "不写",
+            "不出现",
+            "不要念",
+            "不复述",
+            "只说",
+            "说「",
+        ];
+        let zh = tools_for("zh");
+        for name in names {
+            let tool = zh
                 .iter()
                 .find(|tool| tool.name() == name)
                 .unwrap_or_else(|| panic!("工具清单里缺少 {name}"));
@@ -1902,13 +2023,46 @@ mod prompt_tests {
             let mut lines = description.lines();
             let first = lines.next().unwrap_or_default();
             assert!(
-                !markers.iter().any(|marker| first.contains(marker)),
+                !zh_markers.iter().any(|marker| first.contains(marker)),
                 "{name} 的第一行含表达约束，会污染能力清单：{first}"
             );
             let tail = lines.collect::<Vec<_>>().join("\n");
             assert!(
-                markers.iter().any(|marker| tail.contains(marker)),
+                zh_markers.iter().any(|marker| tail.contains(marker)),
                 "{name} 的 description 末尾缺表达约束"
+            );
+        }
+
+        // 英文：同一批工具也必须带约束。英文的用途摘要本身就会写边界
+        // （例如 "never returns MAC addresses"），所以首行只拦专属的措辞约束，
+        // 末尾则要求出现 say / never / do not / don't 之一。
+        let en_first_line_forbidden = [
+            "never mention",
+            "never say",
+            "always say",
+            "never read them aloud",
+            "say only",
+        ];
+        let en_tail_markers = ["say ", "never ", "do not ", "don't "];
+        let en = tools_for("en");
+        for name in names {
+            let tool = en
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap_or_else(|| panic!("工具清单里缺少 {name}"));
+            let description = tool.description().to_lowercase();
+            let mut lines = description.lines();
+            let first = lines.next().unwrap_or_default();
+            assert!(
+                !en_first_line_forbidden
+                    .iter()
+                    .any(|marker| first.contains(marker)),
+                "{name} 的英文首行含措辞约束，会污染能力清单：{first}"
+            );
+            let tail = lines.collect::<Vec<_>>().join("\n");
+            assert!(
+                en_tail_markers.iter().any(|marker| tail.contains(marker)),
+                "{name} 的英文 description 末尾缺表达约束"
             );
         }
     }
@@ -1975,5 +2129,39 @@ mod prompt_tests {
             system.contains("不要重复超过两次"),
             "重试上限不在 system.md"
         );
+    }
+}
+
+#[cfg(test)]
+mod error_shape_tests {
+    use super::*;
+
+    /// 上游错误：界面只拿 code，原文不随错误出网。
+    #[test]
+    fn upstream_error_has_no_interface_message() {
+        let error = upstream_error(&"socket closed");
+        assert_eq!(error.code, "UPSTREAM_ERROR");
+        assert_eq!(error.message, "");
+    }
+
+    /// 预算超限：界面文案靠 reason 拼，金额随 details 下发。
+    #[test]
+    fn budget_error_carries_the_reason_and_amounts() {
+        let error = budget_error(1.25, 2.0);
+        assert_eq!(error.code, "PRECONDITION_FAILED");
+        assert_eq!(error.message, "");
+        let details = error.details.expect("预算错误必须带 details");
+        assert_eq!(details["reason"], "budget_exceeded");
+        assert_eq!(details["cost_usd"], 1.25);
+        assert_eq!(details["limit_usd"], 2.0);
+    }
+
+    /// panic：code 是 INTERNAL，panic 文本只进日志。
+    #[test]
+    fn panic_error_has_no_interface_message() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        let error = panic_error(payload);
+        assert_eq!(error.code, "INTERNAL");
+        assert_eq!(error.message, "");
     }
 }

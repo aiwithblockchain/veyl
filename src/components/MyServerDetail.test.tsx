@@ -273,7 +273,8 @@ describe("服务器详情", () => {
     expect(
       document.querySelector(".myservers__facts")?.textContent,
     ).toContain("已扣 $0.30，退款处理中");
-    expect(screen.getByText("装环境失败。")).toBeTruthy();
+    // 后端 message 只进日志：界面按失败码取句。
+    expect(screen.getByText("装机失败。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
   });
 
@@ -821,7 +822,9 @@ describe("服务器重命名", () => {
     await waitFor(() => expect(after.readOnly).toBe(false));
     expect(after.value).toBe("新名字");
     expect(document.activeElement).toBe(after);
-    expect(screen.getByRole("alert").textContent).toContain("连不上");
+    expect(screen.getByRole("alert").textContent).toContain(
+      "没连上服务器，检查网络后再试。",
+    );
   });
 });
 
@@ -886,7 +889,7 @@ describe("停机删除的墓碑", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
-    const alert = await screen.findByText(/连不上/);
+    const alert = await screen.findByText(/没连上服务器/);
     expect(alert.textContent).toContain("没有改动这台服务器");
     // 墓碑没被乐观移除：说明句还在，确认入口还能再点。
     expect(

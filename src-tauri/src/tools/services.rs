@@ -11379,7 +11379,7 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 空文件：可读，但解析不出节点 → `not_node_text`，消息用文件措辞。
+    /// 空文件：可读，但解析不出节点 → `not_node_text`；文件措辞由前端按 reason 渲染。
     #[tokio::test]
     async fn an_empty_file_is_rejected_as_not_node_text() {
         crate::test_support::install_test_secrets();
@@ -11394,10 +11394,7 @@ mod config_service_tests {
                 .unwrap_err();
         assert_eq!(error["code"], "INVALID_ARGUMENT");
         assert_eq!(error["details"]["reason"], "not_node_text");
-        assert!(error["message"]
-            .as_str()
-            .unwrap()
-            .contains("这个文件里没有可用的节点"));
+        assert_eq!(error["message"], "");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

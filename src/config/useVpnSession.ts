@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, ConfigCreateInput, NodeAttachInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { t as translate } from "../i18n";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
@@ -127,8 +128,7 @@ function toConnectionState(state: RuntimeSnapshot["state"]): VpnConnectionState 
 }
 
 function actionMessage(error: unknown, fallback: string): string {
-  const bridgeError = toBridgeError(error);
-  return bridgeError.hasMessage ? bridgeError.message : fallback;
+  return errorText(error, fallback);
 }
 
 function actionReason(error: unknown): string | undefined {
@@ -152,9 +152,7 @@ function attachMessage(error: unknown): string {
   if (reason === "switch_in_progress") {
     return translate("vpn.error.switchInProgress");
   }
-  return bridgeError.hasMessage
-    ? bridgeError.message
-    : translate("vpn.error.addFailed");
+  return errorText(error, translate("vpn.error.addFailed"));
 }
 
 /** Tauri 对未注册命令的报错形如 `Command node_probe not found`。 */

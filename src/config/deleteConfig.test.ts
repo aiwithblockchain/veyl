@@ -116,7 +116,7 @@ describe("deleteConfigWithDisconnect", () => {
 
   it("断开成功但删除失败，文案说明已经断开", async () => {
     const disconnect = vi.fn().mockResolvedValue({ ok: true });
-    const remove = vi.fn().mockRejectedValue(new Error("boom"));
+    const remove = vi.fn().mockRejectedValue({ code: "UPSTREAM_ERROR" });
 
     const outcome = await deleteConfigWithDisconnect({
       configId: "c1",
@@ -127,7 +127,7 @@ describe("deleteConfigWithDisconnect", () => {
 
     expect(outcome).toEqual({
       ok: false,
-      message: "已断开连接，但删除失败：boom",
+      message: "已断开连接，但删除失败：服务器服务暂时不可用，稍后再试。",
     });
   });
 });

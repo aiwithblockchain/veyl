@@ -803,14 +803,11 @@ function normalizeServerSyncFailures(value: unknown): ServerSyncFailure[] {
       typeof raw.server_id !== "string" ||
       raw.server_id === "" ||
       typeof raw.code !== "string" ||
-      raw.code === "" ||
-      typeof raw.message !== "string"
+      raw.code === ""
     ) {
       return [];
     }
-    return [
-      { server_id: raw.server_id, code: raw.code, message: raw.message },
-    ];
+    return [{ server_id: raw.server_id, code: raw.code }];
   });
 }
 

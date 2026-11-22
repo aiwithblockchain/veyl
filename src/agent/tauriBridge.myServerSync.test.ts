@@ -45,7 +45,6 @@ const CHANGED = {
 const FAILED = {
   server_id: "srv_2",
   code: "NODE_CREDENTIALS_FAILED",
-  message: "取凭据失败",
 };
 
 describe("my_server_sync", () => {
@@ -77,7 +76,7 @@ describe("my_server_sync", () => {
     invoke.mockResolvedValueOnce({
       servers: [],
       changed: [{ node_id: "local_1" }, CHANGED],
-      failed: [{ server_id: "srv_2", code: "E" }, FAILED],
+      failed: [{ code: "E" }, FAILED],
     });
 
     const data = await new TauriAgentBridge().myServerSync();

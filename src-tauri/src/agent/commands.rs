@@ -105,7 +105,7 @@ async fn send_message_for_state(
             return Err(json!({
                 "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                 "code": "BUSY",
-                "message": "上一条消息还在处理中，等它回完再发",
+                "message": "",
                 "retryable": true,
                 "details": {
                     "reason": "request_in_flight",
@@ -204,7 +204,7 @@ fn prepare_message(
                 return Err(json!({
                     "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                     "code": "INVALID_ARGUMENT",
-                    "message": "消息不能为空",
+                    "message": "",
                     "retryable": false,
                     "details": { "reason": "empty_text" },
                     "request_id": "",
@@ -256,11 +256,16 @@ pub async fn trial_status(state: State<'_, Arc<AppState>>) -> Result<Value, Valu
     state.services.trial_status().await.map_err(error_value)
 }
 
+/// 界面可见的错误信封：`message` 恒为空串（契约 §1.2 / §1.6），诊断文本只进日志。
 fn command_error(code: &str, message: impl std::fmt::Display, details: Value) -> Value {
+    let message = message.to_string();
+    if !message.is_empty() {
+        log::warn!("[command] {code}: {message}");
+    }
     json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
         "code": code,
-        "message": message.to_string(),
+        "message": "",
         "retryable": false,
         "details": details,
         "request_id": "",
@@ -395,14 +400,17 @@ pub async fn my_server_catalog(
     match result {
         Ok(catalog) => serde_json::to_value(catalog)
             .map_err(|error| command_error("INTERNAL", error, Value::Null)),
-        Err(error) => Err(json!({
-            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-            "code": error.code,
-            "message": error.message,
-            "retryable": error.retryable,
-            "details": error.details,
-            "request_id": "",
-        })),
+        Err(error) => {
+            log::warn!("[my_server_catalog] {}: {}", error.code, error.message);
+            Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": error.code,
+                "message": "",
+                "retryable": error.retryable,
+                "details": error.details,
+                "request_id": "",
+            }))
+        }
     }
 }
 
@@ -570,19 +578,21 @@ fn finish_topup(
 ) -> Result<Value, Value> {
     match opened {
         Ok(()) => Ok(json!(topup)),
-        Err(detail) => Err(json!({
-            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-            "code": "INTERNAL",
-            "message": "收银台没能在浏览器里打开，可以复制链接自己打开",
-            "retryable": false,
-            "details": {
-                "reason": "checkout_open_failed",
-                "topup_id": topup.topup_id,
-                "checkout_url": topup.checkout_url,
-                "open_error": detail,
-            },
-            "request_id": "",
-        })),
+        Err(detail) => {
+            log::warn!("[topup] 收银台打开失败：{detail}");
+            Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": "INTERNAL",
+                "message": "",
+                "retryable": false,
+                "details": {
+                    "reason": "checkout_open_failed",
+                    "topup_id": topup.topup_id,
+                    "checkout_url": topup.checkout_url,
+                },
+                "request_id": "",
+            }))
+        }
     }
 }
 
@@ -877,14 +887,17 @@ pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
 pub async fn node_rotate_credentials(server_id: Option<Value>) -> Result<Value, Value> {
     match crate::tools::node_rotate::rotate_from_ui(server_id).await {
         Ok(value) => Ok(value),
-        Err(error) => Err(json!({
-            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-            "code": error.code,
-            "message": error.message,
-            "retryable": error.retryable,
-            "details": error.details,
-            "request_id": "",
-        })),
+        Err(error) => {
+            log::warn!("[node_rotate] {}: {}", error.code, error.message);
+            Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": error.code,
+                "message": "",
+                "retryable": error.retryable,
+                "details": error.details,
+                "request_id": "",
+            }))
+        }
     }
 }
 
@@ -897,10 +910,12 @@ pub async fn node_rotate_credentials(server_id: Option<Value>) -> Result<Value, 
 pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Result<Value, Value> {
     let Some(store) = crate::store::global().cloned() else {
         return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": "本地数据库还没就绪",
+            "message": "",
             "retryable": true,
             "details": { "reason": "store_unavailable" },
+            "request_id": "",
         }));
     };
 
@@ -944,20 +959,25 @@ where
             Ok(Some(node)) => node,
             Ok(None) => return Ok(json!({ "removed": false })),
             Err(error) => {
+                log::warn!("读取本地节点失败：{error}");
                 return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                     "code": "INTERNAL",
-                    "message": format!("读取本地节点失败：{error}"),
+                    "message": "",
                     "retryable": true,
                     "details": { "reason": "store_error" },
-                }))
+                    "request_id": "",
+                }));
             }
         };
         if node.source != crate::store::configs::SOURCE_OWNED {
             return Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                 "code": "PRECONDITION_FAILED",
-                "message": "只能删除服务器节点",
+                "message": "",
                 "retryable": false,
                 "details": { "reason": "not_owned" },
+                "request_id": "",
             }));
         }
 
@@ -985,9 +1005,10 @@ where
                 return Err(json!({
                     "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                     "code": "UPSTREAM_ERROR",
-                    "message": format!("暂时连不上服务器服务：{}", error.message),
+                    "message": "",
                     "retryable": true,
                     "details": { "reason": "dismiss_failed", "server_id": server_id },
+                    "request_id": "",
                 }));
             }
         }
@@ -1021,9 +1042,10 @@ where
                 return Err(json!({
                     "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                     "code": "INTERNAL",
-                    "message": format!("删除本地节点失败：{error}"),
+                    "message": "",
                     "retryable": true,
                     "details": { "reason": "store_error" },
+                    "request_id": "",
                 }));
             }
         };
@@ -1116,10 +1138,30 @@ pub async fn my_server_identity() -> Result<Value, Value> {
 /// 服务层错误已经是结构化的 `ServiceError`；还原成契约里的 AivpnError 形状。
 fn error_value(error: anyhow::Error) -> Value {
     if let Some(service) = error.downcast_ref::<crate::tools::services::ServiceError>() {
+        if !service.message.is_empty() {
+            log::warn!("[service] {}: {}", service.code, service.message);
+        }
+        // 界面命令不再产出 SECRET_STORE：本机钥匙串失败统一成 INTERNAL / keychain_failed，
+        // 工具通道仍保留原码（`tools.md` 写给模型）。
+        if service.code == "SECRET_STORE" {
+            let mut details = match &service.details {
+                Some(Value::Object(map)) => Value::Object(map.clone()),
+                _ => json!({}),
+            };
+            details["reason"] = json!("keychain_failed");
+            return json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": "INTERNAL",
+                "message": "",
+                "retryable": service.retryable,
+                "details": details,
+                "request_id": "",
+            });
+        }
         return json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": service.code,
-            "message": service.message,
+            "message": "",
             "retryable": service.retryable,
             "details": service.details,
             "request_id": "",
@@ -1127,14 +1169,15 @@ fn error_value(error: anyhow::Error) -> Value {
     }
 
     let text = error.to_string();
+    log::warn!("[command] {text}");
     match text.split_once(": ") {
-        Some((code, message))
+        Some((code, _))
             if !code.is_empty() && code.chars().all(|c| c.is_ascii_uppercase() || c == '_') =>
         {
             json!({
                 "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                 "code": code,
-                "message": message,
+                "message": "",
                 "retryable": false,
                 "details": null,
                 "request_id": "",
@@ -1143,7 +1186,7 @@ fn error_value(error: anyhow::Error) -> Value {
         _ => json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": text,
+            "message": "",
             "retryable": false,
             "details": null,
             "request_id": "",
@@ -1310,10 +1353,11 @@ pub async fn config_update(
     request: tauri::ipc::Request<'_>,
 ) -> Result<Value, Value> {
     fn invalid(reason: &str, message: &str) -> Value {
+        log::warn!("[config_update] {reason}: {message}");
         json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INVALID_ARGUMENT",
-            "message": message,
+            "message": "",
             "retryable": false,
             "details": { "reason": reason },
             "request_id": "",
@@ -1546,18 +1590,12 @@ pub(crate) async fn import_nodes_from_file(
             command_error(
                 "INTERNAL",
                 format!("读取文件任务异常：{error}"),
-                Value::Null,
+                json!({ "reason": "job_read_failed" }),
             )
         })??;
     match services.node_import_text(config_id, &text).await {
         Ok(value) => Ok(value),
-        Err(error) => {
-            let mut value = error_value(error);
-            if value["details"]["reason"] == "not_node_text" {
-                value["message"] = json!("这个文件里没有可用的节点（支持多行 ss:// 链接）");
-            }
-            Err(value)
-        }
+        Err(error) => Err(error_value(error)),
     }
 }
 
@@ -1636,6 +1674,7 @@ fn file_too_large_error() -> Value {
 }
 
 fn file_error(reason: &str, message: &str, max_bytes: Option<u64>) -> Value {
+    log::warn!("[node_import_file] {reason}: {message}");
     let mut details = json!({ "reason": reason });
     if let Some(max) = max_bytes {
         details["max_bytes"] = json!(max);
@@ -1643,7 +1682,7 @@ fn file_error(reason: &str, message: &str, max_bytes: Option<u64>) -> Value {
     json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
         "code": "INVALID_ARGUMENT",
-        "message": message,
+        "message": "",
         "retryable": false,
         "details": details,
         "request_id": "",
@@ -1873,13 +1912,25 @@ pub async fn open_log_dir() -> Result<Value, Value> {
     let logs_dir = crate::runtime::default_app_data_dir().join("logs");
     let Some(target) = latest_log_file(&logs_dir) else {
         return Err(json!({
-            "code": "NOT_FOUND",
-            "message": "还没有日志，先连接一次",
-            "details": { "hint": "还没有日志，先连接一次" },
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "PRECONDITION_FAILED",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "no_logs" },
+            "request_id": "",
         }));
     };
-    reveal_in_file_manager(&target)
-        .map_err(|error| json!({ "code": "INTERNAL", "message": error }))?;
+    reveal_in_file_manager(&target).map_err(|error| {
+        log::warn!("打开日志目录失败：{error}");
+        json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "internal" },
+            "request_id": "",
+        })
+    })?;
     Ok(json!({ "path": target.to_string_lossy() }))
 }
 
@@ -1953,7 +2004,7 @@ pub async fn network_force_reset(state: State<'_, Arc<AppState>>) -> Result<Valu
         return Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "PRECONDITION_FAILED",
-            "message": "强制重置正在进行中，请等当前这次结束",
+            "message": "",
             "retryable": true,
             "details": { "reason": "reset_in_flight" },
             "request_id": "",
@@ -1985,7 +2036,7 @@ pub async fn chat_delete(
         return Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "PRECONDITION_FAILED",
-            "message": "会话有进行中的请求，先停止再删除",
+            "message": "",
             "retryable": false,
             "details": { "reason": "active_request" },
             "request_id": "",
@@ -1996,9 +2047,9 @@ pub async fn chat_delete(
         return Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": "本地数据库不可用",
+            "message": "",
             "retryable": false,
-            "details": null,
+            "details": { "reason": "store_unavailable" },
             "request_id": "",
         }));
     };
@@ -2021,20 +2072,23 @@ pub async fn chat_delete(
             Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "NOT_FOUND",
-            "message": "会话不存在",
+            "message": "",
             "retryable": false,
-            "details": null,
+            "details": { "reason": "session_gone" },
             "request_id": "",
             }))
         }
-        Err(error) => Err(json!({
+        Err(error) => {
+            log::warn!("删除会话失败：{error}");
+            Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": error.code(),
-            "message": error.to_string(),
+            "message": "",
             "retryable": false,
-            "details": null,
+            "details": { "reason": "store_error" },
             "request_id": "",
-        })),
+            }))
+        }
     }
 }
 
@@ -2045,15 +2099,21 @@ pub async fn chat_delete(
 fn llm_error((reason, message): (String, String)) -> Value {
     let code = match reason.as_str() {
         "not_found" => "NOT_FOUND",
-        "SECRET_STORE" => "SECRET_STORE",
+        "SECRET_STORE" => "INTERNAL",
         "INTERNAL" => "INTERNAL",
         "builtin_provider" | "no_key" => "PRECONDITION_FAILED",
         _ => "INVALID_ARGUMENT",
     };
+    let reason = match reason.as_str() {
+        "SECRET_STORE" => "keychain_failed".to_string(),
+        "INTERNAL" => "internal".to_string(),
+        other => other.to_string(),
+    };
+    log::warn!("[llm] {code}/{reason}: {message}");
     json!({
         "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
         "code": code,
-        "message": message,
+        "message": "",
         "retryable": false,
         "details": { "reason": reason },
         "request_id": "",
@@ -2065,9 +2125,9 @@ fn global_store() -> Result<&'static Arc<crate::store::Store>, Value> {
         json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": "本地数据库不可用",
+            "message": "",
             "retryable": false,
-            "details": null,
+            "details": { "reason": "store_unavailable" },
             "request_id": "",
         })
     })
@@ -2181,10 +2241,11 @@ pub async fn reply_user_question(
                 "answer_not_in_options" => "INVALID_ARGUMENT",
                 _ => "INTERNAL",
             };
+            log::warn!("[questions] {code}/{reason}: {message}");
             json!({
                 "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
                 "code": code,
-                "message": message,
+                "message": "",
                 "retryable": false,
                 "details": { "reason": reason },
                 "request_id": "",
@@ -2363,7 +2424,7 @@ pub async fn open_external(app: tauri::AppHandle, url: String) -> Result<Value, 
         return Err(json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INVALID_ARGUMENT",
-            "message": "只允许打开白名单内的链接",
+            "message": "",
             "retryable": false,
             "details": { "reason": "url_not_allowed" },
             "request_id": "",
@@ -2371,12 +2432,13 @@ pub async fn open_external(app: tauri::AppHandle, url: String) -> Result<Value, 
     }
 
     app.opener().open_url(url, None::<&str>).map_err(|error| {
+        log::warn!("打开浏览器失败：{error}");
         json!({
             "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": format!("打开浏览器失败：{error}"),
+            "message": "",
             "retryable": false,
-            "details": null,
+            "details": { "reason": "open_browser_failed" },
             "request_id": "",
         })
     })?;
@@ -2400,7 +2462,17 @@ pub async fn tun_helper_open_settings() -> Result<Value, Value> {
 pub async fn tun_helper_uninstall() -> Result<Value, Value> {
     crate::tun::privilege::unregister_helper()
         .map(|()| json!({ "ok": true }))
-        .map_err(|error| json!({ "code": error.code, "message": error.message }))
+        .map_err(|error| {
+            log::warn!("卸载后台助手失败：{} {}", error.message, error.detail.unwrap_or_default());
+            json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": error.code,
+                "message": "",
+                "retryable": false,
+                "details": { "reason": "internal" },
+                "request_id": "",
+            })
+        })
 }
 
 /// 重启后恢复会话：不传 `session_id` 时取最近一个会话。
@@ -2452,9 +2524,14 @@ pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
 /// 已有可用 active 时 `activate_builtin_if_unconfigured` 不会抢。
 fn apply_saved_deepseek_key(store: &crate::store::Store, validation: &str) -> Result<(), Value> {
     if validation == "invalid" {
+        log::warn!("DeepSeek Key 鉴权失败：Key 可能无效或已被吊销");
         return Err(json!({
-            "code": "INVALID_KEY",
-            "message": "DeepSeek 鉴权失败，Key 可能无效或已被吊销",
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INVALID_ARGUMENT",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "provider_key_invalid" },
+            "request_id": "",
         }));
     }
     crate::llm::activate_builtin_if_unconfigured(store);
@@ -2480,10 +2557,29 @@ pub async fn deepseek_save_key(
                 "verified": outcome.validation == "ok",
             }))
         }
-        Err(error) => Err(json!({
-            "code": error.ui_code(),
-            "message": error.message(),
-        })),
+        Err(error) => {
+            let code = error.ui_code();
+            log::warn!("保存 DeepSeek Key 失败：{code} {}", error.message());
+            if code == "INVALID_KEY" {
+                Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INVALID_ARGUMENT",
+                    "message": "",
+                    "retryable": false,
+                    "details": { "reason": "provider_key_invalid" },
+                    "request_id": "",
+                }))
+            } else {
+                Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INTERNAL",
+                    "message": "",
+                    "retryable": false,
+                    "details": { "reason": "keychain_failed" },
+                    "request_id": "",
+                }))
+            }
+        }
     }
 }
 
@@ -2512,10 +2608,17 @@ pub async fn deepseek_clear_key(_state: State<'_, Arc<AppState>>) -> Result<Valu
             crate::agent::refresh_credentials();
             Ok(json!({ "ok": true }))
         }
-        Err(error) => Err(json!({
-            "code": "KEYCHAIN",
-            "message": error.to_string(),
-        })),
+        Err(error) => {
+            log::warn!("清除 DeepSeek Key 失败：{error}");
+            Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": "INTERNAL",
+                "message": "",
+                "retryable": false,
+                "details": { "reason": "keychain_failed" },
+                "request_id": "",
+            }))
+        }
     }
 }
 
@@ -2527,22 +2630,28 @@ fn normalise_title(title: &str) -> Result<&str, Value> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INVALID_ARGUMENT",
-            "message": "标题不能为空",
+            "message": "",
+            "retryable": false,
             "details": { "reason": "empty_title" },
+            "request_id": "",
         }));
     }
 
     let length = trimmed.chars().count();
     if length > MAX_TITLE_CHARS {
         return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INVALID_ARGUMENT",
-            "message": format!("标题最多 {MAX_TITLE_CHARS} 个字符"),
+            "message": "",
+            "retryable": false,
             "details": {
                 "reason": "title_too_long",
                 "max": MAX_TITLE_CHARS,
                 "actual": length,
             },
+            "request_id": "",
         }));
     }
 
@@ -2556,8 +2665,12 @@ pub async fn rename_session(session_id: String, title: String) -> Result<Value, 
 
     let Some(store) = crate::store::global() else {
         return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "INTERNAL",
-            "message": "本地数据库不可用",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "store_unavailable" },
+            "request_id": "",
         }));
     };
 
@@ -2569,13 +2682,105 @@ pub async fn rename_session(session_id: String, title: String) -> Result<Value, 
             "created_at": crate::store::iso_from_ms(session.created_at),
         })),
         Err(crate::store::StoreError::NotFound(_)) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
             "code": "NOT_FOUND",
-            "message": "会话不存在",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "session_gone" },
+            "request_id": "",
         })),
-        Err(error) => Err(json!({
-            "code": "INTERNAL",
-            "message": error.to_string(),
-        })),
+        Err(error) => {
+            log::warn!("重命名会话失败：{error}");
+            Err(json!({
+                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                "code": "INTERNAL",
+                "message": "",
+                "retryable": false,
+                "details": { "reason": "store_error" },
+                "request_id": "",
+            }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_envelope_tests {
+    use super::*;
+
+    /// 界面可见的错误信封必须六个字段齐全、`message` 恒为空（契约 §1.2 / §1.6）。
+    fn assert_interface_envelope(error: &Value) {
+        for key in [
+            "contract_version",
+            "code",
+            "message",
+            "retryable",
+            "details",
+            "request_id",
+        ] {
+            assert!(error.get(key).is_some(), "缺少字段 {key}：{error}");
+        }
+        assert_eq!(error["contract_version"], crate::runtime::EVENT_CONTRACT_VERSION);
+        assert_eq!(error["message"], "", "错误不得带界面文案：{error}");
+        assert_eq!(error["request_id"], "");
+    }
+
+    #[test]
+    fn every_interface_error_envelope_has_an_empty_message() {
+        let envelopes = [
+            command_error("INTERNAL", "本地数据库不可用", json!({ "reason": "store_unavailable" })),
+            file_error("invalid_path", "请选择要导入的文件", None),
+            file_error("file_too_large", "文件超过 1 MiB", Some(1024)),
+            error_value(anyhow::anyhow!("INTERNAL: 内部错误")),
+            error_value(anyhow::anyhow!("普通失败")),
+            llm_error(("invalid_key".into(), "Key 无效".into())),
+            normalise_title("").unwrap_err(),
+            normalise_title(&"汉".repeat(MAX_TITLE_CHARS + 1)).unwrap_err(),
+        ];
+        for error in &envelopes {
+            assert_interface_envelope(error);
+        }
+    }
+
+    /// 错误归类：带显式码的走该码，不带的落到 INTERNAL，文案都只进日志。
+    #[test]
+    fn error_value_keeps_the_code_and_drops_the_text() {
+        let coded = error_value(anyhow::anyhow!("UPSTREAM_ERROR: 上游炸了"));
+        assert_eq!(coded["code"], "UPSTREAM_ERROR");
+        assert_eq!(coded["message"], "");
+
+        let plain = error_value(anyhow::anyhow!("some io failure 中文"));
+        assert_eq!(plain["code"], "INTERNAL");
+        assert_eq!(plain["message"], "");
+    }
+
+    /// 界面命令不产出 SECRET_STORE：钥匙串失败归一成 INTERNAL / keychain_failed，
+    /// 已有的 details 键不能丢。
+    #[test]
+    fn a_service_secret_store_error_becomes_internal_keychain_failed() {
+        use crate::tools::services::ServiceError;
+
+        let bare = error_value(anyhow::Error::new(ServiceError {
+            code: "SECRET_STORE".into(),
+            message: "钥匙串不可用".into(),
+            retryable: false,
+            details: None,
+        }));
+        assert_eq!(bare["code"], "INTERNAL");
+        assert_eq!(bare["details"]["reason"], "keychain_failed");
+        assert_eq!(bare["message"], "");
+        assert_interface_envelope(&bare);
+
+        let with_details = error_value(anyhow::Error::new(ServiceError {
+            code: "SECRET_STORE".into(),
+            message: "钥匙串不可用".into(),
+            retryable: true,
+            details: Some(json!({ "config_id": "cfg_1" })),
+        }));
+        assert_eq!(with_details["code"], "INTERNAL");
+        assert_eq!(with_details["details"]["reason"], "keychain_failed");
+        assert_eq!(with_details["details"]["config_id"], "cfg_1");
+        assert_eq!(with_details["retryable"], true);
+        assert_eq!(with_details["message"], "");
     }
 }
 
@@ -2674,24 +2879,21 @@ mod node_import_file_tests {
         let _ = std::fs::remove_file(&fifo);
     }
 
-    /// 报错消息里不能回显路径：路径可能带用户名等身份信息。
+    /// 界面可见的错误不带文案：路径（可能带用户名）不会经错误出网。
     #[test]
-    fn error_messages_do_not_echo_the_path() {
+    fn error_messages_are_empty() {
         let missing = temp_path("hidden");
-        let shown = missing.to_str().unwrap().to_string();
-        let error = read_node_file(&shown).unwrap_err();
-        assert!(!error["message"].as_str().unwrap().contains(&shown));
+        let error = read_node_file(missing.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["message"], "");
 
         let dir = std::env::temp_dir();
-        let shown = dir.to_str().unwrap().to_string();
-        let error = read_node_file(&shown).unwrap_err();
-        assert!(!error["message"].as_str().unwrap().contains(&shown));
+        let error = read_node_file(dir.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["message"], "");
 
         let big = temp_path("hiddenbig");
         std::fs::write(&big, vec![b'a'; (MAX_NODE_FILE_BYTES + 1) as usize]).unwrap();
-        let shown = big.to_str().unwrap().to_string();
-        let error = read_node_file(&shown).unwrap_err();
-        assert!(!error["message"].as_str().unwrap().contains(&shown));
+        let error = read_node_file(big.to_str().unwrap()).unwrap_err();
+        assert_eq!(error["message"], "");
         let _ = std::fs::remove_file(&big);
     }
 
@@ -2834,7 +3036,7 @@ mod send_message_tests {
             .await
             .unwrap_err();
         assert_eq!(error["code"], "AI_NOT_CONFIGURED");
-        assert_eq!(error["message"], "还没有配置 AI 服务");
+        assert_eq!(error["message"], "");
         assert_eq!(error["retryable"], false);
         assert_eq!(error["details"]["reason"], "ai_not_configured");
         assert_eq!(error["request_id"], "");
@@ -3260,9 +3462,7 @@ mod checkout_command_tests {
             "https://checkout.example/session",
             "失败必须把链接带回去，界面才能重开或复制"
         );
-        assert!(error["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("复制链接")));
+        assert_eq!(error["message"], "", "界面可见的错误不带文案");
     }
 
     #[test]
@@ -3955,7 +4155,7 @@ mod deepseek_save_key_tests {
         crate::store::Store::open_in_memory().unwrap()
     }
 
-    /// 已知无效的 Key 不激活：界面收到 INVALID_KEY，应用仍是「未配置」。
+    /// 已知无效的 Key 不激活：界面收到 INVALID_ARGUMENT / provider_key_invalid，应用仍是「未配置」。
     #[test]
     fn an_invalid_key_does_not_activate_the_builtin() {
         let store = store();
@@ -3964,7 +4164,9 @@ mod deepseek_save_key_tests {
         crate::llm::set_active_id(&store, None).unwrap();
 
         let error = apply_saved_deepseek_key(&store, "invalid").unwrap_err();
-        assert_eq!(error["code"], "INVALID_KEY");
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "provider_key_invalid");
+        assert_eq!(error["message"], "");
         assert_eq!(crate::llm::active_id(&store), None);
     }
 

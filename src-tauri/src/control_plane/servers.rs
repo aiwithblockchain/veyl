@@ -1097,7 +1097,6 @@ pub struct ServerSyncChanged {
 pub struct ServerSyncFailure {
     pub server_id: String,
     pub code: String,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1238,16 +1237,17 @@ async fn sync_with(
                 }
             }
             Err(error) => {
+                // 上游原文只进日志：`failed[]` 只带稳定码（§1.6 / §7.28）。
                 log::warn!(
-                    "节点配置同步失败：server={} code={} reason={}",
+                    "节点配置同步失败：server={} code={} reason={} message={}",
                     server.server_id,
                     error.code,
-                    error.reason().unwrap_or("-")
+                    error.reason().unwrap_or("-"),
+                    crate::logging::truncate_for_log(&error.message)
                 );
                 failed.push(ServerSyncFailure {
                     server_id: server.server_id.clone(),
                     code: error.code,
-                    message: error.message,
                 });
             }
         }

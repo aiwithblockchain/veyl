@@ -9,6 +9,7 @@ pub mod configs;
 pub mod core;
 pub mod core_upgrade;
 pub mod deepseek;
+pub mod description;
 pub mod diag;
 pub mod display;
 pub mod envelope;

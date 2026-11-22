@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.23.0`
+> 契约版本：`3.24.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.23.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.24.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.20.1";
+  contract_version: "3.24.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -249,17 +249,27 @@ type CallSource = "ui" | "agent";
 export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 41 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 40 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 41 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「40 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「41 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放 `\n` 之后的末尾。`capability_catalog` 只取第一行进系统提示清单，所以第一行**不得**出现「对用户说…」这类句子，否则会污染每次请求的能力清单。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
 - **不做输出正则改写**：拦截在渲染层，不改写生成内容。
+
+### 2.5 描述按会话语言（3.24.0）
+
+`Tool::description()` 是唯一入口；Host 在创建会话时按会话语言构建工具集：
+
+- 中文会话：用各工具里的中文 `description()` 原文，不改。
+- 英文会话：`tools/description.rs` 的 `description_en(tool)` 覆盖同名工具的 `description()`；`name` / `input_schema` / `permission_level` / `self_gates` / `advanced` / `execute` 全部委托给原工具。
+- claurst 内置文件工具（Read / Edit / Write / Bash / Glob / Grep）本来就是英文，不包。
+- 会话语言在创建时解析一次，切换设置只影响新会话（`i18n.md` Q1）。
+- 新增工具必须同时补中英两套；`description_en` 未命中时保持中文并记日志，测试会拦。
 
 ---
 
@@ -303,7 +313,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 32 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
 | 33 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
 | 34 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
-| 35 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（全部软件 ↔ 本机代理，**会断开重连**） | `Execute` | 高 |
+| 35 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（Tun 模式 ↔ Proxy 模式，**会断开重连**） | `Execute` | 高 |
 | 36 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
 | 37 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
 | 38 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
@@ -864,7 +874,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.20.1";
+  contract_version: "3.24.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1064,7 +1074,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.20.1";
+  contract_version: "3.24.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -2236,6 +2246,13 @@ type NodeRotateCredentialsData = {
 ---
 
 ## 8. 变更记录
+
+### 3.24.0（未发布，2026-11-22：工具描述按会话语言）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.24.0`；新增 §2.5：英文会话用 `tools/description.rs` 的英文表覆盖 `description()`，其余元数据与执行全部委托原工具；中文描述保持原有行为（本版唯一例外是第 2 行的口径对齐）；新增工具必须同时补两套，测试会拦 | 行为修订 | i18n 批次 4–5；2026-11-22 架构 |
+| 2 | §4.49 `ConfigSetMode` 的中文描述、确认卡与展示词同步改为「Tun 模式 / Proxy 模式」，与 §3 第 35 行口径一致；旧说法（本机代理 / 全部接管）不再出现在该工具 | 文案对齐 | 2026-11-22 C1 复核 P2 |
 
 ### 3.23.0（未发布，2026-11-21：新增 `NodeRotateCredentials`）
 

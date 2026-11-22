@@ -568,7 +568,8 @@ describe("三区外壳与连接舞台", () => {
       await waitFor(() => expect(screen.getByText("免费节点没加完")).toBeTruthy(), {
         timeout: 5000,
       });
-      expect(screen.getByText(/连不上节点源/)).toBeTruthy();
+      // 后端 message 只进日志：界面按错误码取句。
+      expect(screen.getByText(/没连上服务器，检查网络后再试/)).toBeTruthy();
       const fetchRow = screen.getByText("拉取预置配置").closest(".stage-step");
       expect(fetchRow?.className).toContain("is-failed");
       expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();

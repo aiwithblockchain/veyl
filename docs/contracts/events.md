@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.22.0`
+> 契约版本：`2.23.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.21.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.23.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -114,7 +114,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -136,7 +136,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -154,7 +154,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -196,7 +196,7 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 
 ```ts
 type ToolDisplay = {
-  text: string;                              // 面向用户的一句话，≤24 字
+  text: string;                              // 2.23.0 起 UI 不渲染；下一版删除
   facts?: string[];                          // 可选：≤4 行，只放用户看得懂的名称与数值
   changed: "none" | "restored" | "unknown";  // 这次调用有没有改动用户的设置
   actions?: DisplayAction[];                 // 2.11.0：可直接点击的动作，≤2 个
@@ -208,7 +208,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -231,7 +231,8 @@ type ToolCallEndPayload = {
 `display` 规则（2.7.0）：
 
 - **这是给用户看的唯一工具文案。** `result` 是给模型的，UI 不得直接渲染；缺 `display` 时用前端映射表（`tools.md` §2.4）的通用文案兜底，不报错、不丢事件。
-- `text` ≤24 字，不含工具名、`cfg_…` / `nod_…` 等 id、路径、错误码、英文或原始 JSON。
+- **2.23.0：UI 一律用前端映射表渲染完成/失败那句话，不渲染 `display.text`。** Host 仍随事件下发 `text` 一版（原中文），给旧前端降级用；下一版删除该字段。`facts` 仍由 Host 投影（结构化改造另批）。
+- `text` ≤24 字，不含工具名、`cfg_…` / `nod_…` 等 id、路径、错误码、英文或原始 JSON。（2.23.0 起 UI 不渲染，约束保留给降级版本。）
 - `facts` 可选，≤4 行；只放用户关心的名称与数值（配置名、节点名、出口 IP、延迟）。没有就省略，不要填空串。
 - `changed` 必填（不是可选）：
   - 只读工具固定 `"none"`；
@@ -271,14 +272,42 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
-  text: string;                 // 面向用户的一行状态，例 "正在检查连接状态"
+  text_key: AiStatusTextKey;    // 2.23.0：界面唯一文案来源
+  params?: Record<string, string | number>;  // 2.23.0：text_key 的插值
+  text: string;                 // 保留一版；UI 不再渲染（2.24.0 删除）
   emitted_at: string;
 };
+
+type AiStatusTextKey =
+  | "ai.status.thinking"
+  | "ai.status.streaming"
+  | "ai.status.preparing"
+  | "ai.status.working"
+  | "ai.status.waiting_permission"
+  | "ai.status.compacting"
+  | "ai.status.completed"
+  | "ai.status.retrying"        // params: attempt, max_attempts, delay_seconds, reason
+  | "ai.status.truncated";      // 输出达到长度上限
 ```
+
+映射（Host 侧固定，不按上游文本猜）：
+
+| 来源 | `phase` | `text_key` |
+|---|---|---|
+| 请求开始 | `thinking` | `ai.status.thinking` |
+| `Status(s)` 含 permission | `waiting_permission` | `ai.status.waiting_permission` |
+| `Status(s)` 含 prepar + tool | `preparing_tool` | `ai.status.preparing` |
+| `Status(s)` 含 tool / bash / command | `running_tool` | `ai.status.working` |
+| `Status(s)` 含 stream / respond / answer | `streaming_answer` | `ai.status.streaming` |
+| `Status(s)` 含 compact | `compacting` | `ai.status.compacting` |
+| `Status(s)` 含 complete / finished / done | `completed` | `ai.status.completed` |
+| `Status(s)` 其他（含 claurst 的英文 spinner 文本） | `thinking` | `ai.status.thinking` |
+| `Retry { … }` | `retrying` | `ai.status.retrying` + `params` |
+| 达到长度上限 | `completed` | `ai.status.truncated` |
 
 来源：
 
@@ -308,7 +337,7 @@ type AiStatusPayload = {
 
 UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限卡。
 
-**本地化（P1 决议）**：P1 由 Host 直接生成中文 `text`，前端原样展示，不做翻译。P2 若要多语言，改为 `text_key: string` + `params: Record<string, unknown>`，前端查表；届时 `text` 作为降级字段保留一版。
+**本地化（2.23.0）**：界面文案只由 `text_key` + `params` 决定，按界面语言查表；**UI 不渲染 `text`**，也不再显示上游状态文本（claurst 的英文 spinner 文本过去会原样漏进中文界面）。`text` 仍随事件下发一版（内容为原中文状态句），2.24.0 删除。新增 `text_key` 必须同时补齐中英字典，否则按 `phase` 的通用文案兜底并记 `i18n missing key`。
 
 ---
 
@@ -316,11 +345,12 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
-  text: string;
+  text_key: "ai.compact.done";  // 2.23.0：界面唯一文案来源
+  text: string;                 // 保留一版；UI 不再渲染（2.24.0 删除）
   tokens_before: number | null;
   tokens_after: number | null;
   emitted_at: string;
@@ -329,7 +359,7 @@ type AiCompactPayload = {
 
 来源：`QueryEvent::Compacted(record)` 与含 compact 的 `Status`。
 
-UI 处理：在对话流中插入一条分隔提示「上下文已压缩」，不清空已有消息。
+UI 处理：在对话流中插入一条分隔提示（按 `text_key` 查表，中英各一句），不清空已有消息。
 
 ---
 
@@ -344,7 +374,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -382,7 +412,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -417,7 +447,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -453,7 +483,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -487,7 +517,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -504,7 +534,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -576,7 +606,7 @@ UI 用自身的连接状态选择弹窗文案（`docs/design/quit-dialog.md` §6
 
 ```ts
 type QuitRequestedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   emitted_at: string;
 };
 ```
@@ -596,7 +626,7 @@ UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`c
 
 ```ts
 type QuitDismissedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   emitted_at: string;
 };
 ```
@@ -617,7 +647,7 @@ type QuitDismissedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -708,7 +738,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -746,7 +776,7 @@ type NodeListChangedReason =
   | "node_synced";            // my_server_sync 拉到新端口或新密码（2.22.0）
 
 type NodeListChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -768,7 +798,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -796,7 +826,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -834,7 +864,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -888,7 +918,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -914,7 +944,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -947,7 +977,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -970,7 +1000,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -992,7 +1022,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -1021,7 +1051,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   run_id: string;
   config_id: string;
   total: number;
@@ -1062,7 +1092,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1088,7 +1118,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1115,7 +1145,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1140,7 +1170,7 @@ type MyServerOrderChangedPayload = {
 
 ```ts
 type TrialExpiredPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
   removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
@@ -1162,7 +1192,7 @@ AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSe
 
 ```ts
 type SettingsPointPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   section: "ai" | "connection" | "account" | "advanced";
   row: string | null;            // 行 id；只定位到段时为 null
   emitted_at: string;
@@ -1183,7 +1213,7 @@ AI 把地区 / 规格选进「新建节点」舞台。由工具 `StageSelect` �
 
 ```ts
 type StageSelectPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   screen: "new_node";
   region: string | null;         // 目录里的地区 id；本次没请求就是 null
   plan: string | null;           // 目录里的套餐 id；同上
@@ -1210,7 +1240,7 @@ type StageSelectPayload = {
 
 ```ts
 type MyServerAccountClearedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   reason: "device_revoked" | "account_blocked" | "token_invalid" | "auth_required" | "server_rejected";
   emitted_at: string;
 };
@@ -1231,7 +1261,7 @@ type MyServerAccountClearedPayload = {
 
 ```ts
 type MyServerRenamedPayload = {
-  contract_version: "2.22.0";
+  contract_version: "2.23.0";
   server_id: string;
   name: string;          // 服务端 trim 后落库的名字
   local_node_id: string | null;  // 本地节点行 id；本地还没有这台服务器的节点时为 null
@@ -1302,7 +1332,7 @@ idle
 |---|---|---|
 | 事件名是否带 `ai-` 前缀 | **统一不带前缀**：`message-chunk` / `thinking-chunk` / `tool-call-start` / `tool-call-end` / `ai-status` / `ai-compact` / `ai-request-end` | §1、§9 |
 | 事件名常量的唯一来源 | `src/agent/protocol.ts` 的 `AGENT_EVENTS` 是**唯一常量源**，组件与 store 不得出现裸字符串 | §9 |
-| `ai-status.text` 是否本地化 | **P1 由 Host 生成中文 `text`**；`text_key` + `params` 留到 P2 | §3.5 |
+| `ai-status.text` 是否本地化 | **2.23.0 已改为 `text_key` + `params`**（P1 曾由 Host 生成中文 `text`）；UI 不再渲染 `text` | §3.5 |
 | 审批事件 | ~~审批作用域~~ → **审批机制整体移除，`approval-requested` 与 `ai_approval_decision` 均删除**（2026-11-02） | §4.4、§5 |
 | `next_actions` 点击语义 | 等价于用户发一条消息给 Agent（label + args），**UI 不得直接执行工具**，可预填输入框 | §3.4、`tools.md` §1.3 |
 | `args_preview` 是否保留 | **保留**，默认展示非敏感字段；`sensitive` / 黑名单字段打码；脱敏后无可展示字段才省略整个字段 | §3.3、§4.4 |
@@ -1353,6 +1383,15 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.23.0（未发布，2026-11-22：状态与工具卡文案按界面语言）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.23.0`；全文 34 处字面量同步替换（`routing.md` 的两处事件载荷副本随本文件） | 元数据 | `docs/design/i18n.md` Q4；PM 2026-11-22 |
+| 2 | §3.5 `AiStatusPayload` 新增必填 `text_key` 与可选 `params`；界面只按 `text_key` 查表，**不再渲染 `text`**（保留一版，2.24.0 删除）。同时修掉上游 claurst 英文状态文本漏进中文界面的问题 | 新增字段 / 语义 | 同上 |
+| 3 | §3.6 `AiCompactPayload` 新增 `text_key: "ai.compact.done"`；`text` 保留一版、UI 不渲染 | 新增字段 | 同上 |
+| 4 | §3.4 `ToolDisplay.text` 标记为 UI 不渲染、下一版删除；完成/失败那句话一律用前端映射表（`tools.md` §2.4） | 语义 | 同上 |
 
 ### 2.22.0（未发布，2026-11-22：节点凭据变化的原因值）
 

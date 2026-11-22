@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { formatUsdCents } from "../myservers/labels";
 import { IconClose } from "./icons";
 import { useFocusTrap } from "../ui/focus";
@@ -34,8 +35,7 @@ function topupError(error: unknown): string {
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
     return t("topup.network");
   }
-  // 批次 4 起改看稳定错误码；现在只看后端是否真的给了 message。
-  return problem.hasMessage ? problem.message : t("topup.failed");
+  return errorText(error, t("topup.failed"));
 }
 
 /** 充值模态：档位直接来自 wallet 的 denominations_cents。 */

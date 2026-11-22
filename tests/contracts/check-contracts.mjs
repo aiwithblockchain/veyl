@@ -2161,7 +2161,7 @@ check(
   "系统提示的块词汇表为 5 个、不含 issue_card（实现）",
   () => {
     const rs = read("src-tauri/src/claurst_session/mod.rs");
-    const m = rs.match(/const BLOCK_CATALOG: &str = "\\\n([\s\S]*?)";/);
+    const m = rs.match(/const BLOCK_CATALOG(?:_ZH)?: &str = "\\\n([\s\S]*?)";/);
     if (!m) return ["找不到 BLOCK_CATALOG"];
     const problems = [];
     if (m[1].includes("`issue_card`")) {

@@ -8,6 +8,7 @@ import type {
 import { readInsufficientBalanceDetails } from "../agent/bridge";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import {
   continentLabel,
   formatDailyPrice,
@@ -101,10 +102,9 @@ async function resolveOrderedServer(
   }
 }
 
-function errorText(error: unknown): { message: string; retryable: boolean } {
+function startFailure(error: unknown): { message: string; retryable: boolean } {
   const problem = toBridgeError(error);
-  // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
-  const message = problem.hasMessage ? problem.message : t("wizard.failed");
+  const message = errorText(error, t("wizard.failed"));
   return { message, retryable: problem.retryable };
 }
 
@@ -433,7 +433,7 @@ export function MyServerWizard({
           shortfallCents: shortfall,
         });
       } else {
-        setError(errorText(err));
+        setError(startFailure(err));
       }
       if (!shouldKeepIdempotencyKey(err)) idempotencyKey.current = { key: "", region: "", plan: "" };
     } finally {

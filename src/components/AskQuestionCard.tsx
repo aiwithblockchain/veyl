@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
-import { toBridgeError } from "../agent/errors";
+import { errorText } from "../i18n/errorText";
 import { isExplainAnswer } from "../ui/askQuestion";
 import { useT } from "../i18n";
 
@@ -72,12 +72,7 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
       try {
         await onAnswer(value);
       } catch (failure) {
-        const bridgeError = toBridgeError(failure);
-        setError(
-          bridgeError.hasMessage
-            ? bridgeError.message
-            : t("ask.error.answer"),
-        );
+        setError(errorText(failure, t("ask.error.answer")));
         submittingRef.current = false;
         setSubmitting(false);
       }
