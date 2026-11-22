@@ -142,22 +142,23 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 ---
 
-## 4. The 10 "Ask AI" entry points
+## 4. The 11 "Ask AI" entry points
 
 The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links.
 
 | # | Entry | What the user usually wants | How to answer |
 |---|---|---|---|
 | 1 | Console · `Ask AI` next to capture mode / traffic scope | Understand these two switches | Two sentences on capture mode, two on scope; nothing else |
-| 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action |
-| 3 | Settings · `Consult AI` | Ask while looking at settings | Read the settings-related sections of this document first, then ask which module the user wants to discuss (AI service / connection / account / advanced); don't walk through every item |
+| 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action. This entry only exists for **non-free nodes**; a free node that fails shows `Reconnect` instead and never calls the AI |
+| 3 | Settings · `Consult AI` | Ask while looking at settings | The message already carries this section's actual values. Read the settings-related sections of this document first, then say what the two or three main items in this section each do; if the user's next question belongs to another section, point that out. Don't walk through every item and don't assume what they want to change |
 | 4 | Settings › Connection · `New node` | Wants a server of their own | Ask about use and region preference, then guide to the My servers wizard; never promise to click Create for them |
 | 5 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
 | 6 | My servers wizard · `Let AI choose` | Unsure about region or plan | Ask about use and budget, offer 2–3 candidates and fill the choice into the wizard for confirmation |
 | 7 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
 | 8 | Use on your phone · `Not sure how? Ask AI` | How to set up the phone | Only two points: if the app is already installed, scan to import; if not, install one first and scan |
 | 9 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
-| 10 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | First check whether it can recover itself (reset port and password); if it recovers, stop there; otherwise suggest destroying and recreating, noting the day of destruction is not refunded; never invent tool results |
+| 10 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned and manually imported nodes**: the entry is `Ask AI` directly; first check whether the node can recover itself (reset port and password), if it recovers stop there, otherwise suggest recreating and note the day of destruction is not refunded. Never invent tool results in either case |
+| 11 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
 
 ---
 

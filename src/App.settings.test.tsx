@@ -180,7 +180,7 @@ describe("设置 → 咨询 AI", () => {
     ).toBe("true");
   }, 15_000);
 
-  it("咨询开场带上当前分区，不再塞整份设置快照", async () => {
+  it("咨询开场带上当前分区与这一区的事实", async () => {
     render(<App />);
     await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
@@ -196,9 +196,10 @@ describe("设置 → 咨询 AI", () => {
     await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledTimes(1));
     const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>)
       .mock.calls[0];
-    expect(call[1]).toContain("我在 Veyl 的设置页（当前在「连接」）");
-    expect(call[1]).toContain("想咨询哪个模块");
-    expect(call[1]).not.toContain("接管方式");
+    expect(call[1]).toContain("我在 Veyl 的设置页，当前在「连接」分区");
+    expect(call[1]).toContain("本地代理端口：");
+    // 不再反问模块。
+    expect(call[1]).not.toContain("想咨询哪个模块");
   }, 15_000);
 
   it("咨询开关来回切两次，输入框里的草稿还在", async () => {

@@ -90,7 +90,7 @@ function renderSettings(
     connectMode?: "tun" | "system_proxy" | null;
     assistant?: ReactNode;
     configId?: string | null;
-    routingMode?: "direct" | "proxy_all" | null;
+    routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
     onSetRoutingMode?: (mode: "direct" | "proxy_all") => Promise<{ ok: boolean; message?: string }>;
     onConnectModeChanged?: (mode: "tun" | "system_proxy") => void;
     section?: "ai" | "network" | "account" | "advanced";
@@ -615,7 +615,7 @@ describe("咨询 AI 的焦点", () => {
 });
 
 describe("咨询 AI 的提示词", () => {
-  it("从关闭态打开：回调收到带当前分区的咨询提示词", async () => {
+  it("从关闭态打开：回调收到带当前分区事实的咨询提示词", async () => {
     const onConsultAi = vi.fn((_prompt: string) => true);
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
@@ -630,12 +630,62 @@ describe("咨询 AI 的提示词", () => {
 
     expect(onConsultAi).toHaveBeenCalledTimes(1);
     const prompt = onConsultAi.mock.calls[0][0] as string;
-    expect(prompt).toContain("我在 Veyl 的设置页（当前在「连接」）");
-    expect(prompt).toContain("想咨询哪个模块");
-    // 不再塞整份设置快照。
-    expect(prompt).not.toContain("接管方式");
-    expect(prompt).not.toContain("本地代理端口");
-    expect(prompt).not.toContain("当前服务");
+    expect(prompt).toContain("我在 Veyl 的设置页，当前在「连接」分区");
+    expect(prompt).toContain("接管方式：Proxy 模式");
+    expect(prompt).toContain("流量范围：全局");
+    expect(prompt).toContain("本地代理端口：7891");
+    expect(prompt).toContain("节点配置同步间隔：30 分钟");
+    // 不再反问模块，也不留占位符。
+    expect(prompt).not.toContain("想咨询哪个模块");
+    expect(prompt).not.toMatch(/\{\w+\}/);
+  });
+
+  it("流量范围按三值给事实，direct 不会写成智能", async () => {
+    const cases = [
+      ["proxy_all", "流量范围：全局"],
+      ["direct", "流量范围：直连"],
+      ["proxy_selected", "流量范围：指定服务走 VPN"],
+    ] as const;
+    for (const [mode, expected] of cases) {
+      const onConsultAi = vi.fn((_prompt: string) => true);
+      const view = renderSettings(makeBridge(), { routingMode: mode, onConsultAi });
+      fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+      const prompt = onConsultAi.mock.calls[0][0] as string;
+      expect(prompt).toContain(expected);
+      if (mode === "direct") expect(prompt).not.toContain("智能");
+      view.unmount();
+    }
+  });
+
+  it("AI 分区事实带服务商、类型与模型，Key 本身不出现", async () => {
+    const onConsultAi = vi.fn((_prompt: string) => true);
+    renderSettings(makeBridge(), { section: "ai", onConsultAi });
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+
+    const prompt = onConsultAi.mock.calls[0][0] as string;
+    expect(prompt).toContain("服务商：DeepSeek");
+    expect(prompt).toContain("接口类型：openai 兼容");
+    expect(prompt).toContain("模型：deepseek-chat");
+    expect(prompt).not.toMatch(/sk-/);
+    expect(prompt).not.toContain("apiKey");
+    // 已配置 Key 时不再多写一句状态。
+    expect(prompt).not.toContain("尚未配置 Key");
+  });
+
+  it("没有 Key 时只写「尚未配置 Key」", async () => {
+    const onConsultAi = vi.fn((_prompt: string) => true);
+    renderSettings(makeBridge({ providers: [provider({ hasKey: false })] }), {
+      section: "ai",
+      onConsultAi,
+    });
+    await act(async () => {});
+
+    fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+
+    const prompt = onConsultAi.mock.calls[0][0] as string;
+    expect(prompt).toContain("尚未配置 Key");
   });
 
   it("分区名跟着页签走：AI / 账户 / 高级", async () => {

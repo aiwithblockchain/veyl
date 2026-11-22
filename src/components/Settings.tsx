@@ -1053,15 +1053,101 @@ export function Settings({
     "data-pointed": pointedRow === row ? "true" : undefined,
   });
 
+  // 咨询 AI 的分区事实：只读现有 props / state，取不到的项直接不写。
+  // 日志目录没有可读路径（界面只给「打开日志目录」），按取不到处理。
+  const consultFacts = (sectionId: SectionId): string => {
+    const parts: string[] = [];
+    if (sectionId === "ai") {
+      const active =
+        providers.find((provider) => provider.providerId === activeProviderId) ??
+        providers.find((provider) => provider.isActive);
+      if (!active) {
+        parts.push(translate("settings.consult.fact.noProvider"));
+      } else {
+        parts.push(translate("settings.consult.fact.provider", { name: active.name }));
+        parts.push(
+          translate("settings.consult.fact.protocol", {
+            protocol: protocolLabel(active.protocol),
+          }),
+        );
+        parts.push(translate("settings.consult.fact.model", { model: active.model }));
+        // Key 本身永不进提示词；未配置时只留一句状态。
+        if (!active.hasKey) parts.push(translate("settings.consult.fact.noKey"));
+      }
+    } else if (sectionId === "network") {
+      if (connectMode === "system_proxy") {
+        parts.push(
+          translate("settings.consult.fact.mode", { mode: translate("stage.mode.proxy") }),
+        );
+      } else if (connectMode === "tun") {
+        parts.push(
+          translate("settings.consult.fact.mode", { mode: translate("stage.mode.tun") }),
+        );
+      }
+      if (routingMode !== null) {
+        // 三值各有事实；智能只是界面芯片的两态词汇，不能拿来兜底。
+        const scope =
+          routingMode === "proxy_all"
+            ? translate("stage.scope.global")
+            : routingMode === "direct"
+              ? translate("settings.consult.fact.scopeDirect")
+              : routingMode === "proxy_selected"
+                ? translate("settings.consult.fact.scopeSelected")
+                : null;
+        if (scope !== null) {
+          parts.push(translate("settings.consult.fact.scope", { scope }));
+        }
+      }
+      parts.push(translate("settings.consult.fact.port", { port: proxyPort }));
+      parts.push(
+        translate("settings.consult.fact.sync", {
+          interval:
+            syncInterval === 0
+              ? translate("settings.sync.manual")
+              : syncInterval < 60
+                ? translate("settings.sync.minutes", { count: syncInterval })
+                : translate("settings.sync.hours", { count: syncInterval / 60 }),
+        }),
+      );
+    } else if (sectionId === "account") {
+      if (!account?.logged_in) {
+        parts.push(translate("settings.consult.fact.signedOut"));
+      } else {
+        const identity =
+          account.email ??
+          (account.account_kind === "device"
+            ? translate("settings.consult.fact.identityDevice")
+            : translate("settings.account.signedIn"));
+        parts.push(translate("settings.consult.fact.identity", { identity }));
+        if (wallet) {
+          parts.push(
+            translate("settings.consult.fact.balance", {
+              amount: formatUsdCents(wallet.balance_cents),
+            }),
+          );
+        }
+      }
+    } else {
+      parts.push(translate("settings.consult.fact.seed", { summary: seedSummary(seedInfo) }));
+      if (runtime.upstream_version) {
+        parts.push(
+          translate("settings.consult.fact.runtime", { version: runtime.upstream_version }),
+        );
+      }
+    }
+    return parts.join(getLanguage() === "en" ? "; " : "；");
+  };
+
   const toggleConsulting = () => {
     if (consulting) {
       setConsulting(false);
       onConsultingChange?.(false);
       return;
     }
-    // 打开即告诉 AI 用户在看哪个分区；先读文档，再问要咨询哪个模块。
-    // 被拦下（未配置 AI）时不要切到并排布局。
-    const allowed = onConsultAi?.(settingsConsultPrompt(t(SECTION_NAMES[section])));
+    // 打开即带着当前分区的事实；被拦下（未配置 AI）时不要切到并排布局。
+    const allowed = onConsultAi?.(
+      settingsConsultPrompt(t(SECTION_NAMES[section]), consultFacts(section)),
+    );
     if (allowed === false) return;
     setConsulting(true);
     onConsultingChange?.(true);
