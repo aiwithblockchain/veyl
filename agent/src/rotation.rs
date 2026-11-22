@@ -268,11 +268,39 @@ impl RotationEngine {
             .unwrap_or_else(|| "unknown".into())
     }
 
+    /// Tail of the on-disk log, attached to `failed` reports. The control plane
+    /// destroys the instance right after, so this is the only copy that
+    /// survives; both the excerpt and `error` are redacted first.
+    fn recent_log_excerpt(&self) -> Option<String> {
+        let path = self.cfg.log.file.as_ref()?;
+        let bytes = std::fs::read(path).ok()?;
+        // A UTF-8 boundary may be crossed; from_utf8_lossy replaces the split
+        // character instead of dropping the whole tail.
+        let tail = if bytes.len() > 8192 {
+            &bytes[bytes.len() - 8192..]
+        } else {
+            &bytes[..]
+        };
+        let text = String::from_utf8_lossy(tail);
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(30);
+        let joined = lines[start..].join("\n");
+        let excerpt = truncate(&redact_sensitive(&joined), 2000);
+        if excerpt.trim().is_empty() {
+            None
+        } else {
+            Some(excerpt)
+        }
+    }
+
     async fn report_failed(&self, port: u16, control_port: u16, error: &(impl std::fmt::Display + ?Sized)) {
-        let body = self
+        let mut body = self
             .report(Stage::Failed, port, control_port)
             .with_singbox_version(self.current_version().await)
             .with_error(error.to_string());
+        if let Some(excerpt) = self.recent_log_excerpt() {
+            body = body.with_log_excerpt(excerpt);
+        }
         if let Err(e) = self.control.report(&body).await {
             tracing::error!(error = %e, "failed to report failed stage");
         }
@@ -928,6 +956,15 @@ mod tests {
         control: Arc<FakeControl>,
     ) -> (RotationEngine, Arc<AgentConfig>) {
         let cfg = config(dir);
+        engine_with(dir, host, control, cfg)
+    }
+
+    fn engine_with(
+        dir: &Path,
+        host: Arc<FakeHost>,
+        control: Arc<FakeControl>,
+        cfg: Arc<AgentConfig>,
+    ) -> (RotationEngine, Arc<AgentConfig>) {
         std::fs::create_dir_all(dir).unwrap();
         host.put_file(&cfg.singbox.binary_path, b"elf".to_vec());
         host.set_command_output(
@@ -964,6 +1001,34 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn a_failed_report_carries_the_redacted_log_tail() {
+        let dir = tmpdir("failed-excerpt");
+        let log_path = dir.join("agent.log");
+        std::fs::write(&log_path, "INFO boot\nDEBUG password=hunter2\n").unwrap();
+        let mut cfg = (*config(&dir)).clone();
+        cfg.log.file = Some(log_path);
+
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, _cfg) = engine_with(&dir, host, control.clone(), Arc::new(cfg));
+
+        engine.report_failed(30412, 32100, "install failed").await;
+
+        let reports = control.reports.lock().unwrap();
+        let last = reports.last().expect("failed report");
+        assert_eq!(last.stage, Stage::Failed);
+        let excerpt = last.log_excerpt.as_deref().expect("log excerpt");
+        assert!(excerpt.contains("INFO boot"));
+        assert!(!excerpt.contains("hunter2"), "excerpt must stay redacted");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

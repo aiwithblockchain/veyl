@@ -4,6 +4,7 @@
 #
 #   bash scripts/agent/build-release.sh          # test + host release build + sha256
 #   bash scripts/agent/build-release.sh --tag    # interactive: tag agent-v<version>, push
+#   bash scripts/agent/build-release.sh --hash   # print AGENT_SHA256 from the published release
 #
 # Never reads or prints secrets. Uses the local git credentials for the push.
 
@@ -37,9 +38,11 @@ VERSION="$(awk -F'"' '/^version = /{print $2; exit}' "$CARGO_TOML")"
 TAG="agent-v${VERSION}"
 
 TAG_MODE=0
+HASH_MODE=0
 case "${1:-}" in
   "") ;;
   --tag) TAG_MODE=1 ;;
+  --hash) HASH_MODE=1 ;;
   -h|--help)
     usage
     exit 0
@@ -49,6 +52,32 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+
+if [ "$HASH_MODE" -eq 1 ]; then
+  command -v gh >/dev/null 2>&1 || die "gh not found; install the GitHub CLI"
+  echo "release tag: $TAG"
+  if ! gh release view "$TAG" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+    echo "error: release $TAG is not published yet." >&2
+    echo "  check the workflow: gh run list --workflow agent-release.yml --repo $REPO_SLUG" >&2
+    exit 1
+  fi
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_DIR"' EXIT
+  if ! gh release download "$TAG" --repo "$REPO_SLUG" -p SHA256SUMS -D "$TMP_DIR" >/dev/null 2>&1; then
+    die "could not download SHA256SUMS from $TAG (assets may still be uploading)"
+  fi
+  HASH="$(awk '$2 == "veyl-agent-linux-amd64" || $2 == "*veyl-agent-linux-amd64" { print $1; exit }' \
+    "$TMP_DIR/SHA256SUMS")"
+  [ -n "$HASH" ] || die "SHA256SUMS in $TAG has no veyl-agent-linux-amd64 line"
+  echo
+  echo "amd64 sha256: $HASH"
+  echo
+  echo "Paste into the control-plane env:"
+  echo "  \"AGENT_VERSION\": \"$VERSION\","
+  echo "  \"AGENT_DOWNLOAD_URL\": \"https://github.com/${REPO_SLUG}/releases/download/${TAG}/veyl-agent-linux-amd64\","
+  echo "  \"AGENT_SHA256\": \"$HASH\","
+  exit 0
+fi
 
 echo "agent version: $VERSION"
 echo "release tag:   $TAG"

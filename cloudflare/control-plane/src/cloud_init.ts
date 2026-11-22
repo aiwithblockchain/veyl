@@ -53,35 +53,55 @@ AGENT_URL="${input.agent.url}"
 AGENT_SHA256="${input.agent.sha256}"
 
 # 任何一步失败都立即回传：控制面据此销毁这台机器，不留「在计费但没装好」的实例。
+# 回传只带阶段、行号与截断后的 stderr；不含 token、配置内容或下载地址。
+ERR_FILE=/tmp/veyl-cloud-init.err
+: > "\${ERR_FILE}"
+STAGE=download
+
 on_error() {
+  local line="\${1:-0}"
+  local message
+  message="$(head -c 300 "\${ERR_FILE}" 2>/dev/null | tr -d '\\\\"' | tr -d '\\000-\\037' || true)"
   curl -fsS --proto '=https' --tlsv1.2 -m 20 -X POST "\${FAIL_URL}" \\
-    -H "authorization: Bearer \${ENROLL_TOKEN}" >/dev/null 2>&1 || true
+    -H "authorization: Bearer \${ENROLL_TOKEN}" \\
+    -H 'content-type: application/json' \\
+    --data "{\\"stage\\":\\"\${STAGE}\\",\\"line\\":\${line},\\"error\\":\\"\${message}\\"}" \\
+    >/dev/null 2>&1 || true
   exit 1
 }
 trap 'on_error \${LINENO}' ERR
 
 # 1. 下载并校验 agent（版本 ${input.agent.version}）
 # 极简镜像可能没有 curl / CA 证书：只补这一层，其它一律交给 agent。
+: > "\${ERR_FILE}"
 if ! command -v curl >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates
+  apt-get update -qq 2>>"\${ERR_FILE}"
+  apt-get install -y -qq curl ca-certificates 2>>"\${ERR_FILE}"
 fi
-curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}"
-echo "\${AGENT_SHA256}  /tmp/veyl-agent" | sha256sum -c -
-install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent
+curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}" 2>>"\${ERR_FILE}"
+STAGE=checksum
+: > "\${ERR_FILE}"
+echo "\${AGENT_SHA256}  /tmp/veyl-agent" | sha256sum -c - >>"\${ERR_FILE}" 2>&1
+STAGE=install
+: > "\${ERR_FILE}"
+install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent 2>>"\${ERR_FILE}"
 rm -f /tmp/veyl-agent
 
 # 2. 写 agent 配置（控制面地址、enroll URL、一次性 token）
-mkdir -p /etc
-install -m 600 /dev/null /etc/veyl-agent.json
-cat > /etc/veyl-agent.json <<'VEYL_AGENT_CONFIG'
+STAGE=config
+: > "\${ERR_FILE}"
+mkdir -p /etc 2>>"\${ERR_FILE}"
+install -m 600 /dev/null /etc/veyl-agent.json 2>>"\${ERR_FILE}"
+cat > /etc/veyl-agent.json 2>>"\${ERR_FILE}" <<'VEYL_AGENT_CONFIG'
 ${config}
 VEYL_AGENT_CONFIG
-chmod 600 /etc/veyl-agent.json
+chmod 600 /etc/veyl-agent.json 2>>"\${ERR_FILE}"
 
 # 3. systemd unit：root 运行、开机自启、失败重启
-cat > /etc/systemd/system/veyl-agent.service <<'VEYL_AGENT_UNIT'
+STAGE=systemd
+: > "\${ERR_FILE}"
+cat > /etc/systemd/system/veyl-agent.service 2>>"\${ERR_FILE}" <<'VEYL_AGENT_UNIT'
 [Unit]
 Description=Veyl node agent
 After=network-online.target nss-lookup.target
@@ -101,8 +121,8 @@ systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || true
 systemctl disable ssh 2>/dev/null || systemctl disable sshd 2>/dev/null || true
 
 # 5. 启动
-systemctl daemon-reload
+systemctl daemon-reload 2>>"\${ERR_FILE}"
 systemctl enable veyl-agent >/dev/null 2>&1
-systemctl restart veyl-agent
+systemctl restart veyl-agent 2>>"\${ERR_FILE}"
 `;
 }

@@ -239,6 +239,12 @@ export async function provisionServer(
   };
   // 缺任何一个都装不出 agent：宁可整单失败，也不建一台连不上控制面的机器。
   if (!usableBuild(agent) || !usableBuild(singbox)) {
+    // 这些是构建信息（版本 / 公开下载地址 / sha 长度），不含任何凭据；没有它们分不清缺哪一项。
+    console.warn(
+      `[provision] agent_unconfigured server=${server.id}` +
+        ` agent={version:${agent.version || "empty"},url:${agent.url || "empty"},sha_len:${agent.sha256.length}}` +
+        ` singbox={version:${singbox.version || "empty"},url:${singbox.url || "empty"},sha_len:${singbox.sha256.length}}`,
+    );
     return fail(env, server, "agent_unconfigured", { retryable: false });
   }
   // cloud-init 会把 token / URL / 版本拼进 shell：越权字符一律不建机（永久失败 + 退款）。

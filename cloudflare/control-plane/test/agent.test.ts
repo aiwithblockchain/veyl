@@ -391,6 +391,7 @@ describe("POST /v1/agent/report", () => {
     expect(unauthorized?.status).toBe(401);
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const failed = await handleServers(
       reportRequest(serverToken, { stage: "failed" }),
       env as never,
@@ -401,6 +402,11 @@ describe("POST /v1/agent/report", () => {
     expect(body.failed_stage).toBe("booting");
     expect(db.rows("servers")[0].state).toBe("destroyed");
     expect(db.rows("orders")[0].state).toBe("failed");
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("agent_report_failed");
+    expect(logged).toContain("stage=booting");
+    expect(logged).not.toContain(serverToken);
+    warn.mockRestore();
   });
 });
 
@@ -722,6 +728,98 @@ describe("POST /v1/agent/fail", () => {
       env as never,
     );
     expect(replay?.status).toBe(409);
+  });
+
+  it("回传阶段、行号与错误进审计与日志，不带凭据", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ stage: "checksum", line: 42, error: "sha256 mismatch\nbad" }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail).toEqual({
+      reason: "agent_install_failed",
+      stage: "checksum",
+      line: 42,
+      error: "sha256 mismatch bad",
+    });
+
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("stage=checksum");
+    expect(logged).toContain("line=42");
+    expect(logged).not.toContain(ENROLL_TOKEN);
+    warn.mockRestore();
+  });
+
+  it("failed 上报带日志摘要：落审计并截断到 2000 字", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    const serverToken = await enrollAndGetToken(env as never);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+
+    const excerpt = "INFO boot\n".repeat(400);
+    const res = await handleServers(
+      reportRequest(serverToken, {
+        stage: "failed",
+        error: "install failed",
+        log_excerpt: excerpt,
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(409);
+
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.report.failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail.error).toBe("install failed");
+    expect(detail.log_excerpt.length).toBeLessThanOrEqual(2000);
+    expect(detail.log_excerpt).toContain("INFO boot");
+  });
+
+  it("未知阶段与非整行号只落 null，不写任意文本进审计", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ stage: "hacked", line: 1.5, error: "" }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail).toEqual({
+      reason: "agent_install_failed",
+      stage: null,
+      line: null,
+      error: null,
+    });
   });
 });
 

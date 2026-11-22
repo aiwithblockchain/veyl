@@ -1053,11 +1053,16 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     .prepare("SELECT * FROM servers WHERE enrollment_hash = ?")
     .bind(hash)
     .first<ServerRow>();
-  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 404);
+  if (!row) {
+    console.warn("[servers] agent_enroll_rejected reason=unknown_token");
+    return agentJson({ ok: false, reason: "unknown_token" }, 404);
+  }
   if (row.destroyed_at !== null) {
+    console.warn(`[servers] agent_enroll_rejected server=${row.id} reason=destroyed`);
     return agentJson({ ok: false, reason: "destroyed" }, 409);
   }
   if (row.enrollment_expires_at !== null && row.enrollment_expires_at < Date.now()) {
+    console.warn(`[servers] agent_enroll_rejected server=${row.id} reason=expired`);
     await destroyInstance(env, row, "enrollment_expired");
     return agentJson({ ok: false, reason: "expired" }, 409);
   }
@@ -1110,7 +1115,10 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     .bind(now, now, nodeId, tokenHash, row.id, hash)
     .run();
   const changed = (consumed as { meta?: { changes?: number } }).meta?.changes ?? 0;
-  if (changed === 0) return agentJson({ ok: false, reason: "already_used" }, 409);
+  if (changed === 0) {
+    console.warn(`[servers] agent_enroll_rejected server=${row.id} reason=already_used`);
+    return agentJson({ ok: false, reason: "already_used" }, 409);
+  }
 
   try {
     await db
@@ -1140,6 +1148,42 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     // Ed25519 公钥 JWK 字符串：agent 用它离线验桌面端的一次性令牌。
     token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK),
   });
+}
+
+/** cloud-init 装机失败的固定阶段；只认这几个值，其余一律当未知。 */
+const FAIL_STAGES = new Set(["download", "checksum", "install", "config", "systemd"]);
+
+interface AgentFailDetail {
+  stage: string | null;
+  line: number | null;
+  error: string | null;
+}
+
+/**
+ * 解析 cloud-init `on_error` 回传的 `{ stage, line, error }`。
+ * body 里不该有凭据（token 只在 Authorization 头），这里也按白名单收敛，
+ * 避免把任意文本写进审计或日志。
+ */
+async function readAgentFailDetail(request: Request): Promise<AgentFailDetail> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return { stage: null, line: null, error: null };
+  }
+  if (!body || typeof body !== "object") return { stage: null, line: null, error: null };
+  const value = body as { stage?: unknown; line?: unknown; error?: unknown };
+  const stage =
+    typeof value.stage === "string" && FAIL_STAGES.has(value.stage) ? value.stage : null;
+  const line =
+    typeof value.line === "number" && Number.isInteger(value.line) && value.line > 0
+      ? value.line
+      : null;
+  const error =
+    typeof value.error === "string" && value.error.trim() !== ""
+      ? value.error.replace(/\s+/g, " ").trim().slice(0, 300)
+      : null;
+  return { stage, line, error };
 }
 
 /**
@@ -1176,6 +1220,14 @@ async function agentFail(request: Request, env: ServersEnv): Promise<Response> {
   const changed = (consumed as { meta?: { changes?: number } }).meta?.changes ?? 0;
   if (changed === 0) return agentJson({ ok: false, reason: "already_used" }, 409);
 
+  // 实例马上销毁，cloud-init 日志随之消失：这条 warn 与审计是唯一的现场证据。
+  const detail = await readAgentFailDetail(request);
+  console.warn(
+    `[servers] agent_install_failed server=${row.id} stage=${detail.stage ?? "unknown"}` +
+      (detail.line !== null ? ` line=${detail.line}` : "") +
+      ` error=${detail.error ?? "none"}`,
+  );
+
   const outcome = await destroyInstance(env, row, "agent_install_failed");
   if (!outcome.ok) {
     console.warn(`[servers] agent_install_failed_cleanup server=${row.id} reason=${outcome.reason}`);
@@ -1188,7 +1240,17 @@ async function agentFail(request: Request, env: ServersEnv): Promise<Response> {
     .prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.install_failed', ?)",
     )
-    .bind(now, row.account_id, row.id, JSON.stringify({ reason: "agent_install_failed" }))
+    .bind(
+      now,
+      row.account_id,
+      row.id,
+      JSON.stringify({
+        reason: "agent_install_failed",
+        stage: detail.stage,
+        line: detail.line,
+        error: detail.error,
+      }),
+    )
     .run()
     .catch(() => {});
   return agentJson({ ok: true });
@@ -1217,6 +1279,7 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
     control_port?: unknown;
     cert_fingerprint?: unknown;
     ca_pem?: unknown;
+    log_excerpt?: unknown;
   };
   try {
     body = (await request.json()) as typeof body;
@@ -1279,6 +1342,11 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
       typeof body.error === "string" && body.error.trim() !== ""
         ? body.error.trim().slice(0, 300)
         : null;
+    // agent 本地日志随机器销毁消失；这份摘要是唯一的现场副本。agent 侧已脱敏、限 2000 字。
+    const logExcerpt =
+      typeof body.log_excerpt === "string" && body.log_excerpt.trim() !== ""
+        ? body.log_excerpt.trim().slice(0, 2000)
+        : null;
     await db
       .prepare("UPDATE servers SET last_error = ? WHERE id = ?")
       .bind(errorText, row.id)
@@ -1292,11 +1360,17 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
         Date.now(),
         row.account_id,
         row.id,
-        JSON.stringify({ failed_stage: failedStage, error: errorText }),
+        JSON.stringify({ failed_stage: failedStage, error: errorText, log_excerpt: logExcerpt }),
       )
       .run()
       .catch(() => {});
     const reason = failureReason(failedStage);
+    // D1 审计是持久的，但真机排查时 wrangler tail 是最快的一手证据。
+    console.warn(
+      `[servers] agent_report_failed server=${row.id} stage=${failedStage}` +
+        ` destroy=${destroyable} error=${errorText ?? "none"}` +
+        ` log_chars=${logExcerpt?.length ?? 0}`,
+    );
     if (!destroyable) {
       return agentJson({ ok: true, recorded: true });
     }

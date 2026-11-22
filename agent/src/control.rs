@@ -94,10 +94,18 @@ pub struct ReportRequest {
     pub ca_pem: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Sent only with `failed`: the last few log lines. The instance is
+    /// destroyed right after, so this is the only surviving copy of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_excerpt: Option<String>,
     /// Sent only on a successful rotation; `None` for every other report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
+
+/// Cap for the attached log excerpt; the control plane stores it in the audit
+/// detail and must not be able to grow unbounded.
+pub const LOG_EXCERPT_MAX: usize = 2000;
 
 impl ReportRequest {
     pub fn new(
@@ -116,6 +124,7 @@ impl ReportRequest {
             cert_fingerprint: cert_fingerprint.to_string(),
             ca_pem: ca_pem.to_string(),
             error: None,
+            log_excerpt: None,
             password: None,
         }
     }
@@ -136,6 +145,24 @@ impl ReportRequest {
         self.password = Some(password.into());
         self
     }
+
+    /// Attach the tail of the local log to a `failed` report. Redacted here so
+    /// no credential can reach the control plane through the log sink.
+    pub fn with_log_excerpt(mut self, excerpt: impl Into<String>) -> Self {
+        let excerpt: String = excerpt.into();
+        // Hard char cap (no ellipsis) so the body never exceeds what the
+        // control plane stores.
+        let excerpt: String = redact_sensitive(&excerpt)
+            .chars()
+            .take(LOG_EXCERPT_MAX)
+            .collect();
+        self.log_excerpt = if excerpt.trim().is_empty() {
+            None
+        } else {
+            Some(excerpt)
+        };
+        self
+    }
 }
 
 impl fmt::Debug for ReportRequest {
@@ -148,6 +175,10 @@ impl fmt::Debug for ReportRequest {
             .field("control_port", &self.control_port)
             .field("cert_fingerprint", &self.cert_fingerprint)
             .field("error", &self.error)
+            .field(
+                "log_excerpt_len",
+                &self.log_excerpt.as_ref().map(|e| e.chars().count()),
+            )
             .field("password", &self.password.as_ref().map(|_| "***"))
             .finish()
     }
@@ -394,6 +425,33 @@ mod tests {
         let enrollment: Enrollment = serde_json::from_value(value).unwrap();
         assert_eq!(enrollment.server_id, "srv_1");
         assert!(enrollment.token_public_key.unwrap().contains("Ed25519"));
+    }
+
+    #[test]
+    fn failed_report_carries_a_redacted_log_excerpt() {
+        let body = ReportRequest::new(Stage::Failed, 30412, 32100, "fp", "ca-pem")
+            .with_error("boom")
+            .with_log_excerpt("INFO started\nDEBUG password=super-secret\nagent agt_ABC123");
+        let json = serde_json::to_value(&body).unwrap();
+        let excerpt = json["log_excerpt"].as_str().unwrap();
+        assert!(excerpt.contains("INFO started"));
+        assert!(!excerpt.contains("super-secret"));
+        assert!(!excerpt.contains("agt_ABC123"));
+    }
+
+    #[test]
+    fn log_excerpt_is_capped_and_omitted_when_empty() {
+        let body = ReportRequest::new(Stage::Failed, 30412, 32100, "fp", "ca")
+            .with_log_excerpt("x".repeat(5000));
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json["log_excerpt"].as_str().unwrap().chars().count() <= LOG_EXCERPT_MAX);
+
+        let empty = ReportRequest::new(Stage::Failed, 30412, 32100, "fp", "ca")
+            .with_log_excerpt("   \n");
+        assert!(serde_json::to_value(&empty)
+            .unwrap()
+            .get("log_excerpt")
+            .is_none());
     }
 
     #[test]

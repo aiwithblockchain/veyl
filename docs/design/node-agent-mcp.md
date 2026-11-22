@@ -92,7 +92,9 @@ agent 随后：
 - 密码 32 位十六进制（16 字节随机），端口取 `servers.node_port`，host 取 `servers.ip`；三者封存进 `credentials`，也是 `desired-state` 的真源。
 - `node_id` 在 enroll 时由控制面生成并写回 `servers.node_id`；`report active` 只沿用它，不再另外生成。
 
-`POST /v1/agent/report` 请求体：`{ stage, port?, password?, error?, agent_version?, singbox_version?, control_port?, cert_fingerprint?, ca_pem? }`。
+`POST /v1/agent/report` 请求体：`{ stage, port?, password?, error?, log_excerpt?, agent_version?, singbox_version?, control_port?, cert_fingerprint?, ca_pem? }`。
+
+- `log_excerpt` 只在 `failed` 上报时带：agent 把本地日志的最后 30 行（纯文本，agent 侧已脱敏）附上，上限 2000 字，控制面截断后写进 `audit_log.detail`。机器随即销毁，这是本地日志唯一存活的副本。
 
 - 合法 `stage`：`installing` / `verifying` / `active` / `failed` / `rotated`；其它值返回 `400 invalid_stage`，不改状态。
 - `installing` / `verifying` 只允许向前推进（乱序回 `200 {ok:true, ignored:true}`），与旧 enroll 一致。

@@ -73,6 +73,25 @@ describe("cloud-init（只装 agent）", () => {
     expect(body).toContain('authorization: Bearer ${ENROLL_TOKEN}');
   });
 
+  it("失败回传带阶段、行号与截断后的 stderr，且不含凭据", () => {
+    const body = script();
+    for (const stage of ["download", "checksum", "install", "config", "systemd"]) {
+      expect(body).toContain(`STAGE=${stage}`);
+    }
+    expect(body).toContain('head -c 300');
+    expect(body).toContain('2>>"${ERR_FILE}"');
+    // sha256sum 的失败信息走 stdout，必须一并收进现场文件。
+    expect(body).toContain('sha256sum -c - >>"${ERR_FILE}" 2>&1');
+    const dataLine = body.split("\n").find((line) => line.includes("--data"));
+    expect(dataLine).toBeTruthy();
+    expect(dataLine).toContain('\\"stage\\"');
+    expect(dataLine).toContain('\\"line\\"');
+    expect(dataLine).toContain('\\"error\\"');
+    // 凭据只走 Authorization 头，绝不进 body。
+    expect(dataLine).not.toContain("ENROLL_TOKEN");
+    expect(dataLine).not.toContain("enr_tok_test");
+  });
+
   it("关掉 SSH：agent 不需要它，console 才是带外入口", () => {
     const body = script();
     expect(body).toContain("systemctl stop ssh");
