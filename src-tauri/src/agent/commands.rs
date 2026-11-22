@@ -806,6 +806,26 @@ pub async fn my_server_credentials(server_id: String) -> Result<Value, Value> {
     }
 }
 
+/// 界面「智能修复」：与 AI 工具 `NodeRotateCredentials` 共用同一个执行入口
+/// （`tools::node_rotate::rotate_from_ui` → `execute_rotation`），90 秒超时与凭据刷新都不另起一套。
+///
+/// 按钮本身就是用户确认，所以不弹确认卡；失败 reason 与工具完全一致，前端按 reason 选文案。
+/// 令牌与密码不进返回值。
+#[tauri::command]
+pub async fn node_rotate_credentials(server_id: Option<Value>) -> Result<Value, Value> {
+    match crate::tools::node_rotate::rotate_from_ui(server_id).await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": error.code,
+            "message": error.message,
+            "retryable": error.retryable,
+            "details": error.details,
+            "request_id": "",
+        })),
+    }
+}
+
 /// 用户主动删掉一个本地节点（「余额不足停机」留下的墓碑只能这样清，仅 UI）。
 ///
 /// **顺序是有意的**：先让控制面忽略墓碑，全部成功后才动本地（停运行时 → 删镜像行 →

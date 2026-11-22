@@ -58,7 +58,7 @@ enum AgentFailure {
     TlsUntrusted(String),
     /// agent 不认这次令牌（401 / 403）。
     TokenRejected,
-    /// 20 秒内没跑完。
+    /// 90 秒内没跑完。
     Timeout,
     /// 连不上或连接中断。
     Transport(String),
@@ -92,8 +92,7 @@ impl AgentFailure {
                     .with_details(json!({ "reason": "agent_token_rejected" }))
             }
             Self::Timeout => {
-                let mut error =
-                    AivpnError::new("TIMEOUT", "节点在 20 秒内没有完成重置，可以再试一次");
+                let mut error = AivpnError::new("TIMEOUT", "节点在 90 秒内没有完成重置");
                 error.retryable = true;
                 error.with_details(json!({ "reason": "agent_timeout" }))
             }
@@ -663,7 +662,7 @@ impl NodeRotateCredentialsTool {
                 artifact_sha256: None,
             }),
         );
-        // 确认等待不计入 20 秒的 MCP 超时；questions 层超时后回空串。
+        // 确认等待不计入 90 秒的 MCP 超时；questions 层超时后回空串。
         let answer = rx.await.unwrap_or_default();
         if answer == CONFIRM_OPTION {
             Ok(())
@@ -671,6 +670,22 @@ impl NodeRotateCredentialsTool {
             Err(AivpnError::new("CANCELLED", "用户取消了节点重置"))
         }
     }
+}
+
+/// 界面「智能修复」的执行入口：与 AI 工具共用 `execute_rotation`（含 90 秒超时与凭据刷新）。
+///
+/// 按钮本身就是用户确认，所以不再走确认卡；参数校验与失败 reason 与工具保持一致。
+pub(crate) async fn rotate_from_ui(server_id: Option<Value>) -> Result<Value, AivpnError> {
+    rotate_value(&NodeRotateCredentialsTool::new(), server_id).await
+}
+
+async fn rotate_value(
+    tool: &NodeRotateCredentialsTool,
+    server_id: Option<Value>,
+) -> Result<Value, AivpnError> {
+    let server_id = parse_server_id(&json!({ "server_id": server_id }))?;
+    let (report, refreshed) = tool.execute_rotation(&server_id).await?;
+    Ok(json!({ "ok": true, "port": report.port, "refreshed": refreshed }))
 }
 
 fn parse_server_id(input: &Value) -> Result<String, AivpnError> {
@@ -896,7 +911,8 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
         ));
         assert!(matches!(
             classify_service_error(ServiceError::Timeout {
-                timeout: Duration::from_secs(20)
+                // 构造用的任意值：这里只验证 `Timeout` 变体的映射，不是另一套预算。
+                timeout: MCP_TIMEOUT
             }),
             AgentFailure::Timeout
         ));
@@ -1177,6 +1193,104 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
         let (tool, refresher) = tool_with(Err(AgentFailure::Timeout), true);
         let error = tool.execute_rotation("srv_abc123").await.unwrap_err();
         assert_eq!(error.code, "TIMEOUT");
+        assert!(refresher.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_ui_entry_returns_port_and_refresh_flag() {
+        let (tool, refresher) = tool_with(Ok(RotateReport { port: 32101 }), true);
+        let value = rotate_value(&tool, Some(json!("srv_abc123")))
+            .await
+            .unwrap();
+        assert_eq!(
+            value,
+            json!({ "ok": true, "port": 32101, "refreshed": true })
+        );
+        // 返回体只有这三个字段：没有令牌、没有密码。
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(*refresher.calls.lock().unwrap(), vec!["srv_abc123"]);
+    }
+
+    #[tokio::test]
+    async fn the_ui_entry_passes_every_failure_reason_through() {
+        let cases = [
+            (
+                AgentFailure::ControlPlane(CpError::new(
+                    "PRECONDITION_FAILED",
+                    "还没准备好",
+                    false,
+                    json!({ "reason": "not_ready" }),
+                )),
+                "PRECONDITION_FAILED",
+                "not_ready",
+            ),
+            (
+                AgentFailure::TlsUntrusted("x".into()),
+                "UPSTREAM_ERROR",
+                "agent_tls_untrusted",
+            ),
+            (
+                AgentFailure::TokenRejected,
+                "UPSTREAM_ERROR",
+                "agent_token_rejected",
+            ),
+            (AgentFailure::Timeout, "TIMEOUT", "agent_timeout"),
+            (
+                AgentFailure::Transport("closed".into()),
+                "UPSTREAM_ERROR",
+                "agent_unreachable",
+            ),
+            (
+                AgentFailure::ToolFailed {
+                    message: "重启失败".into(),
+                    retryable: true,
+                },
+                "INTERNAL",
+                "agent_tool_failed",
+            ),
+            (
+                AgentFailure::BadResponse("x".into()),
+                "INTERNAL",
+                "agent_bad_response",
+            ),
+        ];
+        for (failure, code, reason) in cases {
+            let (tool, refresher) = tool_with(Err(failure), true);
+            let error = rotate_value(&tool, Some(json!("srv_abc123")))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code, "{reason}");
+            assert_eq!(
+                error.details.as_ref().unwrap()["reason"],
+                reason,
+                "{reason}"
+            );
+            assert!(
+                refresher.calls.lock().unwrap().is_empty(),
+                "{reason}：失败时不刷新本地凭据"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalid_server_id_never_reaches_the_backend() {
+        let (tool, refresher) = tool_with(Ok(RotateReport { port: 32101 }), true);
+        for input in [
+            None,
+            Some(json!("")),
+            Some(json!("srv_../../evil")),
+            Some(json!("srv_a/b")),
+            Some(json!(42)),
+        ] {
+            let error = rotate_value(&tool, input.clone()).await.unwrap_err();
+            assert_eq!(error.code, "INVALID_ARGUMENT", "{input:?}");
+            assert_eq!(
+                error.details.as_ref().unwrap()["reason"],
+                "invalid_server_id",
+                "{input:?}"
+            );
+        }
+        // 非法参数在发请求之前就被拒：轮换与刷新一次都没发生。
         assert!(refresher.calls.lock().unwrap().is_empty());
     }
 
