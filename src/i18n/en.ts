@@ -1596,6 +1596,8 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.rotate.failedNoReason": "Reset failed",
   "diagnosis.rotate.confirm":
     "This disconnects the current connection and changes the port and password; other devices must update their config before they can connect again.",
+  "diagnosis.rotate.confirmIdle":
+    "This restarts the server and changes the port and password; other devices must update their config before they can connect again.",
   "diagnosis.rotate.confirmAction": "Reset anyway",
   "diagnosis.ai.handed": "Diagnosis details handed to AI",
   "diagnosis.reason.agentTokenUnavailable":

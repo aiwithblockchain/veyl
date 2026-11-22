@@ -274,6 +274,11 @@ describe("节点诊断面板", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "重置端口与密码" }),
     );
+    expect(
+      screen.getByText(
+        "会重启这台节点，端口和密码都会变；其它设备需要更新配置后才能继续用。",
+      ),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
 
     expect(await screen.findByText("已重置，重新连接后生效")).toBeTruthy();

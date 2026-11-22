@@ -2151,6 +2151,15 @@ export default function App() {
             snapshot?.state === "running" ||
             snapshot?.state === "degraded"
           ) {
+            // 只认跑在目标节点上的运行时：切到别的节点不算就绪。
+            if (
+              localNodeId !== null &&
+              snapshot.node_id !== null &&
+              snapshot.node_id !== localNodeId
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              continue;
+            }
             return true;
           }
           if (snapshot?.state === "failed") return false;
@@ -2159,6 +2168,7 @@ export default function App() {
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
+      uiLog("warn", "diagnosis reconnect timeout", "node-diagnosis");
       return false;
     };
     const deps: DiagnosisDeps = {
@@ -2208,8 +2218,9 @@ export default function App() {
         }
       },
       openAi: (context) => {
-        setDiagnosis(null);
-        askAiInPanel(nodeDiagnosisAsk(context));
+        const handed = askAiInPanel(nodeDiagnosisAsk(context));
+        if (handed) setDiagnosis(null);
+        return handed;
       },
       onGoToServers: () => {
         setDiagnosis(null);

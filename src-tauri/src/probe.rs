@@ -65,7 +65,20 @@ pub async fn node_probe_reachability(
     let tcp = tokio::task::spawn_blocking(move || probe_tcp(ip, control_port));
 
     match tokio::time::timeout(PROBE_BUDGET, async { (icmp.await, tcp.await) }).await {
-        Ok((Ok(icmp), Ok(tcp))) => Ok(NodeReachabilityReport { icmp, tcp }),
+        Ok((Ok(icmp), Ok(tcp))) => {
+            // 每次诊断一条：只记结论与耗时，不记地址与端口。
+            log::info!(
+                "[node_probe_reachability] icmp ok={} rtt={:?} loss={} error={:?} tcp ok={} ms={:?} error={:?}",
+                icmp.ok,
+                icmp.rtt_ms,
+                icmp.loss,
+                icmp.error,
+                tcp.ok,
+                tcp.ms,
+                tcp.error
+            );
+            Ok(NodeReachabilityReport { icmp, tcp })
+        }
         Ok((icmp, tcp)) => {
             // 只可能是探测线程 panic；不把 panic 文本送给界面。
             if let Err(error) = icmp {

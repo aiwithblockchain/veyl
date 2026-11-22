@@ -125,8 +125,8 @@ export interface DiagnosisDeps {
   reconnectAndProbe: () => Promise<boolean>;
   /** 重置这台节点的端口与密码（`node_rotate_credentials`）。 */
   rotateCredentials: () => Promise<RotateOutcome>;
-  /** 打开右栏，把诊断清单作为一条系统消息交给 AI。 */
-  openAi: (context: DiagnosisContext) => void;
+  /** 打开右栏，把诊断清单作为一条系统消息交给 AI。返回 false = 被拦下（AI 未配置）。 */
+  openAi: (context: DiagnosisContext) => boolean;
   /** 「去销毁并重建」只做导航；销毁仍在服务器详情页确认。 */
   onGoToServers?: () => void;
 }
@@ -410,12 +410,24 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     setSteps((prev) => [...prev.slice(0, -1), step]);
   };
 
+  const runtimeLabel = (): "this" | "other" | "idle" =>
+    depsRef.current.isTunnelRunning()
+      ? "this"
+      : depsRef.current.isRuntimeRunning()
+        ? "other"
+        : "idle";
+
   const startConnectivity = async () => {
     busyRef.current = true;
     updatePhase("running");
     setSteps([
       { id: "connectivity", status: "running", conclusion: { kind: "connectivity-pending" } },
     ]);
+    uiLog(
+      "info",
+      `diagnosis start server=${depsRef.current.facts.serverId} node=${depsRef.current.facts.localNodeId ?? "none"} runtime=${runtimeLabel()}`,
+      "node-diagnosis",
+    );
 
     let report: ProbeReport | null = null;
     let probeError: string | null = null;
@@ -435,6 +447,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     if (report === null) {
       // 命令没跑起来（IP / 端口非法、Host 超时…）不等于机器死了：不给销毁。
+      uiLog(
+        "warn",
+        `diagnosis connectivity probe-error code=${probeError ?? "none"}`,
+        "node-diagnosis",
+      );
       setSteps([
         {
           id: "connectivity",
@@ -448,6 +465,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     collectedRef.current.icmp = report.icmp;
     collectedRef.current.tcp = report.tcp;
+    uiLog(
+      "info",
+      `diagnosis connectivity icmp=${report.icmp.ok ? "ok" : report.icmp.error ? `error:${report.icmp.error}` : "fail"} rtt=${report.icmp.rtt_ms ?? "none"} tcp=${report.tcp.ok ? "ok" : `fail:${report.tcp.error ?? "unknown"}`} ms=${report.tcp.ms ?? "none"}`,
+      "node-diagnosis",
+    );
 
     if (report.icmp.ok || report.tcp.ok) {
       setSteps([
@@ -533,6 +555,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     // 没在跑隧道：不自动连接、也不探测，只把配置结果说清楚。
     if (!depsRef.current.isRuntimeRunning()) {
+      uiLog(
+        "info",
+        `diagnosis config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=idle result=${outcome.changed ? "applied" : "unchanged"}`,
+        "node-diagnosis",
+      );
       busyRef.current = false;
       if (!mountedRef.current) return;
       if (outcome.changed) {
@@ -572,6 +599,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.reprobe = ok;
     }
 
+    uiLog(
+      "info",
+      `diagnosis config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=${runtimeLabel()} result=${ok ? "ok" : "fail"}`,
+      "node-diagnosis",
+    );
     busyRef.current = false;
     if (!mountedRef.current) return;
 
@@ -614,6 +646,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     if (!outcome.ok) {
       const reason = outcome.reason.trim() === "" ? null : outcome.reason;
+      uiLog(
+        "warn",
+        `diagnosis rotate ok=false reason=${reason ?? "none"} runtime=${runtimeLabel()}`,
+        "node-diagnosis",
+      );
       collectedRef.current.rotateOk = false;
       collectedRef.current.rotateReason = reason;
       busyRef.current = false;
@@ -633,6 +670,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     // 没在跑隧道：端口已经换了，但不探测、也不替用户自动连接。
     if (!depsRef.current.isRuntimeRunning()) {
+      uiLog(
+        "info",
+        `diagnosis rotate ok=true port=${outcome.port} runtime=idle result=applied`,
+        "node-diagnosis",
+      );
       busyRef.current = false;
       if (!mountedRef.current) return;
       replaceLast({
@@ -663,6 +705,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.reprobe = ok;
     }
 
+    uiLog(
+      "info",
+      `diagnosis rotate ok=true port=${outcome.port} runtime=${reconnected ? "this" : "other"} result=${ok ? "ok" : "fail"}`,
+      "node-diagnosis",
+    );
     busyRef.current = false;
     if (!mountedRef.current) return;
 
@@ -686,9 +733,15 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   };
 
   const handOffToAi = () => {
-    depsRef.current.openAi(
+    const handed = depsRef.current.openAi(
       buildContext(depsRef.current.facts, collectedRef.current),
     );
+    if (handed === false) {
+      // AI 还没配置：面板留着，用户配好后可以再点一次。
+      uiLog("warn", "diagnosis ai blocked", "node-diagnosis");
+      return;
+    }
+    uiLog("info", "diagnosis ai handed", "node-diagnosis");
     setSteps((prev) => [
       ...prev,
       { id: "ai", status: "passed", conclusion: { kind: "ai-handed" } },

@@ -1528,6 +1528,8 @@ export const zh = {
   "diagnosis.rotate.failedNoReason": "重置失败",
   "diagnosis.rotate.confirm":
     "会断开当前连接，端口和密码都会变；其它设备需要更新配置后才能继续用。",
+  "diagnosis.rotate.confirmIdle":
+    "会重启这台节点，端口和密码都会变；其它设备需要更新配置后才能继续用。",
   "diagnosis.rotate.confirmAction": "确认重置",
   "diagnosis.ai.handed": "已把诊断信息交给 AI",
   "diagnosis.reason.agentTokenUnavailable": "控制面暂时不可达，重置没开始。",

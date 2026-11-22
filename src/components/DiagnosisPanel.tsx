@@ -168,6 +168,8 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
   };
 
   const action = diagnosis.action;
+  // 只有隧道正跑着这台节点时，重置才会断开当前连接；其余情况只说会重启节点。
+  const willDisconnect = deps.isTunnelRunning();
 
   return (
     <div className="quit-backdrop" onMouseDown={onClose}>
@@ -241,7 +243,13 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
 
         {diagnosis.phase === "confirming" ? (
           <div className="diagnosis__confirm">
-            <p className="diagnosis__confirm-text">{t("diagnosis.rotate.confirm")}</p>
+            <p className="diagnosis__confirm-text">
+              {t(
+                willDisconnect
+                  ? "diagnosis.rotate.confirm"
+                  : "diagnosis.rotate.confirmIdle",
+              )}
+            </p>
             <div className="diagnosis__confirm-actions">
               <button
                 ref={cancelRef}
