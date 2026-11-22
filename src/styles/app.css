@@ -3780,6 +3780,15 @@ body[data-resizing] {
   border-top: 1px solid var(--hair);
 }
 
+/* 详情页的智能修复：入口、确认与结果都排在销毁上方。 */
+.myservers__repair {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .myservers__confirm {
   display: flex;
   flex-direction: column;

@@ -234,6 +234,9 @@ const MOCK_CLIENT_URLS: Record<
   ],
 };
 
+/** 预览里的智能修复端口：每次 +1，让人看得出「确实换了」。 */
+let mockRotatePort = 8443;
+
 export class MockAgentBridge implements AgentBridge {
   readonly mode = "mock" as const;
 
@@ -798,6 +801,13 @@ export class MockAgentBridge implements AgentBridge {
       created_at: Date.now(),
     });
     return node;
+  }
+
+  async nodeRotateCredentials(serverId: string) {
+    // 形状与真桥一致；先确认服务器存在，再给一个递增端口。
+    this.myServers.get(serverId);
+    mockRotatePort += 1;
+    return { ok: true as const, port: mockRotatePort, refreshed: true };
   }
 
   async myServerRegisterDevice() {

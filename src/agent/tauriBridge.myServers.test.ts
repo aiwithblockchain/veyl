@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { TauriAgentBridge } from "./tauriBridge";
+import { rotateFailureReason } from "../myservers/rotateCredentials";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -157,5 +158,33 @@ describe("结账余额不足的错误细节（2.37.1）", () => {
         min_days: 7,
       },
     });
+  });
+});
+
+describe("智能修复命令", () => {
+  it("命令名与参数键传对，结果原样透传", async () => {
+    invoke.mockResolvedValueOnce({ ok: true, port: 8555, refreshed: true });
+
+    const result = await new TauriAgentBridge().nodeRotateCredentials("srv_1");
+
+    expect(invoke).toHaveBeenCalledWith("node_rotate_credentials", {
+      serverId: "srv_1",
+    });
+    expect(result).toEqual({ ok: true, port: 8555, refreshed: true });
+  });
+
+  it("失败信封里的 reason 原样透到 rotateFailureReason", async () => {
+    invoke.mockRejectedValueOnce({
+      code: "INTERNAL",
+      message: "节点没在超时内跑完",
+      retryable: true,
+      details: { reason: "agent_timeout" },
+    });
+
+    const error = await new TauriAgentBridge()
+      .nodeRotateCredentials("srv_1")
+      .catch((err: unknown) => err);
+
+    expect(rotateFailureReason(error)).toBe("agent_timeout");
   });
 });

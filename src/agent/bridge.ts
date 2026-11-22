@@ -606,6 +606,15 @@ export interface MyServer {
   failure: MyServerFailure | null;
 }
 
+/** 桥 / 封装的统一结果：Host 的 `node_rotate_credentials` 原样返回。 */
+export interface NodeRotateCredentialsResult {
+  ok: true;
+  /** 轮换后的节点端口；密码不回传。 */
+  port: number;
+  /** Host 是否已顺手重读过服务器/节点数据。 */
+  refreshed: boolean;
+}
+
 export type MyServerOrderState =
   | "pending_payment"
   | "paid"
@@ -962,6 +971,10 @@ export interface AgentBridge {
   myServerDestroy(serverId: string, confirm: boolean): Promise<MyServer>;
   /** 取凭据；客户端验签后落库，界面不展示。 */
   myServerCredentials(serverId: string): Promise<MyServerCredentialNode>;
+  /** 智能修复：重置节点端口与密码（会重启节点）；Host 没接时省略。 */
+  nodeRotateCredentials?(
+    serverId: string,
+  ): Promise<NodeRotateCredentialsResult>;
   /** 取 SSH 登录信息；仅 UI 通道。 */
   myServerSshCredentials(serverId: string): Promise<MyServerSshCredentials>;
   /** 身份丢失后的显式重新注册；丢弃旧身份，旧服务器记录保留为只读。 */

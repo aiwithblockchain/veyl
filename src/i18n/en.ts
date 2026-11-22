@@ -959,6 +959,22 @@ export const en: Record<MessageKey, string> = {
   "detail.confirmDestroy": "Confirm destroy",
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
+  "detail.repair": "Smart repair",
+  "detail.repair.confirmBody":
+    "Smart repair restarts the node and changes its port; the node drops briefly and the current connection may be interrupted.",
+  "detail.repair.confirm": "Repair now",
+  "detail.repair.working": "Repairing…",
+  "detail.repair.done": "Repaired. Port {port}",
+  "detail.repair.unsupported": "This version doesn't support smart repair yet.",
+  "detail.repair.tokenUnavailable":
+    "The control plane is unreachable right now, so smart repair isn't available. Try again later.",
+  "detail.repair.auth":
+    "Couldn't establish a trusted connection to this server. Smart repair isn't available; rebuild this server instead.",
+  "detail.repair.unreachable":
+    "The server can't be reached right now, so smart repair didn't finish. Try again later.",
+  "detail.repair.agentFailed":
+    "The node agent couldn't finish the repair. Try again later, or rebuild this server.",
+  "detail.repair.failed": "Smart repair didn't finish. Try again later.",
 
   // New node wizard
   "wizard.back": "Back",

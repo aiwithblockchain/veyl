@@ -2519,6 +2519,7 @@ export default function App() {
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
           onChanged={() => void myServers.refresh()}
+          onRotated={() => vpn.reload()}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}

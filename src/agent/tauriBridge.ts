@@ -38,6 +38,7 @@ import type {
   MyServerCatalog,
   MyServerCreateInput,
   MyServerCredentialNode,
+  NodeRotateCredentialsResult,
   MyServerDeviceIdentity,
   MyServerFailure,
   MyServerIdentity,
@@ -1492,6 +1493,15 @@ export class TauriAgentBridge implements AgentBridge {
       port: raw.port,
       method: raw.method,
     };
+  }
+
+  /** 智能修复：命令结果原样透传；失败信封由 call 归一化，reason 不改写。 */
+  async nodeRotateCredentials(
+    serverId: string,
+  ): Promise<NodeRotateCredentialsResult> {
+    return call<NodeRotateCredentialsResult>("node_rotate_credentials", {
+      serverId,
+    });
   }
 
   async myServerRegisterDevice(): Promise<MyServerDeviceIdentity> {

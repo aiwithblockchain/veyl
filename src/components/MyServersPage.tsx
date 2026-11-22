@@ -54,6 +54,8 @@ interface Props {
   pendingServer?: boolean;
   /** 改名成功：用返回的完整对象更新列表与详情。 */
   onRenamed?: (server: MyServer) => void;
+  /** 智能修复成功：重读节点数据（服务器数据走 onChanged）。 */
+  onRotated?: () => void;
 }
 
 /**
@@ -88,6 +90,7 @@ export function MyServersPage({
   onGoConnect,
   pendingServer = false,
   onRenamed,
+  onRotated,
 }: Props) {
   const t = useT();
   const trialHint = trial
@@ -160,6 +163,7 @@ export function MyServersPage({
             onGone={onGone}
             onForget={onForget}
             onRenamed={onRenamed}
+            onRotated={onRotated}
           />
         )}
       </div>

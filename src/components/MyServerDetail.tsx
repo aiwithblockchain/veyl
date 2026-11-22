@@ -14,6 +14,10 @@ import {
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
+import {
+  rotateFailureReason,
+  rotateNodeCredentials,
+} from "../myservers/rotateCredentials";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
 
@@ -39,6 +43,8 @@ interface Props {
   onForget: (serverId: string, nodeId: string) => Promise<void>;
   /** 改名成功：用返回的完整对象更新列表与详情，不二次拉取。 */
   onRenamed?: (server: MyServer) => void;
+  /** 智能修复成功：让调用方重读节点数据（服务器数据走 onChanged）。 */
+  onRotated?: () => void;
 }
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
@@ -68,6 +74,7 @@ export function MyServerDetail({
   onGone,
   onForget,
   onRenamed,
+  onRotated,
 }: Props) {
   const tr = useT();
   const [confirming, setConfirming] = useState(false);
@@ -83,6 +90,11 @@ export function MyServerDetail({
   const focusRenameAfterSave = useRef(false);
   const [ipCopy, setIpCopy] = useState<"idle" | "copied" | "failed">("idle");
   const ipCopyTimer = useRef(0);
+  const [repairing, setRepairing] = useState(false);
+  const [repairConfirming, setRepairConfirming] = useState(false);
+  const [repairResult, setRepairResult] = useState<{ port: number } | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const repairCancelRef = useRef<HTMLButtonElement>(null);
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
 
@@ -204,12 +216,61 @@ export function MyServerDetail({
   };
 
   useEffect(() => {
+    if (repairConfirming) repairCancelRef.current?.focus();
+  }, [repairConfirming]);
+
+  const repairErrorText = (err: unknown): string => {
+    if (toBridgeError(err).code === "UNSUPPORTED") {
+      return tr("detail.repair.unsupported");
+    }
+    switch (rotateFailureReason(err)) {
+      case "agent_token_unavailable":
+        return tr("detail.repair.tokenUnavailable");
+      case "agent_tls_untrusted":
+      case "agent_token_rejected":
+        return tr("detail.repair.auth");
+      case "agent_timeout":
+      case "agent_unreachable":
+        return tr("detail.repair.unreachable");
+      case "agent_tool_failed":
+      case "agent_bad_response":
+        return tr("detail.repair.agentFailed");
+      default:
+        return tr("detail.repair.failed");
+    }
+  };
+
+  /** 智能修复：换端口会重启节点，必须先过确认；失败按 reason 给不同出路。 */
+  const repair = async () => {
+    if (repairing) return;
+    setRepairConfirming(false);
+    setRepairing(true);
+    setRepairError(null);
+    setRepairResult(null);
+    try {
+      const result = await rotateNodeCredentials(bridge, server.server_id);
+      setRepairResult({ port: result.port });
+      // 服务器数据走 onChanged；节点数据由调用方的 onRotated 重读。
+      onChanged();
+      onRotated?.();
+    } catch (err) {
+      setRepairError(repairErrorText(err));
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  useEffect(() => {
     setBusy(false);
     setConfirming(false);
     setError(null);
     setRenaming(false);
     setRenameError(null);
     setNameDraft("");
+    setRepairing(false);
+    setRepairConfirming(false);
+    setRepairResult(null);
+    setRepairError(null);
   }, [server.server_id]);
 
   useEffect(() => {
@@ -485,6 +546,72 @@ export function MyServerDetail({
 
       <div className="myservers__footer">
         <div className="myservers__danger">
+          {ready && !readOnly ? (
+            <div className="myservers__repair">
+              {repairConfirming ? (
+                <div
+                  className="myservers__confirm"
+                  role="alert"
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setRepairConfirming(false);
+                    }
+                  }}
+                >
+                  <p>{tr("detail.repair.confirmBody")}</p>
+                  <div className="myservers__actions">
+                    <button
+                      ref={repairCancelRef}
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={repairing}
+                      onClick={() => setRepairConfirming(false)}
+                    >
+                      {tr("common.cancel")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--danger-ghost"
+                      disabled={repairing}
+                      onClick={() => void repair()}
+                    >
+                      {tr("detail.repair.confirm")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn--danger-ghost"
+                  disabled={locked || repairing || confirming}
+                  aria-busy={repairing || undefined}
+                  onClick={() => {
+                    setConfirming(false);
+                    setRepairError(null);
+                    setRepairConfirming(true);
+                  }}
+                >
+                  {tr("detail.repair")}
+                </button>
+              )}
+              {repairing ? (
+                <p className="myservers__hint" role="status">
+                  {tr("detail.repair.working")}
+                </p>
+              ) : null}
+              {repairResult ? (
+                <p className="myservers__hint" role="status">
+                  {tr("detail.repair.done", { port: repairResult.port })}
+                </p>
+              ) : null}
+              {repairError ? (
+                <p className="myservers__error" role="alert">
+                  {repairError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
               {tr("detail.destroying")}
@@ -519,8 +646,11 @@ export function MyServerDetail({
             <button
               type="button"
               className="btn btn--danger-ghost"
-              disabled={locked}
-              onClick={() => setConfirming(true)}
+              disabled={locked || repairing}
+              onClick={() => {
+                setRepairConfirming(false);
+                setConfirming(true);
+              }}
             >
               {destroying ? tr("detail.retryDestroy") : tr("detail.destroy")}
             </button>

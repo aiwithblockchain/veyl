@@ -989,3 +989,125 @@ describe("IP 复制在途时切服务器", () => {
     ).toBe("复制");
   });
 });
+
+describe("智能修复", () => {
+  function renderRepair(
+    rotate: ((serverId: string) => Promise<unknown>) | undefined,
+    over: Partial<MyServer> = {},
+    onChanged = vi.fn(),
+    onRotated = vi.fn(),
+  ) {
+    const bridge = {
+      myServerDestroy: vi.fn(),
+      nodeRotateCredentials: rotate,
+    } as unknown as AgentBridge;
+    render(
+      <MyServerDetail
+        bridge={bridge}
+        server={server(over)}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        onRotated={onRotated}
+      />,
+    );
+    return { onChanged, onRotated, bridge };
+  }
+
+  const ok = () => Promise.resolve({ ok: true as const, port: 8443, refreshed: true });
+
+  it("只在服务器可用时出现，安装中 / 出错 / 已销毁都没有", () => {
+    renderRepair(ok);
+    expect(screen.getByRole("button", { name: "智能修复" })).toBeTruthy();
+    cleanup();
+
+    renderRepair(ok, { state: "active" });
+    expect(screen.getByRole("button", { name: "智能修复" })).toBeTruthy();
+    cleanup();
+
+    for (const state of ["installing", "error", "destroyed"] as MyServerState[]) {
+      renderRepair(ok, { state });
+      expect(screen.queryByRole("button", { name: "智能修复" })).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("点击先确认：说明后果，默认焦点在取消，Esc 收起", () => {
+    renderRepair(ok);
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    expect(
+      screen.getByText(/智能修复会重启节点并更换端口/),
+    ).toBeTruthy();
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(document.activeElement).toBe(cancel);
+
+    fireEvent.keyDown(cancel, { key: "Escape" });
+    expect(screen.queryByText(/智能修复会重启节点并更换端口/)).toBeNull();
+  });
+
+  it("确认后调命令：成功显示端口并重读数据", async () => {
+    const rotate = vi.fn(ok);
+    const { onChanged, onRotated } = renderRepair(rotate);
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+
+    await waitFor(() => expect(rotate).toHaveBeenCalledWith("srv_1"));
+    expect(await screen.findByText("已修复，端口 8443")).toBeTruthy();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onRotated).toHaveBeenCalledTimes(1);
+  });
+
+  it("进行中：按钮禁用并给一行进行中文案", async () => {
+    let release: (value: unknown) => void = () => {};
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    renderRepair(() => pending);
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+
+    expect(await screen.findByText("正在修复…")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "智能修复" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      release({ ok: true, port: 9000, refreshed: true });
+    });
+    expect(await screen.findByText("已修复，端口 9000")).toBeTruthy();
+  });
+
+  it("失败按原因给不同文案", async () => {
+    const cases: Array<[string, RegExp]> = [
+      ["agent_token_unavailable", /控制面暂时不可达，智能修复暂不可用/],
+      ["agent_token_rejected", /无法与这台服务器建立可信连接/],
+      ["agent_tls_untrusted", /无法与这台服务器建立可信连接/],
+      ["agent_timeout", /服务器暂时连不上/],
+      ["agent_unreachable", /服务器暂时连不上/],
+      ["agent_tool_failed", /节点 agent 没完成修复/],
+      ["agent_bad_response", /节点 agent 没完成修复/],
+    ];
+    for (const [reason, pattern] of cases) {
+      renderRepair(() => Promise.reject({ code: "INTERNAL", message: reason }));
+      fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+      fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+      expect(await screen.findByText(pattern)).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it("Host 还没接命令：明说不支持，不静默失败", async () => {
+    renderRepair(undefined);
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+
+    expect(await screen.findByText("这个版本还不支持智能修复。")).toBeTruthy();
+  });
+});

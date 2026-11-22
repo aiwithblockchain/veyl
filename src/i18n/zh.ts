@@ -906,6 +906,22 @@ export const zh = {
   "detail.confirmDestroy": "确认销毁",
   "detail.retryDestroy": "重试销毁",
   "detail.destroy": "销毁",
+  "detail.repair": "智能修复",
+  "detail.repair.confirmBody":
+    "智能修复会重启节点并更换端口；节点会短暂断线，当前连接可能中断。",
+  "detail.repair.confirm": "确认修复",
+  "detail.repair.working": "正在修复…",
+  "detail.repair.done": "已修复，端口 {port}",
+  "detail.repair.unsupported": "这个版本还不支持智能修复。",
+  "detail.repair.tokenUnavailable":
+    "控制面暂时不可达，智能修复暂不可用。稍后再试。",
+  "detail.repair.auth":
+    "无法与这台服务器建立可信连接，智能修复暂不可用。可以销毁重建。",
+  "detail.repair.unreachable":
+    "服务器暂时连不上，智能修复没完成。稍后再试。",
+  "detail.repair.agentFailed":
+    "服务器上的节点 agent 没完成修复。稍后再试；还是不行就销毁重建。",
+  "detail.repair.failed": "智能修复没完成。稍后再试。",
 
   // 新建节点向导
   "wizard.back": "返回",
