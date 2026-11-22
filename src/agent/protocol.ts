@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.19.0" as const;
+export const CONTRACT_VERSION = "2.22.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -617,7 +617,11 @@ export type NodeListChangedReason =
   | "url_import"
   | "manual_create"
   | "node_deleted"
-  | "bindings_changed";
+  | "bindings_changed"
+  /** 智能修复成功后本机刷新。 */
+  | "node_rotated"
+  /** my_server_sync 拉到新端口 / 新密码。 */
+  | "node_synced";
 
 export interface NodeListChangedPayload {
   contract_version: typeof CONTRACT_VERSION;

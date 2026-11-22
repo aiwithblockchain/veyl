@@ -4,6 +4,7 @@
 //! 命令层只负责参数搬运，所有业务在这里。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1036,19 +1037,25 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
 }
 
 pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
-    let client = ControlPlane::new()?;
-    let raw = client
-        .post(&format!("/v1/servers/{server_id}/credentials"), None, None)
-        .await?;
-    let response = credential_response(&raw)?;
-
     let linked_before = local_server(server_id).and_then(|server| server.node_id);
-    let node = super::credentials::verify_and_store(
-        server_id,
-        response.payload,
-        response.signature,
-        response.key_id,
-    )?;
+
+    // 锁只包「取回 → 验签 → 落库」：控制面慢时轮换与同步会排队，这是有意的代价，
+    // 换来的是同一台不会被两路并发覆盖。发事件等后续逻辑放在锁外。
+    let node = super::credentials::with_credential_lock(async {
+        let client = ControlPlane::new()?;
+        let raw = client
+            .post(&format!("/v1/servers/{server_id}/credentials"), None, None)
+            .await?;
+        let response = credential_response(&raw)?;
+        super::credentials::verify_and_store(
+            server_id,
+            response.payload,
+            response.signature,
+            response.key_id,
+        )
+    })
+    .await?;
+
     // 本地关联真的变了才发事件；重复取凭据不制造无意义的状态事件。
     let linked_after = local_server(server_id);
     if linked_after
@@ -1064,6 +1071,196 @@ pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
     Ok(json!(node))
 }
 
+/// 同一时刻只允许一个整批同步（契约 §7.28）。
+static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// 兜底释放并发闸：任务 panic 或提前返回都不会让同步永远「在跑」。
+struct SyncGuard;
+
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        SYNC_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerSyncChanged {
+    pub server_id: String,
+    /// 本地节点行 id（不是控制面 node_id）。
+    pub node_id: String,
+    pub name: String,
+    pub port_changed: bool,
+    pub password_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerSyncFailure {
+    pub server_id: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerSyncData {
+    pub servers: Vec<MyServer>,
+    pub changed: Vec<ServerSyncChanged>,
+    pub failed: Vec<ServerSyncFailure>,
+}
+
+/// 变化判定：给旧/新端口与密码，返回 `(port_changed, password_changed)`。
+/// 本地原来没有节点行（首次落库）不算变化，由前端按 `local_node_id` 变化处理。
+fn change_flags(
+    old: Option<(u16, Option<String>)>,
+    new: Option<(u16, Option<String>)>,
+) -> (bool, bool) {
+    match (old, new) {
+        (Some((old_port, old_secret)), Some((new_port, new_secret))) => {
+            (old_port != new_port, old_secret != new_secret)
+        }
+        _ => (false, false),
+    }
+}
+
+/// 本地节点快照：row id、端口、密码值（只用于比较，永不外传或打日志）。
+fn local_node_snapshot(server_id: &str) -> Option<(String, u16, Option<String>)> {
+    let store = crate::store::global()?;
+    let conn = store.conn();
+    let node = crate::store::configs::find_node_by_source_key(
+        &conn,
+        crate::store::configs::SOURCE_OWNED,
+        server_id,
+    )
+    .ok()
+    .flatten()?;
+    let secret = crate::secrets::get_secret(&node.password_ref)
+        .ok()
+        .flatten();
+    Some((node.id, node.port, secret))
+}
+
+/// 同步成功且有变化时发的那一条事件；落地方式可注入（测试用记录器）。
+trait SyncEvents: Send + Sync {
+    fn node_list_changed(&self, changed_node_ids: &[String]);
+}
+
+struct HostSyncEvents;
+
+impl SyncEvents for HostSyncEvents {
+    fn node_list_changed(&self, changed_node_ids: &[String]) {
+        if let Some(store) = crate::store::global() {
+            crate::seed::emit_node_list_changed(
+                store.as_ref(),
+                "node_synced",
+                None,
+                changed_node_ids,
+            );
+        }
+    }
+}
+
+/// 只发一条汇总；没有变化不发，也不逐台发 `my-server-changed`。
+fn emit_sync_changes(events: &dyn SyncEvents, changed: &[ServerSyncChanged]) {
+    if changed.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = changed.iter().map(|item| item.node_id.clone()).collect();
+    events.node_list_changed(&ids);
+}
+
+/// 批量同步节点配置：先拉列表，再串行取每台可用服务器的凭据。
+///
+/// 单台失败进 `failed` 继续；列表失败整批返回（不写任何本地值）。
+/// 不删行、不探测、不断开重连；有变化时只发一条 `node-list-changed` 汇总。
+pub async fn sync_all() -> Result<ServerSyncData, CpError> {
+    sync_with(
+        &|| Box::pin(list()),
+        &|server_id: String| Box::pin(async move { credentials(&server_id).await }),
+        &HostSyncEvents,
+    )
+    .await
+}
+
+type SyncFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+
+/// 可注入的同步主体：列表与逐台凭据都由调用方给，生产入口传真实实现。
+async fn sync_with(
+    list: &(dyn Fn() -> SyncFuture<Result<Vec<MyServer>, CpError>> + Send + Sync),
+    fetch_credentials: &(dyn Fn(String) -> SyncFuture<Result<Value, CpError>> + Send + Sync),
+    events: &dyn SyncEvents,
+) -> Result<ServerSyncData, CpError> {
+    if SYNC_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return Err(CpError::new(
+            "BUSY",
+            "节点配置同步正在进行中",
+            false,
+            json!({ "reason": "sync_in_flight" }),
+        ));
+    }
+    let _guard = SyncGuard;
+
+    let mut servers = list().await?;
+    let mut changed = Vec::new();
+    let mut failed = Vec::new();
+
+    for server in &mut servers {
+        // 其余状态没有凭据可取；`node_id` 为空说明控制面还没准备好节点。
+        if !matches!(server.state.as_str(), "active" | "healthy") || server.node_id.is_none() {
+            continue;
+        }
+        let before = local_node_snapshot(&server.server_id);
+        match fetch_credentials(server.server_id.clone()).await {
+            Ok(node) => {
+                let after = local_node_snapshot(&server.server_id);
+                if let Some(node_id) = node.get("node_id").and_then(Value::as_str) {
+                    server.local_node_id = Some(node_id.to_string());
+                }
+                let old = before
+                    .as_ref()
+                    .map(|(_, port, secret)| (*port, secret.clone()));
+                let new = after
+                    .as_ref()
+                    .map(|(_, port, secret)| (*port, secret.clone()));
+                let (port_changed, password_changed) = change_flags(old, new);
+                if port_changed || password_changed {
+                    if let Some(node_id) = after
+                        .as_ref()
+                        .map(|(id, _, _)| id.clone())
+                        .or_else(|| server.local_node_id.clone())
+                    {
+                        changed.push(ServerSyncChanged {
+                            server_id: server.server_id.clone(),
+                            node_id,
+                            name: server.name.clone(),
+                            port_changed,
+                            password_changed,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "节点配置同步失败：server={} code={} reason={}",
+                    server.server_id,
+                    error.code,
+                    error.reason().unwrap_or("-")
+                );
+                failed.push(ServerSyncFailure {
+                    server_id: server.server_id.clone(),
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        }
+    }
+
+    emit_sync_changes(events, &changed);
+
+    Ok(ServerSyncData {
+        servers,
+        changed,
+        failed,
+    })
+}
 /// 凭据响应的三个字段缺一不可；缺字段按 `invalid_response` 报错，不猜默认值。
 fn credential_response(raw: &Value) -> Result<super::credentials::CredentialResponse<'_>, CpError> {
     let payload = raw
@@ -1991,6 +2188,7 @@ mod tests {
 #[cfg(test)]
 mod orphan_tests {
     use super::*;
+    use std::sync::Arc;
 
     fn store_with_nodes() -> crate::store::Store {
         let store = crate::store::Store::open_in_memory().unwrap();
@@ -2045,5 +2243,199 @@ mod orphan_tests {
             .unwrap()
             .is_none());
         assert_eq!(crate::secrets::get_secret("node:nd_a").unwrap(), None);
+    }
+
+    /// 变化判定只看已有的行：新节点首次落库不算变化，密码只比存在值。
+    #[test]
+    fn change_flags_compare_existing_rows_only() {
+        let old = Some((443, Some("pw-1".to_string())));
+        assert_eq!(change_flags(old.clone(), old.clone()), (false, false));
+        assert_eq!(
+            change_flags(old.clone(), Some((8443, Some("pw-1".into())))),
+            (true, false)
+        );
+        assert_eq!(
+            change_flags(old.clone(), Some((443, Some("pw-2".into())))),
+            (false, true)
+        );
+        assert_eq!(
+            change_flags(Some((443, None)), Some((443, Some("pw-2".into())))),
+            (false, true)
+        );
+        assert_eq!(
+            change_flags(None, Some((443, Some("pw-2".into())))),
+            (false, false),
+            "新节点首次落库不算变化"
+        );
+    }
+
+    /// 已在跑时再发一次整批同步：直接 BUSY，不排队。
+    #[tokio::test]
+    async fn a_second_sync_is_rejected_while_one_is_running() {
+        SYNC_IN_FLIGHT.store(true, Ordering::SeqCst);
+        let error = sync_all().await.unwrap_err();
+        SYNC_IN_FLIGHT.store(false, Ordering::SeqCst);
+        assert_eq!(error.code, "BUSY");
+        assert_eq!(error.reason(), Some("sync_in_flight"));
+    }
+
+    struct RecordingEvents(std::sync::Mutex<Vec<Vec<String>>>);
+
+    impl SyncEvents for RecordingEvents {
+        fn node_list_changed(&self, changed_node_ids: &[String]) {
+            self.0.lock().unwrap().push(changed_node_ids.to_vec());
+        }
+    }
+
+    fn changed_at(node_id: &str) -> ServerSyncChanged {
+        ServerSyncChanged {
+            server_id: format!("srv_{node_id}"),
+            node_id: node_id.into(),
+            name: "节点".into(),
+            port_changed: true,
+            password_changed: false,
+        }
+    }
+
+    /// 有变化只发一条汇总，`changed_node_ids` 用本地节点 id；没有变化不发。
+    #[test]
+    fn a_sync_with_changes_emits_one_summary_event() {
+        let events = RecordingEvents(std::sync::Mutex::new(Vec::new()));
+        emit_sync_changes(&events, &[changed_at("nd_a"), changed_at("nd_b")]);
+        {
+            let calls = events.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0], vec!["nd_a".to_string(), "nd_b".to_string()]);
+        }
+
+        let quiet = RecordingEvents(std::sync::Mutex::new(Vec::new()));
+        emit_sync_changes(&quiet, &[]);
+        assert!(quiet.0.lock().unwrap().is_empty());
+    }
+
+    fn sync_store() -> &'static Arc<crate::store::Store> {
+        if let Some(store) = crate::store::global() {
+            return store;
+        }
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        crate::store::install_global(Arc::clone(&store));
+        crate::store::global().expect("全局库已安装")
+    }
+
+    fn remote(server_id: &str, name: &str) -> MyServer {
+        serde_json::from_value(json!({
+            "server_id": server_id,
+            "name": name,
+            "region": "tyo",
+            "plan": "s-1vcpu-1gb",
+            "state": "active",
+            "created_at": "2026-11-14T08:00:00Z",
+            "node_id": format!("remote-{server_id}"),
+            "hourly_usd": 0.0,
+            "monthly_usd": 6.0,
+            "daily_price_cents": 20,
+            "transfer_gib": 0,
+            "billing_state": "active",
+        }))
+        .unwrap()
+    }
+
+    fn owned_node(
+        store: &crate::store::Store,
+        node_id: &str,
+        server_id: &str,
+        port: u16,
+        secret: &str,
+    ) {
+        let password_ref = format!("node:{node_id}");
+        {
+            let conn = store.conn();
+            crate::store::configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id: node_id,
+                    name: "节点",
+                    server: "203.0.113.9",
+                    port,
+                    method: "aes-256-gcm",
+                    password_ref: &password_ref,
+                    source: crate::store::configs::SOURCE_OWNED,
+                    source_key: server_id,
+                },
+            )
+            .unwrap();
+        }
+        crate::secrets::set_secret(&password_ref, secret).unwrap();
+    }
+
+    /// 全路径：一台更新、一台失败；失败的行与密码不动，闸在返回时已释放。
+    #[tokio::test]
+    async fn sync_all_isolates_failures_and_releases_the_guard() {
+        crate::test_support::install_test_secrets();
+        let store = sync_store();
+        owned_node(store, "nd_ok", "srv_ok", 20000, "old-password");
+        owned_node(store, "nd_fail", "srv_fail", 20343, "old-fail-password");
+
+        let list = || -> SyncFuture<Result<Vec<MyServer>, CpError>> {
+            Box::pin(async { Ok(vec![remote("srv_ok", "好的"), remote("srv_fail", "坏的")]) })
+        };
+        let fetch = |server_id: String| -> SyncFuture<Result<Value, CpError>> {
+            Box::pin(async move {
+                if server_id == "srv_ok" {
+                    let store = sync_store();
+                    owned_node(store, "nd_ok", "srv_ok", 21111, "new-password");
+                    Ok(json!({ "node_id": "nd_ok" }))
+                } else {
+                    Err(CpError::new("TIMEOUT", "请求超时", true, json!({})))
+                }
+            })
+        };
+        let events = RecordingEvents(std::sync::Mutex::new(Vec::new()));
+
+        let data = sync_with(&list, &fetch, &events).await.unwrap();
+
+        let ok = data
+            .servers
+            .iter()
+            .find(|server| server.server_id == "srv_ok")
+            .unwrap();
+        assert_eq!(ok.local_node_id.as_deref(), Some("nd_ok"), "新节点要回填");
+        assert_eq!(data.failed.len(), 1);
+        assert_eq!(data.failed[0].server_id, "srv_fail");
+        assert_eq!(data.failed[0].code, "TIMEOUT");
+        assert_eq!(data.changed.len(), 1);
+        assert_eq!(data.changed[0].node_id, "nd_ok");
+        assert!(data.changed[0].port_changed);
+        assert!(data.changed[0].password_changed);
+        {
+            let calls = events.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0], vec!["nd_ok".to_string()]);
+        }
+
+        // 失败那台：本地行与密码原样保留。
+        let conn = store.conn();
+        let failed_node = crate::store::configs::find_node_by_source_key(
+            &conn,
+            crate::store::configs::SOURCE_OWNED,
+            "srv_fail",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(failed_node.port, 20343);
+        assert_eq!(
+            crate::secrets::get_secret(&failed_node.password_ref)
+                .unwrap()
+                .as_deref(),
+            Some("old-fail-password")
+        );
+        drop(conn);
+
+        // 闸已释放：紧接着再跑一次不是 BUSY。
+        let empty = || -> SyncFuture<Result<Vec<MyServer>, CpError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        };
+        let again = sync_with(&empty, &fetch, &events).await;
+        assert!(again.is_ok(), "{:?}", again.err().map(|error| error.code));
     }
 }

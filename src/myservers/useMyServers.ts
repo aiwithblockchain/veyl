@@ -312,37 +312,45 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     [bridge, markLoggedOut],
   );
 
+  /**
+   * 拿到的服务器列表落到界面：墓碑过滤、待选基线、选中对齐与 revision。
+   * 列表来自 my_server_list，或 my_server_sync 返回的 servers。
+   */
+  const applyServers = useCallback((input: MyServer[]) => {
+    // 停机删除后本地节点已删、墓碑行不该再出现：等后端不再返回之前先自己滤掉。
+    const list =
+      forgottenRef.current.size === 0
+        ? input
+        : input.filter(
+            (server) => !forgottenRef.current.has(server.server_id),
+          );
+    fetchedServersRef.current = list;
+    setServers(list);
+    // 认出新机器就解除「已下单」占位并选中它；还没出现就继续等，别乱选一台旧的。
+    const baseline = pendingBaselineRef.current;
+    if (baseline) {
+      const appeared = list.find(
+        (server) => !baseline.has(server.server_id),
+      );
+      if (appeared) {
+        pendingBaselineRef.current = null;
+        setPendingServer(false);
+        pinnedSelectionRef.current = appeared.server_id;
+        setSelectedId(appeared.server_id);
+      }
+    }
+    setError(null);
+    setRevision((value) => value + 1);
+  }, []);
+
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
       const result = await bridge.myServerList();
-      // 停机删除后本地节点已删、墓碑行不该再出现：等后端不再返回之前先自己滤掉。
-      const list =
-        forgottenRef.current.size === 0
-          ? result.servers
-          : result.servers.filter(
-              (server) => !forgottenRef.current.has(server.server_id),
-            );
-      fetchedServersRef.current = list;
       refreshOkRef.current = true;
-      setServers(list);
-      // 认出新机器就解除「已下单」占位并选中它；还没出现就继续等，别乱选一台旧的。
-      const baseline = pendingBaselineRef.current;
-      if (baseline) {
-        const appeared = list.find(
-          (server) => !baseline.has(server.server_id),
-        );
-        if (appeared) {
-          pendingBaselineRef.current = null;
-          setPendingServer(false);
-          pinnedSelectionRef.current = appeared.server_id;
-          setSelectedId(appeared.server_id);
-        }
-      }
-      setError(null);
+      applyServers(result.servers);
       setIdentityLostState(false);
       setBlockedState(null);
       setIdentityPresent(true);
-      setRevision((value) => value + 1);
       return true;
     } catch (err) {
       refreshOkRef.current = false;
@@ -366,7 +374,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     } finally {
       setLoading(false);
     }
-  }, [bridge, markLoggedOut]);
+  }, [bridge, markLoggedOut, applyServers]);
 
   /** 账户读取失败后重试：只重读身份，不重登。 */
   const refreshAccount = useCallback(async () => {
@@ -1035,6 +1043,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     loading,
     error,
     refresh,
+    applyServers,
     selected,
     selectedId: selected?.server_id ?? null,
     pendingServer,

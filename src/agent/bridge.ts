@@ -606,6 +606,33 @@ export interface MyServer {
   failure: MyServerFailure | null;
 }
 
+/** 节点配置同步间隔；0 = 手动，不跑定时任务。 */
+export type SyncIntervalMinutes = 0 | 5 | 15 | 30 | 60;
+
+/** 一次同步中端口或密码发生变化的节点；只给事实，不给值。 */
+export interface ServerSyncChanged {
+  server_id: string;
+  /** 本地节点行 id（不是控制面 node_id）。 */
+  node_id: string;
+  /** 服务器名，直接用于提示文案。 */
+  name: string;
+  port_changed: boolean;
+  password_changed: boolean;
+}
+
+/** 单台凭据拉取失败；整批不因它失败。 */
+export interface ServerSyncFailure {
+  server_id: string;
+  code: string;
+  message: string;
+}
+
+export interface ServerSyncData {
+  servers: MyServer[];
+  changed: ServerSyncChanged[];
+  failed: ServerSyncFailure[];
+}
+
 /** 桥 / 封装的统一结果：Host 的 `node_rotate_credentials` 原样返回。 */
 export interface NodeRotateCredentialsResult {
   ok: true;
@@ -952,6 +979,14 @@ export interface AgentBridge {
   /** `fresh` = 回源取 DigitalOcean 当下可用性；只给新建向导用，别处保持缓存。 */
   myServerCatalog(fresh?: boolean): Promise<MyServerCatalog>;
   myServerList(): Promise<{ servers: MyServer[] }>;
+  /** 批量同步节点配置：拉列表 + 逐台取凭据落库；单台失败不影响整批。 */
+  myServerSync(): Promise<ServerSyncData>;
+  /** 读取同步间隔；缺失或非法时 Host 按 30 返回。 */
+  serverSyncIntervalGet(): Promise<{ minutes: SyncIntervalMinutes }>;
+  /** 保存同步间隔；只接受 0 / 5 / 15 / 30 / 60。 */
+  serverSyncIntervalSet(
+    minutes: SyncIntervalMinutes,
+  ): Promise<{ minutes: SyncIntervalMinutes }>;
   myServerGet(serverId: string): Promise<MyServer>;
   /** 改服务器名：只能改自己的，允许重名；服务端按码点校验 1–24。 */
   myServerRename(serverId: string, name: string): Promise<MyServer>;

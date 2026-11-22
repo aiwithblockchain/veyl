@@ -806,6 +806,68 @@ pub async fn my_server_credentials(server_id: String) -> Result<Value, Value> {
     }
 }
 
+/// 节点配置同步（仅 UI，契约 §7.28）：一次拉列表 + 逐台取凭据落库。
+#[tauri::command]
+pub async fn my_server_sync() -> Result<Value, Value> {
+    match crate::control_plane::servers::sync_all().await {
+        Ok(data) => Ok(serde_json::to_value(data).unwrap_or(Value::Null)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+const SERVER_SYNC_INTERVAL_KEY: &str = "server_sync_interval_minutes";
+const SERVER_SYNC_INTERVAL_DEFAULT: u16 = 30;
+const SERVER_SYNC_INTERVALS: [u16; 5] = [0, 5, 15, 30, 60];
+
+fn parse_sync_interval(minutes: Option<&str>) -> u16 {
+    minutes
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|value| SERVER_SYNC_INTERVALS.contains(value))
+        .unwrap_or(SERVER_SYNC_INTERVAL_DEFAULT)
+}
+
+/// 节点配置同步间隔（仅 UI，契约 §7.29）。读不写库：缺失或存库值非法都按 30。
+#[tauri::command]
+pub async fn server_sync_interval_get() -> Result<Value, Value> {
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "", Value::Null));
+    };
+    let raw = {
+        let conn = store.conn();
+        crate::store::settings::get(&conn, SERVER_SYNC_INTERVAL_KEY)
+            .ok()
+            .flatten()
+    };
+    Ok(json!({ "minutes": parse_sync_interval(raw.as_deref()) }))
+}
+
+/// 节点配置同步间隔（仅 UI，契约 §7.29）。只认 0/5/15/30/60，先写库成功再返回。
+#[tauri::command]
+pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
+    let minutes = minutes
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| SERVER_SYNC_INTERVALS.contains(value));
+    let Some(minutes) = minutes else {
+        return Err(command_error(
+            "INVALID_ARGUMENT",
+            "",
+            json!({ "reason": "invalid_interval" }),
+        ));
+    };
+    let Some(store) = crate::store::global() else {
+        return Err(command_error("INTERNAL", "", Value::Null));
+    };
+    let saved = {
+        let conn = store.conn();
+        crate::store::settings::set(&conn, SERVER_SYNC_INTERVAL_KEY, &minutes.to_string())
+    };
+    if saved.is_err() {
+        return Err(command_error("INTERNAL", "", Value::Null));
+    }
+    Ok(json!({ "minutes": minutes }))
+}
+
 /// 界面「智能修复」：与 AI 工具 `NodeRotateCredentials` 共用同一个执行入口
 /// （`tools::node_rotate::rotate_from_ui` → `execute_rotation`），90 秒超时与凭据刷新都不另起一套。
 ///
@@ -3942,5 +4004,67 @@ mod deepseek_save_key_tests {
 
         apply_saved_deepseek_key(&store, "ok").unwrap();
         assert_eq!(crate::llm::active_id(&store).as_deref(), Some(id.as_str()));
+    }
+}
+
+#[cfg(test)]
+mod server_sync_settings_tests {
+    use super::*;
+
+    fn install_store() {
+        if crate::store::global().is_none() {
+            let store = Arc::new(crate::store::Store::open_in_memory().expect("内存库"));
+            crate::store::install_global(store);
+        }
+    }
+
+    /// 缺失/非法都读 30；只认五个合法值，写入后可再读出。
+    #[tokio::test]
+    async fn interval_defaults_validates_and_persists() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+
+        {
+            let conn = store.conn();
+            let _ = crate::store::settings::delete(&conn, SERVER_SYNC_INTERVAL_KEY);
+        }
+        assert_eq!(
+            server_sync_interval_get().await.unwrap()["minutes"],
+            json!(30),
+            "缺失按 30"
+        );
+
+        {
+            let conn = store.conn();
+            crate::store::settings::set(&conn, SERVER_SYNC_INTERVAL_KEY, "7").unwrap();
+        }
+        assert_eq!(
+            server_sync_interval_get().await.unwrap()["minutes"],
+            json!(30),
+            "存库非法值按 30"
+        );
+
+        let error = server_sync_interval_set(json!(7)).await.unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "invalid_interval");
+        assert_eq!(
+            server_sync_interval_get().await.unwrap()["minutes"],
+            json!(30),
+            "非法入参不能改库"
+        );
+
+        assert_eq!(
+            server_sync_interval_set(json!(5)).await.unwrap()["minutes"],
+            json!(5)
+        );
+        assert_eq!(
+            server_sync_interval_get().await.unwrap()["minutes"],
+            json!(5)
+        );
+        assert_eq!(
+            server_sync_interval_set(json!(0)).await.unwrap()["minutes"],
+            json!(0),
+            "0 = 手动也合法"
+        );
     }
 }

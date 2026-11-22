@@ -25,6 +25,9 @@ interface Props {
   /** 已登录 + 至少一台节点就绪时，底部多一行「在手机上使用」。 */
   showMobile?: boolean;
   onMobile?: (trigger: HTMLElement) => void;
+  /** 标题行的同步按钮；不给就不渲染。 */
+  onSync?: () => void;
+  syncBusy?: boolean;
   onSelect: (serverId: string) => void;
   onNew: () => void;
 }
@@ -97,6 +100,8 @@ export function MyServersRail({
   onGoConnect,
   showMobile = false,
   onMobile,
+  onSync,
+  syncBusy = false,
   onSelect,
   onNew,
 }: Props) {
@@ -194,6 +199,28 @@ export function MyServersRail({
           <div className="rail__section">
             <span className="rail__label">{t("rail.myServers")}</span>
             <span className="rail__count">{servers.length}</span>
+            {onSync ? (
+              <button
+                type="button"
+                className="icon-btn rail__sync"
+                aria-label={t("rail.sync")}
+                title={t("rail.sync")}
+                aria-busy={syncBusy || undefined}
+                disabled={disabled || syncBusy}
+                onClick={onSync}
+              >
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+                  <path
+                    d="M13 8a5 5 0 1 1-1.46-3.54M13 3v3.2H9.8"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            ) : null}
             <button
               type="button"
               className="icon-btn rail__add"
@@ -263,14 +290,38 @@ export function MyServersRail({
           >
             <div className="rail-drawer__head">
               <span className="rail__label">{t("rail.myServers")} {servers.length}</span>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label={t("rail.closeList")}
-                onClick={() => setDrawerOpen(false)}
-              >
-                <IconClose size={14} />
-              </button>
+              <div className="rail-drawer__actions">
+                {onSync ? (
+                  <button
+                    type="button"
+                    className="icon-btn rail__sync"
+                    aria-label={t("rail.sync")}
+                    title={t("rail.sync")}
+                    aria-busy={syncBusy || undefined}
+                    disabled={disabled || syncBusy}
+                    onClick={onSync}
+                  >
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+                      <path
+                        d="M13 8a5 5 0 1 1-1.46-3.54M13 3v3.2H9.8"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label={t("rail.closeList")}
+                  onClick={() => setDrawerOpen(false)}
+                >
+                  <IconClose size={14} />
+                </button>
+              </div>
             </div>
             <button
               type="button"

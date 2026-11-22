@@ -18,6 +18,7 @@ import type {
   NodeProbeResult,
   PendingQuestion,
   QuitDecisionAction,
+  SyncIntervalMinutes,
   UiControl,
   UiLastAction,
   UiScreen,
@@ -40,6 +41,8 @@ import { useServerNodePooling } from "./myservers/useServerNodePooling";
 import { isProvisioning, trialAvailableHint } from "./myservers/labels";
 import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
 import { collectDanglingNodeIds } from "./myservers/tombstones";
+import { useServerSync } from "./myservers/useServerSync";
+import { uiLog } from "./log/uiLog";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -65,7 +68,7 @@ import {
   shellLayout,
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
-import { displayNodeNames } from "./ui/nodeList";
+import { displayNodeNames, formatLatency } from "./ui/nodeList";
 import { issueReportOpening } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
@@ -359,6 +362,16 @@ export default function App() {
   }, [appNotice]);
   const [aiReady, setAiReady] = useState(false);
   const [aiRequiredOpen, setAiRequiredOpen] = useState(false);
+  const [syncInterval, setSyncInterval] = useState<SyncIntervalMinutes | null>(null);
+  const [syncIntervalUnsaved, setSyncIntervalUnsaved] = useState(false);
+  // 成功确认的当前档位 / 最后一次用户意图：迟到写入据此补发，保证最终落库是最新值。
+  const syncIntervalConfirmedRef = useRef<SyncIntervalMinutes>(30);
+  const syncIntervalTargetRef = useRef<SyncIntervalMinutes>(30);
+  // 账户代次：登出/登录/换号时递增；同步的迟到结果据此丢弃。
+  const [accountEpoch, setAccountEpoch] = useState(0);
+  // 读/写的迟到响应不能覆盖用户刚选的档位：只认最新一次写入。
+  const syncIntervalTouchedRef = useRef(false);
+  const syncIntervalWriteSeqRef = useRef(0);
   // 当前服务商的显示名；未配置或读取失败时为空，由助手头部决定回退文案。
   const [aiProviderName, setAiProviderName] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -415,9 +428,56 @@ export default function App() {
   useEffect(() => {
     if (destination === "servers") refreshServersOnce();
   }, [destination, refreshServersOnce]);
+
+  const serverSync = useServerSync({
+    bridge,
+    intervalMinutes: syncInterval,
+    enabled: myServers.loggedIn,
+    accountEpoch,
+    applyServers: (servers) => myServers.applyServers(servers),
+    onChanged: (changed) => {
+      if (changed.length === 1) {
+        setAppNotice({
+          level: "info",
+          text: translate("app.sync.updatedOne", { name: changed[0].name }),
+        });
+      } else if (changed.length > 1) {
+        setAppNotice({
+          level: "info",
+          text: translate("app.sync.updatedMany", { count: changed.length }),
+        });
+      }
+    },
+  });
   /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
   const userLogoutRef = useRef(false);
   const wasLoggedInRef = useRef(false);
+
+  // 登出 / 登录 / 换号都推进账户代次，让在途同步的迟到结果作废。
+  const accountIdentityRef = useRef<{
+    loggedIn: boolean;
+    id: string | null;
+  } | null>(null);
+  useEffect(() => {
+    // 账户还没读回时不建立基线：首次读回不是「登录事件」，不该推进 epoch。
+    if (!myServers.accountLoaded) return;
+    const next = {
+      loggedIn: myServers.loggedIn,
+      id: myServers.account?.account_id ?? null,
+    };
+    const prev = accountIdentityRef.current;
+    accountIdentityRef.current = next;
+    if (
+      prev &&
+      (prev.loggedIn !== next.loggedIn || prev.id !== next.id)
+    ) {
+      setAccountEpoch((value) => value + 1);
+    }
+  }, [
+    myServers.accountLoaded,
+    myServers.loggedIn,
+    myServers.account?.account_id,
+  ]);
   // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
   useEffect(() => {
     const pending = pendingBillsRef.current;
@@ -1090,6 +1150,35 @@ export default function App() {
     };
   }, [refreshDefaultProfile, refreshAiStatus]);
 
+  // 节点配置同步间隔：启动读一次；读失败重试一次，仍失败按 30（不写库）。
+  useEffect(() => {
+    let cancelled = false;
+    const load = (attempt: number): void => {
+      void bridge
+        .serverSyncIntervalGet()
+        .then((data) => {
+          if (cancelled || syncIntervalTouchedRef.current) return;
+          syncIntervalConfirmedRef.current = data.minutes;
+          syncIntervalTargetRef.current = data.minutes;
+          setSyncInterval(data.minutes);
+        })
+        .catch(() => {
+          if (cancelled || syncIntervalTouchedRef.current) return;
+          if (attempt === 0) {
+            load(1);
+            return;
+          }
+          syncIntervalConfirmedRef.current = 30;
+          syncIntervalTargetRef.current = 30;
+          setSyncInterval(30);
+        });
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
   // 试用状态：启动时读一次；收到 trial-expired 或连接成功后重读。
   useEffect(() => {
     if (!onboardingLoaded || showOnboarding) return;
@@ -1216,6 +1305,49 @@ export default function App() {
     setSettingsOpen(false);
     setSettingsConsulting(false);
     void refreshAiStatus();
+  };
+
+  const changeSyncInterval = (minutes: SyncIntervalMinutes) => {
+    syncIntervalTouchedRef.current = true;
+    syncIntervalTargetRef.current = minutes;
+    const previous = syncInterval;
+    const seq = ++syncIntervalWriteSeqRef.current;
+    void bridge
+      .serverSyncIntervalSet(minutes)
+      .then((data) => {
+        // 只回写仍是当前档位的那次写入。
+        if (seq === syncIntervalWriteSeqRef.current) {
+          syncIntervalConfirmedRef.current = data.minutes;
+          syncIntervalTargetRef.current = data.minutes;
+          setSyncInterval(data.minutes);
+          setSyncIntervalUnsaved(false);
+          return;
+        }
+        // 旧写入迟到：界面不动，但把用户最新意图补发一次，保证最终落库是新档。
+        const target = syncIntervalTargetRef.current;
+        void bridge
+          .serverSyncIntervalSet(target)
+          .catch(() => {
+            console.warn("[server-sync] resend failed", { minutes: target });
+            uiLog(
+              "warn",
+              `server sync resend failed minutes=${target}`,
+              "servers",
+            );
+          });
+      })
+      .catch(() => {
+        if (seq !== syncIntervalWriteSeqRef.current) return;
+        // 写库失败：回退到上一个有效值；首次设置失败则按 30。
+        const fallback = previous ?? syncIntervalConfirmedRef.current ?? 30;
+        syncIntervalTargetRef.current = fallback;
+        setSyncInterval(fallback);
+        setSyncIntervalUnsaved(true);
+        setAppNotice({
+          level: "error",
+          text: translate("app.sync.intervalFailed"),
+        });
+      });
   };
 
   const openMobileExport = (trigger: HTMLElement) => {
@@ -2446,6 +2578,8 @@ export default function App() {
           onMobile={openMobileExport}
           onSelect={myServers.select}
           onNew={() => openNewNode("servers")}
+          onSync={() => void serverSync.syncNow()}
+          syncBusy={serverSync.busy}
         />
       ) : null}
       {destination === "servers" && panes.canDragRail ? (
@@ -2757,6 +2891,12 @@ export default function App() {
         onViewBills={() => void handleViewBills()}
         mobileExportOpen={mobileExportOpen}
         trapPaused={aiRequiredOpen}
+        syncInterval={syncInterval ?? 30}
+        syncIntervalUnsaved={syncIntervalUnsaved}
+        onSyncIntervalChange={changeSyncInterval}
+        onSyncNow={() => void serverSync.syncNow()}
+        syncBusy={serverSync.busy}
+        lastSyncedAt={serverSync.lastSyncedAt}
         onOpenMobileExport={openMobileExport}
       />
 

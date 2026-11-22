@@ -483,6 +483,9 @@ export const en: Record<MessageKey, string> = {
   "app.importJsonOnly":
     "You can only drop .json seed files here. Import node text from Settings › Connection › Add node.",
   "app.imported": "Imported {count} nodes",
+  "app.sync.updatedOne": "“{name}” was updated",
+  "app.sync.updatedMany": "{count} nodes were updated",
+  "app.sync.intervalFailed": "Couldn't save the sync interval",
   "app.dropOneFile":
     "Only one file can be imported at a time. You dropped {count}; drop them one by one.",
   "app.busyAnswer": "Answer the question above first, or skip it.",
@@ -918,6 +921,7 @@ export const en: Record<MessageKey, string> = {
   "rail.closeList": "Close server list",
   "rail.enabling": "Activating",
   "rail.perDay": "/day",
+  "rail.sync": "Sync node config",
 
   // Server details
   "detail.error.noChangeRetry": "This server wasn't changed. Try again later.",
@@ -1332,6 +1336,14 @@ export const en: Record<MessageKey, string> = {
   "settings.connection.scopeNote": "Smart only routes the traffic that needs it; Global routes everything.",
   "settings.connection.noConfig": "No configuration yet. Add a node on the Connection screen first.",
   "settings.connection.switch": "Switch",
+  "settings.sync.rowLabel": "Node config sync",
+  "settings.sync.interval": "Sync interval",
+  "settings.sync.minutes": "{count} min",
+  "settings.sync.manual": "Manual",
+  "settings.sync.now": "Sync now",
+  "settings.sync.lastSynced": "Last synced {time}",
+  "settings.sync.never": "Not synced yet",
+  "settings.sync.unsaved": "Not saved",
   "settings.port.lowHint": "Ports below 1024 usually need admin permission; using one isn't recommended.",
   "settings.port.occupiedHint": "It's in use by another app right now; the app will pick the next free port when connecting.",
   "settings.port.unavailableHint": "This machine can't bind that port (admin permission needed); the app will pick the next free port when connecting.",

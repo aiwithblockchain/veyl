@@ -39,6 +39,8 @@ import type {
   ReportActionData,
   RuntimeStartResult,
   QuitDecisionAction,
+  ServerSyncData,
+  SyncIntervalMinutes,
   TrialStatusData,
   TunHelperInfo,
   TunHelperRestartResult,
@@ -97,6 +99,9 @@ const HELPER_STATES: TunHelperState[] = [
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
+const MOCK_SYNC_INTERVAL_KEY = "veyl.mock.serverSyncInterval";
+const SYNC_INTERVALS = new Set<number>([0, 5, 15, 30, 60]);
+
 /** 直连出口：与代理出口不同，面板才能看出代理真的生效。 */
 export const MOCK_DIRECT_IP = "198.51.100.9";
 
@@ -712,6 +717,36 @@ export class MockAgentBridge implements AgentBridge {
 
   async myServerList() {
     return this.myServers.list();
+  }
+
+  private syncIntervalMinutes: SyncIntervalMinutes = 30;
+
+  async myServerSync(): Promise<ServerSyncData> {
+    return { ...this.myServers.list(), changed: [], failed: [] };
+  }
+
+  async serverSyncIntervalGet(): Promise<{ minutes: SyncIntervalMinutes }> {
+    try {
+      const stored = Number(localStorage.getItem(MOCK_SYNC_INTERVAL_KEY));
+      if (SYNC_INTERVALS.has(stored)) {
+        this.syncIntervalMinutes = stored as SyncIntervalMinutes;
+      }
+    } catch {
+      // 读不到就用默认 30。
+    }
+    return { minutes: this.syncIntervalMinutes };
+  }
+
+  async serverSyncIntervalSet(
+    minutes: SyncIntervalMinutes,
+  ): Promise<{ minutes: SyncIntervalMinutes }> {
+    this.syncIntervalMinutes = minutes;
+    try {
+      localStorage.setItem(MOCK_SYNC_INTERVAL_KEY, String(minutes));
+    } catch {
+      // 存不了就只在本会话生效。
+    }
+    return { minutes };
   }
 
   async myServerGet(serverId: string) {

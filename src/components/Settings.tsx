@@ -13,6 +13,7 @@ import type {
   MyServerWallet,
   NetworkForceResetResult,
   NetworkForceResetStep,
+  SyncIntervalMinutes,
 } from "../agent/bridge";
 import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type {
@@ -23,7 +24,7 @@ import type {
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
-import { setLanguage, t as translate, useT } from "../i18n";
+import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
 import type { MessageKey } from "../i18n";
 import { formatUsdCents } from "../myservers/labels";
 import type { WalletTrigger } from "../myservers/useMyServers";
@@ -105,6 +106,15 @@ interface Props {
   /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
   trapPaused?: boolean;
   onOpenMobileExport?: (trigger: HTMLElement) => void;
+  /** 节点配置同步：间隔档位与手动触发都由 App 持有并落库。 */
+  syncInterval?: SyncIntervalMinutes;
+  onSyncIntervalChange?: (minutes: SyncIntervalMinutes) => void;
+  onSyncNow?: () => void;
+  syncBusy?: boolean;
+  /** 间隔写库失败：在行内标一句「未保存」，不拦交互。 */
+  syncIntervalUnsaved?: boolean;
+  /** 最近一次成功同步的时刻（Unix 毫秒）；null = 尚未同步。 */
+  lastSyncedAt?: number | null;
 }
 
 type SectionId = "ai" | "network" | "account" | "advanced";
@@ -740,6 +750,12 @@ export function Settings({
   mobileExportOpen = false,
   trapPaused = false,
   onOpenMobileExport,
+  syncInterval = 30,
+  onSyncIntervalChange,
+  onSyncNow,
+  syncBusy = false,
+  syncIntervalUnsaved = false,
+  lastSyncedAt = null,
 }: Props) {
   const t = useT();
   const connected = runtime.state === "running" || runtime.state === "degraded";
@@ -2231,6 +2247,55 @@ export function Settings({
                 ) : null}
               </p>
             ) : null}
+
+            <div className="settings-row" {...pointAttrs("connection.sync")}>
+              <div>
+                <div className="settings-row__label">{t("settings.sync.rowLabel")}</div>
+                {syncIntervalUnsaved ? (
+                  <div className="settings-row__value">
+                    {t("settings.sync.unsaved")}
+                  </div>
+                ) : null}
+              </div>
+              <div className="settings-row__aside">
+                <span className="settings-row__value">
+                  {lastSyncedAt === null
+                    ? t("settings.sync.never")
+                    : t("settings.sync.lastSynced", {
+                        time: new Date(lastSyncedAt).toLocaleTimeString(
+                          getLanguage() === "en" ? "en-US" : "zh-CN",
+                          { hour: "2-digit", minute: "2-digit" },
+                        ),
+                      })}
+                </span>
+                <select
+                  className="settings-sync__select"
+                  aria-label={t("settings.sync.interval")}
+                  value={syncInterval}
+                  disabled={!onSyncIntervalChange}
+                  onChange={(event) =>
+                    onSyncIntervalChange?.(
+                      Number(event.target.value) as SyncIntervalMinutes,
+                    )
+                  }
+                >
+                  <option value={0}>{t("settings.sync.manual")}</option>
+                  {([5, 15, 30, 60] as const).map((minutes) => (
+                    <option key={minutes} value={minutes}>
+                      {t("settings.sync.minutes", { count: minutes })}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={syncBusy || !onSyncNow}
+                  onClick={onSyncNow}
+                >
+                  {t("settings.sync.now")}
+                </button>
+              </div>
+            </div>
 
             {connectMode === "system_proxy" ? (
               portEditing ? (

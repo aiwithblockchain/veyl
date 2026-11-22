@@ -69,8 +69,12 @@ import type {
   ProxyRecoveryReportData,
   RenamedSession,
   RuntimeStartResult,
+  ServerSyncChanged,
+  ServerSyncData,
+  ServerSyncFailure,
   StoredChatMessage,
   StoredSessionSummary,
+  SyncIntervalMinutes,
   TunHelperInfo,
   TunHelperRestartResult,
   TunHelperState,
@@ -752,6 +756,64 @@ function normalizeMyServerFailure(value: unknown): MyServerFailure | null {
   };
 }
 
+const SYNC_INTERVALS = new Set<number>([0, 5, 15, 30, 60]);
+
+function normalizeSyncInterval(value: unknown): SyncIntervalMinutes | null {
+  return typeof value === "number" && SYNC_INTERVALS.has(value)
+    ? (value as SyncIntervalMinutes)
+    : null;
+}
+
+/** 变化条目逐字段校验；形状不对的条目丢弃，不猜默认值。 */
+function normalizeServerSyncChanged(value: unknown): ServerSyncChanged[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ServerSyncChanged[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    if (
+      typeof raw.server_id !== "string" ||
+      raw.server_id === "" ||
+      typeof raw.node_id !== "string" ||
+      raw.node_id === "" ||
+      typeof raw.name !== "string" ||
+      typeof raw.port_changed !== "boolean" ||
+      typeof raw.password_changed !== "boolean"
+    ) {
+      return [];
+    }
+    return [
+      {
+        server_id: raw.server_id,
+        node_id: raw.node_id,
+        name: raw.name,
+        port_changed: raw.port_changed,
+        password_changed: raw.password_changed,
+      },
+    ];
+  });
+}
+
+/** 失败条目逐字段校验；形状不对的条目丢弃。 */
+function normalizeServerSyncFailures(value: unknown): ServerSyncFailure[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ServerSyncFailure[] => {
+    if (!item || typeof item !== "object") return [];
+    const raw = item as Record<string, unknown>;
+    if (
+      typeof raw.server_id !== "string" ||
+      raw.server_id === "" ||
+      typeof raw.code !== "string" ||
+      raw.code === "" ||
+      typeof raw.message !== "string"
+    ) {
+      return [];
+    }
+    return [
+      { server_id: raw.server_id, code: raw.code, message: raw.message },
+    ];
+  });
+}
+
 function normalizeMyServer(raw: unknown): MyServer | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
@@ -1383,6 +1445,41 @@ export class TauriAgentBridge implements AgentBridge {
       .map((value) => normalizeMyServer(value))
       .filter((server): server is MyServer => server !== null);
     return { servers };
+  }
+
+  async myServerSync(): Promise<ServerSyncData> {
+    const raw = await call<{
+      servers?: unknown;
+      changed?: unknown;
+      failed?: unknown;
+    }>("my_server_sync");
+    if (!Array.isArray(raw?.servers)) serverDataError();
+    const servers = raw.servers
+      .map((value) => normalizeMyServer(value))
+      .filter((server): server is MyServer => server !== null);
+    return {
+      servers,
+      changed: normalizeServerSyncChanged(raw.changed),
+      failed: normalizeServerSyncFailures(raw.failed),
+    };
+  }
+
+  async serverSyncIntervalGet(): Promise<{ minutes: SyncIntervalMinutes }> {
+    const raw = await call<{ minutes?: unknown }>("server_sync_interval_get");
+    const minutes = normalizeSyncInterval(raw?.minutes);
+    if (minutes === null) serverDataError();
+    return { minutes };
+  }
+
+  async serverSyncIntervalSet(
+    minutes: SyncIntervalMinutes,
+  ): Promise<{ minutes: SyncIntervalMinutes }> {
+    const raw = await call<{ minutes?: unknown }>("server_sync_interval_set", {
+      minutes,
+    });
+    const saved = normalizeSyncInterval(raw?.minutes);
+    if (saved === null) serverDataError();
+    return { minutes: saved };
   }
 
   async myServerGet(serverId: string): Promise<MyServer> {

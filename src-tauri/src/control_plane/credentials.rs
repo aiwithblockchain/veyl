@@ -208,12 +208,16 @@ pub struct CredentialResponse<'a> {
 ///
 /// 幂等键是 `(source='owned', source_key=server_id)`：同一台服务器重新取凭据时复用
 /// 已有节点行（即使控制面换发了新 `node_id`），不会撞 `nodes` 的来源唯一索引。
-/// `save_secret` 让测试用临时凭据库，生产走全局 `secrets.enc`。
+/// `save_secret` / `load_secret` 让测试用临时凭据库，生产走全局 `secrets.enc`。
+///
+/// 已有行且 host / port / method / 密码都与载荷相同时直接返回，不 upsert、不写密码——
+/// 同步与轮换会重复取凭据，没变化就不该产生写操作。
 pub fn persist_with(
     conn: &rusqlite::Connection,
     server_name: Option<&str>,
     payload: &CredentialPayload,
     save_secret: impl Fn(&str, &str) -> Result<(), ()>,
+    load_secret: impl Fn(&str) -> Result<Option<String>, ()>,
 ) -> Result<OwnedNode, CpError> {
     let existing = crate::store::configs::find_node_by_source_key(
         conn,
@@ -221,7 +225,29 @@ pub fn persist_with(
         &payload.server_id,
     )
     .map_err(|error| CpError::internal(format!("读取本地节点失败：{error}")))?;
-    let created = existing.is_none();
+
+    if let Some(old) = &existing {
+        let same_secret = load_secret(&old.password_ref)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(payload.password.as_str());
+        if old.server == payload.host
+            && old.port == payload.port
+            && old.method == payload.method
+            && same_secret
+        {
+            return Ok(OwnedNode {
+                server_id: payload.server_id.clone(),
+                node_id: old.id.clone(),
+                name: old.name.clone(),
+                host: old.server.clone(),
+                port: old.port,
+                method: old.method.clone(),
+            });
+        }
+    }
+
     let node_id = existing
         .as_ref()
         .map(|node| node.id.clone())
@@ -252,8 +278,34 @@ pub fn persist_with(
     .map_err(|error| CpError::internal(format!("保存节点失败：{error}")))?;
 
     if save_secret(&secret_ref, &payload.password).is_err() {
-        if created {
-            let _ = crate::store::configs::delete_node(conn, &node.id);
+        match existing {
+            Some(old) => {
+                // 密码写失败时端口可能已经被 upsert 改掉：整行恢复成旧值再报错，
+                // 保证「失败保旧值」对端口与密码都成立（契约 §7.28）。
+                if let Err(error) = upsert_node(
+                    conn,
+                    &NewNode {
+                        id: &old.id,
+                        name: &old.name,
+                        server: &old.server,
+                        port: old.port,
+                        method: &old.method,
+                        password_ref: &old.password_ref,
+                        source: &old.source,
+                        source_key: &old.source_key,
+                    },
+                ) {
+                    // 双重失败：密码没写进去、旧行也没恢复，只能留下可观测线索。
+                    log::warn!(
+                        "节点配置回滚失败：server={} error={}",
+                        payload.server_id,
+                        error
+                    );
+                }
+            }
+            None => {
+                let _ = crate::store::configs::delete_node(conn, &node.id);
+            }
         }
         return Err(CpError::internal("保存节点密码失败"));
     }
@@ -282,6 +334,7 @@ pub fn materialize_with(
     public_key: &[u8],
     expected_key_id: &str,
     save_secret: impl Fn(&str, &str) -> Result<(), ()>,
+    load_secret: impl Fn(&str) -> Result<Option<String>, ()>,
 ) -> Result<OwnedNode, CpError> {
     let verified = verify_with(
         public_key,
@@ -291,7 +344,7 @@ pub fn materialize_with(
         response.signature,
         response.key_id,
     )?;
-    persist_with(conn, server_name, &verified, save_secret)
+    persist_with(conn, server_name, &verified, save_secret, load_secret)
 }
 
 /// 生产入口：内置公钥验签 + 全局凭据库/数据库落库，返回本地节点。
@@ -322,7 +375,17 @@ pub fn verify_and_store(
         &key,
         key_id,
         |key, value| crate::secrets::set_secret(key, value).map_err(|_| ()),
+        |key| crate::secrets::get_secret(key).map_err(|_| ()),
     )
+}
+
+/// 凭据「取回 → 验签 → 落库」的进程内串行锁：同步与轮换都走 `credentials`，共用这一把。
+static CREDENTIAL_FLOW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 在全局凭据锁内执行一段异步流程。锁随 future 结束释放，panic 也由 Drop 兜底。
+pub(crate) async fn with_credential_lock<T>(future: impl std::future::Future<Output = T>) -> T {
+    let _guard = CREDENTIAL_FLOW_LOCK.lock().await;
+    future.await
 }
 
 /// 测试辅助：把一段载荷签成合法响应。
@@ -357,6 +420,10 @@ mod tests {
 
     fn save_into(secrets: &SecretsStore) -> impl Fn(&str, &str) -> Result<(), ()> + '_ {
         move |key, value| secrets.set(key, value).map_err(|_| ())
+    }
+
+    fn load_from(secrets: &SecretsStore) -> impl Fn(&str) -> Result<Option<String>, ()> + '_ {
+        move |key| secrets.get(key).map_err(|_| ())
     }
 
     fn local_server(conn: &rusqlite::Connection) {
@@ -411,7 +478,7 @@ mod tests {
         let conn = store.conn();
         local_server(&conn);
         let (secrets, dir) = secrets_store();
-        let node = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+        let node = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets), load_from(&secrets)).unwrap();
 
         assert_eq!(node.server_id, "srv_1");
         assert_eq!(node.node_id, "nd_1");
@@ -449,7 +516,7 @@ mod tests {
         let conn = store.conn();
         local_server(&conn);
         let (secrets, dir) = secrets_store();
-        let first = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+        let first = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets), load_from(&secrets)).unwrap();
         assert_eq!(first.node_id, "nd_1");
 
         // 控制面重新签发，node_id 和端口都变了；本地仍以 server_id 为键复用同一行。
@@ -461,7 +528,7 @@ mod tests {
         let signature = sign(&pair, &body);
         let verified =
             verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
-        let second = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+        let second = persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets), load_from(&secrets)).unwrap();
 
         assert_eq!(second.node_id, "nd_1");
         assert_eq!(second.server_id, "srv_1");
@@ -513,6 +580,7 @@ mod tests {
             &other_public,
             "cp-test",
             save_into(&secrets),
+            load_from(&secrets),
         )
         .unwrap_err();
         assert_eq!(error.reason(), Some("credential_signature_invalid"));
@@ -564,6 +632,7 @@ mod tests {
                 &public,
                 "cp-test",
                 save_into(&secrets),
+                load_from(&secrets),
             )
             .unwrap_err();
             assert_eq!(error.reason(), Some("invalid_response"), "{field}");
@@ -595,7 +664,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let conn = store.conn();
         local_server(&conn);
-        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(())).unwrap_err();
+        let error =
+            persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(()), |_| Ok(None)).unwrap_err();
         assert_eq!(error.reason(), Some("internal"));
 
         // 新节点还没写进密码，不能留在节点池里；服务器也不该关联它。
@@ -623,7 +693,7 @@ mod tests {
         let conn = store.conn();
         local_server(&conn);
         let (secrets, dir) = secrets_store();
-        persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets)).unwrap();
+        persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets), load_from(&secrets)).unwrap();
 
         // 控制面换发：新 node_id、新密码；覆盖写密码失败时旧密码与旧节点必须保留。
         let mut value: serde_json::Value = serde_json::from_str(&payload("srv_1")).unwrap();
@@ -633,7 +703,7 @@ mod tests {
         let signature = sign(&pair, &body);
         let verified =
             verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
-        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(())).unwrap_err();
+        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(()), load_from(&secrets)).unwrap_err();
         assert_eq!(error.reason(), Some("internal"));
 
         assert!(crate::store::configs::get_node(&conn, "nd_2")
@@ -656,6 +726,121 @@ mod tests {
             Some("nd_1")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_secret_write_rolls_the_port_back_too() {
+        let (pair, public) = keypair();
+        let body = payload("srv_1");
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        persist_with(&conn, Some("Tokyo"), &verified, save_into(&secrets), load_from(&secrets)).unwrap();
+
+        // 端口与密码都变了；密码写失败时端口也必须回到旧值。
+        let mut value: serde_json::Value = serde_json::from_str(&payload("srv_1")).unwrap();
+        value["port"] = json!(20443);
+        value["password"] = json!("rotated-password");
+        let body = value.to_string();
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+        let error = persist_with(&conn, Some("Tokyo"), &verified, |_, _| Err(()), load_from(&secrets)).unwrap_err();
+        assert_eq!(error.reason(), Some("internal"));
+
+        let stored = crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.port, 20343, "端口必须回滚成旧值");
+        assert_eq!(
+            secrets.get("node:nd_1").unwrap().as_deref(),
+            Some("s3cret-password"),
+            "旧密码仍在"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一份凭据再取一次：host/port/method/密码都没变时不 upsert、不写密码。
+    #[test]
+    fn an_unchanged_credential_writes_nothing() {
+        let (pair, public) = keypair();
+        let body = payload("srv_1");
+        let signature = sign(&pair, &body);
+        let verified =
+            verify_with(&public, "cp-test", "srv_1", &body, &signature, "cp-test").unwrap();
+
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        local_server(&conn);
+        let (secrets, dir) = secrets_store();
+        persist_with(
+            &conn,
+            Some("Tokyo"),
+            &verified,
+            save_into(&secrets),
+            load_from(&secrets),
+        )
+        .unwrap();
+
+        let writes = std::cell::Cell::new(0);
+        // 故意换一个 server_name：如果走了 upsert，节点名会被改掉。
+        let saved = persist_with(
+            &conn,
+            Some("Renamed"),
+            &verified,
+            |key, value| {
+                writes.set(writes.get() + 1);
+                secrets.set(key, value).map_err(|_| ())
+            },
+            load_from(&secrets),
+        )
+        .unwrap();
+        assert_eq!(writes.get(), 0, "没变化不能写密码");
+        assert_eq!(saved.node_id, "nd_1");
+        let stored = crate::store::configs::get_node(&conn, "nd_1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.name, "Tokyo", "没变化不能 upsert");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 凭据流程全局串行：第一个还持锁时，第二个进不来。
+    #[tokio::test]
+    async fn credential_flows_run_one_at_a_time() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let holder = tokio::spawn(async move {
+            with_credential_lock(async move {
+                let _ = entered_tx.send(());
+                let _ = release_rx.await;
+            })
+            .await;
+        });
+        entered_rx.await.unwrap();
+
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let waiter = tokio::spawn(async move {
+            with_credential_lock(async move {
+                let _ = second_tx.send(());
+            })
+            .await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            second_rx.try_recv().is_err(),
+            "第一个释放前第二个不能进入"
+        );
+
+        release_tx.send(()).unwrap();
+        second_rx.recv().await.expect("释放后第二个必须进入");
+        holder.await.unwrap();
+        waiter.await.unwrap();
     }
 
     #[test]
