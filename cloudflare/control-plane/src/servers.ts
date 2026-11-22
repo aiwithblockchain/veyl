@@ -1331,15 +1331,32 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
       JSON.stringify({ host: row.ip, port, password, method: "aes-256-gcm" }),
     );
     const now = Date.now();
-    // 先改端口：changes = 0 说明行已销毁（并发销毁），此时绝不能再写凭据把它复活。
-    let updated: { meta?: { changes?: number } };
+    // 端口、凭据、审计必须在同一个事务里：D1 batch 任一步失败整批回滚，
+    // 否则会出现「node_port 已是新值、实际仍是旧凭据」的分歧，直到下次轮换才自愈。
+    // 两个 EXISTS / destroyed_at 守卫保留：行被并发销毁时三件事都不生效。
+    let results: unknown[];
     try {
-      updated = (await db
-        .prepare(
-          "UPDATE servers SET node_port = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL",
-        )
-        .bind(port, now, row.id)
-        .run()) as { meta?: { changes?: number } };
+      results = await db.batch([
+        db
+          .prepare(
+            "UPDATE servers SET node_port = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL",
+          )
+          .bind(port, now, row.id),
+        db
+          .prepare(
+            "INSERT INTO credentials (server_id, key_version, iv, ciphertext, created_at) " +
+              "SELECT ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL) " +
+              "ON CONFLICT(server_id) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext, destroyed_at = NULL",
+          )
+          .bind(row.id, sealed.iv, sealed.ciphertext, now, row.id),
+        db
+          .prepare(
+            "INSERT INTO audit_log (at, account_id, server_id, action, detail) " +
+              "SELECT ?, ?, ?, 'server.rotated', ? " +
+              "WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL)",
+          )
+          .bind(now, row.account_id, row.id, JSON.stringify({ port }), row.id),
+      ]);
     } catch (error) {
       // 唯一索引兜底：同账户其它活着的服务器占着这个端口。
       const message = String((error as Error)?.message ?? error).toLowerCase();
@@ -1349,35 +1366,14 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
       console.warn(`[servers] rotation_failed server=${row.id} error=${String(error)}`);
       return agentJson({ ok: false, reason: "rotation_failed" }, 500);
     }
-    if (Number(updated.meta?.changes ?? 0) !== 1) {
+
+    // changes = 0 说明行已销毁（并发销毁），此时 batch 里的凭据与审计也被守卫跳过。
+    const changed = Number(
+      (results[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+    );
+    if (changed !== 1) {
       return agentJson({ ok: false, reason: "server_destroyed" }, 409);
     }
-
-    try {
-      await db
-        .prepare(
-          "INSERT INTO credentials (server_id, key_version, iv, ciphertext, created_at) " +
-            "SELECT ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL) " +
-            "ON CONFLICT(server_id) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext, destroyed_at = NULL",
-        )
-        .bind(row.id, sealed.iv, sealed.ciphertext, now, row.id)
-        .run();
-    } catch (error) {
-      console.warn(`[servers] rotation_credentials_failed server=${row.id} error=${String(error)}`);
-      return agentJson({ ok: false, reason: "rotation_failed" }, 500);
-    }
-
-    await db
-      .prepare(
-        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.rotated', ?)",
-      )
-      .bind(now, row.account_id, row.id, JSON.stringify({ port }))
-      .run()
-      .catch((error) =>
-        console.warn(
-          `[servers] audit_failed action=server.rotated server=${row.id} error=${String(error)}`,
-        ),
-      );
     return agentJson({ ok: true, port });
   }
 

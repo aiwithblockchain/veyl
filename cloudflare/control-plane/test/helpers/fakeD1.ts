@@ -50,6 +50,8 @@ export class FakeD1 {
   beforeWebhookSample?: () => void;
   /** 测试钩子：建机批次的 servers 插入前触发，用来模拟端口在最后一步才冲突。 */
   beforeServerInsert?: () => void;
+  /** 测试钩子：轮换事务里的凭据重封前触发，用来模拟事务中途失败。 */
+  beforeCredentialInsert?: () => void;
   /** 测试钩子：结算失败认领订单前触发，用来模拟「并发结算已经把订单置 ready」。 */
   beforeSettleClaim?: () => void;
 
@@ -252,6 +254,23 @@ export class FakeD1 {
         created_at: a[6],
         last_seen_at: a[7],
         revoked_at: null,
+      });
+      return null;
+    }
+    if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from servers")) {
+      // 带存活守卫的审计（server.rotated）：行已销毁时不落痕。
+      const [at, accountId, serverId, detail, guardId] = a;
+      const server = this.tables.servers.find(
+        (row) => row.id === guardId && row.destroyed_at == null,
+      );
+      if (!server) return null;
+      const literal = /'([a-z_.]+)'/.exec(sql)?.[1];
+      this.tables.audit_log.push({
+        at,
+        account_id: accountId,
+        server_id: serverId,
+        action: literal ?? "server.rotated",
+        detail,
       });
       return null;
     }
@@ -986,7 +1005,16 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("insert into credentials")) {
+      this.beforeCredentialInsert?.();
       const serverId = a[0];
+      // SELECT … WHERE EXISTS 形态带存活守卫：行已销毁时这条不写。
+      if (sql.includes("where exists (select 1 from servers")) {
+        const guardId = a[a.length - 1];
+        const server = this.tables.servers.find(
+          (row) => row.id === guardId && row.destroyed_at == null,
+        );
+        if (!server) return null;
+      }
       // 两种写法：key_version 硬编码为 1（values 或 select 形态）或走占位符。
       const literalKeyVersion = sql.includes(", 1, ?, ?, ?");
       const existing = this.tables.credentials.find((c) => c.server_id === serverId);

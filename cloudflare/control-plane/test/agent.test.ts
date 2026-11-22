@@ -494,6 +494,31 @@ describe("POST /v1/agent/report · rotated", () => {
     expect(String(audit?.detail)).not.toContain("p".repeat(32));
   });
 
+  it("同一事务里凭据重封失败：node_port 不生效，返回非 2xx", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const serverToken = await seedAgentToken(db);
+    db.beforeCredentialInsert = () => {
+      db.beforeCredentialInsert = undefined;
+      throw new Error("disk full");
+    };
+
+    const res = await handleServers(
+      reportRequest(serverToken, {
+        stage: "rotated",
+        port: 30500,
+        password: "p".repeat(32),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(500);
+    expect(((await res!.json()) as { reason: string }).reason).toBe("rotation_failed");
+    // 事务回滚：端口仍是旧值，审计也没有落。
+    expect(db.rows("servers")[0].node_port).toBe(30412);
+    expect(db.rows("audit_log").some((row) => row.action === "server.rotated")).toBe(false);
+  });
+
   it("端口越界、密码过短、端口被同账户占用都 409，且不销毁", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());
