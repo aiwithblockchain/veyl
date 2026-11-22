@@ -77,6 +77,7 @@ export type ChatAction =
   | { type: "send_user_message"; sessionId: string; text: string; localRequestId: string }
   | { type: "start_hidden_request"; sessionId: string; localRequestId: string }
   | { type: "append_user_message"; sessionId: string; text: string }
+  | { type: "append_system_message"; sessionId: string; text: string }
   | { type: "request_pending"; sessionId: string }
   | {
       type: "request_started";
@@ -447,6 +448,27 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         messages: [
           ...session.messages,
           { id: nextId("user"), role: "user", text: action.text, at: now },
+        ],
+      }));
+    }
+
+    // 本地系统行：不进模型、不触发请求（例如修复成功后的提示）。
+    case "append_system_message": {
+      const target = state.sessions.find((session) => session.id === action.sessionId);
+      if (!target || action.text.length === 0) return state;
+      const now = Date.now();
+      return patchSession(state, target.id, (session) => ({
+        ...session,
+        updatedAt: now,
+        messages: [
+          ...session.messages,
+          {
+            id: nextId("system"),
+            role: "system",
+            level: "info",
+            text: action.text,
+            at: now,
+          },
         ],
       }));
     }

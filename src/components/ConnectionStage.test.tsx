@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConfigConnectMode,
@@ -9,6 +9,9 @@ import type {
 } from "../agent/protocol";import { emptyRuntimeView } from "../agent/bridge";
 import type { NodeProbesController } from "../config/useNodeProbes";
 import { ConnectionStage, type PendingServerNode } from "./ConnectionStage";
+import { uiLog } from "../log/uiLog";
+
+vi.mock("../log/uiLog", () => ({ uiLog: vi.fn() }));
 
 afterEach(cleanup);
 
@@ -176,6 +179,16 @@ interface StageOverrides {
   onReportProblem?: () => void;
   reportBusy?: boolean;
   onAskAi?: (prompt: string) => void;
+  onAskAiAboutNode?: (nodeId: string, prompt: string) => void;
+  serverIdForNode?: (nodeId: string) => string | null;
+  onRepairCredentials?: (serverId: string) => Promise<{ port: number }>;
+  onSyncCredentials?: (serverId: string) => Promise<number | null>;
+  onGoServers?: () => void;
+  onRepaired?: (info: {
+    nodeId: string;
+    name: string;
+    latencyMs: number;
+  }) => void;
   pendingServerNodes?: PendingServerNode[];
 }
 
@@ -205,6 +218,12 @@ function stageElement(over: StageOverrides = {}) {
       onReportProblem={over.onReportProblem}
       reportBusy={over.reportBusy}
       onAskAi={over.onAskAi}
+      onAskAiAboutNode={over.onAskAiAboutNode}
+      serverIdForNode={over.serverIdForNode}
+      onRepairCredentials={over.onRepairCredentials}
+      onSyncCredentials={over.onSyncCredentials}
+      onGoServers={over.onGoServers}
+      onRepaired={over.onRepaired}
       pendingServerNodes={over.pendingServerNodes}
     />
   );
@@ -2263,7 +2282,7 @@ describe("停机删除的悬挂节点", () => {
   });
 });
 
-describe("测不通问AI", () => {
+describe("测不通时的两个动作", () => {
   const OWNED: ConfigDetail["nodes"][number] = {
     ...CONFIG.nodes[1],
     node_id: "o1",
@@ -2278,8 +2297,11 @@ describe("测不通问AI", () => {
     return { ...CONFIG, node_count: nodes.length, current_node_id: current, nodes };
   }
 
-  it("测不通的行给出「测不通问AI」：点了发带节点名的提示，不切节点", () => {
+  const mapServer = (nodeId: string) => (nodeId === "o1" ? "srv_o1" : null);
+
+  it("自有坏行给出「智能修复 · 问 AI」：问 AI 带节点 id 与提示，不切节点", () => {
     const onAskAi = vi.fn();
+    const onAskAiAboutNode = vi.fn();
     const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
     renderStage({
       config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
@@ -2287,131 +2309,650 @@ describe("测不通问AI", () => {
         results: { o1: failedProbe("o1"), n1: probeResult("n1", 42) },
       }),
       onAskAi,
+      onAskAiAboutNode,
+      serverIdForNode: mapServer,
+      onRepairCredentials: async () => ({ port: 8555 }),
       onSwitchNode,
     });
 
     const rows = screen.getAllByRole("option");
-    // 正常行没有入口，只有测不通的那行有。
+    expect(within(rows[1]).queryByRole("button", { name: /问 AI/ })).toBeNull();
     expect(
-      within(rows[1]).queryByRole("button", { name: "测不通问AI" }),
-    ).toBeNull();
-    const ask = within(rows[0]).getByRole("button", { name: "测不通问AI" });
-    expect(ask.tagName).toBe("BUTTON");
+      within(rows[0]).getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+    const ask = within(rows[0]).getByRole("button", {
+      name: "就悉尼0.2u测不通咨询 AI",
+    });
 
     fireEvent.click(ask);
-    expect(onAskAi).toHaveBeenCalledTimes(1);
-    const prompt = String(onAskAi.mock.calls[0][0]);
-    expect(prompt).toContain("悉尼0.2u");
-    expect(prompt).toContain("测不通");
-    expect(prompt).toContain("智能恢复");
-    expect(prompt).toContain("销毁重建");
+    expect(onAskAi).not.toHaveBeenCalled();
+    expect(onAskAiAboutNode).toHaveBeenCalledTimes(1);
+    const [nodeId, prompt] = onAskAiAboutNode.mock.calls[0];
+    expect(nodeId).toBe("o1");
+    expect(String(prompt)).toContain("悉尼0.2u");
+    expect(String(prompt)).toContain("智能恢复");
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
-    expect(rows[1].getAttribute("aria-selected")).toBe("false");
   });
 
-  it("免费种子节点测不通：不出现入口，仍写纯文本「测不通」", () => {
+  it("没有 onAskAiAboutNode 时退回 onAskAi", () => {
     const onAskAi = vi.fn();
-    renderStage({
-      config: withNodes(
-        [CONFIG.nodes[0], CONFIG.nodes[1]],
-        CONFIG.nodes[0].node_id,
-      ),
-      nodeProbes: probes({
-        results: { n1: failedProbe("n1"), n2: probeResult("n2", 42) },
-      }),
-      onAskAi,
-    });
-
-    const rows = screen.getAllByRole("option");
-    expect(
-      within(rows[0]).queryByRole("button", { name: "测不通问AI" }),
-    ).toBeNull();
-    expect(rows[0].querySelector(".stage-node__ms")?.textContent).toBe("测不通");
-  });
-
-  it("点行的其它区域仍然选中该节点，不触发 AI", () => {
-    const onAskAi = vi.fn();
-    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
-    renderStage({
-      config: withNodes([OWNED, CONFIG.nodes[0]], CONFIG.nodes[0].node_id),
-      nodeProbes: probes({
-        results: { o1: failedProbe("o1"), n1: probeResult("n1", 42) },
-      }),
-      onAskAi,
-      onSwitchNode,
-    });
-
-    const rows = screen.getAllByRole("option");
-    fireEvent.click(rows[0].querySelector(".stage-node__name") as HTMLElement);
-    // 未连接时点行只做本地选中，不切隧道。
-    expect(rows[0].getAttribute("aria-selected")).toBe("true");
-    expect(onAskAi).not.toHaveBeenCalled();
-  });
-
-  it("行是键盘可达的容器，AI 入口是原生按钮", () => {
-    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
     renderStage({
       config: withNodes([OWNED], OWNED.node_id),
       nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
-      onAskAi: vi.fn(),
-      onSwitchNode,
+      onAskAi,
+      serverIdForNode: mapServer,
+      onRepairCredentials: async () => ({ port: 1 }),
     });
 
-    const row = screen.getAllByRole("option")[0];
-    expect(row.getAttribute("tabindex")).toBe("0");
-    fireEvent.keyDown(row, { key: "Enter" });
-    expect(row.getAttribute("aria-selected")).toBe("true");
-    // 真按钮：没有覆盖 tabIndex，跟随原生 Tab 顺序。
-    expect(
-      within(row).getByRole("button", { name: "测不通问AI" }).getAttribute(
-        "tabindex",
-      ),
-    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "就悉尼0.2u测不通咨询 AI" }),
+    );
+    expect(onAskAi).toHaveBeenCalledTimes(1);
   });
 
-  it("延迟、未测、测速中、到期、停机删除都不出现入口", () => {
-    const onAskAi = vi.fn();
-
+  it("免费节点、无服务器映射、未测、测速中、到期、停机删除都不出现入口", () => {
+    const base = {
+      onAskAi: vi.fn(),
+      onRepairCredentials: async () => ({ port: 1 }),
+    };
+    // 免费种子测不通
     renderStage({
-      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      config: withNodes([CONFIG.nodes[0], CONFIG.nodes[1]], CONFIG.nodes[0].node_id),
       nodeProbes: probes({
-        results: { o1: probeResult("o1", 42), n1: untestedProbe("n1") },
+        results: { n1: failedProbe("n1"), n2: probeResult("n2", 42) },
       }),
-      onAskAi,
+      serverIdForNode: mapServer,
+      ...base,
     });
-    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
     cleanup();
 
-    // 测速中：旧结果还是测不通，但这一行正在测，先不出现入口。
+    // 自有但查不到服务器
     renderStage({
-      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      config: withNodes([OWNED], OWNED.node_id),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      serverIdForNode: () => null,
+      ...base,
+    });
+    expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
+    cleanup();
+
+    // 延迟 / 未测
+    for (const result of [probeResult("o1", 42), untestedProbe("o1")]) {
+      renderStage({
+        config: withNodes([OWNED], OWNED.node_id),
+        nodeProbes: probes({ results: { o1: result } }),
+        serverIdForNode: mapServer,
+        ...base,
+      });
+      expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
+      cleanup();
+    }
+
+    // 测速中
+    renderStage({
+      config: withNodes([OWNED], OWNED.node_id),
       nodeProbes: probes({
         probing: new Set(["o1"]),
         results: { o1: failedProbe("o1") },
       }),
-      onAskAi,
+      serverIdForNode: mapServer,
+      ...base,
     });
-    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
     cleanup();
 
+    // 到期 seed（owned 节点不会过期）
     renderStage({
       config: withNodes([CONFIG.nodes[0], CONFIG.nodes[1]], CONFIG.nodes[1].node_id),
       trialExpiresAt: new Date(Date.now() - 1000).toISOString(),
       nodeProbes: probes({
         results: { n1: failedProbe("n1"), n2: failedProbe("n2") },
       }),
-      onAskAi,
+      serverIdForNode: mapServer,
+      ...base,
     });
-    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
+    cleanup();
+
+    // 停机删除
+    renderStage({
+      config: withNodes([OWNED], OWNED.node_id),
+      danglingNodeIds: new Set(["o1"]),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      serverIdForNode: mapServer,
+      ...base,
+    });
+    expect(screen.queryByRole("button", { name: /智能修复/ })).toBeNull();
+  });
+
+  it("点智能修复先确认：默认焦点取消，Esc 不调用命令；确认后传 server id", async () => {
+    const onRepairCredentials = vi.fn(async () => ({ port: 8555 }));
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      onAskAi: vi.fn(),
+      serverIdForNode: mapServer,
+      onRepairCredentials,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("节点会重启一次");
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(onRepairCredentials).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
+    await waitFor(() =>
+      expect(onRepairCredentials).toHaveBeenCalledWith("srv_o1"),
+    );
+  });
+
+  it("修复中行内只留「正在修复…」，两行动作与行切换都禁用", async () => {
+    let release: (value: { port: number }) => void = () => {};
+    const pending = new Promise<{ port: number }>((resolve) => {
+      release = resolve;
+    });
+    const OTHER: ConfigDetail["nodes"][number] = {
+      ...OWNED,
+      node_id: "o2",
+      name: "墨尔本0.5u",
+    };
+    const both = (nodeId: string) =>
+      nodeId === "o1" ? "srv_o1" : nodeId === "o2" ? "srv_o2" : null;
+    renderStage({
+      config: withNodes([OWNED, OTHER], OWNED.node_id),
+      nodeProbes: probes({
+        results: { o1: failedProbe("o1"), o2: failedProbe("o2") },
+      }),
+      onAskAi: vi.fn(),
+      serverIdForNode: both,
+      onRepairCredentials: () => pending,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
+
+    expect(await screen.findByText("正在修复…")).toBeTruthy();
+    const rows = screen.getAllByRole("option");
+    expect(
+      within(rows[0]).queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeNull();
+    // 修复中的行不可切换；另一行的两个动作也被禁用。
+    expect(rows[0].getAttribute("aria-disabled")).toBe("true");
+    expect(
+      within(rows[1]).getByRole("button", { name: "对墨尔本0.5u执行智能修复" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+    expect(
+      within(rows[1]).getByRole("button", { name: "就墨尔本0.5u测不通咨询 AI" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+
+    await act(async () => {
+      release({ port: 8555 });
+    });
+    expect(await screen.findByText(/已修复，端口 8555/)).toBeTruthy();
+  });
+
+  it("成功后自动重测：结果回来收起底部那行并通知 App", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onRepaired = vi.fn();
+    const first = probes({
+      results: { o1: failedProbe("o1") },
+      start,
+    });
+    const view = render(
+      stageElement({
+        config: withNodes([OWNED], OWNED.node_id),
+        nodeProbes: first,
+        onAskAi: vi.fn(),
+        serverIdForNode: mapServer,
+        onRepairCredentials: async () => ({ port: 8555 }),
+        onRepaired,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(start).toHaveBeenCalledWith("cfg_1", ["o1"]),
+    );
+    expect(await screen.findByText(/正在重新测速/)).toBeTruthy();
+
+    view.rerender(
+      stageElement({
+        config: withNodes([OWNED], OWNED.node_id),
+        nodeProbes: probes({
+          results: { o1: probeResult("o1", 42) },
+          start,
+        }),
+        onAskAi: vi.fn(),
+        serverIdForNode: mapServer,
+        onRepairCredentials: async () => ({ port: 8555 }),
+        onRepaired,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(onRepaired).toHaveBeenCalledWith({
+        nodeId: "o1",
+        name: "悉尼0.2u",
+        latencyMs: 42,
+      }),
+    );
+    expect(screen.queryByText(/正在重新测速/)).toBeNull();
+    expect(
+      screen.getAllByRole("option")[0].querySelector(".stage-node__ms")
+        ?.textContent,
+    ).toBe("42 毫秒");
+  });
+
+  it("失败按 reason 给文案；auth 类附「去我的服务器」", async () => {
+    const onGoServers = vi.fn();
+    renderStage({
+      config: withNodes([OWNED], OWNED.node_id),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      onAskAi: vi.fn(),
+      serverIdForNode: mapServer,
+      onRepairCredentials: async () => {
+        throw { code: "INTERNAL", message: "agent_token_rejected" };
+      },
+      onGoServers,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
+
+    const note = await screen.findByText(/悉尼0.2u：无法与这台服务器建立可信连接/);
+    expect(note).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "去我的服务器" }));
+    expect(onGoServers).toHaveBeenCalledTimes(1);
+    // 失败后两个动作恢复可点。
+    expect(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+  });
+
+  it("超时类失败只留文字，不给「去我的服务器」", async () => {
+    renderStage({
+      config: withNodes([OWNED], OWNED.node_id),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      onAskAi: vi.fn(),
+      serverIdForNode: mapServer,
+      onRepairCredentials: async () => {
+        throw { code: "INTERNAL", message: "agent_timeout" };
+      },
+      onGoServers: vi.fn(),
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
+
+    expect(
+      await screen.findByText(/悉尼0.2u：服务器暂时连不上/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去我的服务器" })).toBeNull();
+  });
+
+  it("七类 reason 合成 5 组文案；只有 auth 与 agentFailed 给「去我的服务器」", async () => {
+    const cases: Array<[string, RegExp, boolean]> = [
+      ["agent_token_unavailable", /控制面暂时不可达/, false],
+      ["agent_tls_untrusted", /无法与这台服务器建立可信连接/, true],
+      ["agent_token_rejected", /无法与这台服务器建立可信连接/, true],
+      ["agent_timeout", /服务器暂时连不上/, false],
+      ["agent_unreachable", /服务器暂时连不上/, false],
+      ["agent_tool_failed", /节点 agent 没完成修复/, true],
+      ["agent_bad_response", /节点 agent 没完成修复/, true],
+      ["something_else", /智能修复没完成/, false],
+    ];
+    for (const [reason, pattern, showServers] of cases) {
+      renderStage({
+        config: withNodes([OWNED], OWNED.node_id),
+        nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+        onAskAi: vi.fn(),
+        serverIdForNode: mapServer,
+        onRepairCredentials: async () => {
+          throw { code: "INTERNAL", message: reason };
+        },
+        onGoServers: vi.fn(),
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+      );
+      fireEvent.click(
+        within(screen.getByRole("alertdialog")).getByRole("button", {
+          name: "智能修复",
+        }),
+      );
+      expect(await screen.findByText(pattern)).toBeTruthy();
+      expect(
+        screen.queryByRole("button", { name: "去我的服务器" }) !== null,
+      ).toBe(showServers);
+      cleanup();
+    }
+  });
+
+  it("点行的其它区域仍然选中该节点，不触发动作", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], CONFIG.nodes[0].node_id),
+      nodeProbes: probes({
+        results: { o1: failedProbe("o1"), n1: probeResult("n1", 42) },
+      }),
+      onAskAi: vi.fn(),
+      serverIdForNode: mapServer,
+      onRepairCredentials: async () => ({ port: 1 }),
+      onSwitchNode,
+    });
+
+    const rows = screen.getAllByRole("option");
+    fireEvent.click(rows[0].querySelector(".stage-node__name") as HTMLElement);
+    expect(rows[0].getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("测不通先静默同步凭据", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    ...CONFIG.nodes[1],
+    node_id: "o1",
+    name: "悉尼0.2u",
+    source: "owned",
+    port: 8388,
+  };
+
+  function withNodes(
+    nodes: ConfigDetail["nodes"],
+    current: string | null = nodes[0]?.node_id ?? null,
+  ): ConfigDetail {
+    return { ...CONFIG, node_count: nodes.length, current_node_id: current, nodes };
+  }
+
+  const base = {
+    config: withNodes([OWNED], OWNED.node_id),
+    nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+    onAskAi: vi.fn(),
+    serverIdForNode: (nodeId: string) => (nodeId === "o1" ? "srv_o1" : null),
+    onRepairCredentials: async () => ({ port: 1 }),
+  };
+
+  it("取回成功就重测一次（端口没变也测）；通过只显示已恢复，不说配置更新", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => 8388);
+    const view = render(
+      stageElement({
+        ...base,
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+        onSyncCredentials,
+      }),
+    );
+
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalledWith("srv_o1"));
+    await waitFor(() => expect(start).toHaveBeenCalledWith("cfg_1", ["o1"]));
+
+    // 重测通过：行内只写「已恢复」，不出现配置更新提示。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: {
+            o1: { ...probeResult("o1", 42), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+        onSyncCredentials,
+      }),
+    );
+    expect(await screen.findByText("已恢复")).toBeTruthy();
+    expect(screen.queryByText(/配置已更新/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeNull();
+  });
+
+  it("端口变了且重测通过：已恢复 + 一句「配置已更新，连接已恢复」", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => 9000);
+    const view = render(
+      stageElement({
+        ...base,
+        onSyncCredentials,
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      }),
+    );
+
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalled());
+
+    view.rerender(
+      stageElement({
+        ...base,
+        config: withNodes([{ ...OWNED, port: 9000 }], OWNED.node_id),
+        onSyncCredentials,
+        nodeProbes: probes({
+          results: {
+            o1: { ...probeResult("o1", 42), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+      }),
+    );
+
+    expect(await screen.findByText("已恢复")).toBeTruthy();
+    expect(await screen.findByText("配置已更新，连接已恢复")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeNull();
+  });
+
+  it("取回成功但重测仍失败：出现修复入口，并记 no_change 日志", async () => {
+    vi.mocked(uiLog).mockClear();
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => 9000);
+    const view = render(
+      stageElement({
+        ...base,
+        onSyncCredentials,
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      }),
+    );
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalled());
+
+    view.rerender(
+      stageElement({
+        ...base,
+        config: withNodes([{ ...OWNED, port: 9000 }], OWNED.node_id),
+        onSyncCredentials,
+        nodeProbes: probes({
+          results: {
+            o1: { ...failedProbe("o1"), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/配置已更新/)).toBeNull();
+    expect(vi.mocked(uiLog)).toHaveBeenCalledWith(
+      "debug",
+      "sync no_change node=o1 port_changed=true",
+      "node-sync",
+    );
+  });
+
+  it("同步中：行内写「正在更新配置…」，不出现动作", async () => {
+    let release: (value: number | null) => void = () => {};
+    const pending = new Promise<number | null>((resolve) => {
+      release = resolve;
+    });
+    renderStage({ ...base, onSyncCredentials: () => pending });
+
+    expect(await screen.findByText("正在更新配置…")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeNull();
+
+    await act(async () => {
+      release(8388);
+    });
+    // 重测仍是失败：回到修复入口。
+    cleanup();
+  });
+
+  it("控制面不可达：不弹错误，直接给修复入口并记 failed 日志", async () => {
+    vi.mocked(uiLog).mockClear();
+    const onSyncCredentials = vi.fn(async () => {
+      throw { code: "NETWORK", message: "连不上" };
+    });
+    renderStage({ ...base, onSyncCredentials });
+
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/控制面暂时不可达/)).toBeNull();
+    expect(screen.queryByText("连不上")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(vi.mocked(uiLog)).toHaveBeenCalledWith(
+      "warn",
+      "sync failed node=o1",
+      "node-sync",
+    );
+  });
+
+  it("未测 / 测速中不触发同步", () => {
+    const onSyncCredentials = vi.fn(async () => 9000);
+    renderStage({
+      ...base,
+      nodeProbes: probes({ results: { o1: untestedProbe("o1") } }),
+      onSyncCredentials,
+    });
+    expect(onSyncCredentials).not.toHaveBeenCalled();
     cleanup();
 
     renderStage({
-      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
-      danglingNodeIds: new Set(["o1"]),
-      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
-      onAskAi,
+      ...base,
+      nodeProbes: probes({
+        probing: new Set(["o1"]),
+        results: { o1: failedProbe("o1") },
+      }),
+      onSyncCredentials,
     });
-    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    expect(onSyncCredentials).not.toHaveBeenCalled();
+  });
+
+  it("确认弹窗的「先更新配置」：再同步一次并关闭弹窗", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => {
+      throw { code: "NETWORK", message: "连不上" };
+    });
+    renderStage({
+      ...base,
+      nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      onSyncCredentials,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "先更新配置" }),
+    );
+
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+  });
+});
+
+describe("静默同步的等待上限", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    ...CONFIG.nodes[1],
+    node_id: "o1",
+    name: "悉尼0.2u",
+    source: "owned",
+    port: 8388,
+  };
+  const base = {
+    config: { ...CONFIG, node_count: 1, current_node_id: "o1", nodes: [OWNED] },
+    nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+    onAskAi: vi.fn(),
+    serverIdForNode: (nodeId: string) => (nodeId === "o1" ? "srv_o1" : null),
+    onRepairCredentials: async () => ({ port: 1 }),
+  };
+
+  it("22 秒没有结果：不作为失败，出现修复入口且不显示错误文案", async () => {
+    vi.mocked(uiLog).mockClear();
+    vi.useFakeTimers();
+    try {
+      renderStage({ ...base, onSyncCredentials: () => new Promise(() => {}) });
+      await act(async () => {});
+      expect(screen.getByText("正在更新配置…")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(21_000);
+      });
+      expect(
+        screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+      ).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(
+        screen.getByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+      ).toBeTruthy();
+      expect(screen.queryByText(/更新失败|同步失败|配置没更新/)).toBeNull();
+      expect(vi.mocked(uiLog)).toHaveBeenCalledWith(
+        "warn",
+        "sync timeout node=o1",
+        "node-sync",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

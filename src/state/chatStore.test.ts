@@ -899,6 +899,28 @@ describe("追问回答追加", () => {
 
     expect(activeSession(state)!.messages).toHaveLength(before);
   });
+
+  it("本地系统行只追加消息，不动请求状态", () => {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    const before = activeSession(state)!;
+
+    state = chatReducer(state, {
+      type: "append_system_message",
+      sessionId,
+      text: "已对「东京 01」执行智能修复。",
+    });
+
+    const after = activeSession(state)!;
+    expect(after.messages).toHaveLength(before.messages.length + 1);
+    expect(after.messages[after.messages.length - 1]).toMatchObject({
+      role: "system",
+      level: "info",
+      text: "已对「东京 01」执行智能修复。",
+    });
+    expect(after.requesting).toBe(before.requesting);
+    expect(after.status).toEqual(before.status);
+  });
 });
 
 describe("hidden 开场（问题报告）", () => {

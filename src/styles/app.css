@@ -1446,6 +1446,34 @@ body[data-resizing] {
   color: var(--ink);
 }
 
+/* 单段说明的确认弹窗（连接页智能修复）：380 宽。 */
+.quit-dialog--repair {
+  width: min(380px, calc(100vw - 48px));
+}
+
+.quit-dialog__text {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.quit-dialog__text--hint {
+  margin-top: 10px;
+}
+
+/* 「先更新配置」是正文里的文字链，不占按钮位。 */
+.quit-dialog__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: inherit;
+  color: var(--link);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .quit-dialog__value {
   margin: 0;
   color: var(--ink-2);
@@ -5869,14 +5897,101 @@ details[open] > .settings-fold__summary::before {
 }
 
 /* 测不通的问 AI 入口：一段带下划线的文字链接，不是实心按钮。 */
+/* 行内两个动作：智能修复（600）在前，问 AI（500）在后；都是 13px 文字链。 */
+.stage-node__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.stage-node__repair,
 .stage-node__ask {
+  position: relative;
   flex: 0 0 auto;
   padding: 0;
   border: 0;
   background: none;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.35;
+  color: var(--link);
+  cursor: pointer;
+}
+
+.stage-node__repair {
+  font-weight: 600;
+}
+
+.stage-node__ask {
+  font-weight: 500;
+}
+
+.stage-node__repair:hover,
+.stage-node__repair:focus-visible,
+.stage-node__ask:hover,
+.stage-node__ask:focus-visible {
+  text-decoration: underline;
+}
+
+/* 命中区 ≥44：与「测速」同样的伪元素扩区。 */
+.stage-node__repair::after,
+.stage-node__ask::after {
+  content: "";
+  position: absolute;
+  inset: -14px -8px;
+}
+
+.stage-node__repair[aria-disabled="true"],
+.stage-node__ask[aria-disabled="true"] {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.stage-node__repair[aria-disabled="true"]::after,
+.stage-node__ask[aria-disabled="true"]::after {
+  content: none;
+}
+
+.stage-node__sep {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink-3);
+}
+
+.stage-node__ms.is-done {
+  font-size: 12px;
+  color: var(--link);
+}
+
+/* 窄容器：动作整体换到行内第二行（只发生在坏 + 自有的行）。 */
+.stage-card__nodes {
+  container-type: inline-size;
+}
+
+@container (max-width: 319px) {
+  .stage-node:has(.stage-node__actions) {
+    height: auto;
+    min-height: 48px;
+    padding-block: 8px;
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .stage-node__actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* 底部一行失败原因里的「去我的服务器」：只导航，不做危险操作。 */
+.stage-card__repair-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: inherit;
   color: var(--link);
   text-decoration: underline;
   cursor: pointer;

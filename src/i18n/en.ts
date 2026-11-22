@@ -551,6 +551,25 @@ export const en: Record<MessageKey, string> = {
   "console.node.pendingNote": "Available after reconnecting",
   "console.node.askAi": "Ask AI",
   "console.node.probeFailedAria": "Didn't connect this time",
+  "connection.repair.done": "Repaired",
+  "connection.repair.probing": "Repaired. Port {port}; re-testing…",
+  "connection.repair.ariaRepair": "Run smart repair on {name}",
+  "connection.repair.ariaAsk": "Ask AI about {name} being unreachable",
+  "connection.repair.goServers": "Open My servers",
+  "connection.repair.sync": "Update config first",
+  "connection.repair.syncHint": "Used this node on another device?",
+  "connection.repair.syncing": "Updating configuration…",
+  "connection.repair.recovered": "Restored",
+  "connection.repair.updated": "Configuration updated; connection restored",
+  "connection.repair.title": "Repair this node?",
+  "connection.repair.body":
+    "The node restarts once; its port and password will change. Devices currently using it disconnect briefly, and other devices need to update their config before they can keep using it.",
+  "connection.repair.auth":
+    "Couldn't establish a trusted connection to this server. Smart repair isn't available.",
+  "connection.repair.agentFailed":
+    "The node agent couldn't finish the repair.",
+  "connection.repair.aiNote":
+    "Ran smart repair on \"{name}\" and re-tested: {latency}.",
   "console.aria.main": "Connection",
   "console.aria.nodes": "Nodes",
   "console.title.nodes": "Nodes",

@@ -43,6 +43,7 @@ import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
 import { collectDanglingNodeIds } from "./myservers/tombstones";
 import { useServerSync } from "./myservers/useServerSync";
 import { uiLog } from "./log/uiLog";
+import { rotateNodeCredentials } from "./myservers/rotateCredentials";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -514,6 +515,8 @@ export default function App() {
   }, [myServers.loggedIn]);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
+  /** 连接页行内「问 AI」最近问的是哪台节点：修复成功后据此决定要不要补一句。 */
+  const lastNodeAskRef = useRef<string | null>(null);
   /** 从「查看账单」拉起的登录：成功后回到账户页。 */
   const pendingBillsRef = useRef<"waiting" | "seen" | null>(null);
   const destinationRef = useRef(destination);
@@ -2034,6 +2037,31 @@ export default function App() {
     return vpn.switchNode(nodeId);
   };
 
+  // 连接页行内「问 AI」：记住问的是哪台，修复成功后据此决定要不要在右栏补一句。
+  const handleAskAiAboutNode = (nodeId: string, prompt: string) => {
+    lastNodeAskRef.current = nodeId;
+    askAiInPanel(prompt);
+  };
+
+  // 修复成功且自动重测有数值时：只在右栏已开、且本轮确实在聊这台节点时补一条系统行。
+  // 不含端口与凭据；面板没开就不打扰，也不写进历史。
+  const handleNodeRepaired = (info: {
+    nodeId: string;
+    name: string;
+    latencyMs: number;
+  }) => {
+    if (!panelOpenRef.current || !session) return;
+    if (lastNodeAskRef.current !== info.nodeId) return;
+    dispatch({
+      type: "append_system_message",
+      sessionId: session.id,
+      text: translate("connection.repair.aiNote", {
+        name: info.name,
+        latency: formatLatency(info.latencyMs),
+      }),
+    });
+  };
+
   // 手动测速：只更新延迟，不改选中/不连接；点击动作随下一条消息上报。
   const handleProbe = () => {
     lastActionRef.current = { id: "client.probe" };
@@ -2723,6 +2751,26 @@ export default function App() {
           onSetConnectMode={handleSetConnectMode}
           onSetRoutingMode={handleSetRoutingMode}
           onAskAi={askAiInPanel}
+          onAskAiAboutNode={handleAskAiAboutNode}
+          serverIdForNode={(nodeId) =>
+            myServers.servers.find((server) => server.local_node_id === nodeId)
+              ?.server_id ?? null
+          }
+          onRepairCredentials={(serverId) =>
+            rotateNodeCredentials(bridge, serverId)
+          }
+          onSyncCredentials={async (serverId) => {
+            try {
+              const node = await bridge.myServerCredentials(serverId);
+              // 落库后重读配置，让节点行拿到新端口再测。
+              vpn.reload();
+              return node.port;
+            } catch {
+              return null;
+            }
+          }}
+          onGoServers={() => changeDestination("servers")}
+          onRepaired={handleNodeRepaired}
         />
       ) : (
         <StartChoice

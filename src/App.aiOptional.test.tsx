@@ -552,11 +552,57 @@ async function failConnection() {
   return screen.findByRole("button", { name: "让 AI 检查" });
 }
 
-/** 自有节点测不通：让行内的「测不通问AI」入口出现。 */
+/** 自有节点测不通：让行内的「智能修复 · 问 AI」入口出现。 */
 function useOwnedUnreachable(): () => void {
   vi.mocked(bridge.configDetail).mockResolvedValue({
     ...DETAIL,
     nodes: [{ ...DETAIL.nodes[0], source: "owned" }],
+  });
+  // 行内动作要能把节点 id 映射到 server id，否则按设计不渲染。
+  vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+    logged_in: true,
+    email: "me@example.com",
+    account_id: "acct_1",
+    device_id: "dev_1",
+    account_kind: "email",
+  });
+  const server: MyServer = {
+    server_id: "srv_tokyo",
+    name: "东京 01",
+    region: "sgp1",
+    plan: "s-1vcpu-1gb",
+    state: "healthy",
+    created_at: new Date(0).toISOString(),
+    ip: "203.0.113.1",
+    port: 8388,
+    node_id: "nd_tokyo",
+    local_node_id: "node_1",
+    hourly_usd: 0.007,
+    monthly_usd: 5,
+    daily_price_cents: 30,
+    paid_until: new Date(86_400_000).toISOString(),
+    billing_state: "active",
+    grace_ends_at: null,
+    transfer_gib: 1000,
+    failure: null,
+  };
+  vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [server] });
+  // 账户已登录：余额读不到会被当成登录过期而清空服务器列表，这里给一个正常值。
+  vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+    balance_cents: 1000,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  });
+  vi.spyOn(bridge, "myServerIdentity").mockResolvedValue({
+    has_identity: true,
+    account_id: "acct_1",
+  });
+  // 定时同步会用它的返回值整体覆盖列表：保持一致，别把映射冲掉。
+  vi.spyOn(bridge, "myServerSync").mockResolvedValue({
+    servers: [server],
+    changed: [],
+    failed: [],
   });
   vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue({
     configId: CONFIG_ID,
@@ -695,7 +741,9 @@ describe("AI 入口双向闸门", () => {
     );
     await waitFor(() => expect(bridge.nodeProbeAll).toHaveBeenCalled());
     emitUnreachable();
-    const button = await screen.findByRole("button", { name: "测不通问AI" });
+    const button = await screen.findByRole("button", {
+      name: "就东京 01测不通咨询 AI",
+    });
 
     fireEvent.click(button);
     expect(
@@ -713,7 +761,9 @@ describe("AI 入口双向闸门", () => {
     await waitForShell();
     await waitFor(() => expect(bridge.nodeProbeAll).toHaveBeenCalled());
     emitUnreachable();
-    const button = await screen.findByRole("button", { name: "测不通问AI" });
+    const button = await screen.findByRole("button", {
+      name: "就东京 01测不通咨询 AI",
+    });
 
     fireEvent.click(button);
     await waitFor(() =>
