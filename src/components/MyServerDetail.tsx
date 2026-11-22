@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
+import { NodeRepairDialog } from "./NodeRepairDialog";
 import { IconPencil } from "./icons";
 import {
   billingNoticeText,
@@ -94,7 +95,6 @@ export function MyServerDetail({
   const [repairConfirming, setRepairConfirming] = useState(false);
   const [repairResult, setRepairResult] = useState<{ port: number } | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
-  const repairCancelRef = useRef<HTMLButtonElement>(null);
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
 
@@ -215,10 +215,6 @@ export function MyServerDetail({
     }
   };
 
-  useEffect(() => {
-    if (repairConfirming) repairCancelRef.current?.focus();
-  }, [repairConfirming]);
-
   const repairErrorText = (err: unknown): string => {
     if (toBridgeError(err).code === "UNSUPPORTED") {
       return tr("detail.repair.unsupported");
@@ -255,6 +251,24 @@ export function MyServerDetail({
       onRotated?.();
     } catch (err) {
       setRepairError(repairErrorText(err));
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  /** 确认弹窗的「先更新配置」：取回最新凭据并重读数据，不换端口。 */
+  const syncCredentials = async () => {
+    if (repairing) return;
+    setRepairConfirming(false);
+    setRepairing(true);
+    setRepairError(null);
+    setRepairResult(null);
+    try {
+      await bridge.myServerCredentials(server.server_id);
+      onChanged();
+      onRotated?.();
+    } catch (err) {
+      setRepairError(errorText(err));
     } finally {
       setRepairing(false);
     }
@@ -548,39 +562,7 @@ export function MyServerDetail({
         <div className="myservers__danger">
           {ready && !readOnly ? (
             <div className="myservers__repair">
-              {repairConfirming ? (
-                <div
-                  className="myservers__confirm"
-                  role="alert"
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      setRepairConfirming(false);
-                    }
-                  }}
-                >
-                  <p>{tr("detail.repair.confirmBody")}</p>
-                  <div className="myservers__actions">
-                    <button
-                      ref={repairCancelRef}
-                      type="button"
-                      className="btn btn--ghost"
-                      disabled={repairing}
-                      onClick={() => setRepairConfirming(false)}
-                    >
-                      {tr("common.cancel")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--danger-ghost"
-                      disabled={repairing}
-                      onClick={() => void repair()}
-                    >
-                      {tr("detail.repair.confirm")}
-                    </button>
-                  </div>
-                </div>
-              ) : (
+              {repairConfirming ? null : (
                 <button
                   type="button"
                   className="btn btn--danger-ghost"
@@ -667,6 +649,14 @@ export function MyServerDetail({
           </button>
         ) : null}
       </div>
+      {repairConfirming ? (
+        <NodeRepairDialog
+          nodeName={server.name}
+          onCancel={() => setRepairConfirming(false)}
+          onConfirm={() => void repair()}
+          onSync={() => void syncCredentials()}
+        />
+      ) : null}
     </div>
   );
 }

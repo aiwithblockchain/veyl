@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { DESTROY_RETRY_MS, MyServerDetail } from "./MyServerDetail";
@@ -997,9 +997,18 @@ describe("智能修复", () => {
     onChanged = vi.fn(),
     onRotated = vi.fn(),
   ) {
+    const credentials = vi.fn(async () => ({
+      server_id: "srv_1",
+      node_id: "nd_control_1",
+      name: "东京 01",
+      host: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+    }));
     const bridge = {
       myServerDestroy: vi.fn(),
       nodeRotateCredentials: rotate,
+      myServerCredentials: credentials,
     } as unknown as AgentBridge;
     render(
       <MyServerDetail
@@ -1014,7 +1023,7 @@ describe("智能修复", () => {
         onRotated={onRotated}
       />,
     );
-    return { onChanged, onRotated, bridge };
+    return { onChanged, onRotated, bridge, credentials };
   }
 
   const ok = () => Promise.resolve({ ok: true as const, port: 8443, refreshed: true });
@@ -1035,18 +1044,17 @@ describe("智能修复", () => {
     }
   });
 
-  it("点击先确认：说明后果，默认焦点在取消，Esc 收起", () => {
+  it("点击先确认：说明后果，默认焦点在取消，Esc 收起", async () => {
     renderRepair(ok);
 
     fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    expect(
-      screen.getByText(/智能修复会重启节点并更换端口/),
-    ).toBeTruthy();
-    const cancel = screen.getByRole("button", { name: "取消" });
-    expect(document.activeElement).toBe(cancel);
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("节点会重启一次");
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
 
-    fireEvent.keyDown(cancel, { key: "Escape" });
-    expect(screen.queryByText(/智能修复会重启节点并更换端口/)).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("确认后调命令：成功显示端口并重读数据", async () => {
@@ -1054,7 +1062,11 @@ describe("智能修复", () => {
     const { onChanged, onRotated } = renderRepair(rotate);
 
     fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
 
     await waitFor(() => expect(rotate).toHaveBeenCalledWith("srv_1"));
     expect(await screen.findByText("已修复，端口 8443")).toBeTruthy();
@@ -1070,7 +1082,11 @@ describe("智能修复", () => {
     renderRepair(() => pending);
 
     fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
 
     expect(await screen.findByText("正在修复…")).toBeTruthy();
     expect(
@@ -1097,7 +1113,11 @@ describe("智能修复", () => {
     for (const [reason, pattern] of cases) {
       renderRepair(() => Promise.reject({ code: "INTERNAL", message: reason }));
       fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-      fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+      fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
       expect(await screen.findByText(pattern)).toBeTruthy();
       cleanup();
     }
@@ -1106,8 +1126,61 @@ describe("智能修复", () => {
   it("Host 还没接命令：明说不支持，不静默失败", async () => {
     renderRepair(undefined);
     fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "智能修复",
+      }),
+    );
 
     expect(await screen.findByText("这个版本还不支持智能修复。")).toBeTruthy();
+  });
+});
+
+describe("详情页「先更新配置」", () => {
+  it("取回凭据并刷新数据，关闭弹窗，不调用修复", async () => {
+    const credentials = vi.fn(async () => ({
+      server_id: "srv_1",
+      node_id: "nd_control_1",
+      name: "东京 01",
+      host: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+    }));
+    const rotate = vi.fn();
+    const onChanged = vi.fn();
+    const onRotated = vi.fn();
+    render(
+      <MyServerDetail
+        bridge={
+          {
+            myServerCredentials: credentials,
+            nodeRotateCredentials: rotate,
+          } as unknown as AgentBridge
+        }
+        server={server()}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        onRotated={onRotated}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "先更新配置",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(credentials).toHaveBeenCalledWith("srv_1"),
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(onRotated).toHaveBeenCalledTimes(1);
+    expect(rotate).not.toHaveBeenCalled();
   });
 });
