@@ -1130,6 +1130,7 @@ export default function App() {
             defaultIndex: detail.defaultIndex,
             upgradeConfirm: detail.upgradeConfirm,
             configSetModeConfirm: detail.configSetModeConfirm,
+            issueSubmitConfirm: detail.issueSubmitConfirm,
           },
         ]);
       }
