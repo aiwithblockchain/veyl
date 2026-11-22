@@ -12,10 +12,10 @@ use tokio::time::MissedTickBehavior;
 use crate::auth;
 use crate::cert;
 use crate::config::AgentConfig;
-use crate::control::{ControlApi, ControlPlane, ControlSession, DesiredState};
+use crate::control::{ControlApi, ControlError, ControlPlane, ControlSession, DesiredState};
 use crate::host::{Host, RealHost};
 use crate::identity::Identity;
-use crate::logging::{self, redact_sensitive};
+use crate::logging::{self, redact_sensitive, FileLogConfig};
 use crate::rotation::{PollOutcome, RotationEngine, Rotator};
 use crate::singbox::SingBox;
 use crate::state::{AgentState, StateStore, StoredDesired};
@@ -24,18 +24,66 @@ use crate::{start_agent_with_certs, AgentHandle};
 /// Production builds compile the control plane's Ed25519 public key in.
 const BUILTIN_SIGNER_PUBKEY: Option<&str> = option_env!("VEYL_AGENT_SIGNER_PUBKEY");
 
+/// How long to wait before touching the control plane again after a 409.
+const TERMINAL_BACKOFF: Duration = Duration::from_secs(600);
+
+enum DesiredFetch {
+    Found(DesiredState),
+    Unavailable,
+    /// 409: the token is dead or the server was destroyed.
+    Terminal(String),
+}
+
+fn is_terminal_control_error(err: &ControlError) -> bool {
+    matches!(err, ControlError::Status { status: 409, .. })
+}
+
+/// The control plane puts the machine-readable cause in the body
+/// (`destroyed`, `expired`, …); keep it verbatim in the log.
+fn terminal_reason(err: &ControlError) -> String {
+    match err {
+        ControlError::Status { status, body } => format!(
+            "HTTP {status}: {}",
+            crate::logging::truncate(&redact_sensitive(body.trim()), 120)
+        ),
+        other => other.to_string(),
+    }
+}
+
 pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Result<()> {
     let mut cfg = AgentConfig::load(config_path)?;
-    logging::init(
+    let log_file = logging::init(
         log_level_override
             .as_deref()
             .unwrap_or(cfg.log_level.as_str()),
+        cfg.log.file.as_ref().map(|path| FileLogConfig {
+            path: path.clone(),
+            max_bytes: cfg.log.max_bytes,
+            keep_files: cfg.log.keep_files,
+        }),
     );
 
+    // Load the persisted state first: the startup banner must say whether this
+    // process is enrolling for the first time or resuming an existing node
+    // (after a console password reset / reboot, that is the first thing to
+    // check).
+    let store = StateStore::new(cfg.state_path());
+    let mut state = store.load_or_recover();
+    let restored = state.server_id.is_some() && state.server_token.is_some();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         config = %config_path.display(),
-        "starting veyl agent"
+        state_file = %cfg.state_path().display(),
+        log_file = %log_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "disabled".to_string()),
+        control_plane = %control_host(&cfg.control_plane_url),
+        control_port = cfg.control_port,
+        mode = if restored { "restored" } else { "cold" },
+        persisted_desired = state.last_desired.is_some(),
+        active_unconfirmed = state.active_unconfirmed,
+        "veyl-agent starting"
     );
 
     // The desktop connects to `https://<public-ip>:32100`; the leaf SAN and the
@@ -63,8 +111,6 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     tracing::info!(ca_fingerprint = %ca_fp, leaf_fingerprint = %leaf_fp, "TLS identity ready");
 
     let plane = ControlPlane::new(&cfg.control_plane_url)?.with_enroll_url(cfg.enroll_url.clone());
-    let store = StateStore::new(cfg.state_path());
-    let mut state = store.load()?;
     if state.cert_fingerprint.as_deref() != Some(leaf_fp.as_str()) {
         state.cert_fingerprint = Some(leaf_fp.clone());
         store.save(&state)?;
@@ -77,16 +123,34 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
 
     let control: Arc<dyn ControlApi> =
         Arc::new(ControlSession::new(plane, server_token));
+    // A 409 means the token is no longer valid for this server (consumed,
+    // expired, or the server was destroyed). Retrying every 30 seconds only
+    // spams the control plane; pause polls and say what the operator must do.
+    let mut poll_paused_until = std::time::Instant::now();
     let desired = match enrolled_desired {
         Some(desired) => Some(desired),
         None => match fetch_desired_with_retries(control.as_ref()).await {
-            Some(desired) => Some(desired),
-            None => {
+            DesiredFetch::Found(desired) => Some(desired),
+            DesiredFetch::Unavailable => {
                 let fallback = state.last_desired.as_ref().map(StoredDesired::to_desired);
                 if fallback.is_some() {
                     tracing::warn!(
                         "control plane unreachable; using the persisted desired state"
                     );
+                }
+                fallback
+            }
+            DesiredFetch::Terminal(message) => {
+                tracing::error!(
+                    status = 409,
+                    reason = %message,
+                    error = %message,
+                    "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
+                );
+                poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
+                let fallback = state.last_desired.as_ref().map(StoredDesired::to_desired);
+                if fallback.is_some() {
+                    tracing::warn!("serving the persisted desired state until the node is rebuilt");
                 }
                 fallback
             }
@@ -108,6 +172,21 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     } else if control_port != configured_control_port {
         cfg.control_port = control_port;
     }
+    if let Some(d) = &desired {
+        tracing::info!(
+            port = d.port,
+            control_port = d.control_port,
+            singbox_version = %d.singbox.version.trim_start_matches('v'),
+            singbox_sha256 = %short_sha(&d.singbox.sha256),
+            "desired state resolved"
+        );
+    }
+    tracing::info!(
+        control_port = cfg.control_port,
+        configured = configured_control_port,
+        source = if desired.is_some() { "desired" } else { "config" },
+        "control port"
+    );
 
     let host: Arc<dyn Host> = Arc::new(RealHost::new()?);
     let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host));
@@ -120,16 +199,6 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         identity.clone(),
     ));
 
-    if let Some(desired) = &desired {
-        tracing::info!(port = desired.port, "checking desired state on startup");
-        if let Err(e) = engine.apply_if_needed(desired, true).await {
-            // Keep running: the control endpoint must stay reachable.
-            tracing::error!(kind = ?e.kind, error = %e.public_message(), "startup apply failed");
-        }
-    } else {
-        tracing::warn!("no desired state at startup; waiting for the poll loop");
-    }
-
     let bind_ip: IpAddr = cfg.control_bind.parse().context("control_bind")?;
     let addr = SocketAddr::new(bind_ip, cfg.control_port);
     if cfg.public_host.is_none() && cfg.allowed_hosts.is_empty() {
@@ -138,15 +207,49 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         );
     }
     let rotator: Arc<dyn Rotator> = engine.clone();
-    let handle: AgentHandle = start_agent_with_certs(
+    // Bind the MCP endpoint *before* the first apply: install/download can take
+    // minutes and the desktop must be able to reach the agent meanwhile.
+    let replay_path = cfg.state_dir.join("jtis.json");
+    let mut handle: AgentHandle = start_agent_with_certs(
         addr,
         identity.clone(),
         &server_id,
         signer,
         rotator,
         false,
+        Some(replay_path),
     )
     .await?;
+
+    tracing::info!(
+        bind = %addr,
+        public_host = %cfg.public_host.as_deref().unwrap_or("<unknown>"),
+        poll_interval_secs = cfg.poll_interval_secs,
+        "agent ready"
+    );
+
+    if let Some(desired) = &desired {
+        tracing::info!(
+            port = desired.port,
+            singbox_version = %desired.singbox.version.trim_start_matches('v'),
+            singbox_sha256 = %short_sha(&desired.singbox.sha256),
+            "checking desired state on startup"
+        );
+        if let Err(e) = engine.apply_if_needed(desired, true).await {
+            // Keep running: the control endpoint must stay reachable.
+            tracing::error!(kind = ?e.kind, error = %e.public_message(), "startup apply failed");
+            if e.is_terminal() {
+                tracing::error!(
+                    status = ?e.status,
+                    reason = %e.public_message(),
+                    "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
+                );
+                poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
+            }
+        }
+    } else {
+        tracing::warn!("no desired state at startup; waiting for the poll loop");
+    }
 
     let mut interval = tokio::time::interval(Duration::from_secs(cfg.poll_interval_secs));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -157,7 +260,27 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                 tracing::info!("shutting down");
                 break;
             }
+            // If the MCP task dies the process must die too, or the unit stays
+            // "active" with nothing listening on 32100.
+            stopped = crate::supervise_mcp(&mut handle.task) => {
+                match stopped {
+                    Ok(()) => tracing::error!(
+                        "MCP server task exited; exiting so systemd restarts the agent"
+                    ),
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "MCP server task stopped; exiting so systemd restarts the agent"
+                    ),
+                }
+                std::process::exit(1);
+            }
             _ = interval.tick() => {
+                if std::time::Instant::now() < poll_paused_until {
+                    tracing::warn!(
+                        "poll paused after a terminal control-plane response; rebuild this node"
+                    );
+                    continue;
+                }
                 // The public IP may have been unavailable at startup. Retry the
                 // metadata probe; on success re-sign the leaf and refresh the
                 // registration so the control plane hands out the new fingerprint.
@@ -188,6 +311,15 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                     Ok(PollOutcome::Applied { port }) => {
                         tracing::info!(port, "desired state applied");
                     }
+                    Err(e) if e.is_terminal() => {
+                        tracing::error!(
+                            status = ?e.status,
+                            reason = %e.public_message(),
+                            error = %e.public_message(),
+                            "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
+                        );
+                        poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
+                    }
                     Err(e) => {
                         tracing::warn!(kind = ?e.kind, error = %e.public_message(), "desired-state poll failed");
                     }
@@ -200,8 +332,31 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     Ok(())
 }
 
-fn resolve_signer_pubkey(cfg: &AgentConfig, jwk: Option<&str>) -> Result<VerifyingKey> {
-    if let Some(jwk) = jwk {
+/// Scheme host and port only: never log the path or query of a control-plane
+/// URL (they can carry one-time tokens).
+fn control_host(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => {
+            let host = parsed.host_str().unwrap_or("<no-host>");
+            match parsed.port_or_known_default() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_string(),
+            }
+        }
+        Err(_) => "<invalid>".to_string(),
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    let sha = sha.trim();
+    if sha.is_empty() {
+        "<none>".to_string()
+    } else {
+        sha.chars().take(8).collect()
+    }
+}
+
+fn resolve_signer_pubkey(cfg: &AgentConfig, jwk: Option<&str>) -> Result<VerifyingKey> {    if let Some(jwk) = jwk {
         match auth::parse_verifying_key_jwk(jwk) {
             Ok(key) => return Ok(key),
             Err(e) => tracing::warn!(error = %e, "invalid token_public_key from enroll"),
@@ -253,46 +408,73 @@ async fn ensure_identity(
         bail!("not enrolled and no enrollment_token in the config");
     };
 
-    let mut last = String::new();
-    for attempt in 1..=3 {
-        match plane.enroll(enrollment_token).await {
-            Ok(enrollment) => {
-                tracing::info!(server_id = %enrollment.server_id, "enrolled");
-                state.server_id = Some(enrollment.server_id.clone());
-                state.server_token = Some(enrollment.server_token.clone());
-                if let Some(jwk) = &enrollment.token_public_key {
-                    state.agent_token_public_key = Some(jwk.clone());
+    // A 409 is terminal for this token: it was already consumed, its TTL
+    // expired, or the server was destroyed. Retrying quickly (and letting
+    // systemd restart every 10 s) only burns requests, so back off for 10
+    // minutes and say what the operator has to do.
+    'enroll: loop {
+        let mut last = String::new();
+        for attempt in 1..=3 {
+            match plane.enroll(enrollment_token).await {
+                Ok(enrollment) => {
+                    tracing::info!(
+                        server_id = %enrollment.server_id,
+                        port = enrollment.desired.port,
+                        control_port = enrollment.desired.control_port,
+                        singbox_version = %enrollment.desired.singbox.version.trim_start_matches('v'),
+                        singbox_sha256 = %short_sha(&enrollment.desired.singbox.sha256),
+                        token_public_key = enrollment.token_public_key.is_some(),
+                        "enrolled with the control plane"
+                    );
+                    state.server_id = Some(enrollment.server_id.clone());
+                    state.server_token = Some(enrollment.server_token.clone());
+                    if let Some(jwk) = &enrollment.token_public_key {
+                        state.agent_token_public_key = Some(jwk.clone());
+                    }
+                    // The password is only guaranteed to be in this response; keep
+                    // it so a restart survives a control-plane outage.
+                    state.last_desired = Some(StoredDesired::from_desired(
+                        &enrollment.desired,
+                        auth::now_unix(),
+                    ));
+                    store.save(state)?;
+                    return Ok((
+                        enrollment.server_id,
+                        enrollment.server_token,
+                        Some(enrollment.desired),
+                        enrollment.token_public_key,
+                    ));
                 }
-                // The password is only guaranteed to be in this response; keep
-                // it so a restart survives a control-plane outage.
-                state.last_desired = Some(StoredDesired::from_desired(
-                    &enrollment.desired,
-                    auth::now_unix(),
-                ));
-                store.save(state)?;
-                return Ok((
-                    enrollment.server_id,
-                    enrollment.server_token,
-                    Some(enrollment.desired),
-                    enrollment.token_public_key,
-                ));
-            }
-            Err(e) => {
-                last = redact_sensitive(&e.to_string());
-                tracing::warn!(attempt, error = %last, "enrollment failed");
-                if attempt < 3 {
-                    tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
+                Err(e) if is_terminal_control_error(&e) => {
+                    tracing::error!(
+                        status = 409,
+                        reason = %terminal_reason(&e),
+                        error = %e,
+                        "enrollment returned 409: the token expired or the server was destroyed; rebuild this node; retrying in 10 minutes"
+                    );
+                    tokio::time::sleep(TERMINAL_BACKOFF).await;
+                    continue 'enroll;
+                }
+                Err(e) => {
+                    last = redact_sensitive(&e.to_string());
+                    tracing::warn!(attempt, error = %last, "enrollment failed");
+                    if attempt < 3 {
+                        tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
+                    }
                 }
             }
         }
+        bail!("enrollment failed after 3 attempts: {last}");
     }
-    bail!("enrollment failed after 3 attempts: {last}")
 }
 
-async fn fetch_desired_with_retries(control: &dyn ControlApi) -> Option<DesiredState> {
+async fn fetch_desired_with_retries(control: &dyn ControlApi) -> DesiredFetch {
     for attempt in 1..=3 {
         match control.desired_state().await {
-            Ok(desired) => return Some(desired),
+            Ok(desired) => return DesiredFetch::Found(desired),
+            Err(e) if is_terminal_control_error(&e) => {
+                return DesiredFetch::Terminal(terminal_reason(&e));
+            }
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "desired-state fetch failed");
                 if attempt < 3 {
@@ -301,5 +483,33 @@ async fn fetch_desired_with_retries(control: &dyn ControlApi) -> Option<DesiredS
             }
         }
     }
-    None
+    DesiredFetch::Unavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_reason_keeps_the_control_plane_body() {
+        let destroyed = ControlError::Status {
+            status: 409,
+            body: "destroyed".into(),
+        };
+        assert!(is_terminal_control_error(&destroyed));
+        assert_eq!(terminal_reason(&destroyed), "HTTP 409: destroyed");
+
+        let expired = ControlError::Status {
+            status: 409,
+            body: "expired".into(),
+        };
+        assert!(is_terminal_control_error(&expired));
+        assert_eq!(terminal_reason(&expired), "HTTP 409: expired");
+
+        let other = ControlError::Status {
+            status: 410,
+            body: "gone".into(),
+        };
+        assert!(!is_terminal_control_error(&other));
+    }
 }

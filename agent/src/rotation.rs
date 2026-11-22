@@ -35,10 +35,24 @@ pub enum RotateErrorKind {
     Fatal,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RotateError {
     pub kind: RotateErrorKind,
     pub message: String,
+    /// HTTP status when the control plane answered; None for local failures.
+    #[serde(skip)]
+    pub status: Option<u16>,
+}
+
+/// `{:?}` redacts the message: it can embed a control-plane error body.
+impl std::fmt::Debug for RotateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateError")
+            .field("kind", &self.kind)
+            .field("message", &truncate(&redact_sensitive(&self.message), 300))
+            .field("status", &self.status)
+            .finish()
+    }
 }
 
 impl RotateError {
@@ -46,6 +60,7 @@ impl RotateError {
         Self {
             kind: RotateErrorKind::Retryable,
             message: message.into(),
+            status: None,
         }
     }
 
@@ -53,17 +68,24 @@ impl RotateError {
         Self {
             kind: RotateErrorKind::Fatal,
             message: message.into(),
+            status: None,
         }
     }
 
     pub fn public_message(&self) -> String {
         truncate(&redact_sensitive(&self.message), 300)
     }
+
+    /// The control plane said this server is gone or the token is dead;
+    /// retrying every 30 seconds will not help.
+    pub fn is_terminal(&self) -> bool {
+        self.status == Some(409)
+    }
 }
 
 impl std::fmt::Display for RotateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.public_message())
     }
 }
 
@@ -77,13 +99,22 @@ impl From<ApplyError> for RotateError {
         Self {
             kind: RotateErrorKind::Fatal,
             message: e.message,
+            status: None,
         }
     }
 }
 
 impl From<ControlError> for RotateError {
     fn from(e: ControlError) -> Self {
-        Self::fatal(e.to_string())
+        let status = match &e {
+            ControlError::Status { status, .. } => Some(*status),
+            _ => None,
+        };
+        Self {
+            kind: RotateErrorKind::Fatal,
+            message: e.to_string(),
+            status,
+        }
     }
 }
 
@@ -311,9 +342,9 @@ impl RotationEngine {
             }
         }
         if let Some(e) = last {
-            // Do not report `failed`: the control plane destroys the machine on
-            // it, while `apply` has rolled back to the previous config and the
-            // node keeps serving. The caller gets the error and decides.
+            // Do not report `failed` for a rotation: `apply` has rolled back
+            // to the previous config and the node keeps serving. The caller
+            // gets the error and decides; the machine state stays untouched.
             return Err(e);
         }
 
@@ -325,14 +356,38 @@ impl RotationEngine {
             .with_singbox_version(version.clone())
             .with_password(password.clone());
         if let Err(e) = self.control.report(&rotated).await {
-            tracing::warn!(error = %e, "control plane rejected the rotation; rolling back");
-            if let Err(rollback) = self.singbox.restore(old_config).await {
-                tracing::error!(error = %rollback, "rollback after rejected rotation failed");
+            let status = match &e {
+                ControlError::Status { status, .. } => Some(*status),
+                _ => None,
+            };
+            tracing::warn!(
+                from = ?current_port,
+                to = port,
+                stage = "rotated",
+                status = ?status,
+                error = %e,
+                "control plane rejected the rotation; rolling back"
+            );
+            match self.singbox.restore(old_config).await {
+                Ok(()) => tracing::info!(
+                    port = current_port.unwrap_or(0),
+                    "rolled back to the previous config"
+                ),
+                Err(rollback) => {
+                    tracing::error!(error = %rollback, "rollback after rejected rotation failed")
+                }
             }
             return Err(RotateError::fatal(format!(
                 "rotation rejected by the control plane: {e}"
             )));
         }
+        tracing::info!(
+            from = ?current_port,
+            to = port,
+            stage = "rotated",
+            status = 200,
+            "control plane accepted the rotation"
+        );
 
         self.confirm_desired(port, &password).await;
 
@@ -367,7 +422,7 @@ impl RotationEngine {
         }
         drop(state);
 
-        tracing::info!(port, "rotation complete");
+        tracing::info!(from = ?current_port, to = port, "rotation complete");
         Ok(port)
     }
 
@@ -533,8 +588,9 @@ impl RotationEngine {
             }
         }
         if let Some(e) = last {
-            // Only now, after an in-process retry, does the control plane hear
-            // about it: `failed` destroys the machine.
+            // The control plane records `failed` on an active machine (it no
+            // longer destroys it), but a machine that never became active is
+            // still destroyed. Only report after the in-process retry.
             self.report_failed(desired.port, control_port, &e).await;
             return Err(e);
         }
@@ -555,6 +611,12 @@ impl RotationEngine {
             tracing::error!(error = %e, "failed to persist applied port");
         }
         drop(state);
+        tracing::info!(
+            port = desired.port,
+            singbox_version = %desired.singbox.version.trim_start_matches('v'),
+            active = active.is_ok(),
+            "desired state applied"
+        );
         active?;
         Ok(())
     }
@@ -592,6 +654,25 @@ impl RotationEngine {
         report_when_unchanged: bool,
     ) -> Result<PollOutcome, RotateError> {
         if self.desired_matches(desired).await {
+            // The config can match while the unit is dead (OOM, manual stop,
+            // crash). Check before reporting active and retry once.
+            if !matches!(self.singbox.is_active().await, Ok(true)) {
+                tracing::warn!(
+                    port = desired.port,
+                    "sing-box is not active although the config matches; restarting once"
+                );
+                if let Err(e) = self.singbox.restart().await {
+                    let message = format!(
+                        "sing-box is not running: {}",
+                        truncate(&redact_sensitive(&e.message), 300)
+                    );
+                    tracing::error!(error = %message, "sing-box did not come back after a restart");
+                    self.report_failed(desired.port, desired.control_port, &message)
+                        .await;
+                    return Err(RotateError::retryable(message));
+                }
+                tracing::info!(port = desired.port, "sing-box restarted after a liveness check");
+            }
             if report_when_unchanged {
                 match self.report_active(desired, false).await {
                     Ok(()) => self.set_active_unconfirmed(false),
@@ -621,16 +702,24 @@ impl RotationEngine {
     pub async fn poll_once(&self) -> Result<PollOutcome, RotateError> {
         let desired = match self.control.desired_state().await {
             Ok(desired) => desired,
-            Err(e) => match self.last_desired() {
-                Some(last) => {
-                    tracing::warn!(
-                        error = %e,
-                        "desired-state fetch failed; using the persisted credentials"
-                    );
-                    last
+            Err(e) => {
+                if matches!(&e, ControlError::Status { status: 409, .. }) {
+                    // Terminal: the token is dead or the server was destroyed.
+                    // Let the caller pause polls instead of hammering every
+                    // 30 seconds.
+                    return Err(e.into());
                 }
-                None => return Err(e.into()),
-            },
+                match self.last_desired() {
+                    Some(last) => {
+                        tracing::warn!(
+                            error = %e,
+                            "desired-state fetch failed; using the persisted credentials"
+                        );
+                        last
+                    }
+                    None => return Err(e.into()),
+                }
+            }
         };
 
         // Earlier `active` reports may never have landed; re-report until the
@@ -815,6 +904,7 @@ mod tests {
             poll_interval_secs: 30,
             egress_probe: "1.1.1.1:443".into(),
             log_level: "debug".into(),
+            log: Default::default(),
             allow_insecure_control_plane: false,
         })
     }
@@ -826,7 +916,7 @@ mod tests {
             control_port: 32100,
             singbox: SingBoxDesired {
                 version: version.into(),
-                sha256: "abc".into(),
+                sha256: "f".repeat(64),
                 url: "https://example.com/sing-box.tar.gz".into(),
             },
         }
@@ -1133,6 +1223,120 @@ mod tests {
             engine.poll_once().await.unwrap(),
             PollOutcome::Unchanged { port }
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_error_debug_hides_secrets() {        let err = RotateError::fatal("rejected: password=abc123 token=tok-9");
+        let debug = format!("{err:?}");
+        assert!(!debug.contains("abc123"));
+        assert!(!debug.contains("tok-9"));
+        assert!(debug.contains("Fatal"));
+    }
+
+    #[tokio::test]
+    async fn a_409_from_desired_state_is_terminal() {
+        struct TerminalControl;
+        #[async_trait]
+        impl ControlApi for TerminalControl {
+            async fn report(&self, _body: &ReportRequest) -> Result<(), ControlError> {
+                Ok(())
+            }
+            async fn desired_state(&self) -> Result<DesiredState, ControlError> {
+                Err(ControlError::Status {
+                    status: 409,
+                    body: r#"{"reason":"server_destroyed"}"#.into(),
+                })
+            }
+        }
+
+        let dir = tmpdir("terminal-409");
+        let cfg = config(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host: Arc<dyn crate::host::Host> = Arc::new(FakeHost::new());
+        let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host));
+        let identity =
+            Arc::new(crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap());
+        let engine = RotationEngine::new(
+            cfg.clone(),
+            singbox,
+            Arc::new(TerminalControl),
+            Arc::new(Mutex::new(AgentState::default())),
+            StateStore::new(cfg.state_path()),
+            identity,
+        );
+        let err = engine.poll_once().await.unwrap_err();
+        assert_eq!(err.status, Some(409));
+        assert!(err.is_terminal());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn startup_restarts_a_dead_singbox_once() {
+        let dir = tmpdir("dead-restart");
+        let host = Arc::new(FakeHost::new());
+        let d = desired(30412, "1.14.4");
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(d.clone()),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, &d.password, "aes-256-gcm").into_bytes(),
+        );
+        // is-active fails, restart succeeds, is-active succeeds.
+        host.queue_command_outputs(
+            "systemctl",
+            &[(1, "", "inactive"), (0, "", ""), (0, "", "")],
+        );
+
+        let outcome = engine.apply_if_needed(&d, true).await.unwrap();
+        assert_eq!(outcome, PollOutcome::Unchanged { port: 30412 });
+        let stages: Vec<Stage> = control
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.stage)
+            .collect();
+        assert_eq!(stages, vec![Stage::Active]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn startup_reports_failed_when_singbox_stays_down() {
+        let dir = tmpdir("dead-failed");
+        let host = Arc::new(FakeHost::new());
+        let d = desired(30412, "1.14.4");
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(d.clone()),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, &d.password, "aes-256-gcm").into_bytes(),
+        );
+        // is-active fails, restart fails.
+        host.queue_command_outputs(
+            "systemctl",
+            &[(1, "", "inactive"), (1, "", "restart failed")],
+        );
+
+        let err = engine.apply_if_needed(&d, true).await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Retryable);
+        let reports = control.reports.lock().unwrap();
+        assert_eq!(reports.last().map(|r| r.stage), Some(Stage::Failed));
+        assert!(reports
+            .last()
+            .and_then(|r| r.error.as_deref())
+            .unwrap_or("")
+            .contains("not running"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -53,6 +53,97 @@ impl std::fmt::Display for ApplyError {
 
 impl std::error::Error for ApplyError {}
 
+/// Map a host error to ApplyError: a stuck command is retryable, everything
+/// else (bad path, non-zero exit) is fatal.
+fn from_host(err: anyhow::Error, context: &str) -> ApplyError {
+    let message = format!(
+        "{context}: {}",
+        crate::logging::redact_sensitive(&err.to_string())
+    );
+    if crate::host::is_timeout(&err) {
+        ApplyError::retryable(message)
+    } else {
+        ApplyError::fatal(message)
+    }
+}
+
+/// `^[0-9A-Za-z._-]{1,32}$`, minus the strings that would traverse a path.
+pub fn is_safe_singbox_version(version: &str) -> bool {
+    let v = version;
+    !v.is_empty()
+        && v.len() <= 32
+        && !v.contains("..")
+        && v != "."
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Reject a desired state that could escape the download dir or fetch over
+/// plaintext before any host side effect happens.
+fn validate_desired(want: &SingBoxDesired) -> Result<(), ApplyError> {
+    if !is_safe_singbox_version(&want.version) {
+        return Err(ApplyError::fatal(format!(
+            "unsafe sing-box version {:?}",
+            want.version
+        )));
+    }
+    if !is_sha256_hex(want.sha256.trim()) {
+        return Err(ApplyError::fatal("desired sing-box sha256 is not 64 hex chars"));
+    }
+    let url = want.url.trim();
+    if !url.starts_with("https://") {
+        return Err(ApplyError::fatal(
+            "desired sing-box URL must be https://",
+        ));
+    }
+    Ok(())
+}
+
+/// `tar -tvzf` line -> (type char, name). GNU and BSD both print
+/// `perm links owner size date time name`; the name may contain spaces.
+fn parse_tar_verbose(line: &str) -> Option<(char, String)> {
+    let kind = line.chars().next()?;
+    let bytes = line.as_bytes();
+    let mut pos = 0;
+    for _ in 0..5 {
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+    }
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    if pos >= bytes.len() {
+        return None;
+    }
+    Some((kind, line[pos..].to_string()))
+}
+
+/// Absolute paths, `..` components and backslashes are rejected; only plain
+/// relative paths inside the archive are extracted.
+fn validate_tar_entry(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("archive contains an empty entry name");
+    }
+    if name.starts_with('/') {
+        anyhow::bail!("archive entry {name:?} is an absolute path");
+    }
+    if name.contains('\\') {
+        anyhow::bail!("archive entry {name:?} contains a backslash");
+    }
+    if name.split('/').any(|component| component == "..") {
+        anyhow::bail!("archive entry {name:?} traverses out of the extraction dir");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedConfig {
     pub port: u16,
@@ -117,6 +208,7 @@ impl SingBox {
         want: &SingBoxDesired,
         download_dir: &Path,
     ) -> Result<(), ApplyError> {
+        validate_desired(want)?;
         let want_version = want.version.trim_start_matches('v');
         match self.installed_version().await {
             Ok(Some(version)) if version == want_version => {
@@ -153,7 +245,11 @@ impl SingBox {
                 want.url, want.sha256
             )));
         }
-        tracing::debug!(sha256 = %got, "sing-box download verified");
+        tracing::info!(
+            sha256 = %&got[..got.len().min(8)],
+            version = want_version,
+            "sing-box archive sha256 verified"
+        );
 
         let bytes = self
             .host
@@ -164,11 +260,11 @@ impl SingBox {
         if bytes.starts_with(&[0x1f, 0x8b]) {
             self.install_from_targz(&archive, download_dir, want_version)
                 .await
-                .map_err(|e| ApplyError::fatal(e.to_string()))?;
+                .map_err(|e| from_host(e, "unpack sing-box"))?;
         } else if bytes.starts_with(b"\x7fELF") {
             self.install_file(&archive)
                 .await
-                .map_err(|e| ApplyError::fatal(e.to_string()))?;
+                .map_err(|e| from_host(e, "install sing-box"))?;
         } else {
             return Err(ApplyError::fatal(format!(
                 "downloaded artifact is neither gzip nor ELF (first bytes: {})",
@@ -200,29 +296,43 @@ impl SingBox {
         download_dir: &Path,
         version: &str,
     ) -> Result<()> {
+        // Verbose listing carries the entry type, so a symlink cannot be
+        // extracted as if it were the binary.
         let list = self
             .host
             .run(
                 &self.cfg.tar,
                 &[
-                    "-tzf".to_string(),
+                    "-tvzf".to_string(),
                     archive.to_string_lossy().into_owned(),
                 ],
             )
             .await?;
         if !list.success() {
             anyhow::bail!(
-                "tar -tzf failed: {}",
+                "tar -tvzf failed: {}",
                 crate::logging::truncate(&crate::logging::redact_sensitive(&list.summary()), 300)
             );
         }
-        let entry = list
-            .stdout
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.ends_with('/') && line.rsplit('/').next() == Some("sing-box"))
-            .ok_or_else(|| anyhow::anyhow!("archive has no sing-box binary"))?
-            .to_string();
+
+        let mut entry: Option<String> = None;
+        for line in list.stdout.lines() {
+            let Some((kind, name)) = parse_tar_verbose(line) else {
+                continue;
+            };
+            validate_tar_entry(&name)?;
+            let basename = name.rsplit('/').next().unwrap_or(&name);
+            if basename != "sing-box" {
+                continue;
+            }
+            if kind != '-' {
+                anyhow::bail!("archive entry {name:?} is not a regular file");
+            }
+            if entry.is_none() {
+                entry = Some(name.to_string());
+            }
+        }
+        let entry = entry.ok_or_else(|| anyhow::anyhow!("archive has no sing-box binary"))?;
         tracing::debug!(entry, "extracting sing-box");
 
         let extract_dir = download_dir.join(format!("extract-{version}"));
@@ -246,7 +356,21 @@ impl SingBox {
                 crate::logging::truncate(&crate::logging::redact_sensitive(&extract.summary()), 300)
             );
         }
-        self.install_file(&extract_dir.join(entry)).await?;
+
+        // Belt and braces: even with validated entry names, confirm the
+        // extracted path is still inside the temp dir (no symlink hop).
+        let canon_dir = self.host.canonicalize(&extract_dir).await?;
+        let extracted = extract_dir.join(&entry);
+        let canon_file = self.host.canonicalize(&extracted).await?;
+        anyhow::ensure!(
+            canon_file.starts_with(&canon_dir),
+            "extracted {entry:?} resolved outside the extraction dir"
+        );
+        anyhow::ensure!(
+            self.host.is_file(&canon_file).await?,
+            "extracted {entry:?} is not a regular file"
+        );
+        self.install_file(&canon_file).await?;
         Ok(())
     }
 
@@ -308,6 +432,44 @@ impl SingBox {
         }))
     }
 
+    /// `systemctl is-active --quiet`: cheap liveness probe for the poll loop.
+    pub async fn is_active(&self) -> Result<bool> {
+        let out = self
+            .host
+            .run(
+                &self.cfg.systemctl,
+                &[
+                    "is-active".to_string(),
+                    "--quiet".to_string(),
+                    self.cfg.unit_name.clone(),
+                ],
+            )
+            .await?;
+        Ok(out.success())
+    }
+
+    /// Restart the unit and wait until it reports active.
+    pub async fn restart(&self) -> Result<(), ApplyError> {
+        let out = self
+            .host
+            .run(
+                &self.cfg.systemctl,
+                &["restart".to_string(), self.cfg.unit_name.clone()],
+            )
+            .await
+            .map_err(|e| from_host(e, "systemctl restart"))?;
+        if !out.success() {
+            return Err(ApplyError::retryable(format!(
+                "systemctl restart failed: {}",
+                crate::logging::truncate(
+                    &crate::logging::redact_sensitive(&out.summary()),
+                    300
+                )
+            )));
+        }
+        self.wait_active().await
+    }
+
     /// Write config (checked first), install the unit, enable + restart, wait
     /// for `systemctl is-active`. Any failure rolls back the previous config.
     pub async fn apply(&self, port: u16, password: &str) -> Result<(), ApplyError> {
@@ -335,9 +497,13 @@ impl SingBox {
                 ],
             )
             .await
-            .map_err(|e| ApplyError::fatal(format!("run sing-box check: {e}")))?;
+            .map_err(|e| from_host(e, "run sing-box check"))?;
         if !check.success() {
             let _ = self.host.remove(&tmp).await;
+            tracing::warn!(
+                output = %crate::logging::truncate(&crate::logging::redact_sensitive(&check.summary()), 300),
+                "sing-box config check failed"
+            );
             return Err(ApplyError::fatal(format!(
                 "sing-box check failed: {}",
                 crate::logging::truncate(
@@ -346,6 +512,10 @@ impl SingBox {
                 )
             )));
         }
+        tracing::info!(
+            output = %crate::logging::truncate(&crate::logging::redact_sensitive(&check.summary()), 200),
+            "sing-box config check passed"
+        );
 
         self.host
             .rename(&tmp, &self.cfg.config_path)
@@ -372,7 +542,12 @@ impl SingBox {
                 .host
                 .run(&self.cfg.systemctl, &args)
                 .await
-                .map_err(|e| ApplyError::fatal(format!("systemctl {}: {e}", args.join(" "))))?;
+                .map_err(|e| from_host(e, &format!("systemctl {}", args.join(" "))))?;
+            tracing::info!(
+                command = %format!("systemctl {}", args.join(" ")),
+                ok = out.success(),
+                "systemctl step"
+            );
             if !out.success() {
                 let err = if fatal {
                     ApplyError::fatal(format!(
@@ -428,7 +603,7 @@ impl SingBox {
     }
 
     async fn wait_active(&self) -> Result<(), ApplyError> {
-        for _ in 0..15 {
+        for attempt in 1..=15 {
             let out = self
                 .host
                 .run(
@@ -442,6 +617,7 @@ impl SingBox {
                 .await
                 .map_err(|e| ApplyError::retryable(format!("systemctl is-active: {e}")))?;
             if out.success() {
+                tracing::info!(unit = %self.cfg.unit_name, attempt, "sing-box is active");
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -492,6 +668,7 @@ impl SingBox {
                 "sing-box is not listening on {port}: {last}"
             )));
         }
+        tracing::info!(port, "sing-box is listening locally");
 
         let mut egress_err = String::new();
         for _ in 0..2 {
@@ -501,7 +678,11 @@ impl SingBox {
                 .await
             {
                 Ok(()) => {
-                    tracing::debug!(port, probe = %egress_probe, "local listener + egress probe passed");
+                    tracing::info!(
+                        port,
+                        egress = %egress_probe,
+                        "liveness check passed (listener + egress)"
+                    );
                     return Ok(());
                 }
                 Err(e) => {
@@ -616,7 +797,7 @@ mod tests {
         let sb = SingBox::new(cfg(), host.clone());
         let want = SingBoxDesired {
             version: "1.14.4".into(),
-            sha256: "ffff".into(),
+            sha256: "f".repeat(64),
             url: "https://example.com/sb.tar.gz".into(),
         };
         let err = sb.ensure_binary(&want, Path::new("/tmp/dl")).await.unwrap_err();
@@ -625,6 +806,104 @@ mod tests {
             .commands()
             .iter()
             .any(|(p, _)| p == "install"));
+    }
+
+    #[test]
+    fn version_whitelist_rejects_traversal_and_odd_characters() {
+        assert!(is_safe_singbox_version("1.14.4"));
+        assert!(is_safe_singbox_version("v1.14.4-beta_1"));
+        assert!(!is_safe_singbox_version(".."));
+        assert!(!is_safe_singbox_version("1.14/../x"));
+        assert!(!is_safe_singbox_version("a b"));
+        assert!(!is_safe_singbox_version("1.14.4\n"));
+        assert!(!is_safe_singbox_version(&"1".repeat(33)));
+        assert!(!is_safe_singbox_version(""));
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_desired_state_never_downloads() {
+        let host = Arc::new(FakeHost::new());
+        let sb = SingBox::new(cfg(), host.clone());
+        for want in [
+            SingBoxDesired {
+                version: "../../etc".into(),
+                sha256: "f".repeat(64),
+                url: "https://example.com/sb.tar.gz".into(),
+            },
+            SingBoxDesired {
+                version: "1.14.4".into(),
+                sha256: "not-hex".into(),
+                url: "https://example.com/sb.tar.gz".into(),
+            },
+            SingBoxDesired {
+                version: "1.14.4".into(),
+                sha256: "f".repeat(64),
+                url: "http://example.com/sb.tar.gz".into(),
+            },
+        ] {
+            let err = sb.ensure_binary(&want, Path::new("/tmp/dl")).await.unwrap_err();
+            assert_eq!(err.kind, ApplyErrorKind::Fatal, "{err:?}");
+        }
+        assert!(host.commands().is_empty(), "no command may run for a bad desired state");
+    }
+
+    fn gzip_bytes() -> Vec<u8> {
+        vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]
+    }
+
+    #[tokio::test]
+    async fn tar_entries_with_traversal_are_rejected() {
+        let host = Arc::new(FakeHost::new());
+        host.set_download(gzip_bytes());
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output(
+            "tar",
+            0,
+            "-rwxr-xr-x 0/0 3 2024-01-01 00:00 ../sing-box\n",
+            "",
+        );
+        let sb = SingBox::new(cfg(), host.clone());
+        let want = SingBoxDesired {
+            version: "1.14.4".into(),
+            sha256: "f".repeat(64),
+            url: "https://example.com/sb.tar.gz".into(),
+        };
+        let err = sb.ensure_binary(&want, Path::new("/tmp/dl")).await.unwrap_err();
+        assert!(err.to_string().contains("traverses"), "{err}");
+        assert!(!host.commands().iter().any(|(p, _)| p == "install"));
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_binary_entry_is_rejected() {
+        let host = Arc::new(FakeHost::new());
+        host.set_download(gzip_bytes());
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output(
+            "tar",
+            0,
+            "lrwxrwxrwx 0/0 7 2024-01-01 00:00 bin/sing-box\n",
+            "",
+        );
+        let sb = SingBox::new(cfg(), host.clone());
+        let want = SingBoxDesired {
+            version: "1.14.4".into(),
+            sha256: "f".repeat(64),
+            url: "https://example.com/sb.tar.gz".into(),
+        };
+        let err = sb.ensure_binary(&want, Path::new("/tmp/dl")).await.unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    #[test]
+    fn tar_verbose_lines_expose_type_and_name() {
+        let (kind, name) =
+            parse_tar_verbose("-rwxr-xr-x 0/0 12345 2024-01-01 12:34 sing-box-1.14.4-linux-amd64/sing-box")
+                .unwrap();
+        assert_eq!(kind, '-');
+        assert_eq!(name, "sing-box-1.14.4-linux-amd64/sing-box");
+        assert!(validate_tar_entry("/etc/passwd").is_err());
+        assert!(validate_tar_entry("a\\b").is_err());
+        assert!(validate_tar_entry("ok/sing-box").is_ok());
     }
 
     #[tokio::test]

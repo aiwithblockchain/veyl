@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
                 verifying_key,
                 Arc::new(StubRotator::default()),
                 true,
+                None,
             )
             .await?;
             eprintln!("press Ctrl-C to stop {}", handle.mcp_url());

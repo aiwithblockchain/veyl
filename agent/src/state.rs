@@ -68,7 +68,24 @@ impl fmt::Debug for StoredDesired {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Hand-written so `{:?}` can never print the server token.
+impl fmt::Debug for AgentState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentState")
+            .field("server_id", &self.server_id)
+            .field("server_token", &self.server_token.as_ref().map(|_| "***"))
+            .field("recent_ports", &self.recent_ports)
+            .field("applied_port", &self.applied_port)
+            .field("cert_fingerprint", &self.cert_fingerprint)
+            .field("agent_token_public_key", &self.agent_token_public_key)
+            .field("pending_rotation", &self.pending_rotation)
+            .field("last_desired", &self.last_desired)
+            .field("active_unconfirmed", &self.active_unconfirmed)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentState {
     #[serde(default)]
     pub server_id: Option<String>,
@@ -129,6 +146,28 @@ impl StateStore {
                 .with_context(|| format!("parse state {}", self.path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AgentState::default()),
             Err(e) => Err(e).with_context(|| format!("read state {}", self.path.display())),
+        }
+    }
+
+    /// Load, and on a corrupt file back it up and start over (which makes the
+    /// agent re-enroll). Exiting here would put systemd into a 10-second
+    /// restart loop that never logs a new cause.
+    pub fn load_or_recover(&self) -> AgentState {
+        match self.load() {
+            Ok(state) => state,
+            Err(e) => {
+                let backup = self.path.with_extension(format!(
+                    "json.corrupt.{}",
+                    crate::auth::now_unix()
+                ));
+                tracing::error!(
+                    error = %e,
+                    backup = %backup.display(),
+                    "state file is unreadable; backing it up and starting over"
+                );
+                let _ = std::fs::rename(&self.path, &backup);
+                AgentState::default()
+            }
         }
     }
 
@@ -220,8 +259,37 @@ mod tests {
     }
 
     #[test]
-    fn recent_ports_are_deduped_and_bounded() {
-        let mut state = AgentState::default();
+    fn corrupt_state_is_backed_up_and_reset() {
+        let dir = tmpdir("corrupt");
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        let store = StateStore::new(&path);
+        let state = store.load_or_recover();
+        assert_eq!(state, AgentState::default());
+        assert!(!path.exists(), "the corrupt file should be moved aside");
+        let backups: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn debug_output_hides_the_server_token() {
+        let state = AgentState {
+            server_id: Some("srv_1".into()),
+            server_token: Some("agt_super_secret".into()),
+            ..Default::default()
+        };
+        let debug = format!("{state:?}");
+        assert!(!debug.contains("agt_super_secret"));
+        assert!(debug.contains("srv_1"));
+    }
+
+    #[test]
+    fn recent_ports_are_deduped_and_bounded() {        let mut state = AgentState::default();
         for port in [30001, 30002, 30001, 30003] {
             state.remember_port(port, 2);
         }

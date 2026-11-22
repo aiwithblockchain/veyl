@@ -106,6 +106,10 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 | `poll_interval_secs` | 期望状态轮询周期，默认 30 秒 |
 | `egress_probe` | 轮换验活时的出站 TCP 目标，默认 `1.1.1.1:443` |
 | `singbox.*` | 二进制、配置、unit、systemctl/tar/install/journalctl 路径 |
+| `log_level` | `info`；`RUST_LOG` 优先 |
+| `log.file` | 日志文件，默认 `/var/log/veyl-agent/agent.log`；设 `null` 关闭文件日志 |
+| `log.max_bytes` | 单文件上限，默认 5242880（5 MiB） |
+| `log.keep_files` | 轮转保留份数，默认 3（`agent.log.1`…`.3`） |
 
 **公网 IP 为什么重要**：桌面端用 `https://<公网 IP>:32100` 连接。webpki 会校验证书 SAN，leaf 里没有这个 IP 时，即使信任了 CA 也会因 `NotValidForName` 失败；Host 校验也会拒绝。cloud-init 没有把 IP 传给 agent，所以默认查 DO metadata。**启动时查不到会保留上次的 SAN，并在每轮 poll 重试探测**；成功后只重签 leaf（CA 不变）、更新指纹与 Host 白名单，并刷新一次登记信息（`verifying` 上报只刷新登记字段，不会把 active 机器改回 installing）。查不到且没有历史 SAN 时必须显式配 `public_host`。
 
@@ -121,11 +125,13 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 
 `token_public_key` 是 Ed25519 公钥 JWK（`{"kty":"OKP","crv":"Ed25519","x":"…"}`）。agent 把它存进 state，重启后继续离线验桌面端令牌。
 
-**阶段语义（按控制面实现）**：`installing / verifying` 只前进不回退；`active` 才真正激活（写 node_id 收尾、订单 ready、开始计费）；`failed` 会让控制面**直接销毁机器**。所以 agent 只在「期望状态驱动」的 apply 内部重试一次后仍失败时才上报 `failed`；轮换失败不上报 `failed`（见下文）。每次 report 都带证书指纹和 CA PEM，否则桌面端拿不到 `agent-token`。
+**阶段语义（按控制面实现）**：`installing / verifying` 只前进不回退；`active` 才真正激活（写 node_id 收尾、订单 ready、开始计费）；`failed` 对**尚未 active** 的机器会触发销毁，对已是 `active / healthy` 的机器只记录 `last_error` 并返回 `200 {ok:true,recorded:true}`，不销毁。所以 agent 只在「期望状态驱动」的 apply 内部重试一次后仍失败时才上报 `failed`，收到 200 也继续重试；轮换失败不上报 `failed`（见下文）。每次 report 都带证书指纹和 CA PEM，否则桌面端拿不到 `agent-token`。
+
+**enroll 恢复语义**：enrollment token 已消费、但仍在 `enrollment_expires_at` 内且服务器未销毁时，再次 enroll 会返回**新的 `server_token`**（旧的立即失效），host/端口/密码沿用同一份。因此 `state.json` 损坏或丢失后的恢复路径就是备份坏文件、重新 enroll、用新 token 继续；不要假设第二次 enroll 一定 409。409 的 body 是 `destroyed` / `expired`（服务器已销毁 / token 过期），agent 会把 reason 原样写进日志并退避 10 分钟。
 
 **active 未确认重试**：启动时如果 `active` 上报失败，agent 把 `active_unconfirmed` 写进 `state.json`；之后每轮 poll 都会再报一次 `active`，收到 200 才清除。否则机器会在 normal serving 的情况下停在 installing/verifying，10 分钟后被控制面 sweep 销毁。
 
-注意：控制面的 `active` 只接受 `booting/installing/verifying`，如果第一次 active 已经落库但响应丢失，补报会被判 `activation_lost`。这个窗口很小；建议控制面把 active 做成幂等（已是 active 时返回 200），agent 这边已经按“未确认才补报”收敛。
+注意：控制面的 `active` 已做成幂等（机器已是 active/healthy 时直接返回 200 `already_active`），agent 这边仍按“未确认才补报”收敛。
 
 `desired.password` 只在 enroll 响应里保证出现，之后由 `desired-state` 返回最新值。agent 在 enroll 成功、每次 apply/轮换成功后都把完整的 `last_desired`（含密码）写入 0600 的 `state.json`，控制面短暂不可达时重启也能恢复；该字段永不进日志。
 
@@ -139,7 +145,7 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 
 `active` 分支的 `port === node_port` 校验保留；`rotated` 已更新 `node_port`，所以之后的 active 不会再判漂移。
 
-`failed` 阶段仍会销毁机器；agent 只在期望状态驱动的 apply 内部重试一次后仍失败时才上报，并带 `error`（控制面截断 300 字写入审计 / `last_error`）。轮换失败不上报 `failed`。
+`failed` 阶段对未激活机器仍会销毁；对已 active/healthy 的机器只记录 `last_error`。agent 只在期望状态驱动的 apply 内部重试一次后仍失败时才上报，并带 `error`（控制面截断 300 字写入审计 / `last_error`）。轮换失败不上报 `failed`。
 
 每条 report 都带 `ca_pem`（自签 CA 的 PEM）与 `cert_fingerprint`；桌面端优先用 CA 建立信任，指纹作为兜底。
 
@@ -172,16 +178,24 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 
 ## 期望状态轮询
 
-- 启动时拉一次 desired；与当前 config.json + 已装版本一致时只上报 `active`，**不重启 sing-box**；不一致才走安装/应用流程。
-- 之后每 `poll_interval_secs` 拉一次；端口/密码/sing-box 版本变化才应用。
+- **先监听，再 apply**：MCP 端点（32100）在首次安装/应用之前就 bind，下载慢或 systemd 卡住时桌面端仍能连上。
+- 启动时拉一次 desired；与当前 config.json + 已装版本一致时先做一次 `systemctl is-active`，服务没跑就重启一次，仍失败则上报 `failed`；正常时只上报 `active`，**不重启 sing-box**；不一致才走安装/应用流程。
+- 之后每 `poll_interval_secs` 拉一次；每次 poll 都做一次轻量 `is-active`，服务死了就重启一次，仍失败上报 `failed` 并继续重试。
 - 轮换与轮询共用一把异步锁，同一时刻只有一个 apply。
 - 期望状态里的 `control_port` 与当前不同会告警；改控制端口需要重启 agent 才能重新绑定（本期不做热迁移）。
+- **控制面 409 是终态**：enroll 返回 409（token 已消费/过期、服务器已销毁）时打一条 error 说明需要重建，然后退避 10 分钟再试，不退出进程（避免 systemd 每 10 秒重启刷屏）；轮询遇到 409 同样暂停 10 分钟。
 
 ## 日志与脱敏
 
-- `log_level` 或 `RUST_LOG` 控制；debug 会打印下载地址、sha256、端口、每条 systemctl/tar 命令、验活结果。
-- 密码与令牌永不进日志：`DesiredState`/`Enrollment`/`ReportRequest` 的 `Debug` 已手写脱敏；错误体在输出前统一走 `logging::redact_sensitive`（JSON `password`/`server_token` 字段 + `agt_`/`enr_` 前缀串），并截断。
-- 状态文件 `state.json`（0600）保存 `server_id`、`server_token`、最近端口、证书指纹、`token_public_key` 与 `last_desired`（含密码，用于控制面不可达时重启恢复）；密码与令牌不会出现在日志里。
+- `log_level` 或 `RUST_LOG` 控制；debug 会打印下载主机（不含完整 URL/查询串）、sha256、端口、命令名、验活结果。
+- **同时落盘**：默认 `/var/log/veyl-agent/agent.log`（由 agent 自己创建，目录 0700、文件 0600），按 `log.max_bytes` 轮转、保留 `log.keep_files` 份。console 登录机器排查时直接 `tail -f /var/log/veyl-agent/agent.log`，不用翻 journald。文件打不开（例如非 root 本地调试）只降级为 stdout，不阻止启动。
+- **启动横幅**（每次启动一行，`veyl-agent starting`）：版本、配置路径、state 文件、日志文件、控制面 host（只到 host:port，不含路径/查询串）、控制端口，以及 `mode="cold"`（首次 enroll）或 `mode="restored"`（从 `state.json` 恢复）。重置密码重启后先看这一行判断 agent 是否自己恢复。
+- **关键流程**都有日志：enroll 结果（server_id/端口/sing-box 版本/sha 前 8 位）、期望状态、sha 校验、`sing-box check` 输出（截断）、`systemctl daemon-reload/enable/restart/is-active` 各步结果、监听 + 出站验活、每个 MCP 请求（method、tool、令牌校验结论、状态码、耗时）、轮换全过程（旧端口→新端口、`rotated` 上报状态、是否回滚）。
+- 密码与令牌永不进日志：`DesiredState`/`Enrollment`/`ReportRequest`/`AgentState`/`AgentConfig`/`ControlError`/`RotateError` 的 `Debug` 手写脱敏；stdout 与文件两路用同一条 `redact_sensitive`（JSON 的 `password`/`server_token`/`token`/`authorization` 字段、`agt_`/`enr_` 前缀串、`Authorization:` 头、`Bearer <token>`、`password=`/`token=` 赋值），并截断。
+- 状态文件 `state.json`（0600）保存 `server_id`、`server_token`、最近端口、证书指纹、`token_public_key` 与 `last_desired`（含密码，用于控制面不可达时重启恢复）；密码与令牌不会出现在日志里。解析失败时改名为 `state.json.corrupt.<时间戳>` 备份并重新 enroll，不会把进程拖进 systemd 重启循环。
+- **jti 重放表落盘**：已用 jti + 过期时间写在 `state_dir/jtis.json`（0600、原子 rename、上限 512 条、过期清理），重启后 60 秒窗口内不能重放同一令牌；demo/serve 用内存表。
+- **证书热重载**：公网 IP 后补探测导致 leaf 重签后，下一条 TLS 连接即使用新证书，不需要重启 agent。
+- **命令超时**：`systemctl`/`journalctl`/`sing-box` 等系统命令 30 秒，`tar`/`install` 300 秒，超时按可重试处理并记录命令；下载只接受 https、重定向不允许降级到 http、上限 200 MiB。
 
 ## 测试
 
@@ -189,18 +203,21 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 cargo test
 ```
 
-当前 **49 个单元测试**，覆盖：
+当前 **80 个单元测试**，覆盖：
 
-- 令牌：JWT 往返、过期、错误签名、错误 `server_id`、jti 一次性、JWK 解析、篡改 payload/alg=none、批量 `tools/call` 计数；
-- 证书：CA/leaf 持久化、leaf 缺失时只重签 leaf、公网地址变化时只重签 leaf、动态 Host 白名单、公网 IP 重签只发生一次；
-- 配置：HTTPS 强制、控制端口必须在带外、allowed_hosts 合并去重、cloud-init 最小配置解析；
-- control：enroll 响应的 `token_public_key`、desired 两种包裹形态、report 字段；
+- 令牌：JWT 往返、过期、错误签名、错误 `server_id`、jti 一次性、JWK 解析、篡改 payload/alg=none、批量 `tools/call` 计数、**jti 跨重启重放**、过期 jti 清理、重放表上限；
+- 证书：CA/leaf 持久化、leaf 缺失时只重签 leaf、公网地址变化时只重签 leaf、动态 Host 白名单、公网 IP 重签只发生一次、**重签后新连接实际拿到新证书（TLS 握手校验）**；
+- 配置：HTTPS 强制、控制端口必须在带外、allowed_hosts 合并去重、cloud-init 最小配置解析、**release 策略拒绝 `allow_insecure_control_plane`**、`Debug` 不打印 enroll token；
+- control：enroll 响应的 `token_public_key`、desired 两种包裹形态、report 字段、错误体 Display/Debug 脱敏；
 - 端口：只在带内、排除已用、带耗尽返回空；
-- sing-box：配置 JSON、unit 内容、版本解析、sha 不一致不安装、`check` 失败不 restart；
-- 轮换：成功上报 `installing/verifying/rotated` 且 rotated 带新密码；`rotated` 被 409 拒绝时回滚旧配置、不落状态、不上报 `failed`；busy 返回 retryable；
-- 期望状态：一致时不重启；变化时应用；apply 失败内部重试一次；两次 restart 失败后才上报 `failed`；active 未确认时每轮补报、失败保留标记；轮换后控制面未追平时不覆盖新端口；
-- 状态持久化：缺失文件、roundtrip、0600、端口去重、`last_desired`（含密码）落盘且 Debug 脱敏；
-- 脱敏：密码/令牌字段、未知键的 token 串、嵌套转义、截断。
+- sing-box：配置 JSON、unit 内容、版本解析、sha 不一致不安装、`check` 失败不 restart、**版本白名单**、**tar 路径穿越/绝对路径/反斜杠拒绝**、**symlink 条目拒绝**；
+- 轮换：成功上报 `installing/verifying/rotated` 且 rotated 带新密码；`rotated` 被 409 拒绝时回滚旧配置、不落状态、不上报 `failed`；busy 返回 retryable；`Debug` 脱敏；
+- 期望状态：一致时不重启；变化时应用；apply 失败内部重试一次；两次 restart 失败后才上报 `failed`；active 未确认时每轮补报、失败保留标记；轮换后控制面未追平时不覆盖新端口；**config 一致但服务死了：重启一次成功继续报 active，仍失败上报 failed**；
+- 状态持久化：缺失文件、roundtrip、0600、端口去重、`last_desired`（含密码）落盘且 Debug 脱敏、**损坏文件备份后重置**；
+- 脱敏：密码/令牌字段、未知键的 token 串、嵌套转义、`Authorization`/`Bearer`、`password=`/`token=` 赋值、截断；
+- 日志文件：跨 write 分片仍按行脱敏（密码/`server_token`/`Authorization`/`Bearer` 不落盘）、0600 文件 + 0700 目录、按大小轮转并只保留配置份数、轮转后写新文件；`log.file: null` 可关闭，缺省配置可启动；
+- host：**命令超时返回可标记错误**、tar/install 用 300 秒超时、下载拒绝 http；
+- 进程守护：MCP 任务正常退出或报错都被视为致命（主循环退出码非 0，交给 systemd 重启）。
 
 ## 未完成 / 需要真机或控制面确认
 
@@ -208,7 +225,7 @@ cargo test
 2. **真实下载**：GitHub release 的 tar.gz 校验/解包尚未在真机跑；URL 由控制面 `SING_BOX_DOWNLOAD_URL` 下发。
 3. **控制面联调**：`rotated`、`ca_pem`、`error` 已按最新契约实现，但尚未和线上 Worker 跑过一次真实轮换。
 4. **穿隧道验活**：当前「出站探测」只证明宿主还能出网，不等于 SS 隧道可用。真正的穿隧道探测需要本地 SS 客户端，属于后续。
-5. **enroll 崩溃窗口**：控制面先消费一次性 token 再返回；若 agent 在返回后、写 state 前崩溃，重启会收到 409 `already_used`。窗口很小，但控制面最好允许幂等重放。
+5. **enroll 崩溃窗口**：控制面先消费一次性 token 再返回；若 agent 在返回后、写 state 前崩溃，重启会收到 409。控制面已支持 TTL 内幂等换发新 `server_token`；agent 现在也会把 409 当终态、退避 10 分钟重试并明确提示重建，不再 10 秒重启一次。真机上仍需验证这条恢复路径。
 6. DO metadata 公网 IP 查询是新增行为，只在 DO 上有效；其他环境要显式配 `public_host`。
 7. 不做自更新；版本由重建决定（设计 §12）。
 8. 只改 `agent/`；未提交、未部署。

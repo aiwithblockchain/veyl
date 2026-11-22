@@ -1,6 +1,6 @@
 //! In-memory `Host` used by unit tests. Not compiled into the binary.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -14,6 +14,7 @@ use crate::host::{CmdOutput, Host};
 #[derive(Default)]
 pub struct FakeHost {
     files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    dirs: Mutex<HashSet<PathBuf>>,
     commands: Mutex<Vec<(String, Vec<String>)>>,
     outputs: Mutex<HashMap<String, CmdOutput>>,
     queues: Mutex<HashMap<String, VecDeque<CmdOutput>>>,
@@ -134,12 +135,23 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    async fn create_dir_all(&self, _path: &Path) -> Result<()> {
+    async fn create_dir_all(&self, path: &Path) -> Result<()> {
+        self.dirs.lock().unwrap().insert(path.to_path_buf());
         Ok(())
     }
 
     async fn is_file(&self, path: &Path) -> Result<bool> {
         Ok(self.files.lock().unwrap().contains_key(path))
+    }
+
+    async fn canonicalize(&self, path: &Path) -> Result<PathBuf> {
+        let exists = self.dirs.lock().unwrap().contains(path)
+            || self.files.lock().unwrap().contains_key(path);
+        if exists {
+            Ok(path.to_path_buf())
+        } else {
+            bail!("canonicalize: {} does not exist", path.display())
+        }
     }
 
     async fn connect(&self, addr: SocketAddr, _timeout: Duration) -> Result<()> {

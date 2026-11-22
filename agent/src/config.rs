@@ -48,6 +48,44 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+fn default_log_file() -> Option<PathBuf> {
+    Some(PathBuf::from("/var/log/veyl-agent/agent.log"))
+}
+
+fn default_log_max_bytes() -> u64 {
+    5 * 1024 * 1024
+}
+
+fn default_log_keep_files() -> usize {
+    3
+}
+
+/// On-disk log sink for console troubleshooting. Every key has a default so
+/// the existing cloud-init config (`control_url` / `enroll_url` /
+/// `enroll_token` only) keeps starting unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    /// Log file path; `null` disables file logging.
+    #[serde(default = "default_log_file")]
+    pub file: Option<PathBuf>,
+    /// Rotate when the current file would exceed this size.
+    #[serde(default = "default_log_max_bytes")]
+    pub max_bytes: u64,
+    /// Number of rotated backups to keep (`agent.log.1` … `agent.log.N`).
+    #[serde(default = "default_log_keep_files")]
+    pub keep_files: usize,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            file: default_log_file(),
+            max_bytes: default_log_max_bytes(),
+            keep_files: default_log_keep_files(),
+        }
+    }
+}
+
 fn default_sb_binary() -> PathBuf {
     PathBuf::from("/usr/local/bin/sing-box")
 }
@@ -131,7 +169,7 @@ impl Default for SingBoxConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Control-plane base URL. cloud-init writes it as `control_url`.
     #[serde(alias = "control_url")]
@@ -182,9 +220,39 @@ pub struct AgentConfig {
     pub egress_probe: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default)]
+    pub log: LogConfig,
     /// Dev only: allow `http://` control-plane URLs. Production must be HTTPS.
     #[serde(default)]
     pub allow_insecure_control_plane: bool,
+}
+
+/// Plaintext control-plane URLs are a dev convenience. Release binaries
+/// compile the escape hatch out; a config that sets it refuses to start.
+pub fn insecure_control_plane_allowed() -> bool {
+    cfg!(debug_assertions) || cfg!(feature = "dev")
+}
+
+/// `{:?}` never prints the enrollment token.
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("control_plane_url", &self.control_plane_url)
+            .field("enrollment_token", &self.enrollment_token.as_ref().map(|_| "***"))
+            .field("enroll_url", &self.enroll_url)
+            .field("signer_pubkey", &self.signer_pubkey)
+            .field("detect_public_ip", &self.detect_public_ip)
+            .field("control_bind", &self.control_bind)
+            .field("control_port", &self.control_port)
+            .field("public_host", &self.public_host)
+            .field("allowed_hosts", &self.allowed_hosts)
+            .field("cert_dir", &self.cert_dir)
+            .field("state_dir", &self.state_dir)
+            .field("log_level", &self.log_level)
+            .field("log", &self.log)
+            .field("allow_insecure_control_plane", &self.allow_insecure_control_plane)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentConfig {
@@ -198,15 +266,27 @@ impl AgentConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_with_policy(insecure_control_plane_allowed())
+    }
+
+    /// `allow_insecure` is the build's policy; tests pass false to prove a
+    /// release build refuses the dev escape hatch.
+    pub fn validate_with_policy(&self, allow_insecure: bool) -> Result<()> {
+        if self.allow_insecure_control_plane && !allow_insecure {
+            bail!(
+                "allow_insecure_control_plane is a dev-only option and is disabled in release builds"
+            );
+        }
+        let insecure_ok = self.allow_insecure_control_plane && allow_insecure;
         let url = self.control_plane_url.trim();
-        if !(url.starts_with("https://") || (self.allow_insecure_control_plane && url.starts_with("http://"))) {
+        if !(url.starts_with("https://") || (insecure_ok && url.starts_with("http://"))) {
             bail!(
                 "control_plane_url must be https:// (set allow_insecure_control_plane for dev only)"
             );
         }
         if let Some(enroll_url) = &self.enroll_url {
             if !(enroll_url.starts_with("https://")
-                || (self.allow_insecure_control_plane && enroll_url.starts_with("http://")))
+                || (insecure_ok && enroll_url.starts_with("http://")))
             {
                 bail!("enroll_url must be https://");
             }
@@ -232,6 +312,14 @@ impl AgentConfig {
         self.control_bind
             .parse::<std::net::IpAddr>()
             .with_context(|| format!("control_bind must be an IP address, got {}", self.control_bind))?;
+        if self.log.file.is_some() {
+            if self.log.max_bytes < 4096 {
+                bail!("log.max_bytes must be at least 4096");
+            }
+            if !(1..=50).contains(&self.log.keep_files) {
+                bail!("log.keep_files must be 1..=50");
+            }
+        }
         Ok(())
     }
 
@@ -292,6 +380,7 @@ mod tests {
             poll_interval_secs: default_poll_interval_secs(),
             egress_probe: default_egress_probe(),
             log_level: default_log_level(),
+            log: LogConfig::default(),
             allow_insecure_control_plane: false,
         }
     }
@@ -344,6 +433,53 @@ mod tests {
         );
         assert_eq!(cfg.control_port, 32100);
         assert_eq!(cfg.port_band, [30000, 30999]);
+        assert_eq!(
+            cfg.log.file.as_deref(),
+            Some(std::path::Path::new("/var/log/veyl-agent/agent.log"))
+        );
+        assert_eq!(cfg.log.max_bytes, 5 * 1024 * 1024);
+        assert_eq!(cfg.log.keep_files, 3);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn release_build_refuses_the_insecure_escape_hatch() {
+        let mut cfg = base();
+        cfg.control_plane_url = "http://control.example.com".into();
+        cfg.allow_insecure_control_plane = true;
+        // Dev policy: allowed. Release policy: rejected outright, even if the
+        // URL happens to be https.
+        assert!(cfg.validate_with_policy(true).is_ok());
+        assert!(cfg.validate_with_policy(false).is_err());
+        cfg.control_plane_url = "https://control.example.com".into();
+        assert!(cfg.validate_with_policy(false).is_err());
+    }
+
+    #[test]
+    fn debug_output_hides_the_enrollment_token() {
+        let mut cfg = base();
+        cfg.enrollment_token = Some("enr_secret_value".into());
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("enr_secret_value"));
+        assert!(debug.contains("control.example.com"));
+    }
+
+    #[test]
+    fn log_sink_can_be_disabled_and_has_defaults() {
+        let text = r#"{
+            "control_url": "https://control.example.com",
+            "log": { "file": null }
+        }"#;
+        let cfg: AgentConfig = serde_json::from_str(text).unwrap();
+        assert!(cfg.log.file.is_none());
+        assert_eq!(cfg.log.keep_files, 3);
+        cfg.validate().unwrap();
+        // A bogus size is rejected only while the file sink is enabled.
+        let text = r#"{
+            "control_url": "https://control.example.com",
+            "log": { "max_bytes": 1 }
+        }"#;
+        let cfg: AgentConfig = serde_json::from_str(text).unwrap();
+        assert!(cfg.validate().is_err());
     }
 }

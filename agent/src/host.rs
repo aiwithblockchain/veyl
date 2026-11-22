@@ -9,11 +9,46 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+/// 200 MiB: large enough for any sing-box release, small enough that a hostile
+/// or broken endpoint cannot fill the disk.
+const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+const CMD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Unpack/install read a whole archive; give them more room than systemctl.
+const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmdOutput {
     pub status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Marker error so callers can map a stuck command to a retryable failure
+/// instead of a fatal one.
+#[derive(Debug)]
+pub struct CommandTimeout {
+    pub program: String,
+    pub args: Vec<String>,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Display for CommandTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} timed out after {:?}",
+            self.program,
+            crate::logging::redact_sensitive(&self.args.join(" ")),
+            self.timeout
+        )
+    }
+}
+
+impl std::error::Error for CommandTimeout {}
+
+/// True when an error came from the command timeout wrapper.
+pub fn is_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| e.is::<CommandTimeout>())
 }
 
 impl CmdOutput {
@@ -49,6 +84,7 @@ pub trait Host: Send + Sync {
     async fn remove(&self, path: &Path) -> Result<()>;
     async fn create_dir_all(&self, path: &Path) -> Result<()>;
     async fn is_file(&self, path: &Path) -> Result<bool>;
+    async fn canonicalize(&self, path: &Path) -> Result<std::path::PathBuf>;
     async fn connect(&self, addr: SocketAddr, timeout: Duration) -> Result<()>;
     async fn download(&self, url: &str, dest: &Path) -> Result<()>;
     async fn sha256_file(&self, path: &Path) -> Result<String>;
@@ -56,27 +92,93 @@ pub trait Host: Send + Sync {
 
 pub struct RealHost {
     http: reqwest::Client,
+    cmd_timeout: Duration,
+    archive_timeout: Duration,
 }
 
 impl RealHost {
     pub fn new() -> Result<Self> {
+        Self::with_timeouts(CMD_TIMEOUT, ARCHIVE_TIMEOUT)
+    }
+
+    pub fn with_timeouts(cmd_timeout: Duration, archive_timeout: Duration) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .user_agent(crate::control::USER_AGENT)
+            // Redirects must stay on https; a downgrade to http would let a
+            // compromised mirror swap the binary on the wire.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many redirects")
+                } else if attempt.url().scheme() != "https" {
+                    attempt.error("redirect to a non-https URL")
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            cmd_timeout,
+            archive_timeout,
+        })
+    }
+
+    fn timeout_for(&self, program: &str) -> Duration {
+        let base = Path::new(program)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(program);
+        if base == "tar" || base == "install" {
+            self.archive_timeout
+        } else {
+            self.cmd_timeout
+        }
+    }
+}
+
+/// Scheme + host only: URLs can carry one-time tokens in their query string.
+fn url_host(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => format!("{}://{host}", parsed.scheme()),
+            None => "<no-host>".to_string(),
+        },
+        Err(_) => "<invalid-url>".to_string(),
     }
 }
 
 #[async_trait]
 impl Host for RealHost {
     async fn run(&self, program: &str, args: &[String]) -> Result<CmdOutput> {
-        tracing::debug!(program, ?args, "exec");
-        let output = tokio::process::Command::new(program)
-            .args(args)
-            .output()
-            .await
-            .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let timeout = self.timeout_for(program);
+        if let Some(base) = Path::new(program).file_name().and_then(|n| n.to_str()) {
+            tracing::debug!(program = base, "exec");
+        }
+        let mut command = tokio::process::Command::new(program);
+        command.args(args).kill_on_drop(true);
+        let output = match tokio::time::timeout(timeout, command.output()).await {
+            Ok(result) => result.with_context(|| {
+                format!(
+                    "run {} {}",
+                    program,
+                    crate::logging::redact_sensitive(&args.join(" "))
+                )
+            })?,
+            Err(_) => {
+                tracing::warn!(
+                    program,
+                    args = %crate::logging::redact_sensitive(&args.join(" ")),
+                    timeout_secs = timeout.as_secs(),
+                    "command timed out"
+                );
+                return Err(anyhow::Error::new(CommandTimeout {
+                    program: program.to_string(),
+                    args: args.to_vec(),
+                    timeout,
+                }));
+            }
+        };
         Ok(CmdOutput {
             status: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -156,6 +258,12 @@ impl Host for RealHost {
             .unwrap_or(false))
     }
 
+    async fn canonicalize(&self, path: &Path) -> Result<std::path::PathBuf> {
+        tokio::fs::canonicalize(path)
+            .await
+            .with_context(|| format!("canonicalize {}", path.display()))
+    }
+
     async fn connect(&self, addr: SocketAddr, timeout: Duration) -> Result<()> {
         match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
             Ok(Ok(_)) => Ok(()),
@@ -165,15 +273,27 @@ impl Host for RealHost {
     }
 
     async fn download(&self, url: &str, dest: &Path) -> Result<()> {
-        tracing::debug!(url, dest = %dest.display(), "download");
+        let parsed = reqwest::Url::parse(url).context("parse download URL")?;
+        if parsed.scheme() != "https" {
+            anyhow::bail!("download URL must be https");
+        }
+        tracing::debug!(host = %url_host(url), dest = %dest.display(), "download");
         let mut resp = self
             .http
-            .get(url)
+            .get(parsed)
             .send()
             .await
-            .with_context(|| format!("GET {url}"))?
+            .with_context(|| format!("GET {}", url_host(url)))?
             .error_for_status()
-            .with_context(|| format!("GET {url}"))?;
+            .with_context(|| format!("GET {}", url_host(url)))?;
+        if let Some(len) = resp.content_length() {
+            if len > MAX_DOWNLOAD_BYTES {
+                anyhow::bail!(
+                    "download from {} is {len} bytes, over the {MAX_DOWNLOAD_BYTES}-byte limit",
+                    url_host(url)
+                );
+            }
+        }
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -181,7 +301,23 @@ impl Host for RealHost {
             .await
             .with_context(|| format!("create {}", dest.display()))?;
         use tokio::io::AsyncWriteExt;
-        while let Some(chunk) = resp.chunk().await.context("read download body")? {
+        let mut written: u64 = 0;
+        loop {
+            let chunk = resp.chunk().await.context("read download body")?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+            written += chunk.len() as u64;
+            if written > MAX_DOWNLOAD_BYTES {
+                drop(file);
+                let _ = tokio::fs::remove_file(dest).await;
+                tracing::warn!(
+                    host = %url_host(url),
+                    limit_bytes = MAX_DOWNLOAD_BYTES,
+                    "download exceeded the size limit; partial file removed"
+                );
+                anyhow::bail!("download from {} exceeded the size limit", url_host(url));
+            }
             file.write_all(&chunk).await.context("write download")?;
         }
         file.flush().await.context("flush download")?;
@@ -203,5 +339,61 @@ impl Host for RealHost {
             hasher.update(&buf[..n]);
         }
         Ok(crate::cert::hex(hasher.finalize().as_slice()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_hung_command_times_out_with_a_marker_error() {
+        crate::init_crypto_provider();
+        let host = RealHost::with_timeouts(
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let err = host
+            .run("sh", &["-c".into(), "sleep 5".into()])
+            .await
+            .unwrap_err();
+        assert!(is_timeout(&err), "expected a CommandTimeout: {err}");
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn archive_commands_get_the_longer_timeout() {
+        crate::init_crypto_provider();
+        let host = RealHost::with_timeouts(Duration::from_secs(30), Duration::from_secs(300))
+            .unwrap();
+        assert_eq!(host.timeout_for("/usr/bin/tar"), Duration::from_secs(300));
+        assert_eq!(host.timeout_for("/usr/bin/install"), Duration::from_secs(300));
+        assert_eq!(
+            host.timeout_for("/usr/local/bin/sing-box"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(host.timeout_for("systemctl"), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn download_rejects_plain_http_before_connecting() {
+        crate::init_crypto_provider();
+        let host = RealHost::new().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-agent-host-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = host
+            .download("http://example.com/sing-box.tar.gz", &dir.join("x"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must be https"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -10,6 +10,7 @@
 //! `exp`, `server_id`, and that the jti has not already authorized a tool call.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -98,12 +99,18 @@ pub fn mint_payload(signing_key: &SigningKey, payload: &TokenPayload) -> String 
     )
 }
 
+/// Upper bound on persisted jti entries; expired ones are dropped first.
+const MAX_REPLAY_ENTRIES: usize = 512;
+
 /// Shared verification + replay state.
 pub struct AuthState {
     verifying_key: VerifyingKey,
     server_id: String,
     /// jti -> exp for tokens that have already executed a tool.
     executed: Mutex<HashMap<String, u64>>,
+    /// Optional 0600 file so a restart cannot reopen the 60-second replay
+    /// window. None in the demo/serve helpers.
+    replay_path: Option<PathBuf>,
 }
 
 impl AuthState {
@@ -112,6 +119,23 @@ impl AuthState {
             verifying_key,
             server_id: server_id.into(),
             executed: Mutex::new(HashMap::new()),
+            replay_path: None,
+        }
+    }
+
+    /// Like `new`, but persists used jtis so replay protection survives a
+    /// restart (systemd restarts, console reboots).
+    pub fn with_store(
+        verifying_key: VerifyingKey,
+        server_id: impl Into<String>,
+        replay_path: PathBuf,
+    ) -> Self {
+        let executed = load_replay(&replay_path);
+        Self {
+            verifying_key,
+            server_id: server_id.into(),
+            executed: Mutex::new(executed),
+            replay_path: Some(replay_path),
         }
     }
 
@@ -162,7 +186,8 @@ impl AuthState {
     }
 
     /// Atomically mark this jti as used by a tool execution. The first caller
-    /// wins; any later caller gets `Replayed`.
+    /// wins; any later caller gets `Replayed`. The set is persisted (0600,
+    /// atomic rename) when a store path was configured.
     pub fn consume_jti(&self, payload: &TokenPayload) -> Result<(), AuthError> {
         let now = now_unix();
         let mut executed = self.executed.lock().expect("replay map poisoned");
@@ -171,12 +196,76 @@ impl AuthState {
             return Err(AuthError::Replayed);
         }
         executed.insert(payload.jti.clone(), payload.exp);
+        cap_replay(&mut executed);
+        if let Some(path) = &self.replay_path {
+            if let Err(e) = persist_replay(path, &executed) {
+                tracing::error!(error = %e, "failed to persist the jti replay set");
+            }
+        }
         Ok(())
     }
 
     pub fn executed_count(&self) -> usize {
         self.executed.lock().expect("replay map poisoned").len()
     }
+}
+
+fn load_replay(path: &Path) -> HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str::<HashMap<String, u64>>(&text) {
+        Ok(mut map) => {
+            let now = now_unix();
+            map.retain(|_, exp| *exp > now);
+            map
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "ignoring unreadable jti replay file");
+            HashMap::new()
+        }
+    }
+}
+
+/// Keep the map bounded: when over the cap, drop the entries that expire
+/// soonest (they are the least useful for replay protection).
+fn cap_replay(map: &mut HashMap<String, u64>) {
+    if map.len() <= MAX_REPLAY_ENTRIES {
+        return;
+    }
+    let mut entries: Vec<(String, u64)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    entries.sort_by_key(|(_, exp)| *exp);
+    let excess = entries.len() - MAX_REPLAY_ENTRIES;
+    for (jti, _) in entries.into_iter().take(excess) {
+        map.remove(&jti);
+    }
+}
+
+fn persist_replay(path: &Path, map: &HashMap<String, u64>) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string(map)?;
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 pub fn parse_verifying_key_hex(s: &str) -> anyhow::Result<VerifyingKey> {
@@ -327,5 +416,71 @@ mod tests {
             .unwrap();
         assert!(auth.consume_jti(&p).is_ok());
         assert_eq!(auth.consume_jti(&p), Err(AuthError::Replayed));
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-agent-auth-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn jti_replay_survives_a_restart() {
+        let dir = tmpdir("restart");
+        let path = dir.join("jtis.json");
+        let sk = key();
+        let token = mint_token(&sk, "srv_1", "j1", now_unix() + 60);
+
+        {
+            let auth = AuthState::with_store(sk.verifying_key(), "srv_1", path.clone());
+            let p = auth.verify(&token).unwrap();
+            auth.consume_jti(&p).unwrap();
+        }
+        // A new process would load the same file.
+        let auth = AuthState::with_store(sk.verifying_key(), "srv_1", path.clone());
+        let p = auth.verify(&token).unwrap();
+        assert_eq!(auth.consume_jti(&p), Err(AuthError::Replayed));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expired_jtis_are_not_loaded_back() {
+        let dir = tmpdir("expired");
+        let path = dir.join("jtis.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{"old":{},"live":{}}}"#, now_unix() - 1, now_unix() + 60),
+        )
+        .unwrap();
+        let auth = AuthState::with_store(key().verifying_key(), "srv_1", path);
+        assert_eq!(auth.executed_count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn replay_set_is_capped() {
+        let mut map = HashMap::new();
+        for i in 0..MAX_REPLAY_ENTRIES + 50 {
+            map.insert(format!("j{i}"), now_unix() + i as u64);
+        }
+        cap_replay(&mut map);
+        assert_eq!(map.len(), MAX_REPLAY_ENTRIES);
+        // The soonest-to-expire entries were dropped first.
+        assert!(!map.contains_key("j0"));
+        assert!(map.contains_key(&format!("j{}", MAX_REPLAY_ENTRIES + 49)));
     }
 }

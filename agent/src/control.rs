@@ -153,11 +153,27 @@ impl fmt::Debug for ReportRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ControlError {
     Transport(String),
     Status { status: u16, body: String },
     Decode(String),
+}
+
+/// `{:?}` redacts a response body: it can echo a desired state with the
+/// password.
+impl std::fmt::Debug for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlError::Transport(e) => f.debug_tuple("Transport").field(e).finish(),
+            ControlError::Status { status, body } => f
+                .debug_struct("Status")
+                .field("status", status)
+                .field("body", &truncate(&redact_sensitive(body), 300))
+                .finish(),
+            ControlError::Decode(e) => f.debug_tuple("Decode").field(e).finish(),
+        }
+    }
 }
 
 impl fmt::Display for ControlError {
@@ -439,5 +455,17 @@ mod tests {
         let text = err.to_string();
         assert!(!text.contains("hunter2"));
         assert!(text.contains("400"));
+    }
+
+    #[test]
+    fn error_debug_also_redacts_body() {
+        let err = ControlError::Status {
+            status: 409,
+            body: r#"{"desired":{"password":"hunter2"},"reason":"server_destroyed"}"#.into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("409"));
+        assert!(debug.contains("server_destroyed"));
     }
 }

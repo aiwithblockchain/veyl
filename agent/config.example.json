@@ -3,5 +3,10 @@
   "enroll_url": "https://control.example.com/v1/agent/enroll",
   "enroll_token": "enr_REPLACE_ME",
   "log_level": "debug",
+  "log": {
+    "file": "/var/log/veyl-agent/agent.log",
+    "max_bytes": 5242880,
+    "keep_files": 3
+  },
   "detect_public_ip": true
 }

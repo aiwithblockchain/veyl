@@ -50,7 +50,8 @@ pub struct AgentHandle {
     pub task: tokio::task::JoinHandle<Result<()>>,
 }
 
-/// Start the MCP endpoint on an existing TLS identity.
+/// Start the MCP endpoint on an existing TLS identity. `replay_path` persists
+/// used jtis (production); dev helpers pass None.
 pub async fn start_agent_with_certs(
     addr: SocketAddr,
     identity: Arc<Identity>,
@@ -58,14 +59,15 @@ pub async fn start_agent_with_certs(
     verifying_key: VerifyingKey,
     rotator: Arc<dyn Rotator>,
     announce: bool,
+    replay_path: Option<std::path::PathBuf>,
 ) -> Result<AgentHandle> {
     let listener = server::bind(addr).await?;
     let addr = listener.local_addr()?;
-    let state = ServerState::new(
-        Arc::new(AuthState::new(verifying_key, server_id)),
-        rotator,
-        identity.clone(),
-    );
+    let auth = match replay_path {
+        Some(path) => AuthState::with_store(verifying_key, server_id, path),
+        None => AuthState::new(verifying_key, server_id),
+    };
+    let state = ServerState::new(Arc::new(auth), rotator, identity.clone());
     let certs = identity.certs().clone();
     let ct = CancellationToken::new();
     let task = tokio::spawn(server::serve(listener, state.clone(), ct.clone()));
@@ -92,5 +94,36 @@ impl AgentHandle {
     pub async fn shutdown(self) {
         self.ct.cancel();
         let _ = self.task.await;
+    }
+}
+
+/// Await the MCP task. Any exit — clean return, error, panic — is fatal: the
+/// caller logs and exits non-zero so systemd restarts the process. Otherwise
+/// the unit stays "active" while port 32100 is dead.
+pub async fn supervise_mcp(task: &mut tokio::task::JoinHandle<Result<()>>) -> Result<()> {
+    match task.await {
+        Ok(Ok(())) => Err(anyhow::anyhow!("MCP server task exited unexpectedly")),
+        Ok(Err(e)) => Err(e.context("MCP server task failed")),
+        Err(e) if e.is_panic() => Err(anyhow::anyhow!("MCP server task panicked: {e}")),
+        Err(e) => Err(anyhow::anyhow!("MCP server task stopped: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_finished_mcp_task_is_reported_as_fatal() {
+        let mut task = tokio::spawn(async { Err(anyhow::anyhow!("bind lost")) });
+        let err = supervise_mcp(&mut task).await.unwrap_err();
+        assert!(err.to_string().contains("MCP server task failed"));
+    }
+
+    #[tokio::test]
+    async fn a_cleanly_returning_mcp_task_is_also_fatal() {
+        let mut task = tokio::spawn(async { Ok(()) });
+        let err = supervise_mcp(&mut task).await.unwrap_err();
+        assert!(err.to_string().contains("exited unexpectedly"));
     }
 }

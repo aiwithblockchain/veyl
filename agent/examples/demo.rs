@@ -273,6 +273,7 @@ async fn main() -> Result<()> {
         signing.verifying_key(),
         Arc::new(StubRotator::default()),
         false,
+        None,
     )
     .await?;
     let url = agent.mcp_url();
