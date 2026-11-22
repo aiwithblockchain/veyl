@@ -55,9 +55,9 @@
 
 | # | 工作 | 现在的状态 | 下一步 | 谁 |
 |---|---|---|---|---|
-| N1 | agent release 产物 | CI run 44976898297：首次 amd64 卡死已取消重跑，test 已过，两个 musl 构建进行中 | 取 `SHA256SUMS` 里 `veyl-agent-linux-amd64` 那行的 sha256 | CI |
-| N2 | 控制面 `AGENT_SHA256` | dev 与 prod 两处仍是 `REPLACE_WITH_AGENT_SHA256`（下载地址已对齐实际资产名） | 填 N1 的值 | 用户 |
-| N3 | dev 部署 | 迁移 0010 未应用；`AGENT_TOKEN_SIGNING_JWK` 未设置 | `wrangler d1 migrations apply` + `wrangler secret put AGENT_TOKEN_SIGNING_JWK` + `npm run deploy:dev` | 用户 |
+| N1 | agent release 产物 | 已完成：run `45015144375` success，`amd64` / `arm64` / `SHA256SUMS` 三个资产已发布 | — | 已完成 |
+| N2 | 控制面 `AGENT_SHA256` | 已完成：amd64 摘要 `4f82df12…` 填入 prod 与 dev，与 release 的 `SHA256SUMS` 逐字一致（`9ff5492`） | — | 已完成 |
+| N3 | dev 部署 | 迁移 0010/0011 已应用（问题墙批次）；`AGENT_TOKEN_SIGNING_JWK` 未设置 | 部署时带上 `fca3ea4`、`5c70ef1`、`9ff5492`，先确认四个 secret | 用户 + issue-report-api |
 | N4 | 真机验收（设计 §13 五条） | 全部未做 | 建机上报 active / 停服务后修复 / 模拟端口被封后轮换并同步到手机 / 伪造与重放令牌被拒 / 修复失败引导重建 | 用户 |
 | N5 | 「智能修复」按钮 | 已完成：按钮、确认、三态、7 类失败文案、真桥接；65 项测试绿 | 契约增量写入 `commands.md`（2.53.0） | 已交付 |
 | N6 | 控制面不可达的说明 | 已完成（`agent_token_unavailable` 就地提示，不静默失败） | — | 已交付 |
