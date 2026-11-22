@@ -159,7 +159,7 @@ impl Tool for MyServersTool {
          只读；返回地址，不返回端口、密码。用户问这台机器的地址时直接答，不要绕。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
          不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
-         用「服务器」「地区」「安装中」这些词；不出现 server_id、node_id。"
+         用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -184,15 +184,58 @@ impl Tool for MyServersTool {
                 } else {
                     original.iter().take(8).filter_map(server_row_fact).collect()
                 };
-                let count = servers.len();
+                let summary = summarise_servers(&servers);
                 let mut visible = data;
                 visible["servers"] = Value::Array(servers);
-                ToolOutcome::ok(format!("共 {count} 台服务器。"), visible).with_facts(facts)
+                ToolOutcome::ok(summary, visible).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
         envelope::finish(ctx, "MyServers", outcome)
     }
+}
+
+/// 模型只看得到摘要（`ToolResult.content`），`data` 只进界面。
+/// 所以每台的 id / 名称 / 地区 / 状态 / 地址 / 计费必须写在这里，
+/// `server_id` 是 `NodeRotateCredentials` 等工具的唯一入参来源。
+fn summarise_servers(servers: &[Value]) -> String {
+    if servers.is_empty() {
+        return "你名下还没有自建服务器。".to_string();
+    }
+    let mut lines = vec![format!("共 {} 台服务器：", servers.len())];
+    for server in servers {
+        let id = server
+            .get("server_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let name = server
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("(未命名)");
+        let region = server.get("region").and_then(Value::as_str).unwrap_or("-");
+        let state = state_label(server.get("state").and_then(Value::as_str).unwrap_or(""));
+        let ip = server
+            .get("ip")
+            .and_then(Value::as_str)
+            .unwrap_or("地址未就绪");
+        let ready = server
+            .get("node_ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let daily = server
+            .get("daily_price_cents")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut line = format!("- {id} | {name} | {region} | {state} | {ip} | 每天 {:.2} 美元", daily as f64 / 100.0);
+        if ready {
+            line.push_str(" | 可建配置");
+        }
+        if let Some(reason) = server.get("destroyed_reason").and_then(Value::as_str) {
+            line.push_str(&format!(" | {reason}"));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -214,6 +257,46 @@ mod tests {
         assert_eq!(state_label("healthy"), "可用");
         assert_eq!(state_label("destroying"), "正在销毁");
         assert_eq!(state_label("nonsense"), "状态未知");
+    }
+
+    #[test]
+    fn the_summary_carries_every_server_because_only_content_reaches_the_model() {
+        let servers = vec![
+            json!({
+                "server_id": "srv_1",
+                "name": "伦敦",
+                "region": "lon1",
+                "state": "active",
+                "ip": "167.99.195.212",
+                "node_ready": true,
+                "daily_price_cents": 30,
+            }),
+            json!({
+                "server_id": "srv_2",
+                "name": "纽约",
+                "region": "nyc1",
+                "state": "destroyed",
+                "ip": null,
+                "node_ready": false,
+                "daily_price_cents": 30,
+                "destroyed_reason": "已销毁",
+            }),
+        ];
+        let text = summarise_servers(&servers);
+        for expected in [
+            "共 2 台服务器",
+            "srv_1",
+            "伦敦",
+            "lon1",
+            "167.99.195.212",
+            "可用",
+            "可建配置",
+            "srv_2",
+            "已销毁",
+        ] {
+            assert!(text.contains(expected), "摘要缺少 {expected}：{text}");
+        }
+        assert_eq!(summarise_servers(&[]), "你名下还没有自建服务器。");
     }
 
     /// 地址保留；端口、密码、节点 id、provider id 等内部字段不得出现。

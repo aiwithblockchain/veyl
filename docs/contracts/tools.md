@@ -1818,6 +1818,7 @@ type CoreUpgradeData = {
   - **密码、节点 id、provider id 等内部字段一律不给**；工具按固定白名单重建每一条。
   - **已销毁的行带 `destroyed_reason`（3.21.3）**：`failure.code = "billing_unpaid"` → 「因余额不足停机删除」，其余 destroyed → 「已销毁」。同时把内部 `failure` 置 null，**不给模型原始 `failure_code`**。
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
+- **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，可用时追加「可建配置」，已销毁时追加人话原因。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
 - `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态 · IP（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
 
