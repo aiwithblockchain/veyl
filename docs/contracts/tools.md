@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.22.1`
+> 契约版本：`3.23.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
