@@ -21,6 +21,7 @@
 | 工具描述按会话语言（41 条英文 + `LocalizedTool`）、界面错误只回稳定码（`errorText` 映射） | `7ce7b29` |
 | 事件状态与工具卡文案按 `text_key` 渲染（批次 B）、两语言回归手册 | `950b876` |
 | 工具卡事实结构化（B3/B2b，100 条 `tool.fact.*`）、公开问题墙（`tools.md` 3.25.0）、节点诊断收尾、版本 1.1.0、同步档位改 30 分钟–24 小时 | `adace5b` |
+| B3 复核修复与节点探测语义收口：工具卡参数名/枚举、缺字段不发 fact、`other_config` → `node_not_in_config`、Clash 404 独立原因、接手 TUN 复原连接上下文、契约 2.59.0 / tools 3.25.1 | `c8a142f` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 
@@ -40,7 +41,7 @@
 | 8 | 首启开场真机验收 | 只有 jsdom 测试 | 构建后完成首启配置，确认 AI 用开场词主动开口、且在已有配置时不再发 | 用户 |
 | 9 | 推送 | 本地领先 `origin/main` 多个提交（上次推送停在 `0cceb40`；之后有 `7ce7b29`、`950b876`、`adace5b` 等功能批次与若干 docs 提交） | 线路可用时 `git push` | 用户 |
 | 10 | 1.1.0 发布 | 版本号已升到 1.1.0（`adace5b`）；此前公证失败（`HTTPClientError.connectTimeout`），网站下载链接仍 404 | 重试公证与发布 | 用户 |
-| 11 | 契约自检 | 已归零：89 项通过、0 失败（`mobile_export_*` 与 `rules_update` 由移动端批次补齐，`tools.md` 三处版本字面量在 `7ce7b29` 修） | — | 已完成 |
+| 11 | 契约自检 | 已归零：91 项通过、0 失败（`mobile_export_*` 与 `rules_update` 由移动端批次补齐，`tools.md` 三处版本字面量在 `7ce7b29` 修） | — | 已完成 |
 | 12 | 余额修复真机验证 | 跨账户与门禁修复未在真机走过 | 构建后看 `logs/` 的 `ui::wallet` 与切换账户行为 | 用户 |
 | 13 | 节点凭据签发流程讨论 | 记在 `notes/pending-topics.md` #1 | 约一次专门讨论 | 用户 + PM |
 | 14 | 移动端导出（并行进行中） | 文档已回写真机结果并提交（`fa0b73f`）；Shadowrocket / Hiddify 真机通过 | 由该批次自行收尾 | 其它会话 |
@@ -80,6 +81,7 @@
 - `trial.error.fetchWith` 已无引用，待清理。
 - `tools.md` §4.13 / §4.54 仍有「全部软件 / 本机代理」旧用词，未收口。
 - `docs/design/issue-report-api.md`、`docs/design/node-diagnosis-flow.md` 是未提交的设计草案（后者主张取代现有修复动作设计），待产品确认。
+- 可选字段：`vpn.rs` 的 `config_name` / `node_name` 为空串时仍会推出 fact，卡片会显示空值；属可选字段、无中文兜底，未收（`c8a142f` 复核记录）。
 - 偶发：`agent::questions::memory_tests::explaining_a_setting_marks_a_pending_explanation` 在并行全量中挂过一次；事后单跑 20 次全过，判为时序 flake，尚未复现。
 - 偶发：`App.servers.test.tsx`「登录弹窗开着时 Esc 只关弹窗」与 `DiagnosisPanel.test`「重置后连续两次没测成」，在并行全量中各挂过一次；单跑与复跑均通过，待观察。
 - CI 第 1/2 步在 HEAD 上既有红：`check-secrets.sh` 与 `secret-scan.sh` 命中既有测试假凭据与示例 IP，需单独一批加 `check-secrets:allow` 标记。
