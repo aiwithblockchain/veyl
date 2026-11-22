@@ -25,7 +25,13 @@ const STEP_TITLE: Record<DiagnosisStepId, MessageKey> = {
   connectivity: "diagnosis.step.connectivity",
   config: "diagnosis.step.config",
   rotate: "diagnosis.step.rotate",
+  retest: "diagnosis.step.retest",
   ai: "diagnosis.step.ai",
+};
+
+/** connection 档同一步骤名不同：这一档的 config 步骤是本地「运行态与配置」。 */
+const CONNECTION_STEP_TITLE: Partial<Record<DiagnosisStepId, MessageKey>> = {
+  config: "diagnosis.step.runtimeConfig",
 };
 
 const ACTION_LABEL: Record<DiagnosisAction, MessageKey> = {
@@ -35,6 +41,9 @@ const ACTION_LABEL: Record<DiagnosisAction, MessageKey> = {
   retest: "diagnosis.action.retest",
   askAi: "diagnosis.action.askAi",
   goServers: "diagnosis.action.goServers",
+  openSettings: "diagnosis.action.openSettings",
+  changeNode: "diagnosis.action.changeNode",
+  reconnect: "diagnosis.action.reconnect",
 };
 
 const STATUS_LABEL: Record<DiagnosisStep["status"], MessageKey> = {
@@ -42,6 +51,7 @@ const STATUS_LABEL: Record<DiagnosisStep["status"], MessageKey> = {
   passed: "diagnosis.status.passed",
   failed: "diagnosis.status.failed",
   unknown: "diagnosis.status.unknown",
+  skipped: "diagnosis.status.skipped",
 };
 
 /** untested 的 Host 原因：常见的几种给人话，其余走通用语。 */
@@ -50,6 +60,10 @@ const UNTESTED_REASON_KEY: Record<string, MessageKey> = {
   clash_unavailable: "diagnosis.untested.clashUnavailable",
   node_not_in_config: "diagnosis.untested.nodeNotInConfig",
   node_not_in_running_config: "diagnosis.untested.nodeNotInRunningConfig",
+  no_credentials: "diagnosis.untested.noCredentials",
+  runtime_missing: "diagnosis.untested.runtimeMissing",
+  runtime_failed: "diagnosis.untested.runtimeFailed",
+  runtime_timeout: "diagnosis.untested.runtimeTimeout",
 };
 
 /** 破坏性动作才用 danger-ghost；其余只有一个主按钮。 */
@@ -83,6 +97,7 @@ export function DiagnosisPanel({
 }: Props) {
   const t = useT();
   const diagnosis = useNodeDiagnosis(deps);
+  const isConnection = deps.profile === "connection";
   const dialogRef = useRef<HTMLDivElement>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -139,13 +154,21 @@ export function DiagnosisPanel({
       case "unreachable":
         return t("diagnosis.connectivity.unreachable");
       case "service-down":
-        return t("diagnosis.connectivity.serviceDown");
+        return t(
+          isConnection
+            ? "diagnosis.connection.serviceDown"
+            : "diagnosis.connectivity.serviceDown",
+        );
       case "probe-error":
         return t(
           PROBE_ERROR_KEY[conclusion.code ?? ""] ?? "diagnosis.probeError.generic",
         );
       case "local-network":
-        return t("diagnosis.connectivity.localNetwork");
+        return t(
+          isConnection
+            ? "diagnosis.connection.localNetwork"
+            : "diagnosis.connectivity.localNetwork",
+        );
       case "config-pending":
         return t("diagnosis.config.pending");
       case "config-control-plane":
@@ -205,6 +228,30 @@ export function DiagnosisPanel({
           : t("diagnosis.rotate.failedNoReason");
       case "ai-handed":
         return t("diagnosis.ai.handed");
+      case "runtime-helper-blocked":
+        return t("diagnosis.connection.helperBlocked");
+      case "config-node-missing":
+        return t("diagnosis.connection.configNodeMissing");
+      case "config-invalid":
+        return t("diagnosis.connection.configInvalid");
+      case "server-unreachable":
+        return t("diagnosis.connection.serverUnreachable");
+      case "probe-untested": {
+        const key = conclusion.reason
+          ? UNTESTED_REASON_KEY[conclusion.reason]
+          : undefined;
+        return key
+          ? t("diagnosis.connection.probeUntestedReason", { reason: t(key) })
+          : t("diagnosis.connection.probeUntested");
+      }
+      case "runtime-error":
+        return t("diagnosis.connection.runtimeError");
+      case "connection-undetermined":
+        return t("diagnosis.connection.undetermined");
+      case "probe-ok":
+        return t("diagnosis.connection.probeOk");
+      case "skipped":
+        return t("diagnosis.connectivity.skipped");
     }
   };
 
@@ -227,7 +274,9 @@ export function DiagnosisPanel({
       >
         <header className="quit-dialog__head">
           <h2 id="diagnosis-title" className="quit-dialog__title">
-            {t("diagnosis.title", { name: nodeName })}
+            {nodeName
+              ? t("diagnosis.title", { name: nodeName })
+              : t("diagnosis.titlePlain")}
           </h2>
           <button
             ref={closeRef}
@@ -256,12 +305,19 @@ export function DiagnosisPanel({
                     ? "✓"
                     : step.status === "failed"
                       ? "✕"
-                      : step.status === "unknown"
-                        ? "?"
-                        : "…"}
+                      : step.status === "skipped"
+                        ? "–"
+                        : step.status === "unknown"
+                          ? "?"
+                          : "…"}
                 </span>
                 <div>
-                  <p className="diagnosis__step-title">{t(STEP_TITLE[step.id])}</p>
+                  <p className="diagnosis__step-title">
+                    {t(
+                      (isConnection && CONNECTION_STEP_TITLE[step.id]) ||
+                        STEP_TITLE[step.id],
+                    )}
+                  </p>
                   <p className="diagnosis__conclusion">
                     {conclusionText(step.conclusion)}
                   </p>
@@ -279,6 +335,15 @@ export function DiagnosisPanel({
                       >
                         {t(ACTION_LABEL[action])}
                       </button>
+                      {diagnosis.retestProbe && action !== "retest" ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost quit-dialog__btn"
+                          onClick={diagnosis.retestProbe}
+                        >
+                          {t("diagnosis.action.retest")}
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

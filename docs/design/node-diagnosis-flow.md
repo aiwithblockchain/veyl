@@ -137,3 +137,92 @@
 | 重置后重测 | 最多 2 次 | 只重测，不再重置 |
 
 - 任何一步用完次数、或出现确定性失败，一律交给 AI，不再自动推进。用户如果仍想再试，关掉面板重新发起即可，那是新的一轮。
+
+## 10. 连接失败：先本地诊断，AI 兜底
+
+> 2026-11-22 · **已定稿（2026-11-22）**。只出规格；实现归前端批次，Host 与契约不动。
+> 同日修订：兜底条件落到现有结论模型；修正耗时承诺；离线不再进死路；统一「智能诊断」用词；退役 `connectDiag`。
+> 二次修订（实现边界）：补 `service-down` / `probe-ok` 与动作 `reconnect`；B 步加 `tun_helper_info`；`config-node-missing` 改 `changeNode`；本地命令失败归 `runtime-error`；手动导入无 IP 记 `skipped`；`probe-untested` 八个 reason 逐一映射（`clash_unavailable` 走 `retest`）。
+
+### 10.1 失败态
+
+- 非免费节点连接失败：hero 主按钮改为 **`智能诊断`**（`console.primary.diagnose`），点击即开面板并自动开始；`重新连接` 仍为副按钮，`报告问题` 保留。
+- 免费节点不变：无诊断、无 AI，主按钮仍是 `重新连接`。
+
+### 10.2 跑什么、跑多久
+
+- 复用 `DiagnosisPanel` + `useNodeDiagnosis`，新增 `profile: "connection"`；**自动只跑两项**：
+  - A 连通性：`node_probe_reachability`（ICMP 3×2 秒 + TCP 5 秒，整体 10 秒硬超时，`commands.md` §7.30）；
+  - B 运行态与配置：`runtime_status` + `config_detail` + `tun_helper_info`（本地，<100ms）。本地命令抛错或超时 → 结论 `runtime-error`（失败命令与短码进 facts），**不归 `connection-undetermined`**。
+- `tun_helper_info` 按结构化 `state` 判定，**不维护码表**：`running` 通过；`not_running` / `start_failed` / `file_invalid` / `stale` → `runtime-helper-blocked` + `openSettings`（设置位置「高级」，`Settings.tsx:2841`）；`unknown` 不判。
+- 手动导入节点且拿不到 IP → 该步记 `skipped`（本档不适用），**不记 `probe-error`**。
+- **不自动跑 `node_probe`**（Clash 延迟，超时 20 秒，`tools.md` 3.21.1）；它只作为结论后的「重新测一次」动作，由用户点、上限沿用 20 秒。
+- 承诺改为：**通常 2–5 秒出结论，最坏 10 秒**（连通性硬超时）。不适用的检查记 `skipped`；探测命令本身的超时是 `probe-error`（见 10.3），不记 `skipped`、不阻塞其余步骤结论。
+
+### 10.3 结论与动作
+
+固定优先级，命中即止：**网络 → helper → 配置 → 节点**。
+
+| 结论 kind | 文案要点 | 唯一动作 |
+|---|---|---|
+| `local-network` | 当前没有网络 | `retest`（恢复网络后重新检查） |
+| `runtime-helper-blocked` | helper 未运行 / 未授权 | `openSettings` |
+| `config-node-missing` | 配置里没有这个节点 | `changeNode`（重读配置也变不出这个节点） |
+| `config-invalid` | 配置失效 | `updateConfig` |
+| `server-unreachable` | 节点地址不通 | `changeNode`（导航到节点列表） |
+| `service-down` | 节点服务没有响应（TCP refused） | `changeNode` |
+| `probe-untested`（带 reason） | `node_not_in_config`→`updateConfig`；`node_not_in_running_config`→`retest`（重连后生效）；`connection_busy`→`retest` | 见左 |
+| `probe-ok` | 节点现在能连通 | `reconnect`（等价 hero 重新连接） |
+| `runtime-error` | 运行时有错误，本地无对应修复动作 | `askAi` |
+| `probe-error` | 探测本身没跑起来（不是节点不通） | `askAi` |
+| `connection-undetermined` | 本地检查都过、仍连不上 | `askAi` |
+
+- `DiagnosisAction` 新增 `openSettings` / `changeNode` / `reconnect`；`retest` 复用现有。
+- `service-down` 与 `server-unreachable` 分开：前者机器在线、控制服务没监听，后者连地址都不通。
+- `probe-ok` 只出现在用户点「重新测一次」之后，**不用 `connection-undetermined` 承接**（那属于 `askAi` 集合）。
+- `probe-untested` 的 reason 映射覆盖 `commands.md` §4.4 的封闭集合（2.59.0），共八条：`node_not_in_config` → `updateConfig`；`node_not_in_running_config` / `connection_busy` / `clash_unavailable` → `retest`；`no_credentials` → `changeNode`；`runtime_missing` / `runtime_failed` / `runtime_timeout` → `askAi`（按 `runtime-error` 语义）。**契约新增 reason 时必须同步本表**。
+- `clash_unavailable` 不映射 `changeNode`：节点可能是好的，问题在运行时接口；重测仍是该原因时，该次结果记 `runtime-error` 走 `askAi`，不再循环 `retest`。
+- **`local-network` 的判定**：连通性失败 **且** 控制面同时取不到（现有 `facts.controlPlaneError` 非空）。两者同时成立才判「没有网络」，避免把「节点挂了」误报成「你没网」。
+
+### 10.4 AI 兜底条件（只用现有数据判定）
+
+- 判定输入是最后一步的 `DiagnosisStep.conclusion.kind`（`useNodeDiagnosis.ts:154-196` 的判别联合），**不引入 `remediation` 字段**。
+- **可执行结论集合 A** = `{ local-network, runtime-helper-blocked, config-node-missing, config-invalid, server-unreachable, service-down, probe-untested, probe-ok }`（8 个）；`probe-untested` 只有 reason ∈ `{node_not_in_config, node_not_in_running_config, connection_busy, clash_unavailable, no_credentials}` 时才属于 A，命中 A 一定给动作、**永不出现 `askAi`**。
+- **`askAi` 判定**：`kind ∈ { runtime-error, probe-error, connection-undetermined }`，**或** `kind = probe-untested` 且 reason ∈ `{runtime_missing, runtime_failed, runtime_timeout}`；等价于 `action === "askAi"`。
+- 「多个疑似原因」不触发 AI：按 10.3 优先级取第一个可执行动作，其余异常原样作为事实进提示词。
+- 离线时命中 `local-network` ∈ A，**永不判 `askAi`**——离线用户不会被送进必然失败的远程请求。
+
+### 10.5 兜底提示词带的事实（D6：事实进消息、规则进提示词）
+
+固定句取 `assistant.prompt.connectDiagnosis`，附 JSON：
+
+- 失败阶段（connect / starting / running / failed）、错误码与 `reason`；
+- 节点名与来源（owned / manual；seed 不进入本链路）、地区（**不含地址**）；
+- 运行态、helper 状态、接管方式；
+- 各步检查的 `status` 与稳定短码、探测三态与延迟；
+- 已尝试的动作与结果；`app_version`、`platform`。
+
+排除：密码、令牌、私钥、uuid、完整服务器地址与端口、配置全文、日志内容。
+
+### 10.6 与节点行链路的异同
+
+- **用词统一为「智能诊断」**：hero 主按钮、节点行入口（现 `diagnosis.entry` =「智能分析」）、面板标题都用这个词；节点行文案随本批改。
+- **共用**：面板组件、步骤状态机、上下文 JSON 序列化、`去问 AI` 的呈现。
+- **不共用**：入口（hero vs 行内）、步骤集（无服务器同步与重置）、结论集（多 helper / 配置失效）、上下文主体（连接快照 vs 服务器记录）。用 `profile` 区分，不复制面板。
+
+### 10.7 验收
+
+1. 能定位 → 结论带动作，用户不经过 AI 就修好。
+2. 定位不到（`connection-undetermined`）→ 出现 `问 AI`，发送内容含 10.5 全部字段且无敏感项。
+3. 免费节点 → 无诊断、无 AI，主按钮 `重新连接`。
+4. AI 未配置 → 点 `问 AI` 弹全局告警、不发消息，面板结论保留。
+5. 离线 → 结论「当前没有网络」+ `retest`，**不出现 `问 AI`**。
+6. 连通性触到 10 秒硬超时 → 结论 `probe-error`、动作 `askAi`；其余步骤的结论照常进提示词。
+7. 手动导入节点拿不到 IP → 该步记 `skipped`，不误报探测失败。
+8. 本地命令抛错或超时 → 结论 `runtime-error`，失败命令与短码进 facts。
+
+### 10.8 改动范围
+
+- 前端：`ConnectionStage.tsx`（主按钮与回调）、`App.tsx`（connection 档依赖装配）、`useNodeDiagnosis.ts`（profile、`DiagnosisConclusion` 新增 8 个 kind（`service-down` / `local-network` / `probe-error` 复用现有）、`DiagnosisAction` 增 `openSettings` / `changeNode` / `reconnect`）、`DiagnosisPanel.tsx`（标题）、`assistantPrompts.ts`（新增 `connectDiagnosis`）、zh/en 字典（主按钮与 `diagnosis.entry` 统一「智能诊断」、新增结论与动作键）。
+- **退役**：`assistant.prompt.connectDiag` 的中英两键与 `connectDiagAsk()` 随新链路删除，避免下次审计把它当成漏项。
+- Host / 契约：**不改**，全部复用现有 UI 命令；`换一个节点` 本版只做导航，不调 `node_switch`。

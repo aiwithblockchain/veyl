@@ -627,9 +627,10 @@ impl Tool for NodeRotateCredentialsTool {
 
     fn description(&self) -> &str {
         "只在用户明确要求重置这台服务器的节点端口或密码（例如「端口被封了，换一个」「重置节点凭据」）时调用。\
-         会先弹确认卡；用户逐字选「重置」后才会让节点换端口与密码并重启，本机与手机会在下次同步后使用新值。\
+         会先弹确认卡；用户逐字选「重置」后才会让节点换端口与密码并重启。\
+         成功后必须告诉用户：新端口和密码要断开并重新连接之后才会生效，当前连接仍在用旧端口。\
          不得为了排障、提速或推测性的原因自行调用，也不要在用户没提这件事时主动建议后自己执行。\n\
-         说「节点端口」「节点密码」「下次同步」，不出现 server_id、MCP、agent、令牌这些词。"
+         说「节点端口」「节点密码」「重新连接」，不出现 server_id、MCP、agent、令牌这些词。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -702,11 +703,16 @@ impl NodeRotateCredentialsTool {
     }
 
     fn success_outcome(&self, report: RotateReport, refreshed: bool) -> ToolOutcome {
-        let base = "节点端口与密码已重置，本机与手机将在下次同步后使用新值。";
+        // 端口一变，正在跑的隧道就作废了：必须让模型把「断开重连」说出来，
+        // 否则用户会以为重置失败（实测踩过）。
+        let base = format!(
+            "节点端口与密码已重置（新端口 {}）。当前连接仍在用旧端口，断开后重新连接才会生效。",
+            report.port
+        );
         let summary = if refreshed {
-            base.to_string()
+            base
         } else {
-            format!("{base}本机凭据刷新失败，请手动刷新服务器数据。")
+            format!("{base}本机凭据刷新失败，请手动刷新服务器数据后再重连。")
         };
         let mut facts = vec![Fact::with_params(
             FactKey::NodeNewPort,
@@ -1245,7 +1251,12 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
             outcome.data.unwrap(),
             json!({ "ok": true, "port": 32101, "refreshed": true })
         );
-        assert!(outcome.summary.contains("下次同步"));
+        assert!(outcome.summary.contains("32101"));
+        assert!(
+            outcome.summary.contains("重新连接"),
+            "必须明确告诉模型要断开重连：{}",
+            outcome.summary
+        );
         assert!(
             !outcome.summary.contains("重新导入") && !outcome.summary.contains("重新同步配置"),
             "成功文案不能引用产品里不存在的动作：{}",

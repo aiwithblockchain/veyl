@@ -6,6 +6,7 @@ import type {
   ConfigConnectMode,
   ConfigRouteMode,
   NextAction,
+  RuntimeSnapshot,
   RuntimeView,
   TrialStatusData,
 } from "./agent/protocol";
@@ -49,6 +50,9 @@ import { rotateFailureReason, rotateNodeCredentials } from "./myservers/rotateCr
 import { staleConfigNodeId } from "./myservers/staleConfig";
 import { repairAvailableFor } from "./myservers/repairAvailability";
 import type {
+  ConnectionFacts,
+  ConnectionLocalCheck,
+  ConnectionRetest,
   DiagnosisDeps,
   DiagnosisFacts,
   ProbeOutcome,
@@ -71,7 +75,7 @@ import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession"
 import { createRuntimeAuthority } from "./config/runtimeAuthority";
 import { actionCardControls, readActionCards } from "./ui/actionCard";
 import { buildUiContext } from "./ui/controlIds";
-import { connectDiagAsk, nodeDiagnosisAsk, serverFailureAsk } from "./ui/assistantPrompts";
+import { connectDiagnosisAsk, nodeDiagnosisAsk, serverFailureAsk } from "./ui/assistantPrompts";
 import { mobileExportPrompt } from "./ai/advancedPrompts";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
@@ -2091,7 +2095,15 @@ export default function App() {
     server.billing_state !== "past_due" &&
     server.billing_state !== "expired";
 
-  /** 自有节点测不通 / 服务器详情「智能分析」：构造依赖并打开诊断面板。 */
+  /** 交给诊断清单的平台名（不含任何设备标识）。 */
+  const platformName = (): string =>
+    typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent)
+      ? "windows"
+      : typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent)
+        ? "linux"
+        : "macos";
+
+  /** 自有节点测不通 / 服务器详情「智能诊断」：构造依赖并打开诊断面板。 */
   const handleAnalyzeNode = (target: {
     serverId: string;
     nodeName: string;
@@ -2107,12 +2119,7 @@ export default function App() {
         ) ?? null)
       : null;
     const initialPort = configNode?.port ?? server.port ?? null;
-    const platform =
-      typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent)
-        ? "windows"
-        : typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent)
-          ? "linux"
-          : "macos";
+    const platform = platformName();
     const facts: DiagnosisFacts = {
       serverId: server.server_id,
       region: server.region,
@@ -2304,6 +2311,195 @@ export default function App() {
     setDiagnosis({ nodeName: target.nodeName || server.name, deps });
   };
 
+  /**
+   * 连接失败「智能诊断」：自动只跑连通性 + 本地运行态/配置；
+   * 定位不到才把清单交给 AI（node-diagnosis-flow.md §10）。
+   */
+  const handleDiagnoseConnection = () => {
+    const config = vpn.activeConfig;
+    const runtimeNow = runtimeRef.current;
+    const currentId = config?.current_node_id ?? runtimeNow.node_id ?? null;
+    const node = currentId
+      ? (config?.nodes.find((item) => item.node_id === currentId) ?? null)
+      : null;
+    // 免费节点不诊断：用户没有恢复手段（列表入口已拦，这里再兜一层）。
+    if (node?.source === "seed") return;
+    const server = currentId
+      ? (myServers.servers.find(
+          (item) => item.local_node_id === currentId,
+        ) ?? null)
+      : null;
+    const lastError = runtimeNow.last_error;
+    const lastErrorReason = lastError?.details?.reason;
+    const failureStage: ConnectionFacts["failureStage"] =
+      runtimeNow.state === "failed"
+        ? "failed"
+        : runtimeNow.state === "starting" || runtimeNow.state === "restarting"
+          ? "starting"
+          : runtimeNow.state === "running" || runtimeNow.state === "degraded"
+            ? "running"
+            : "connect";
+    const connectionFacts: ConnectionFacts = {
+      failureStage,
+      errorCode: lastError?.code ?? null,
+      errorReason: typeof lastErrorReason === "string" ? lastErrorReason : null,
+      nodeName: node?.name ?? runtimeNow.node_name ?? null,
+      nodeSource:
+        node?.source === "owned" || node?.source === "manual"
+          ? node.source
+          : null,
+      region: server?.region ?? null,
+      connectMode: config?.connect_mode ?? null,
+      controlPlaneError: myServers.error,
+      appVersion,
+      platform: platformName(),
+    };
+
+    const checkConnection = async (): Promise<ConnectionLocalCheck> => {
+      let snapshot: RuntimeSnapshot | null = null;
+      try {
+        snapshot = await bridge.getRuntimeSnapshot();
+      } catch (error) {
+        // 本地检查本身没跑完：带失败的命令与短码，结论走 runtime-error。
+        const code = toBridgeError(error).code || "throw";
+        throw {
+          code,
+          message: "",
+          retryable: false,
+          details: { reason: `runtime_status:${code}` },
+        };
+      }
+      const configId = vpn.activeConfig?.config_id;
+      let configFound = false;
+      let nodeInConfig = false;
+      if (configId) {
+        try {
+          const detail = await bridge.configDetail(configId);
+          configFound = true;
+          nodeInConfig =
+            currentId !== null &&
+            detail.nodes.some((item) => item.node_id === currentId);
+        } catch {
+          // 配置读不出来：这是表里的 config-invalid，不是检查本身失败。
+          configFound = false;
+        }
+      }
+      // helper 用现成的 tun_helper_info；unknown 不判 helper，继续往下。
+      let helperState: ConnectionLocalCheck["helperState"] = "unknown";
+      try {
+        const info = await bridge.tunHelperInfo();
+        helperState =
+          info.state === "running"
+            ? "ok"
+            : info.state === "unknown"
+              ? "unknown"
+              : "blocked";
+      } catch {
+        helperState = "unknown";
+      }
+      const state = snapshot?.state ?? runtimeRef.current.state;
+      const error =
+        snapshot?.last_error ?? runtimeRef.current.last_error ?? null;
+      const code = error?.code ?? null;
+      const reasonValue = error?.details?.reason;
+      const reason = typeof reasonValue === "string" ? reasonValue : null;
+      // 错误只有运行时确实失败时才算「运行时错误」；成功后的旧 last_error 不误导。
+      const runtimeFailed = state === "failed" || state === "degraded";
+      return {
+        runtimeState: state,
+        runtimeErrorCode: runtimeFailed ? code : null,
+        runtimeErrorReason: runtimeFailed ? reason : null,
+        helperState,
+        configFound,
+        nodeInConfig,
+      };
+    };
+
+    const retestConnection = async (): Promise<ConnectionRetest> => {
+      if (!currentId) {
+        return { reachable: null, reason: "node_not_in_config", latencyMs: null };
+      }
+      try {
+        const result = await bridge.nodeProbe(currentId);
+        nodeProbes.recordResults([result]);
+        if (result.status === "untested") {
+          return {
+            reachable: null,
+            reason: result.error?.reason ?? result.error?.code ?? null,
+            latencyMs: null,
+          };
+        }
+        return {
+          reachable: result.reachable === true,
+          reason: result.error?.reason ?? result.error?.code ?? null,
+          latencyMs: result.latency_ms,
+        };
+      } catch (error) {
+        return {
+          reachable: null,
+          reason: toBridgeError(error).code || "throw",
+          latencyMs: null,
+        };
+      }
+    };
+
+    const deps: DiagnosisDeps = {
+      profile: "connection",
+      facts: {
+        serverId: server?.server_id ?? "",
+        region: server?.region ?? "",
+        createdAt: server?.created_at ?? "",
+        state: server?.state ?? runtimeNow.state,
+        localNodeId: currentId,
+        port: node?.port ?? null,
+        nodeInUse: currentId !== null && runtimeNow.node_id === currentId,
+        appVersion,
+        platform: platformName(),
+        uiLogPath: null,
+        controlPlaneError: myServers.error,
+      },
+      isTunnelRunning: () =>
+        currentId !== null && runtimeRef.current.node_id === currentId,
+      isRuntimeRunning: () => {
+        const state = runtimeRef.current.state;
+        return state === "running" || state === "degraded";
+      },
+      // 手动导入的节点没有服务器记录、拿不到 IP：这一类检查不适用，记 skipped。
+      ...(server?.ip
+        ? {
+            probeReachability: () =>
+              bridge.nodeProbeReachability(server.ip as string, 32100),
+          }
+        : {}),
+      connection: {
+        facts: connectionFacts,
+        check: checkConnection,
+        retest: retestConnection,
+        openSettings: () => {
+          setDiagnosis(null);
+          openSettings("advanced");
+        },
+        updateConfig: () => {
+          vpn.reload();
+          void myServers.refresh();
+        },
+        changeNode: () => {
+          setDiagnosis(null);
+        },
+        reconnect: () => {
+          setDiagnosis(null);
+          handleVpnReconnect();
+        },
+        openAi: (context) => {
+          const handed = askAiInPanel(connectDiagnosisAsk(context));
+          if (handed) setDiagnosis(null);
+          return handed;
+        },
+      },
+    };
+    setDiagnosis({ nodeName: connectionFacts.nodeName ?? "", deps });
+  };
+
   // 手动测速：只更新延迟，不改选中/不连接；点击动作随下一条消息上报。
   const handleProbe = () => {
     lastActionRef.current = { id: "client.probe" };
@@ -2362,9 +2558,7 @@ export default function App() {
     });
   };
 
-  const handleDiagnose = () => {
-    askAiInPanel(connectDiagAsk());
-  };
+  const handleDiagnose = handleDiagnoseConnection;
 
   // 查看账单：先确认登录；没登录就拉起登录，成功后回到账户页。
   const handleViewBills = async () => {

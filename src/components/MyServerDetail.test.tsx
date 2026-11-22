@@ -1032,7 +1032,7 @@ describe("IP 复制在途时切服务器", () => {
   });
 });
 
-describe("智能分析入口", () => {
+describe("智能诊断入口", () => {
   function renderAnalyze(
     onDiagnose = vi.fn(),
     over: Partial<MyServer> = {},
@@ -1059,7 +1059,7 @@ describe("智能分析入口", () => {
   it("探测不可达时出现，点击把 server id 与名字交给 App", () => {
     const onDiagnose = renderAnalyze();
 
-    const entry = screen.getByRole("button", { name: "智能分析" });
+    const entry = screen.getByRole("button", { name: "智能诊断" });
     expect(entry.classList.contains("btn--ghost")).toBe(true);
     expect(entry.classList.contains("btn--danger-ghost")).toBe(false);
 
@@ -1072,26 +1072,26 @@ describe("智能分析入口", () => {
 
   it("探测可达或拿不到状态时不出现", () => {
     renderAnalyze(vi.fn(), {}, { available: false });
-    expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "智能诊断" })).toBeNull();
   });
 
   it("安装中 / 出错 / 已销毁都不出现", () => {
     for (const state of ["installing", "error", "destroyed"] as MyServerState[]) {
       renderAnalyze(vi.fn(), { state });
-      expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "智能诊断" })).toBeNull();
       cleanup();
     }
   });
 
   it("身份不可用（只读）时不给入口", () => {
     renderAnalyze(vi.fn(), {}, { readOnly: true });
-    expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "智能诊断" })).toBeNull();
   });
 
-  it("智能分析是普通描边，销毁仍是危险按钮", () => {
+  it("智能诊断是普通描边，销毁仍是危险按钮", () => {
     renderAnalyze();
 
-    const entry = screen.getByRole("button", { name: "智能分析" });
+    const entry = screen.getByRole("button", { name: "智能诊断" });
     expect(entry.classList.contains("btn--ghost")).toBe(true);
     expect(entry.classList.contains("btn--danger-ghost")).toBe(false);
 

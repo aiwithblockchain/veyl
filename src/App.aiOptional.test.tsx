@@ -40,7 +40,7 @@ const DETAIL: ConfigDetail = {
   layout_revision: null,
 };
 
-/** 同一条节点改成手动导入：失败行保留「问 AI」，hero 保留「让 AI 检查」。 */
+/** 同一条节点改成手动导入：失败行保留「问 AI」，hero 保留「智能诊断」。 */
 const MANUAL_DETAIL: ConfigDetail = {
   ...DETAIL,
   nodes: [{ ...DETAIL.nodes[0], source: "manual" }],
@@ -558,10 +558,10 @@ async function emitConnectionFailure() {
   });
 }
 
-/** 非 seed 节点失败态：让 hero 的「让 AI 检查」入口出现。 */
+/** 非 seed 节点失败态：让 hero 的「智能诊断」入口出现。 */
 async function failConnection() {
   await emitConnectionFailure();
-  return screen.findByRole("button", { name: "让 AI 检查" });
+  return screen.findByRole("button", { name: "智能诊断" });
 }
 
 /** 手动导入节点测不通：让行内的「问 AI」入口出现。 */
@@ -705,14 +705,14 @@ async function openFailedServer() {
 }
 
 describe("AI 入口双向闸门", () => {
-  it("免费节点连接失败：不给「让 AI 检查」，主按钮是重新连接", async () => {
+  it("免费节点连接失败：不给「智能诊断」，主按钮是重新连接", async () => {
     seedSkipped();
     render(<App />);
     await waitForShell();
     await emitConnectionFailure();
 
     expect(
-      screen.queryByRole("button", { name: "让 AI 检查" }),
+      screen.queryByRole("button", { name: "智能诊断" }),
     ).toBeNull();
     expect(
       (document.querySelector("button.stage-primary") as HTMLButtonElement)
@@ -720,10 +720,19 @@ describe("AI 入口双向闸门", () => {
     ).toBe("重新连接");
   }, 15_000);
 
-  it("让 AI 检查：未配置弹告警、不发消息", async () => {
+  it("智能诊断：未配置 AI 时点问 AI 弹告警、不发消息", async () => {
     seedSkipped();
-    // hero 的「让 AI 检查」只对非 seed 节点出现。
+    // hero 的「智能诊断」只对非 seed 节点出现。
     vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
+    // 这条用例只测 AI 闸门：helper 视作正常，别让诊断停在「打开设置」。
+    vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+      runningBuild: "2026.11.1",
+      helperVersion: "2026.11.1",
+      expectedBuild: "2026.11.1",
+      stale: false,
+      state: "running",
+      needsAdminRestart: false,
+    });
     render(<App />);
     await waitForShell();
     fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
@@ -733,23 +742,36 @@ describe("AI 入口双向闸门", () => {
     const button = await failConnection();
 
     fireEvent.click(button);
+    // 面板自动跑完本地检查，定位不到时给「去问 AI」。
+    fireEvent.click(await screen.findByRole("button", { name: "去问 AI" }));
     expect(
       await screen.findByRole("dialog", { name: "还没有配置 AI 服务" }),
     ).toBeTruthy();
     expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
-    // 被拦后右栏仍是收起的 tab。
+    // 被拦后右栏仍是收起的 tab，结论保留在面板上。
     expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   }, 15_000);
 
-  it("让 AI 检查：已配置发出诊断消息", async () => {
+  it("智能诊断：已配置时问 AI 发出连接失败清单", async () => {
     seedSkipped();
     aiConfigured = true;
     vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
+    // 同上：helper 视作正常，结论才会落到「去问 AI」。
+    vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
+      runningBuild: "2026.11.1",
+      helperVersion: "2026.11.1",
+      expectedBuild: "2026.11.1",
+      stale: false,
+      state: "running",
+      needsAdminRestart: false,
+    });
     render(<App />);
     await waitForShell();
     const button = await failConnection();
 
     fireEvent.click(button);
+    fireEvent.click(await screen.findByRole("button", { name: "去问 AI" }));
     await waitFor(() =>
       expect(vi.mocked(bridge.sendMessage)).toHaveBeenCalledTimes(1),
     );

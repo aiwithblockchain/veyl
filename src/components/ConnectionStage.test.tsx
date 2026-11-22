@@ -274,7 +274,7 @@ describe("连接舞台", () => {
     expect(onReconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("失败时主按钮是让 AI 检查，旁边保留重新连接", async () => {
+  it("失败时主按钮是智能诊断，旁边保留重新连接", async () => {
     const onDiagnose = vi.fn();
     const onStart = vi.fn();
     const manualNode = {
@@ -309,13 +309,13 @@ describe("连接舞台", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "让 AI 检查" }));
+    fireEvent.click(await screen.findByRole("button", { name: "智能诊断" }));
     expect(onDiagnose).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
     expect(onStart).toHaveBeenCalledTimes(1);
   });
 
-  it("免费节点失败：主按钮不是让 AI 检查，只剩重新连接", () => {
+  it("免费节点失败：主按钮不是智能诊断，只剩重新连接", () => {
     const onDiagnose = vi.fn();
     render(
       <ConnectionStage
@@ -334,7 +334,7 @@ describe("连接舞台", () => {
     );
 
     expect(
-      screen.queryByRole("button", { name: "让 AI 检查" }),
+      screen.queryByRole("button", { name: "智能诊断" }),
     ).toBeNull();
     expect(
       (document.querySelector("button.stage-primary") as HTMLButtonElement)
@@ -2313,7 +2313,7 @@ describe("停机删除的悬挂节点", () => {
   });
 });
 
-describe("测不通时的智能分析入口", () => {
+describe("测不通时的智能诊断入口", () => {
   const OWNED: ConfigDetail["nodes"][number] = {
     ...CONFIG.nodes[1],
     node_id: "o1",
@@ -2330,7 +2330,7 @@ describe("测不通时的智能分析入口", () => {
 
   const mapServer = (nodeId: string) => (nodeId === "o1" ? "srv_o1" : null);
 
-  it("自有坏行只给「智能分析」：点击把服务器 id 与节点名交给 App，不切节点", () => {
+  it("自有坏行只给「智能诊断」：点击把服务器 id 与节点名交给 App，不切节点", () => {
     const onAnalyzeNode = vi.fn();
     const onAskAi = vi.fn();
     const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
@@ -2348,10 +2348,10 @@ describe("测不通时的智能分析入口", () => {
     const rows = screen.getAllByRole("option");
     expect(within(rows[0]).queryByRole("button", { name: /问 AI/ })).toBeNull();
     const analyze = within(rows[0]).getByRole("button", {
-      name: "对悉尼0.2u进行智能分析",
+      name: "对悉尼0.2u进行智能诊断",
     });
     expect(
-      within(rows[1]).queryByRole("button", { name: /智能分析/ }),
+      within(rows[1]).queryByRole("button", { name: /智能诊断/ }),
     ).toBeNull();
 
     fireEvent.click(analyze);
@@ -2364,7 +2364,7 @@ describe("测不通时的智能分析入口", () => {
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
   });
 
-  it("手动导入节点测不通：仍保留「问 AI」，不出现智能分析", () => {
+  it("手动导入节点测不通：仍保留「问 AI」，不出现智能诊断", () => {
     const MANUAL: ConfigDetail["nodes"][number] = {
       ...CONFIG.nodes[0],
       node_id: "m1",
@@ -2381,7 +2381,7 @@ describe("测不通时的智能分析入口", () => {
     });
 
     expect(
-      screen.queryByRole("button", { name: /智能分析/ }),
+      screen.queryByRole("button", { name: /智能诊断/ }),
     ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /咨询 AI/ }));
     expect(onAskAi).toHaveBeenCalledTimes(1);
@@ -2401,11 +2401,11 @@ describe("测不通时的智能分析入口", () => {
     expect(within(row).getByText("测不通")).toBeTruthy();
     expect(within(row).queryByRole("button")).toBeNull();
     expect(
-      screen.queryByRole("button", { name: /智能分析|咨询 AI|问 AI/ }),
+      screen.queryByRole("button", { name: /智能诊断|咨询 AI|问 AI/ }),
     ).toBeNull();
   });
 
-  it("未测、测速中、停机删除、查不到服务器都不出现智能分析入口", () => {
+  it("未测、测速中、停机删除、查不到服务器都不出现智能诊断入口", () => {
     const base = {
       onAskAi: vi.fn(),
       onAnalyzeNode: vi.fn(),
@@ -2418,7 +2418,7 @@ describe("测不通时的智能分析入口", () => {
         nodeProbes: probes({ results: { o1: result } }),
         ...base,
       });
-      expect(screen.queryByRole("button", { name: /智能分析/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
       cleanup();
     }
 
@@ -2430,7 +2430,7 @@ describe("测不通时的智能分析入口", () => {
       }),
       ...base,
     });
-    expect(screen.queryByRole("button", { name: /智能分析/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
     cleanup();
 
     renderStage({
@@ -2439,7 +2439,7 @@ describe("测不通时的智能分析入口", () => {
       nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
       ...base,
     });
-    expect(screen.queryByRole("button", { name: /智能分析/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
     cleanup();
 
     renderStage({
@@ -2449,7 +2449,7 @@ describe("测不通时的智能分析入口", () => {
       onAnalyzeNode: vi.fn(),
       serverIdForNode: () => null,
     });
-    expect(screen.queryByRole("button", { name: /智能分析/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
   });
 });
 

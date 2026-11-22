@@ -2152,7 +2152,7 @@ type NodeRotateCredentialsData = {
   - `agent_unreachable` — 连不上或连接中断，`retryable = true`；
   - `agent_bad_response` — 控制面或 agent 回包结构不对。
   - 用户取消 → `CANCELLED`；参数不合法 → `INVALID_ARGUMENT / invalid_server_id`。
-- 成功返回 `{ ok: true, port, refreshed }`，`display.changed = unknown`（远端已改，本地无回滚）；summary「节点端口与密码已重置，本机与手机将在下次同步后使用新值」（刷新失败时追加一句提示），`display`「节点端口与密码已重置」+ `facts` 带新端口。失败文案不承诺「没有变化」——agent 可能在半途失败。
+- 成功返回 `{ ok: true, port, refreshed }`，`display.changed = unknown`（远端已改，本地无回滚）；summary「节点端口与密码已重置（新端口 N）。当前连接仍在用旧端口，断开后重新连接才会生效」（刷新失败时追加「本机凭据刷新失败，请手动刷新服务器数据后再重连」）；**模型必须把「断开重连」这句话转述给用户**——只刷新本机凭据不会重建正在运行的隧道。`display`「节点端口与密码已重置」+ `facts` 带新端口。失败文案不承诺「没有变化」——agent 可能在半途失败。
 - 审计：沿用工具调用审计（记 `server_id` 与结果），不含令牌与密码。
 
 ### 4.56 `submit_issue_to_public_wall`（上报到公开问题墙，3.25.0 新增）

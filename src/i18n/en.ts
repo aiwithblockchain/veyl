@@ -323,7 +323,7 @@ export const en: Record<MessageKey, string> = {
   "tool.MyServerFailure.failed": "Couldn't read the failure details",
   "tool.NodeRotateCredentials.running": "Resetting the node port…",
   "tool.NodeRotateCredentials.done":
-    "Node port and password reset. This device and your phone will use the new values after the next sync.",
+    "Node port and password reset. Disconnect and reconnect for it to take effect.",
   "tool.NodeRotateCredentials.failed":
     "Couldn't reset the node. Rebuild this server, or try again later.",
   "tool.CatalogOptions.running": "Loading regions and plans",
@@ -474,7 +474,7 @@ export const en: Record<MessageKey, string> = {
   "dialog.mode.unknown": "Selected mode",
   "dialog.nodeRotate.title": "Reset node port and password",
   "dialog.nodeRotate.body":
-    "Resetting restarts the node; connected devices need to import the config again.",
+    "Resetting restarts the node and changes its port. Disconnect and reconnect afterwards for it to take effect; other devices need to import the config again.",
   "dialog.nodeRotate.confirm": "Reset",
   "dialog.issueSubmit.title": "Post to the issue wall",
   "dialog.issueSubmit.titleField": "Title",
@@ -708,7 +708,7 @@ export const en: Record<MessageKey, string> = {
   "console.primary.connecting": "Connecting…",
   "console.primary.disconnecting": "Disconnecting…",
   "console.primary.disconnect": "Disconnect",
-  "console.primary.diagnose": "Have AI check",
+  "console.primary.diagnose": "Diagnose",
   "console.primary.reconnect": "Reconnect",
   "console.primary.connect": "Connect",
 
@@ -805,8 +805,8 @@ export const en: Record<MessageKey, string> = {
   // Fixed questions the UI sends to the AI on the user's behalf
   "assistant.prompt.serverFailure":
     "This server failed to create. Read the structured failure information, explain which step failed and whether it can be retried, and give me exactly one action I can click. Don't guess, and don't ask me to upload logs.",
-  "assistant.prompt.connectDiag":
-    "The connection failed. Run a diagnostic first, walk through the checklist item by item, and give me exactly one action I can click. Don't guess.",
+  "assistant.prompt.connectDiagnosis":
+    "The connection failed. Here is what the local diagnosis collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; don't guess and don't ask me to upload logs.\n{context}",
   "assistant.prompt.nodeUnreachable":
     "Node \"{name}\" failed its test this time. First use a tool to check whether it can recover intelligently (reset port and password); recover it if you can, and only suggest destroying and rebuilding if it can't be recovered. Don't make up tool results; if tools aren't available, say so honestly.",
   "assistant.prompt.pickRegion": "Help me pick a region and plan.",
@@ -1699,8 +1699,9 @@ export const en: Record<MessageKey, string> = {
 
   /* Node diagnosis panel (node-diagnosis-flow.md). */
   "diagnosis.title": "Diagnosis: {name}",
-  "diagnosis.entry": "Analyze",
-  "diagnosis.entryAria": "Analyze {name}",
+  "diagnosis.titlePlain": "Diagnosis",
+  "diagnosis.entry": "Diagnose",
+  "diagnosis.entryAria": "Diagnose {name}",
   "diagnosis.intro": "Work through the likely causes step by step; each step waits for your click.",
   "diagnosis.action.start": "Start analysis",
   "diagnosis.action.updateConfig": "Update config",
@@ -1708,14 +1709,20 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.action.retest": "Re-test",
   "diagnosis.action.askAi": "Ask AI",
   "diagnosis.action.goServers": "Destroy and rebuild",
+  "diagnosis.action.openSettings": "Open settings",
+  "diagnosis.action.changeNode": "Change node",
+  "diagnosis.action.reconnect": "Reconnect",
   "diagnosis.step.connectivity": "Connectivity",
   "diagnosis.step.config": "Update config",
+  "diagnosis.step.runtimeConfig": "Runtime and config",
   "diagnosis.step.rotate": "Reset port and password",
+  "diagnosis.step.retest": "Re-test",
   "diagnosis.step.ai": "Hand to AI",
   "diagnosis.status.running": "In progress",
   "diagnosis.status.passed": "Passed",
   "diagnosis.status.failed": "Failed",
   "diagnosis.status.unknown": "Unfinished",
+  "diagnosis.status.skipped": "Skipped",
   "diagnosis.untested.connectionBusy": "a connection or switch is in progress",
   "diagnosis.untested.nodeNotInConfig":
     "this node isn't in the node pool yet, try again later",
@@ -1723,12 +1730,34 @@ export const en: Record<MessageKey, string> = {
     "this node isn't active yet, reconnect and try again",
   "diagnosis.untested.clashUnavailable":
     "the local probe service is unavailable",
+  "diagnosis.untested.noCredentials": "no local credentials for this node",
+  "diagnosis.untested.runtimeMissing": "the local runtime isn't installed",
+  "diagnosis.untested.runtimeFailed": "the local runtime has stopped",
+  "diagnosis.untested.runtimeTimeout": "the local runtime isn't responding",
   "diagnosis.connectivity.pending": "Checking connectivity…",
   "diagnosis.connectivity.icmpOk": "ICMP reachable",
   "diagnosis.connectivity.tcpOk": "ICMP blocked, TCP reachable",
   "diagnosis.connectivity.unreachable": "The whole machine is unreachable",
   "diagnosis.connectivity.serviceDown": "Machine is online, but the control service is unavailable",
   "diagnosis.connectivity.localNetwork": "Your local network may be down",
+  "diagnosis.connectivity.skipped": "This check doesn't apply to this node",
+  "diagnosis.connection.localNetwork": "There's no network right now",
+  "diagnosis.connection.helperBlocked":
+    "The background helper isn't running or isn't authorized",
+  "diagnosis.connection.configNodeMissing": "This node isn't in the current config",
+  "diagnosis.connection.configInvalid":
+    "The current config can't be read; it may be invalid",
+  "diagnosis.connection.serverUnreachable": "The node's address is unreachable",
+  "diagnosis.connection.serviceDown": "The node service isn't responding",
+  "diagnosis.connection.probeOk": "The node is reachable now",
+  "diagnosis.connection.probeUntested":
+    "Couldn't re-test this time: the probe didn't run, so this isn't a failure.",
+  "diagnosis.connection.probeUntestedReason":
+    "Couldn't re-test this time: {reason}.",
+  "diagnosis.connection.runtimeError":
+    "The runtime reported an error, and there's no local fix to apply",
+  "diagnosis.connection.undetermined":
+    "Local checks all passed, but the connection still fails",
   "diagnosis.config.pending": "Updating config…",
   "diagnosis.config.controlPlane": "Control plane is temporarily unreachable",
   "diagnosis.config.timeout":

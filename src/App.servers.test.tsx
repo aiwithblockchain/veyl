@@ -1230,11 +1230,11 @@ describe("节点诊断入口", () => {
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "智能分析" }),
+      await screen.findByRole("button", { name: "智能诊断" }),
     );
     expect(
       await screen.findByRole("dialog", {
-        name: "诊断：新加坡 1 · DigitalOcean",
+        name: "智能诊断：新加坡 1 · DigitalOcean",
       }),
     ).toBeTruthy();
 
@@ -1266,10 +1266,10 @@ describe("节点诊断入口", () => {
     await screen.findByRole("button", { name: /我的服务器/ });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "智能分析" }),
+      await screen.findByRole("button", { name: "智能诊断" }),
     );
     await screen.findByRole("dialog", {
-      name: "诊断：新加坡 1 · DigitalOcean",
+      name: "智能诊断：新加坡 1 · DigitalOcean",
     });
 
     fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
@@ -1279,7 +1279,7 @@ describe("节点诊断入口", () => {
       name: "还没有配置 AI 服务",
     });
     expect(
-      screen.getByRole("dialog", { name: "诊断：新加坡 1 · DigitalOcean" }),
+      screen.getByRole("dialog", { name: "智能诊断：新加坡 1 · DigitalOcean" }),
     ).toBeTruthy();
     await waitFor(() =>
       expect(alert.contains(document.activeElement)).toBe(true),
@@ -1292,7 +1292,7 @@ describe("节点诊断入口", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(
-      screen.getByRole("dialog", { name: "诊断：新加坡 1 · DigitalOcean" }),
+      screen.getByRole("dialog", { name: "智能诊断：新加坡 1 · DigitalOcean" }),
     ).toBeTruthy();
   });
 
@@ -1322,10 +1322,10 @@ describe("节点诊断入口", () => {
     await screen.findByRole("button", { name: /我的服务器/ });
     fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "智能分析" }),
+      await screen.findByRole("button", { name: "智能诊断" }),
     );
     await screen.findByRole("dialog", {
-      name: "诊断：新加坡 1 · DigitalOcean",
+      name: "智能诊断：新加坡 1 · DigitalOcean",
     });
 
     // 面板打开后本地端口已经被别处同步改过：基准必须现读，不能用打开时的快照。
