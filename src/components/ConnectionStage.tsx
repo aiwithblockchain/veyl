@@ -15,6 +15,7 @@ import { nodeTombstoneWord, trialGroupHint, trialPhase } from "../myservers/labe
 import type { PendingServerNode } from "../myservers/pendingServerNodes";
 import { nodeUnreachableAsk } from "../ui/assistantPrompts";
 import { rotateFailureReason } from "../myservers/rotateCredentials";
+import { updateConfigAndReconnect } from "../myservers/updateConfigAndReconnect";
 import { uiLog } from "../log/uiLog";
 import type { ActionCard } from "../ui/actionCard";
 import { useT } from "../i18n";
@@ -85,6 +86,8 @@ interface Props {
   onSyncCredentials?: (serverId: string) => Promise<number | null>;
   /** 「重新连接并测试」：先重连让运行时读新配置，再测；返回重连是否成功。 */
   onReconnectAndTest?: () => Promise<boolean>;
+  /** 当前正在运行的本地节点 id（nd_…）；没在跑为 null。 */
+  runningNodeId?: string | null;
   /** 周期同步发现当前连接节点的配置变了：hero 区提示重新连接。 */
   staleConfigNode?: boolean;
   /** 用户点了 hero 的「重新连接」：调用方清掉提示。 */
@@ -141,6 +144,7 @@ export function ConnectionStage({
   onRepairCredentials,
   onSyncCredentials,
   onReconnectAndTest,
+  runningNodeId = null,
   staleConfigNode = false,
   onStaleConfigRetry,
   onGoServers,
@@ -586,20 +590,9 @@ export function ConnectionStage({
     }
   };
 
-  /** 第 1 步：静默同步这一台的凭据；端口相同、失败或 12 秒无果都回「仍不通」。 */
-  const runSilentSync = async (
-    nodeId: string,
-    serverId: string,
-    name: string,
-    localPort: number,
-    options: { force?: boolean } = {},
-  ) => {
-    if (!onSyncCredentials) return;
-    window.clearTimeout(recoveredTimer.current);
-    setRecoveredNode(null);
-    setNodeSyncPhase(nodeId, "syncing");
+  /** 逾期按「未完成」处理：不再等，直接让修复入口可见。 */
+  const armSyncDeadline = (nodeId: string) => {
     window.clearTimeout(syncDeadlineTimer.current);
-    // 逾期按「无变化」处理：不再等，直接让修复入口可见。
     syncDeadlineTimer.current = window.setTimeout(() => {
       pendingSyncRef.current = null;
       syncProbeRef.current = null;
@@ -607,48 +600,104 @@ export function ConnectionStage({
       setNodeSyncPhase(nodeId, "needs-repair");
       uiLog("warn", `sync timeout node=${nodeId}`, "node-sync");
     }, SYNC_WAIT_LIMIT_MS);
+  };
+
+  /** 取回成功就重测一次：端口变了先等配置读回新值。 */
+  const probeAfterFetch = (
+    nodeId: string,
+    name: string,
+    port: number,
+    localPort: number,
+  ) => {
+    const changed = port !== localPort;
+    pendingSyncRef.current = { nodeId, name, port, awaitConfig: changed };
+    window.clearTimeout(syncWaitTimer.current);
+    syncWaitTimer.current = window.setTimeout(() => {
+      void beginSyncProbe(nodeId, changed);
+    }, changed ? CONFIG_RELOAD_WAIT_MS : 0);
+  };
+
+  /** 隧道在跑，而且跑的就是这一台。 */
+  const runningThisNode = (nodeId: string) =>
+    connected && runningNodeId === nodeId;
+
+  /** 自动同步：端口没变、失败或截止无果都回「仍不通」。 */
+  const runSilentSync = async (
+    nodeId: string,
+    serverId: string,
+    name: string,
+    localPort: number,
+  ) => {
+    if (!onSyncCredentials) return;
+    window.clearTimeout(recoveredTimer.current);
+    setRecoveredNode(null);
+    setNodeSyncPhase(nodeId, "syncing");
+    armSyncDeadline(nodeId);
     try {
       const port = await onSyncCredentials(serverId);
+      window.clearTimeout(syncDeadlineTimer.current);
       if (port === null) {
-        window.clearTimeout(syncDeadlineTimer.current);
         uiLog("warn", `sync failed node=${nodeId}`, "node-sync");
         setNodeSyncPhase(nodeId, "needs-repair");
         return;
       }
-      // 取回成功就重测一次：端口没变也可能只是密码变了。
       const changed = port !== localPort;
-      if (connected && (changed || options.force === true)) {
-        if (options.force !== true) {
-          // 自动流程：隧道在跑，内存里还是旧配置；等用户点「重新连接并测试」。
-          window.clearTimeout(syncDeadlineTimer.current);
-          pendingSyncRef.current = null;
-          setNodeSyncPhase(nodeId, "restart-needed");
-          return;
-        }
-        // 手动「先更新配置」：只要隧道在跑就必须先 stop → start，再测。
-        window.clearTimeout(syncDeadlineTimer.current);
+      if (runningThisNode(nodeId) && changed) {
+        // 隧道正用这台且端口/密码可能变了：等用户点「重新连接并测试」。
         pendingSyncRef.current = null;
-        setNodeSyncPhase(nodeId, "restarting");
-        const reconnected = onReconnectAndTest
-          ? await onReconnectAndTest()
-          : false;
-        if (!reconnected) {
-          setNodeSyncPhase(nodeId, "needs-repair");
-          return;
-        }
-        await beginSyncProbe(nodeId, changed);
+        setNodeSyncPhase(nodeId, "restart-needed");
         return;
       }
-      pendingSyncRef.current = { nodeId, name, port, awaitConfig: changed };
-      window.clearTimeout(syncWaitTimer.current);
-      syncWaitTimer.current = window.setTimeout(() => {
-        void beginSyncProbe(nodeId, changed);
-      }, changed ? CONFIG_RELOAD_WAIT_MS : 0);
+      probeAfterFetch(nodeId, name, port, localPort);
     } catch {
       // 控制面不可达：不弹错误，直接回「仍不通」，但要留下能区分原因的日志。
       window.clearTimeout(syncDeadlineTimer.current);
       uiLog("warn", `sync failed node=${nodeId}`, "node-sync");
       setNodeSyncPhase(nodeId, "needs-repair");
+    }
+  };
+
+  /** 弹窗「先更新配置」：取凭据 → 需要时 stop → start → 再测（两页共用同一流程）。 */
+  const updateConfigFromDialog = async (target: {
+    nodeId: string;
+    serverId: string;
+    name: string;
+    port: number;
+  }) => {
+    if (!onSyncCredentials) return;
+    setRepairTarget(null);
+    window.clearTimeout(recoveredTimer.current);
+    setRecoveredNode(null);
+    setNodeSyncPhase(target.nodeId, "syncing");
+    armSyncDeadline(target.nodeId);
+    try {
+      const outcome = await updateConfigAndReconnect({
+        fetchPort: async () => {
+          const port = await onSyncCredentials(target.serverId);
+          if (port === null) throw { code: "NETWORK", message: "" };
+          return port;
+        },
+        tunnelRunning: connected,
+        runningNodeId,
+        nodeId: target.nodeId,
+        reconnect: () =>
+          onReconnectAndTest ? onReconnectAndTest() : Promise.resolve(false),
+      });
+      window.clearTimeout(syncDeadlineTimer.current);
+      if (!outcome.reconnectOk) {
+        uiLog("warn", `sync failed node=${target.nodeId}`, "node-sync");
+        setNodeSyncPhase(target.nodeId, "needs-repair");
+        return;
+      }
+      if (outcome.reconnected) {
+        await beginSyncProbe(target.nodeId, outcome.port !== target.port);
+      } else {
+        probeAfterFetch(target.nodeId, target.name, outcome.port, target.port);
+      }
+    } catch {
+      window.clearTimeout(syncDeadlineTimer.current);
+      uiLog("warn", `sync failed node=${target.nodeId}`, "node-sync");
+      setNodeSyncPhase(target.nodeId, "needs-repair");
     }
   };
 
@@ -1494,15 +1543,7 @@ export function ConnectionStage({
               ? () => {
                   const target = repairTarget;
                   if (!target) return;
-                  setRepairTarget(null);
-                  setNodeSyncPhase(target.nodeId, null);
-                  void runSilentSync(
-                    target.nodeId,
-                    target.serverId,
-                    target.name,
-                    target.port,
-                    { force: true },
-                  );
+                  void updateConfigFromDialog(target);
                 }
               : undefined
           }

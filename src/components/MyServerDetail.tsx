@@ -19,6 +19,7 @@ import {
   rotateFailureReason,
   rotateNodeCredentials,
 } from "../myservers/rotateCredentials";
+import { updateConfigAndReconnect } from "../myservers/updateConfigAndReconnect";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
 
@@ -48,6 +49,8 @@ interface Props {
   onRotated?: () => void;
   /** 隧道是否正在运行：运行中同步凭据后必须先 stop → start 再重测。 */
   tunnelConnected?: boolean;
+  /** 正在运行的本地节点 id（nd_…）；只有它等于这台时才重启。 */
+  runningNodeId?: string | null;
   /** 先断开再连接（与连接页共用同一条链路）。 */
   onReconnectAndTest?: () => Promise<boolean>;
 }
@@ -81,6 +84,7 @@ export function MyServerDetail({
   onRenamed,
   onRotated,
   tunnelConnected = false,
+  runningNodeId = null,
   onReconnectAndTest,
 }: Props) {
   const tr = useT();
@@ -270,11 +274,16 @@ export function MyServerDetail({
     setRepairError(null);
     setRepairResult(null);
     try {
-      await bridge.myServerCredentials(server.server_id);
-      // 隧道在跑：探测/重读都拿旧配置，先 stop → start 让运行时读新值。
-      if (tunnelConnected && onReconnectAndTest) {
-        await onReconnectAndTest();
-      }
+      // 与连接页共用同一套：取凭据 →（跑的就是这台时）stop → start → 重读数据。
+      await updateConfigAndReconnect({
+        fetchPort: async () =>
+          (await bridge.myServerCredentials(server.server_id)).port,
+        tunnelRunning: tunnelConnected,
+        runningNodeId,
+        nodeId: server.local_node_id,
+        reconnect: () =>
+          onReconnectAndTest ? onReconnectAndTest() : Promise.resolve(false),
+      });
       onChanged();
       onRotated?.();
     } catch (err) {

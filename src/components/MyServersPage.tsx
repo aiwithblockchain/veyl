@@ -58,6 +58,7 @@ interface Props {
   onRotated?: () => void;
   /** 隧道是否在跑：详情页「先更新配置」需要先 stop → start。 */
   tunnelConnected?: boolean;
+  runningNodeId?: string | null;
   onReconnectAndTest?: () => Promise<boolean>;
 }
 
@@ -95,6 +96,7 @@ export function MyServersPage({
   onRenamed,
   onRotated,
   tunnelConnected = false,
+  runningNodeId = null,
   onReconnectAndTest,
 }: Props) {
   const t = useT();
@@ -170,6 +172,7 @@ export function MyServersPage({
             onRenamed={onRenamed}
             onRotated={onRotated}
             tunnelConnected={tunnelConnected}
+            runningNodeId={runningNodeId}
             onReconnectAndTest={onReconnectAndTest}
           />
         )}

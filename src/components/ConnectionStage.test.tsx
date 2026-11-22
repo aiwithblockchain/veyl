@@ -184,6 +184,7 @@ interface StageOverrides {
   onRepairCredentials?: (serverId: string) => Promise<{ port: number }>;
   onSyncCredentials?: (serverId: string) => Promise<number | null>;
   onReconnectAndTest?: () => Promise<boolean>;
+  runningNodeId?: string | null;
   staleConfigNode?: boolean;
   onStaleConfigRetry?: () => void;
   onGoServers?: () => void;
@@ -226,6 +227,7 @@ function stageElement(over: StageOverrides = {}) {
       onRepairCredentials={over.onRepairCredentials}
       onSyncCredentials={over.onSyncCredentials}
       onReconnectAndTest={over.onReconnectAndTest}
+      runningNodeId={over.runningNodeId}
       staleConfigNode={over.staleConfigNode}
       onStaleConfigRetry={over.onStaleConfigRetry}
       onGoServers={over.onGoServers}
@@ -2992,6 +2994,7 @@ describe("同步发现变化且隧道在跑", () => {
     renderStage({
       ...base,
       runtime: running(),
+      runningNodeId: "o1",
       nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
       onSyncCredentials,
       onReconnectAndTest: async () => true,
@@ -3005,6 +3008,21 @@ describe("同步发现变化且隧道在跑", () => {
     expect(
       screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
     ).toBeNull();
+  });
+
+  it("运行的是别的节点：不提示重连，照常自动重测", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      ...base,
+      runtime: running(),
+      runningNodeId: "n1",
+      nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      onSyncCredentials: async () => 8388,
+      onReconnectAndTest: async () => true,
+    });
+
+    await waitFor(() => expect(start).toHaveBeenCalledWith("cfg_1", ["o1"]));
+    expect(screen.queryByText("配置已变更，请重试")).toBeNull();
   });
 
   it("点「重新连接并测试」：先重连，成功后才测；通过则已恢复", async () => {
@@ -3022,6 +3040,7 @@ describe("同步发现变化且隧道在跑", () => {
       stageElement({
         ...base,
         runtime: running(),
+        runningNodeId: "o1",
         nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
         onSyncCredentials,
         onReconnectAndTest: () => {
@@ -3063,6 +3082,7 @@ describe("同步发现变化且隧道在跑", () => {
     renderStage({
       ...base,
       runtime: running(),
+      runningNodeId: "o1",
       nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
       onSyncCredentials: async () => 9000,
       onReconnectAndTest: async () => false,
@@ -3082,6 +3102,7 @@ describe("同步发现变化且隧道在跑", () => {
       stageElement({
         ...base,
         runtime: running(),
+        runningNodeId: "o1",
         nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
         onSyncCredentials,
         onReconnectAndTest: async () => true,
@@ -3221,6 +3242,7 @@ describe("弹窗「先更新配置」在隧道运行时先重连", () => {
       stageElement({
         config,
         runtime: running,
+        runningNodeId: "o1",
         nodeProbes: probes({ results: { o1: probeResultValue }, start }),
         onAskAi: vi.fn(),
         serverIdForNode: (nodeId: string) =>

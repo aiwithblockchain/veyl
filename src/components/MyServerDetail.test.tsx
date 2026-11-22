@@ -1218,6 +1218,7 @@ describe("详情页「先更新配置」", () => {
         onGone={vi.fn()}
         onForget={async () => {}}
         tunnelConnected
+        runningNodeId="local_node_1"
         onReconnectAndTest={onReconnectAndTest}
       />,
     );
@@ -1234,5 +1235,90 @@ describe("详情页「先更新配置」", () => {
     );
     expect(order).toEqual(["credentials", "reconnect"]);
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("运行的是别的节点：只取凭据，不重启", async () => {
+    const onReconnectAndTest = vi.fn(async () => true);
+    const credentials = vi.fn(async () => ({
+      server_id: "srv_1",
+      node_id: "nd_control_1",
+      name: "东京 01",
+      host: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+    }));
+    const onChanged = vi.fn();
+    render(
+      <MyServerDetail
+        bridge={
+          {
+            myServerCredentials: credentials,
+            nodeRotateCredentials: vi.fn(),
+          } as unknown as AgentBridge
+        }
+        server={server()}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        tunnelConnected
+        runningNodeId="local_node_other"
+        onReconnectAndTest={onReconnectAndTest}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "先更新配置",
+      }),
+    );
+
+    await waitFor(() => expect(credentials).toHaveBeenCalledTimes(1));
+    expect(onReconnectAndTest).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("隧道没在跑：只取凭据，不重启", async () => {
+    const onReconnectAndTest = vi.fn(async () => true);
+    const credentials = vi.fn(async () => ({
+      server_id: "srv_1",
+      node_id: "nd_control_1",
+      name: "东京 01",
+      host: "45.76.20.100",
+      port: 8388,
+      method: "aes-256-gcm",
+    }));
+    render(
+      <MyServerDetail
+        bridge={
+          {
+            myServerCredentials: credentials,
+            nodeRotateCredentials: vi.fn(),
+          } as unknown as AgentBridge
+        }
+        server={server()}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={vi.fn()}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        runningNodeId="local_node_1"
+        onReconnectAndTest={onReconnectAndTest}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "先更新配置",
+      }),
+    );
+
+    await waitFor(() => expect(credentials).toHaveBeenCalledTimes(1));
+    expect(onReconnectAndTest).not.toHaveBeenCalled();
   });
 });

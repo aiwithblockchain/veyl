@@ -2713,6 +2713,7 @@ export default function App() {
           tunnelConnected={
             runtime.state === "running" || runtime.state === "degraded"
           }
+          runningNodeId={runtime.node_id}
           onReconnectAndTest={handleReconnectAndTest}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
@@ -2802,6 +2803,7 @@ export default function App() {
             }
           }}
           onReconnectAndTest={handleReconnectAndTest}
+          runningNodeId={runtime.node_id}
           staleConfigNode={staleConfigNode !== null}
           onStaleConfigRetry={() => setStaleConfigNode(null)}
           onGoServers={() => changeDestination("servers")}
