@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { t } from "../i18n";
+import type { MessageKey } from "../i18n";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -99,10 +101,10 @@ import type {
 const EVENT_NAMES = [...AI_EVENT_NAMES, ...APP_EVENT_NAMES];
 
 /** 契约已定、Host 还没接线：按未实现报错，不改调用方的接口形状。 */
-function notWired<T>(what: string): Promise<T> {
+function notWired<T>(what: MessageKey): Promise<T> {
   return Promise.reject({
     code: "INTERNAL",
-    message: `${what}还没接入这个版本。`,
+    message: t("bridge.notWired", { what: t(what) }),
   });
 }
 
@@ -587,7 +589,7 @@ interface RawLlmProvider {
 function normalizeProvider(raw: RawLlmProvider): LlmProvider {
   return {
     providerId: raw.provider_id ?? "",
-    name: raw.name ?? "未命名",
+    name: raw.name ?? t("bridge.untitled"),
     protocol: raw.protocol === "anthropic" ? "anthropic" : "openai",
     baseUrl: raw.base_url ?? "",
     model: raw.model ?? "",
@@ -728,7 +730,7 @@ const MY_SERVER_ORDER_STATES = new Set<MyServerOrderState>([
 
 /** 服务器数据形状不对时直接报错，不在前端猜一个值。 */
 function serverDataError(): never {
-  throw { code: "UPSTREAM_ERROR", message: "服务器数据格式不正确" };
+  throw { code: "UPSTREAM_ERROR", message: t("bridge.badServerData") };
 }
 
 function normalizeMyServerFailure(value: unknown): MyServerFailure | null {
@@ -1156,7 +1158,10 @@ export class TauriAgentBridge implements AgentBridge {
     const raw = await call<unknown>("node_probe", { nodeId });
     const result = normalizeProbeResult(raw);
     if (!result) {
-      throw new BridgeError("PROBE_RESULT_INVALID", "节点探测返回的结果不完整。");
+      throw new BridgeError(
+        "PROBE_RESULT_INVALID",
+        t("bridge.badProbeResult"),
+      );
     }
     return result;
   }
@@ -1215,7 +1220,11 @@ export class TauriAgentBridge implements AgentBridge {
     });
     const node = normalizeNodeSummary(raw);
     if (!node) {
-      throw { code: "INTERNAL", message: "后端返回的节点缺少标识", details: null };
+      throw {
+        code: "INTERNAL",
+        message: t("bridge.missingNodeId"),
+        details: null,
+      };
     }
     return node;
   }
@@ -1267,7 +1276,7 @@ export class TauriAgentBridge implements AgentBridge {
     const path = await openDialog({
       multiple: false,
       directory: false,
-      filters: [{ name: "节点文件", extensions: ["txt", "json"] }],
+      filters: [{ name: t("bridge.nodeFileFilter"), extensions: ["txt", "json"] }],
     });
     return typeof path === "string" && path.trim() ? path : null;
   }
@@ -1574,7 +1583,7 @@ export class TauriAgentBridge implements AgentBridge {
   async myServerSshCredentials(
     _serverId: string,
   ): Promise<MyServerSshCredentials> {
-    return notWired("我的服务器");
+    return notWired("activity.servers");
   }
 
   async netRepair(action: NetRepairAction): Promise<NetRepairResult> {
@@ -1840,6 +1849,7 @@ export class TauriAgentBridge implements AgentBridge {
           createdAt: item.created_at ?? 0,
           expiresAt: item.expires_at ?? item.created_at ?? 0,
           kind: detail.kind,
+          defaultIndex: detail.defaultIndex,
           upgradeConfirm: detail.upgradeConfirm,
           configSetModeConfirm: detail.configSetModeConfirm,
         };

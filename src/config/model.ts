@@ -5,6 +5,7 @@ import type {
   ConfigSummary,
   NodeSummary,
 } from "../agent/protocol";
+import { t } from "../i18n";
 
 /** 与协议里的 `connect_mode` 同义，界面层用它表示用户的选择。 */
 export type ConnectMode = ConfigConnectMode;
@@ -29,7 +30,7 @@ export function resolveMockNodes(nodeIds: readonly string[]): NodeSummary[] {
     if (known) return { ...known };
     return {
       node_id: nodeId,
-      name: `节点 ${index + 1}`,
+      name: t("config.defaultNodeName", { n: index + 1 }),
       server: "",
       port: 8388,
       method: "aes-256-gcm",
@@ -46,8 +47,8 @@ export function nextConfigName(
 ): string {
   const names = new Set(configs.map((config) => config.name.trim()));
   let index = 1;
-  while (names.has(`配置 ${index}`)) index += 1;
-  return `配置 ${index}`;
+  while (names.has(t("config.defaultConfigName", { n: index }))) index += 1;
+  return t("config.defaultConfigName", { n: index });
 }
 
 /** 只保留左栏需要的字段，与 `config_list` 的返回同形。 */

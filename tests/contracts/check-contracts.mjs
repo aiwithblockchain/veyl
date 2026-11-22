@@ -3022,6 +3022,43 @@ check("代码里的通用错误码都在 runtime.md §6.1 登记（契约）", (
   return problems;
 });
 
+// --- 22：解释入口固定串前后端一致 ---
+
+check("解释入口固定串：questions.rs 与前端字典逐字一致（契约）", () => {
+  const rust = read("src-tauri/src/agent/questions.rs");
+  const zh = read("src/i18n/zh.ts");
+  const en = read("src/i18n/en.ts");
+  const rustValue = (name) => {
+    const m = rust.match(new RegExp(`pub const ${name}: &str = "([^"]*)";`));
+    return m ? m[1] : null;
+  };
+  const dictValue = (text) => {
+    const m = text.match(/"ask\.explain":\s*"([^"]+)"/);
+    return m ? m[1] : null;
+  };
+  const problems = [];
+  for (const [constName, file, actual] of [
+    ["EXPLAIN_ANSWER", "src/i18n/zh.ts", dictValue(zh)],
+    ["EXPLAIN_ANSWER_EN", "src/i18n/en.ts", dictValue(en)],
+  ]) {
+    const expected = rustValue(constName);
+    if (expected === null) {
+      problems.push(`questions.rs 找不到 ${constName}`);
+      continue;
+    }
+    if (actual === null) {
+      problems.push(`${file} 找不到 ask.explain`);
+      continue;
+    }
+    if (expected !== actual) {
+      problems.push(
+        `${constName} 与 ${file} 不一致：Rust ${JSON.stringify(expected)} / 前端 ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+  return problems;
+});
+
 // --- 输出 ---
 
 const strict = process.env.AIVPN_CONTRACT_STRICT === "1";

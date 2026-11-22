@@ -8,6 +8,7 @@ import { Composer } from "./Composer";
 import { MessageItem } from "./MessageItem";
 import type { DisplayActionOutcome } from "./ToolCallCard";
 import type { ToolDisplayAction } from "./toolDisplay";
+import { useT } from "../i18n";
 
 interface Props {
   session: Session;
@@ -57,6 +58,7 @@ export function ChatView({
   composerDraft,
   onComposerDraftChange,
 }: Props) {
+  const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
@@ -81,7 +83,7 @@ export function ChatView({
     <div className="chat">
       {session.report ? (
         <p className="chat__disclosure">
-          报告只保存在你的电脑上；生成时，脱敏后的日志会发给你配置的 AI 服务。要不要把它发出去，由你决定。
+          {t("chat.reportDisclosure")}
         </p>
       ) : null}
       <div

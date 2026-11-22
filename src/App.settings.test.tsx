@@ -180,7 +180,7 @@ describe("设置 → 咨询 AI", () => {
     ).toBe("true");
   }, 15_000);
 
-  it("咨询开场就发一条当前设置总览", async () => {
+  it("咨询开场带上当前分区，不再塞整份设置快照", async () => {
     render(<App />);
     await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
     await act(async () => {});
@@ -192,11 +192,13 @@ describe("设置 → 咨询 AI", () => {
     fireEvent.click(screen.getByRole("button", { name: "咨询 AI" }));
 
     await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalled());
+    // 只发一条：咨询开场不会重复发。
+    await waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledTimes(1));
     const call = (bridge.sendMessage as unknown as ReturnType<typeof vi.fn>)
       .mock.calls[0];
-    expect(call[1]).toContain("我在 Veyl 的设置页");
-    expect(call[1]).toContain("接管方式：Proxy 模式（默认）");
-    expect(call[1]).toContain("当前连接：未连接");
+    expect(call[1]).toContain("我在 Veyl 的设置页（当前在「连接」）");
+    expect(call[1]).toContain("想咨询哪个模块");
+    expect(call[1]).not.toContain("接管方式");
   }, 15_000);
 
   it("咨询开关来回切两次，输入框里的草稿还在", async () => {

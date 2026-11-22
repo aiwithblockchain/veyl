@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, TunHelperInfo } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { useT } from "../i18n";
 
 export interface TunHelperController {
   loading: boolean;
@@ -50,6 +51,7 @@ export function useTunHelper({
   bridge: AgentBridge;
   enabled: boolean;
 }): TunHelperController {
+  const t = useT();
   const [loading, setLoading] = useState(true);
   const [info, setInfo] = useState<TunHelperInfo | null>(null);
   const [available, setAvailable] = useState(true);
@@ -114,12 +116,12 @@ export function useTunHelper({
       if (!result.ok) {
         setFailure(
           result.needsAdminRestart
-            ? "这次没有授权，可以再试一次。"
-            : "更新没有完成，请稍后再试。",
+            ? t("tunHelper.denied")
+            : t("tunHelper.updateFailed"),
         );
         return;
       }
-      setHint("后台组件已更新。");
+      setHint(t("tunHelper.updated"));
       await load(false);
     } catch (error) {
       if (!mounted.current) return;
@@ -128,11 +130,11 @@ export function useTunHelper({
         return;
       }
       if (isBusy(error)) {
-        setHint("正在准备，请稍后再试。");
+        setHint(t("tunHelper.preparing"));
         return;
       }
       setFailure(
-        isDenied(error) ? "这次没有授权，可以再试一次。" : "更新没有完成，请稍后再试。",
+        isDenied(error) ? t("tunHelper.denied") : t("tunHelper.updateFailed"),
       );
     } finally {
       busyRef.current = false;
@@ -149,7 +151,7 @@ export function useTunHelper({
         setAvailable(false);
         return;
       }
-      setFailure("没能打开系统设置，请手动打开「系统设置 › 通用 › 登录项与扩展」。");
+      setFailure(t("tunHelper.openSettingsFailed"));
     }
   }, [bridge]);
 
@@ -173,35 +175,40 @@ function StatusLine({
   info: TunHelperInfo;
   activeConnection: boolean;
 }) {
+  const t = useT();
   switch (info.state) {
     case "running":
       return (
         <p className="tun-helper__status">
-          {info.helperVersion ? `已是最新（${info.helperVersion}）` : "已是最新"}
+          {info.helperVersion
+            ? t("tunHelper.latestWith", { version: info.helperVersion })
+            : t("tunHelper.latest")}
         </p>
       );
     case "not_running":
-      return <p className="tun-helper__status">现在没有运行，连接时会自动启动。</p>;
+      return <p className="tun-helper__status">{t("tunHelper.notRunning")}</p>;
     case "stale":
       return (
         <p className="tun-helper__status">
-          {activeConnection ? "有更新，断开后自动完成。" : "有更新，下次连接时自动完成。"}
+          {activeConnection
+            ? t("tunHelper.updateDisconnect")
+            : t("tunHelper.updateNextConnect")}
         </p>
       );
     case "start_failed":
       return (
         <p className="tun-helper__status is-error">
-          没有启动成功，连接「全部流量」时会再试一次。
+          {t("tunHelper.startFailed")}
         </p>
       );
     case "file_invalid":
       return (
         <p className="tun-helper__status is-error">
-          文件校验失败，重新安装 Veyl 可以修复。
+          {t("tunHelper.fileInvalid")}
         </p>
       );
     default:
-      return <p className="tun-helper__status">暂时读不到后台组件状态。</p>;
+      return <p className="tun-helper__status">{t("tunHelper.unavailable")}</p>;
   }
 }
 
@@ -213,6 +220,7 @@ interface RowProps {
 export function TunHelperRow({ controller, activeConnection }: RowProps) {
   const { loading, info, available, busy, failure, hint, adminHint, restart, openSettings } =
     controller;
+  const t = useT();
   const showAdmin = adminHint && available && !loading && info?.state !== "file_invalid";
   // 「已是最新」和「文件校验失败」不需要这个入口：前者没事可做，后者只能重装。
   // stale 也不给：它已经有「下次连接自动完成」的说明，再放跳转入口语义冲突。
@@ -222,19 +230,19 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
   return (
     <div className="settings-row settings-row--stack">
       <div className="tun-helper">
-        <div className="settings-row__label">更新后台组件</div>
-        <div className="settings-row__value">接管全部流量时要用的系统服务。</div>
+        <div className="settings-row__label">{t("tunHelper.label")}</div>
+        <div className="settings-row__value">{t("tunHelper.help")}</div>
 
-        {loading ? <p className="settings-note tun-helper__status">正在读取状态…</p> : null}
+        {loading ? <p className="settings-note tun-helper__status">{t("tunHelper.loading")}</p> : null}
         {!loading && info ? (
           <StatusLine info={info} activeConnection={activeConnection} />
         ) : null}
         {!loading && !info ? (
-          <p className="settings-note tun-helper__status">暂时读不到后台组件状态。</p>
+          <p className="settings-note tun-helper__status">{t("tunHelper.unavailable")}</p>
         ) : null}
 
         {showAdmin ? (
-          <p className="settings-note">需要更新：连接「全部流量」时会请求一次系统授权。</p>
+          <p className="settings-note">{t("tunHelper.need")}</p>
         ) : null}
 
         {failure ? (
@@ -249,7 +257,7 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
         <div className="settings-row__aside">
           {showSettings ? (
             <button type="button" className="btn btn--ghost" onClick={openSettings}>
-              打开系统设置
+              {t("helper.openSettings")}
             </button>
           ) : null}
           {showAdmin ? (
@@ -259,7 +267,7 @@ export function TunHelperRow({ controller, activeConnection }: RowProps) {
               disabled={busy}
               onClick={() => void restart()}
             >
-              {busy ? "更新中…" : "更新"}
+              {busy ? t("tunHelper.updating") : t("tunHelper.update")}
             </button>
           ) : null}
         </div>

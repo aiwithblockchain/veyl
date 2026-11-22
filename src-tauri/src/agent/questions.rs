@@ -69,8 +69,17 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 提问卡片上的固定入口「解释这个设置的含义」回传的原文。与前端逐字一致。
+/// 提问卡片上的固定入口回传的原文。中文界面逐字发这一句；与前端 `EXPLAIN_ANSWER` 一致。
 pub const EXPLAIN_ANSWER: &str = "解释这个设置的含义";
+
+/// 英文界面的同一句固定入口。批次 2 起前端按界面语言回传，Host 两边都认。
+pub const EXPLAIN_ANSWER_EN: &str = "Explain what this setting means";
+
+/// 是不是「解释这个设置的含义」。**两种语言的原文都算**，前后空白不算内容。
+pub fn is_explain_answer(answer: &str) -> bool {
+    let trimmed = answer.trim();
+    trimmed == EXPLAIN_ANSWER || trimmed == EXPLAIN_ANSWER_EN
+}
 
 /// 节点来源那一问的规范选项。**只认这一串，逐字相等**。
 ///
@@ -408,7 +417,7 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     // 「解释这个设置的含义」不是选择；空回答（跳过 / 超时兜底）也不算做了选择，
     // 保持原状，否则模型可以把跳过当成默认值去建配置。
     let trimmed = answer.trim();
-    if trimmed == EXPLAIN_ANSWER {
+    if is_explain_answer(trimmed) {
         record_explain_pending(session_id, &request_id, true);
     } else if !trimmed.is_empty() {
         record_explain_pending(session_id, &request_id, false);
@@ -931,6 +940,46 @@ mod memory_tests {
         );
 
         cleanup_request("ses_explain", "req_explain");
+    }
+
+    /// 中英两种解释原文都触发解释语义，都不算真实选择、也不构成节点同意。
+    #[tokio::test]
+    async fn both_language_explain_answers_mark_a_pending_explanation() {
+        for (session, answer) in [
+            ("ses_explain_zh", EXPLAIN_ANSWER),
+            ("ses_explain_en", EXPLAIN_ANSWER_EN),
+            ("ses_explain_en_spaced", "  Explain what this setting means  "),
+        ] {
+            let (event, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
+            register(session, "req_explain", event);
+            let id = list_pending(session)["questions"][0]["question_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            assert!(!explain_pending(session, "req_explain"));
+            reply(session, &id, answer).unwrap();
+            assert!(
+                explain_pending(session, "req_explain"),
+                "{answer:?} 应触发解释语义"
+            );
+            assert!(
+                !seed_consent_granted(session, "req_explain"),
+                "解释不是节点来源同意"
+            );
+
+            cleanup_request(session, "req_explain");
+        }
+    }
+
+    #[test]
+    fn explain_answer_matching_is_exact_apart_from_surrounding_space() {
+        assert!(is_explain_answer(EXPLAIN_ANSWER));
+        assert!(is_explain_answer(EXPLAIN_ANSWER_EN));
+        assert!(is_explain_answer("  解释这个设置的含义  "));
+        assert!(!is_explain_answer("解释一下这个设置"));
+        assert!(!is_explain_answer("Explain this setting"));
+        assert!(!is_explain_answer(""));
     }
 
     #[tokio::test]

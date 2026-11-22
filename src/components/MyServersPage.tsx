@@ -8,6 +8,7 @@ import type {
 import type { TrialState } from "../agent/protocol";
 import { trialEmptyHint } from "../myservers/labels";
 import { MyServerDetail } from "./MyServerDetail";
+import { useT } from "../i18n";
 
 interface Props {
   bridge: AgentBridge;
@@ -88,6 +89,7 @@ export function MyServersPage({
   pendingServer = false,
   onRenamed,
 }: Props) {
+  const t = useT();
   const trialHint = trial
     ? trialEmptyHint(
         trial.state,
@@ -106,7 +108,7 @@ export function MyServersPage({
         className="myservers__trial-link"
         onClick={onGoConnect}
       >
-        去控制台
+        {t("serversPage.goConsole")}
       </button>
     </p>
   ) : null;
@@ -114,10 +116,10 @@ export function MyServersPage({
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty" role="alert">
-          <h1 className="myservers__empty-title">账户暂时读不到</h1>
-          <p className="myservers__empty-text">检查网络后再试。</p>
+          <h1 className="myservers__empty-title">{t("serversPage.accountUnavailable")}</h1>
+          <p className="myservers__empty-text">{t("serversPage.checkNetwork")}</p>
           <button type="button" className="btn btn--ghost" onClick={onRefreshAccount}>
-            重试
+            {t("serversPage.retry")}
           </button>
         </section>
       </div>
@@ -129,8 +131,8 @@ export function MyServersPage({
       <div className="myservers">
         {detailError ? (
           <section className="myservers__detail-card" role="alert">
-            <p className="myservers__detail-title">这台服务器的详情暂时读不到。</p>
-            <p className="myservers__detail-text">已有服务器和节点不受影响；稍后再试。</p>
+            <p className="myservers__detail-title">{t("serversPage.detailUnavailable")}</p>
+            <p className="myservers__detail-text">{t("serversPage.detailRetry")}</p>
             <button
               type="button"
               className="btn btn--ghost"
@@ -138,7 +140,7 @@ export function MyServersPage({
               aria-busy={detailRetrying || undefined}
               onClick={onRetryDetail}
             >
-              {detailRetrying ? "正在重试…" : "重试"}
+              {detailRetrying ? t("serversPage.retrying") : t("serversPage.retry")}
             </button>
           </section>
         ) : (
@@ -180,9 +182,9 @@ export function MyServersPage({
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty">
-          <h1 className="myservers__empty-title">先登录</h1>
+          <h1 className="myservers__empty-title">{t("serversPage.loginTitle")}</h1>
           <p className="myservers__empty-text">
-            登录后可以买服务器；装好后节点会出现在这里，也能直接用来连接。
+            {t("serversPage.loginText")}
           </p>
           {trialNote}
           <button
@@ -190,7 +192,7 @@ export function MyServersPage({
             className="btn btn--primary myservers__empty-cta"
             onClick={onLogin}
           >
-            登录
+            {t("serversPage.login")}
           </button>
         </section>
       </div>
@@ -213,8 +215,8 @@ export function MyServersPage({
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty" role="alert">
-          <h1 className="myservers__empty-title">连不上服务器，稍后再试</h1>
-          <p className="myservers__empty-text">已有服务器和节点不受影响。</p>
+          <h1 className="myservers__empty-title">{t("serversPage.errorTitle")}</h1>
+          <p className="myservers__empty-text">{t("serversPage.errorText")}</p>
           <button
             type="button"
             className="btn btn--ghost"
@@ -222,7 +224,7 @@ export function MyServersPage({
             aria-busy={retrying || undefined}
             onClick={onRetry}
           >
-            {retrying ? "正在重试…" : "重试"}
+            {retrying ? t("serversPage.retrying") : t("serversPage.retry")}
           </button>
         </section>
       </div>
@@ -235,7 +237,7 @@ export function MyServersPage({
       <div className="myservers myservers--empty">
         <section className="myservers__empty" role="status">
           <p className="myservers__empty-text">
-            服务器已下单，正在创建，稍后会自动出现。
+            {t("serversPage.pending")}
           </p>
         </section>
       </div>
@@ -245,9 +247,9 @@ export function MyServersPage({
   return (
     <div className="myservers myservers--empty">
       <section className="myservers__empty">
-        <h1 className="myservers__empty-title">还没有服务器</h1>
+        <h1 className="myservers__empty-title">{t("serversPage.emptyTitle")}</h1>
         <p className="myservers__empty-text">
-          买一台装好后，节点会出现在这里，也能直接用来连接。
+          {t("serversPage.emptyText")}
         </p>
         {trialNote}
         <button
@@ -256,7 +258,7 @@ export function MyServersPage({
           disabled={readOnly}
           onClick={onNew}
         >
-          新建节点
+          {t("serversPage.newNode")}
         </button>
       </section>
     </div>

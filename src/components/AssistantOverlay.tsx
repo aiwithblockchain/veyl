@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
+import { useT } from "../i18n";
 
 interface Props {
   onClose: () => void;
@@ -12,6 +13,7 @@ interface Props {
  * Esc 与点遮罩都能收起。
  */
 export function AssistantOverlay({ onClose, children }: Props) {
+  const t = useT();
   const panelRef = useRef<HTMLDivElement>(null);
   useFocusTrap(true, panelRef);
 
@@ -30,7 +32,7 @@ export function AssistantOverlay({ onClose, children }: Props) {
       className="assistant-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="AI 对话"
+      aria-label={t("assistant.panelAria")}
       onMouseDown={onClose}
     >
       <div

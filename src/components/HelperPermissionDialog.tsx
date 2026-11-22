@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useT } from "../i18n";
 import { IconClose } from "./icons";
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
 
 /** 后台助手没被系统允许时的引导：只说明去哪、怎么放行，不替用户重试。 */
 export function HelperPermissionDialog({ open, onClose, onOpenSettings }: Props) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
@@ -42,7 +44,7 @@ export function HelperPermissionDialog({ open, onClose, onOpenSettings }: Props)
       await onOpenSettings();
       onClose();
     } catch {
-      setError("没能打开系统设置，请手动打开「系统设置 › 通用 › 登录项与扩展」。");
+      setError(t("helper.error"));
       busyRef.current = false;
       setBusy(false);
     }
@@ -64,23 +66,19 @@ export function HelperPermissionDialog({ open, onClose, onOpenSettings }: Props)
       >
         <header className="modal__head">
           <h2 id="helper-permission-title" className="modal__title">
-            需要允许后台助手
+            {t("helper.title")}
           </h2>
           <button
             type="button"
             className="modal__close"
             onClick={onClose}
-            aria-label="关闭"
+            aria-label={t("common.close")}
             disabled={busy}
           >
             <IconClose size={14} />
           </button>
         </header>
-        <p className="confirm__text">
-          接管全部流量需要你在系统设置里允许 Veyl
-          的后台助手：系统设置 › 通用 › 登录项与扩展。允许后回到这里，再点一次「启动
-          VPN」。
-        </p>
+        <p className="confirm__text">{t("helper.body")}</p>
         {error ? (
           <p className="confirm__error" role="alert">
             {error}
@@ -88,7 +86,7 @@ export function HelperPermissionDialog({ open, onClose, onOpenSettings }: Props)
         ) : null}
         <div className="confirm__actions">
           <button type="button" className="btn btn--ghost" onClick={onClose} disabled={busy}>
-            取消
+            {t("common.cancel")}
           </button>
           <button
             ref={primaryRef}
@@ -97,7 +95,7 @@ export function HelperPermissionDialog({ open, onClose, onOpenSettings }: Props)
             onClick={() => void openSettings()}
             disabled={busy}
           >
-            打开系统设置
+            {t("helper.openSettings")}
           </button>
         </div>
       </div>

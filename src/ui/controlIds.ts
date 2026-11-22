@@ -1,4 +1,6 @@
 import type { UiContext, UiControl, UiLastAction, UiScreen } from "../agent/bridge";
+import { t } from "../i18n";
+import type { MessageKey } from "../i18n";
 
 /**
  * 静态控件登记表（commands.md §9.1.1）。
@@ -8,44 +10,62 @@ interface StaticControl {
   id: string;
   screen: UiScreen;
   kind: UiControl["kind"];
-  label: string;
+  label: MessageKey;
 }
 
 const STATIC_CONTROLS: StaticControl[] = [
-  { id: "onboarding.connect", screen: "onboarding", kind: "button", label: "连接" },
+  { id: "onboarding.connect", screen: "onboarding", kind: "button", label: "controls.connect" },
   {
     id: "onboarding.other_provider",
     screen: "onboarding",
     kind: "button",
-    label: "使用其他 AI 服务",
+    label: "controls.otherProvider",
   },
-  { id: "onboarding.get_key", screen: "onboarding", kind: "button", label: "获取 Key" },
+  {
+    id: "onboarding.get_key",
+    screen: "onboarding",
+    kind: "button",
+    label: "controls.getKey",
+  },
 
-  { id: "client.primary", screen: "client", kind: "button", label: "连接" },
-  { id: "client.node_pick", screen: "client", kind: "choice", label: "选择节点" },
-  { id: "client.probe", screen: "client", kind: "button", label: "测速" },
-  { id: "client.ask_ai", screen: "client", kind: "button", label: "助手" },
+  { id: "client.primary", screen: "client", kind: "button", label: "controls.connect" },
+  { id: "client.node_pick", screen: "client", kind: "choice", label: "controls.nodePick" },
+  { id: "client.probe", screen: "client", kind: "button", label: "controls.probe" },
+  { id: "client.ask_ai", screen: "client", kind: "button", label: "controls.assistant" },
 
-  { id: "no_nodes.trial", screen: "no_nodes", kind: "button", label: "先试用免费节点" },
-  { id: "no_nodes.new_node", screen: "no_nodes", kind: "button", label: "新建节点" },
+  { id: "no_nodes.trial", screen: "no_nodes", kind: "button", label: "controls.trial" },
+  { id: "no_nodes.new_node", screen: "no_nodes", kind: "button", label: "controls.newNode" },
 
-  { id: "new_node.region", screen: "new_node", kind: "choice", label: "地区" },
-  { id: "new_node.plan", screen: "new_node", kind: "choice", label: "服务器类型" },
-  { id: "new_node.create", screen: "new_node", kind: "button", label: "创建" },
-  { id: "new_node.ask_ai", screen: "new_node", kind: "button", label: "让 AI 帮我选" },
+  { id: "new_node.region", screen: "new_node", kind: "choice", label: "controls.region" },
+  { id: "new_node.plan", screen: "new_node", kind: "choice", label: "controls.plan" },
+  { id: "new_node.create", screen: "new_node", kind: "button", label: "controls.create" },
+  { id: "new_node.ask_ai", screen: "new_node", kind: "button", label: "controls.askAi" },
 
-  { id: "servers.item", screen: "servers", kind: "row", label: "服务器" },
-  { id: "servers.connect", screen: "servers", kind: "button", label: "连接" },
-  { id: "servers.rebuild", screen: "servers", kind: "button", label: "重建" },
-  { id: "servers.destroy", screen: "servers", kind: "button", label: "销毁" },
-  { id: "servers.ai_locate", screen: "servers", kind: "button", label: "AI 定位" },
+  { id: "servers.item", screen: "servers", kind: "row", label: "controls.server" },
+  { id: "servers.destroy", screen: "servers", kind: "button", label: "controls.destroy" },
+  { id: "servers.ai_locate", screen: "servers", kind: "button", label: "controls.aiLocate" },
 
-  { id: "trial_expired.new_node", screen: "trial_expired", kind: "button", label: "新建节点" },
+  {
+    id: "trial_expired.new_node",
+    screen: "trial_expired",
+    kind: "button",
+    label: "controls.newNode",
+  },
 
-  { id: "settings.ai", screen: "settings", kind: "button", label: "AI" },
-  { id: "settings.connection", screen: "settings", kind: "button", label: "连接" },
-  { id: "settings.account", screen: "settings", kind: "button", label: "账户" },
-  { id: "settings.advanced", screen: "settings", kind: "button", label: "高级" },
+  { id: "settings.ai", screen: "settings", kind: "button", label: "controls.ai" },
+  {
+    id: "settings.connection",
+    screen: "settings",
+    kind: "button",
+    label: "settings.tab.connection",
+  },
+  { id: "settings.account", screen: "settings", kind: "button", label: "controls.account" },
+  {
+    id: "settings.advanced",
+    screen: "settings",
+    kind: "button",
+    label: "controls.advanced",
+  },
 ];
 
 const KNOWN_IDS = new Set(STATIC_CONTROLS.map((item) => item.id));
@@ -61,7 +81,7 @@ export function staticControlsFor(
 ): UiControl[] {
   return STATIC_CONTROLS.filter((item) => item.screen === screen).map((item) => ({
     id: item.id,
-    label: normalizeLabel(labels[item.id] ?? item.label) ?? item.label,
+    label: normalizeLabel(labels[item.id] ?? t(item.label)) ?? t(item.label),
     kind: item.kind,
   }));
 }

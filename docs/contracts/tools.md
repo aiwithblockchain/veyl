@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.21.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.23.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -309,10 +309,11 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 38 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
 | 39 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
 | 40 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
+| 41 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 重置某台服务器的节点端口与密码（**有确认点**，会重启节点） | `Execute` | 高 |
 
 > `AskUserQuestion` 由 `claurst-tools` 提供，Veyl 只负责注册与 UI 渲染，不重写。
 
-**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0、`ConfigDelete` 已在 3.18.0 从工具集移除，见 §4.7 / §4.17。
+**破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`NodeRotateCredentials`（**有确认点**，会重启节点并改端口，见 §4.55）、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` / `NodeRotateCredentials` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0、`ConfigDelete` 已在 3.18.0 从工具集移除，见 §4.7 / §4.17。
 
 **UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）、`trial_status`（§7.19）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。
 
@@ -362,6 +363,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 我的服务器（只读）
     Box::new(MyServersTool::new(services.clone())),
     Box::new(MyServerFailureTool::new(services.clone())),
+    // 节点端口与密码轮换（有确认点）
+    Box::new(NodeRotateCredentialsTool::new()),
     // 在线切换接管方式（有确认点）
     Box::new(ConfigSetModeTool::new(store.clone(), rt.clone())),
     // 设置指路（只读）
@@ -1273,7 +1276,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | 回答 | 用户通过 `reply_user_question` 回传：普通提问接受任何非空文本，`core_upgrade_confirm` 必须逐字等于 `options` 之一；空串 = 跳过（`commands.md` §9.6） |
 | 超时 | 15 分钟未答 → Host 代回空串（等同跳过） |
 | 多选 | **不支持**（Claurst 通道本身不支持） |
-| 解释行 | UI 在**带选项、且不是确认卡**的卡片底部加固定按钮 `解释这个设置的含义`；点击回传的就是这串字，工具层只当普通文本，语义由提示词约束（不当作答、不推进、不构成节点同意） |
+| 解释行 | UI 在**带选项、且不是确认卡**的卡片底部加固定按钮，文案跟随界面语言：`解释这个设置的含义`（中）或 `Explain what this setting means`（英）；点击回传的就是这串字，工具层只当普通文本，语义由提示词约束（不当作答、不推进、不构成节点同意） |
 
 **`options` 必须非空，且每一项都是非空字符串**：`options` 缺失、为空数组、或含全空白项时，**不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束。
 
@@ -2093,6 +2096,48 @@ type HttpCheckData = {
 
 ---
 
+### 4.55 `NodeRotateCredentials`（节点端口与密码轮换，3.23.0 新增）
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "server_id": { "type": "string", "description": "要重置的服务器 id，取自 MyServers 的 server_id" }
+  },
+  "required": ["server_id"],
+  "additionalProperties": false
+}
+```
+
+```ts
+type NodeRotateCredentialsData = {
+  ok: true;
+  port: number;      // 轮换后的节点端口；密码不回传
+  refreshed: boolean; // 新凭据是否已写回本机（false 时界面要提示手动刷新服务器数据）
+};
+```
+
+- `PermissionLevel::Execute`；**有确认卡**（kind `node_rotate_confirm`，选项「重置 / 取消」，默认焦点「取消」；Esc / 关闭 / 超时都按取消）。
+- 描述边界写死在工具描述里：只在用户明确要求重置节点端口或密码时调用，不得为了排障、提速或推测性原因自行调用，也不得在用户没提时主动建议后自己执行。
+- 执行链路：Host 先向控制面取这台节点的 agent 端点与一次性令牌（`POST /v1/servers/{id}/agent-token`，60 秒、一次性），再连节点的 MCP 服务调用 `rotate_credentials`。**`endpoint` 是控制面下发的完整 MCP URL（带 `/mcp`），Host 不拼路径**——端点语义只在控制面定义一次。
+- **轮换成功后 Host 主动刷新本机凭据**：节点池只为「本地还没有这台服务器的节点行」取凭据，行还在就不会自动同步；因此工具在 agent 返回成功后立即调用 `POST /v1/servers/{id}/credentials`（按 `server_id` upsert 本地节点行，更新端口与密码并回填 `my_servers.node_id`），再发一次 `my-server-changed` 让界面重读。刷新失败**不影响成功结论**：`refreshed = false`，summary 追加「本机凭据刷新失败，请手动刷新服务器数据」。
+- TLS 信任：控制面给了 `ca_pem` 就 `add_root_certificate` 走正常链校验；**CA 路径失败（`agent_tls_untrusted`）时用同一张票的 `cert_fingerprint` pin 再试一次**（令牌一次性，不能重新开票），仍失败才报错。没有 CA 时直接用指纹 pin；明文 HTTP 的端点直接拒绝。
+- 超时：取令牌 10 秒；`initialize → tools/list → tools/call`（含 CA→指纹的一次重试）整体 90 秒（确认卡的等待不计入）。真实轮换要等节点重启与验活，20 秒会把「其实成功了」报成超时，导致用户再点一次二次轮换。
+- 令牌与密码不进日志、事件、模型上下文与工具返回值；密码由 agent 经自己的鉴权通道写回控制面，桌面靠同步拿新值。`server_id` 只接受 `srv_` + base64url 字符，挡住路径穿越。
+- 失败（`details.reason`）：
+  - `agent_token_unavailable` — 控制面没给令牌（`TIMEOUT` / 网络错误）；控制面的 `PRECONDITION_FAILED` / `NOT_FOUND` 原码透传，reason 保持 `not_ready` / `agent_not_registered` 等；
+  - `agent_tls_untrusted` — CA 与指纹两条路径都没通过校验，请求停在 TLS 阶段（令牌没有发出）；
+  - `agent_token_rejected` — 节点 401 / 403（令牌过期、已用过或不匹配）；
+  - `agent_tool_failed` — agent 回了 `{ok:false,error:{kind,message}}`，`retryable` 取 `kind == "retryable"`；
+  - `agent_timeout` — 90 秒内没跑完，`retryable = true`；
+  - `agent_unreachable` — 连不上或连接中断，`retryable = true`；
+  - `agent_bad_response` — 控制面或 agent 回包结构不对。
+  - 用户取消 → `CANCELLED`；参数不合法 → `INVALID_ARGUMENT / invalid_server_id`。
+- 成功返回 `{ ok: true, port, refreshed }`，`display.changed = unknown`（远端已改，本地无回滚）；summary「节点端口与密码已重置，本机与手机将在下次同步后使用新值」（刷新失败时追加一句提示），`display`「节点端口与密码已重置」+ `facts` 带新端口。失败文案不承诺「没有变化」——agent 可能在半途失败。
+- 审计：沿用工具调用审计（记 `server_id` 与结果），不含令牌与密码。
+
+---
+
 ## 5. 工具间协作约定
 
 ### 5.1 标准连接链路
@@ -2143,6 +2188,7 @@ type HttpCheckData = {
 | `RouteTargetsSet` | 3s |
 | `RuntimeStop` / `VpnDisconnect` | 10s |
 | `CoreUpgrade` | 网络检查 + 返回 `job_id`，≤10s |
+| `NodeRotateCredentials` | 100s（取令牌 10s + MCP 流程 90s，含 CA→指纹一次重试；确认卡等待不计入） |
 
 同步工具超过预算返回 `TIMEOUT` + `retryable: true`，不要无限等待。
 
@@ -2190,6 +2236,13 @@ type HttpCheckData = {
 ---
 
 ## 8. 变更记录
+
+### 3.23.0（未发布，2026-11-21：新增 `NodeRotateCredentials`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.23.0`；§3 工具总表与 §3.1 注册清单新增 `NodeRotateCredentials`（`Execute`，**有确认点**）；新增 §4.55：参数 `{ server_id }`，成功 `{ ok: true, port, refreshed }`，失败 reason 见 §4.55。一条令牌只够一次调用，令牌与密码都不进返回值、日志与事件 | 新工具 | `docs/design/node-agent-mcp.md` §8 / §10；2026-11-21 PM |
+| 2 | 同版行为按评审修订：轮换成功后 Host **主动刷新本地凭据**并补发 `my-server-changed`（节点池不会为已存在的行再取凭据），刷新失败仍算成功、`refreshed = false`；CA 校验失败时用**同一张票**的指纹 pin 再试一次；MCP 超时 20s → 90s；成功文案改为「本机与手机将在下次同步后使用新值」 | 行为修订 | 2026-11-21 交叉评审 B2 / S3 / S4 |
 
 ### 3.22.1（未发布，2026-11-20：`MyServers` 可以给地址）
 

@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useRef } from "react";
 import type { QuitDecisionAction } from "../agent/bridge";
 import { useFocusTrap } from "../ui/focus";
+import { useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 import { IconClose } from "./icons";
 
 interface Props {
@@ -14,22 +16,23 @@ interface Props {
 }
 
 /** 两行「按钮名 + 结果」按连接状态取词，不在 JSX 里拼字符串。 */
-const ROWS = {
+const ROWS: Record<"connected" | "disconnected", Array<{ label: MessageKey; value: MessageKey }>> = {
   connected: [
-    { label: "后台运行", value: "保持连接" },
-    { label: "退出", value: "断开连接并恢复网络设置" },
+    { label: "quit.background.label", value: "quit.background.connected" },
+    { label: "quit.quit.label", value: "quit.quit.connected" },
   ],
   disconnected: [
-    { label: "后台运行", value: "留在菜单栏" },
-    { label: "退出", value: "关闭 Veyl" },
+    { label: "quit.background.label", value: "quit.background.disconnected" },
+    { label: "quit.quit.label", value: "quit.quit.disconnected" },
   ],
-} as const;
+};
 
 /**
  * Host 拦截到退出请求（`quit-requested`）时的确认弹窗。
  * 取消类操作一律回 `background`：用户没说退出，就别替他退出。
  */
 export function QuitDialog({ busy, error, connected, onDecision }: Props) {
+  const t = useT();
   const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const rows = connected ? ROWS.connected : ROWS.disconnected;
@@ -72,13 +75,13 @@ export function QuitDialog({ busy, error, connected, onDecision }: Props) {
       >
         <header className="quit-dialog__head">
           <h2 id="quit-dialog-title" className="quit-dialog__title">
-            退出 Veyl？
+            {t("quit.title")}
           </h2>
           <button
             type="button"
             className="quit-dialog__close"
-            aria-label="关闭"
-            title="关闭"
+            aria-label={t("common.close")}
+            title={t("common.close")}
             disabled={busy}
             onClick={() => decide("background")}
           >
@@ -89,8 +92,8 @@ export function QuitDialog({ busy, error, connected, onDecision }: Props) {
         <dl id="quit-dialog-desc" className="quit-dialog__body">
           {rows.map((row) => (
             <Fragment key={row.label}>
-              <dt className="quit-dialog__label">{row.label}</dt>
-              <dd className="quit-dialog__value">{row.value}</dd>
+              <dt className="quit-dialog__label">{t(row.label)}</dt>
+              <dd className="quit-dialog__value">{t(row.value)}</dd>
             </Fragment>
           ))}
         </dl>
@@ -108,7 +111,7 @@ export function QuitDialog({ busy, error, connected, onDecision }: Props) {
             disabled={busy}
             onClick={() => decide("quit")}
           >
-            退出
+            {t("quit.quit.label")}
           </button>
           <button
             ref={primaryRef}
@@ -117,7 +120,7 @@ export function QuitDialog({ busy, error, connected, onDecision }: Props) {
             disabled={busy}
             onClick={() => decide("background")}
           >
-            后台运行
+            {t("quit.background.label")}
           </button>
         </div>
       </div>

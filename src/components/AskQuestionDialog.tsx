@@ -9,6 +9,7 @@ import type { ConfigConnectMode } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { formatByteSize, upgradeEffectText } from "../format";
 import { useFocusTrap } from "../ui/focus";
+import { t as translate, useT } from "../i18n";
 import { IconClose } from "./icons";
 
 const UNKNOWN_CONFIRM: CoreUpgradeConfirmData = {
@@ -26,9 +27,9 @@ const UNKNOWN_SET_MODE: ConfigSetModeConfirmData = {
 };
 
 function connectModeLabel(mode: ConfigConnectMode | null): string {
-  if (mode === "tun") return "全部软件";
-  if (mode === "system_proxy") return "本机代理";
-  return "所选方式";
+  if (mode === "tun") return translate("dialog.mode.allApps");
+  if (mode === "system_proxy") return translate("dialog.mode.proxy");
+  return translate("dialog.mode.unknown");
 }
 
 interface Props {
@@ -45,9 +46,11 @@ interface Props {
  * 普通提问改为消息流里的内联卡片，不再走这里。
  */
 export function AskQuestionDialog({ question, onAnswer, onExpire, connected = false }: Props) {
+  const t = useT();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const submittingRef = useRef(false);
   const expireRef = useRef(onExpire);
@@ -56,7 +59,8 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
 
   const isUpgrade = question?.kind === "core_upgrade_confirm";
   const isSetMode = question?.kind === "config_set_mode_confirm";
-  const blocking = isUpgrade || isSetMode;
+  const isRotate = question?.kind === "node_rotate_confirm";
+  const blocking = isUpgrade || isSetMode || isRotate;
 
   const confirm = isUpgrade
     ? question?.upgradeConfirm ?? UNKNOWN_CONFIRM
@@ -78,6 +82,8 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     "切换";
   const cancelAnswer =
     options.find((option) => /取消|暂不|稍后|不升|不更新|不用|以后/.test(option)) ?? "取消";
+  /** 通用确认卡（如节点端口重置）：确认回传就是「不是取消」的那个选项原文。 */
+  const confirmAnswer = options.find((option) => option !== cancelAnswer) ?? "确认";
 
   // 后端 15 分钟后静默回空串；倒计时只读后端给的 expires_at。
   // 回答或 request end 会把 question 置空，cleanup 会清掉这个定时器。
@@ -97,7 +103,13 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     submittingRef.current = false;
     setSubmitting(false);
     setError(null);
-    cancelRef.current?.focus();
+    // Host 的 default_index 决定默认焦点；没给或指到取消时就落在「取消」。
+    const cancelIndex = options.indexOf(cancelAnswer);
+    const focusCancel =
+      question.defaultIndex === null ||
+      question.defaultIndex === undefined ||
+      question.defaultIndex === cancelIndex;
+    (focusCancel ? cancelRef.current : confirmRef.current)?.focus();
   }, [question?.questionId, question?.kind]);
 
   const answer = useCallback(
@@ -110,12 +122,16 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
         await onAnswer(value);
       } catch (failure) {
         const bridgeError = toBridgeError(failure);
-        setError(bridgeError.message || "回答失败，请重试");
+        setError(
+          bridgeError.hasMessage
+            ? bridgeError.message
+            : t("ask.error.answer"),
+        );
         submittingRef.current = false;
         setSubmitting(false);
       }
     },
-    [onAnswer],
+    [onAnswer, t],
   );
 
   const skip = useCallback(() => {
@@ -150,12 +166,16 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
       >
         <header className="ask-question__head">
           <h2 id="ask-question-title" className="ask-question__title">
-            {isUpgrade ? "更新后台运行库" : "切换接管方式"}
+            {isUpgrade
+              ? t("dialog.upgrade.title")
+              : isSetMode
+                ? t("dialog.setMode.title")
+                : t("dialog.nodeRotate.title")}
           </h2>
           <button
             type="button"
             className="ask-question__close"
-            aria-label="关闭"
+            aria-label={t("common.close")}
             disabled={submitting}
             onClick={skip}
           >
@@ -166,46 +186,59 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
         {isUpgrade ? (
           <dl className="core-confirm">
             <div className="core-confirm__row">
-              <dt>版本</dt>
+              <dt>{t("dialog.version")}</dt>
               <dd>
-                当前 {confirm?.currentVersion ?? "未知"} → 目标{" "}
-                {confirm?.targetVersion ?? "未知"}
+                {t("dialog.currentToTarget", {
+                  current: confirm?.currentVersion ?? t("dialog.unknown"),
+                  target: confirm?.targetVersion ?? t("dialog.unknown"),
+                })}
               </dd>
             </div>
             <div className="core-confirm__row">
-              <dt>下载大小</dt>
-              <dd>{formatByteSize(confirm?.size ?? null) ?? "大小未知"}</dd>
+              <dt>{t("dialog.downloadSize")}</dt>
+              <dd>{formatByteSize(confirm?.size ?? null) ?? t("dialog.sizeUnknown")}</dd>
             </div>
             <div className="core-confirm__row">
-              <dt>来源</dt>
-              <dd>官方更新</dd>
+              <dt>{t("dialog.source")}</dt>
+              <dd>{t("dialog.official")}</dd>
             </div>
             <div className="core-confirm__row">
-              <dt>生效</dt>
+              <dt>{t("dialog.effect")}</dt>
               <dd>{upgradeEffectText(confirm?.restartRequired ?? false, connected)}</dd>
             </div>
           </dl>
-        ) : (
+        ) : isSetMode ? (
           <dl className="core-confirm">
             <div className="core-confirm__row">
-              <dt>目标方式</dt>
+              <dt>{t("dialog.targetMode")}</dt>
               <dd>{connectModeLabel(setMode?.mode ?? null)}</dd>
             </div>
             <div className="core-confirm__row">
-              <dt>影响</dt>
-              <dd>会短暂断开当前连接。</dd>
+              <dt>{t("dialog.impact")}</dt>
+              <dd>{t("dialog.impactText")}</dd>
             </div>
           </dl>
+        ) : (
+          <p className="ask-question__body">{t("dialog.nodeRotate.body")}</p>
         )}
 
         <div className="core-confirm__actions">
           <button
+            ref={confirmRef}
             type="button"
             className="btn btn--ghost"
             disabled={submitting}
-            onClick={() => void answer(isUpgrade ? upgradeAnswer : switchAnswer)}
+            onClick={() =>
+              void answer(
+                isUpgrade ? upgradeAnswer : isSetMode ? switchAnswer : confirmAnswer,
+              )
+            }
           >
-            {isUpgrade ? "升级" : "切换"}
+            {isUpgrade
+              ? t("dialog.upgrade")
+              : isSetMode
+                ? t("dialog.switch")
+                : t("dialog.nodeRotate.confirm")}
           </button>
           <button
             ref={cancelRef}
@@ -214,7 +247,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
             disabled={submitting}
             onClick={() => void answer(cancelAnswer)}
           >
-            取消
+            {t("common.cancel")}
           </button>
         </div>
 

@@ -137,6 +137,13 @@ describe("MessageItem：解释动作", () => {
     expect(screen.queryByText("你")).toBeNull();
   });
 
+  it("英文界面的解释串也渲染成动作记录", () => {
+    const { container } = renderUser("Explain what this setting means");
+
+    expect(container.querySelector(".msg--action")?.textContent).toBe("已请求解释");
+    expect(container.querySelector(".msg--user")).toBeNull();
+  });
+
   it("普通用户消息仍是用户气泡", () => {
     const { container } = renderUser("帮我看看为什么连不上");
 

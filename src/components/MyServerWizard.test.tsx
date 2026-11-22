@@ -448,8 +448,9 @@ describe("建机余额门槛（余额 ≥ 日价 × 7）", () => {
   ) {
     return {
       myServerWallet: vi.fn(async () => ({ balance_cents: balanceCents })),
+      // 创建只回订单，服务器行要到结账成功之后才有：失败时没有 id 可跳。
       myServerCreate: vi.fn(async () => ({
-        server_id: "srv_1",
+        server_id: null,
         order_id: "ord_1",
       })),
       myServerCheckout: checkout,
@@ -547,7 +548,7 @@ describe("余额不足错误的不同 details 形状", () => {
     const bridge = {
       myServerWallet: vi.fn(async () => ({ balance_cents: balanceCents })),
       myServerCreate: vi.fn(async () => ({
-        server_id: "srv_1",
+        server_id: null,
         order_id: "ord_1",
       })),
       myServerCheckout: checkout,
@@ -956,5 +957,116 @@ describe("结账返回订单（2.39.0）", () => {
       await screen.findByText(/服务器没建起来/),
     ).toBeTruthy();
     expect(onOrdered).not.toHaveBeenCalled();
+  });
+});
+
+describe("下单失败后的去向", () => {
+  it("结账失败、订单已写回服务器 id：按订单反查后去那台失败服务器", async () => {
+    const onOrdered = vi.fn();
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      // 真实形态：create 只回订单，服务器 id 在结账时才写回。
+      myServerCreate: vi.fn(async () => ({
+        order_id: "ord_1",
+        server_id: null,
+      })),
+      myServerCheckout: vi.fn(async () => {
+        throw {
+          code: "UPSTREAM_ERROR",
+          message: "服务器没装好。",
+          details: { reason: "firewall_failed" },
+          retryable: true,
+        };
+      }),
+      myServerOrderGet: vi.fn(async () =>
+        order({ order_id: "ord_1", server_id: "srv_x", state: "failed" }),
+      ),
+      myServerList: vi.fn(async () => ({ servers: [] })),
+      myServerCatalog: vi.fn(async () => CATALOG),
+    } as unknown as AgentBridge;
+
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={onOrdered}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    // 服务器行已经建出来了：走和成功一样的路径，选中那台失败机器。
+    await waitFor(() => expect(onOrdered).toHaveBeenCalledWith("srv_x"));
+    // 错误不再留在向导里，失败详情由「我的服务器」承接。
+    expect(screen.queryByText("服务器没装好。")).toBeNull();
+  });
+
+  it("结账余额不足、订单和列表都没有服务器：停在向导就地报错", async () => {
+    const onOrdered = vi.fn();
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: vi.fn(async () => ({
+        order_id: "ord_1",
+        server_id: null,
+      })),
+      myServerCheckout: vi.fn(async () => {
+        throw {
+          code: "PRECONDITION_FAILED",
+          message: "余额不足",
+          details: { reason: "insufficient_balance", shortfall_cents: 500 },
+          retryable: true,
+        };
+      }),
+      myServerOrderGet: vi.fn(async () =>
+        order({ order_id: "ord_1", server_id: null, state: "pending_payment" }),
+      ),
+      myServerList: vi.fn(async () => ({ servers: [] })),
+      myServerCatalog: vi.fn(async () => CATALOG),
+    } as unknown as AgentBridge;
+
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={onOrdered}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("余额不足，还差 $5.00。");
+    expect(onOrdered).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
+  });
+
+  it("create 自己失败：停在向导就地报错，不跳服务器详情", async () => {
+    const onOrdered = vi.fn();
+    const bridge = {
+      myServerWallet: vi.fn(async () => ({ balance_cents: 1000 })),
+      myServerCreate: vi.fn(async () => {
+        throw { code: "UPSTREAM_ERROR", message: "下单没成功。", retryable: true };
+      }),
+      myServerCheckout: vi.fn(),
+      myServerCatalog: vi.fn(async () => CATALOG),
+    } as unknown as AgentBridge;
+
+    render(
+      <MyServerWizard
+        bridge={bridge}
+        catalog={CATALOG}
+        onOrdered={onOrdered}
+        onEnsureIdentity={async () => true}
+        onTopUp={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "创建" }));
+    expect(await screen.findByText(/下单没成功/)).toBeTruthy();
+    expect(onOrdered).not.toHaveBeenCalled();
+    // 仍在向导里，可以再点「创建」。
+    expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
   });
 });

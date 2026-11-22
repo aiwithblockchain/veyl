@@ -3,12 +3,13 @@ import type { ReactNode } from "react";
 import type { NextAction } from "../agent/protocol";
 import { PRODUCT_NAME } from "../brand";
 import type { ChatMessage, TimelineItem, ToolCall } from "../state/chatStore";
-import { EXPLAIN_ANSWER } from "../ui/askQuestion";
+import { isExplainAnswer } from "../ui/askQuestion";
 import { Markdown } from "./Markdown";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard, ToolCallGroup } from "./ToolCallCard";
 import type { DisplayActionOutcome } from "./ToolCallCard";
 import type { ToolDisplayAction } from "./toolDisplay";
+import { useT } from "../i18n";
 
 interface Props {
   message: ChatMessage;
@@ -23,16 +24,17 @@ export function MessageItem({
   onNextAction,
   onDisplayAction,
 }: Props) {
+  const t = useT();
   // 请求解释是动作，不是用户说的话：不渲染成用户气泡。
-  if (message.role === "user" && message.text.trim() === EXPLAIN_ANSWER) {
-    return <div className="msg msg--action">已请求解释</div>;
+  if (message.role === "user" && isExplainAnswer(message.text)) {
+    return <div className="msg msg--action">{t("chat.explainRequested")}</div>;
   }
 
   if (message.role === "user") {
     return (
       <div className="msg msg--user">
         <div className="msg__role">
-          <span>你</span>
+          <span>{t("chat.you")}</span>
         </div>
         <div className="msg__text msg__text--user">{message.text}</div>
       </div>
@@ -59,7 +61,9 @@ export function MessageItem({
       <div className="msg__role">
         <span className="msg__avatar" aria-hidden />
         <span>{PRODUCT_NAME}</span>
-        {message.streaming ? <span className="msg__streaming">输出中</span> : null}
+        {message.streaming ? (
+          <span className="msg__streaming">{t("chat.streaming")}</span>
+        ) : null}
       </div>
 
       <div className="msg__items">
@@ -171,6 +175,7 @@ function renderTimeline(
 
 /** 整条回答一个按钮：拼接所有正文文本块，不含思考与工具卡。 */
 function CopyAnswerButton({ text }: { text: string }) {
+  const t = useT();
   const [state, setState] = useState<CopyState>("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -193,7 +198,12 @@ function CopyAnswerButton({ text }: { text: string }) {
     resetLater();
   };
 
-  const label = state === "copied" ? "已复制" : state === "failed" ? "复制失败" : "复制回答";
+  const label =
+    state === "copied"
+      ? t("chat.copy.copied")
+      : state === "failed"
+        ? t("chat.copy.failed")
+        : t("chat.copy.action");
 
   return (
     <div className={`msg__actions ${state !== "idle" ? "is-active" : ""}`}>

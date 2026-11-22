@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { toBridgeError } from "../agent/errors";
 import type { MyServerLoginTicket } from "../agent/bridge";
 import { IconClose } from "./icons";
+import { t, useT } from "../i18n";
 
 interface Props {
   onStart: (email: string) => Promise<MyServerLoginTicket>;
@@ -39,31 +40,31 @@ function startError(error: unknown): LoginError {
   const problem = toBridgeError(error);
   const reason = typeof problem.details?.reason === "string" ? problem.details.reason : "";
   if (reason === "email_invalid") {
-    return { message: "邮箱格式不对。", hint: "检查一下地址，再点「发送验证码」。" };
+    return { message: t("login.error.emailInvalid"), hint: t("login.hint.emailInvalid") };
   }
   if (reason === "email_cooldown") {
     const wait = readNumber(problem.details?.retry_after_seconds) ?? 60;
     // 码已经发过且仍有效：不是失败，直接让用户输码。
     return {
-      message: "验证码已发送，请查收邮箱。",
-      hint: `没收到的话，${wait} 秒后可以重发。`,
+      message: t("login.notice.codeSent"),
+      hint: t("login.hint.cooldown", { seconds: wait }),
       cooldown: wait,
       toCode: true,
       tone: "notice",
     };
   }
   if (reason === "email_rate_limited") {
-    return { message: "发得太频繁了。", hint: "等一会儿再点「发送验证码」。" };
+    return { message: t("login.error.rateLimited"), hint: t("login.hint.rateLimited") };
   }
   if (problem.code === "UNSUPPORTED") {
-    return { message: problem.message, hint: "换一个版本再试。" };
+    return { message: problem.message, hint: t("login.hint.otherVersion") };
   }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
-    return { message: "没发出去。", hint: "检查网络后再点「发送验证码」。" };
+    return { message: t("login.error.sendFailed"), hint: t("login.hint.sendFailed") };
   }
   return {
-    message: problem.message && problem.message !== "操作失败" ? problem.message : "没发出去。",
-    hint: "稍后再点「发送验证码」。",
+    message: problem.hasMessage ? problem.message : t("login.error.sendFailed"),
+    hint: t("login.hint.sendFailedLater"),
   };
 }
 
@@ -73,28 +74,31 @@ function verifyError(error: unknown): LoginError {
   if (reason === "code_invalid") {
     const left = readNumber(problem.details?.attempts_remaining);
     return {
-      message: "验证码不对。",
-      hint: left === null ? "再输一次。" : `还可以试 ${Math.max(0, left)} 次。`,
+      message: t("login.error.codeInvalid"),
+      hint:
+        left === null
+          ? t("login.hint.tryAgain")
+          : t("login.hint.attemptsLeft", { count: Math.max(0, left) }),
     };
   }
   if (reason === "code_expired") {
     return {
-      message: "验证码已过期，重新发送。",
-      hint: "点下面的「重发验证码」。",
+      message: t("login.error.codeExpired"),
+      hint: t("login.hint.tapResend"),
       clearCode: true,
     };
   }
   if (reason === "too_many_attempts") {
     return {
-      message: "这个验证码已作废。",
-      hint: "重新发一次验证码。",
+      message: t("login.error.tooManyAttempts"),
+      hint: t("login.hint.sendNewCode"),
       backToEmail: true,
     };
   }
   if (reason === "account_conflict") {
     return {
-      message: "这台设备已经绑定了另一个邮箱。",
-      hint: "先在账号块里退出当前账户，再登录这个邮箱。",
+      message: t("login.error.accountConflict"),
+      hint: t("login.hint.accountConflict"),
       backToEmail: true,
     };
   }
@@ -104,38 +108,39 @@ function verifyError(error: unknown): LoginError {
     reason === "device_missing"
   ) {
     return {
-      message: "这台设备的身份对不上。",
-      hint: "需要重新注册设备；账户和服务器都还在。",
+      message: t("login.error.deviceMismatch"),
+      hint: t("login.hint.deviceMismatch"),
       reRegister: true,
     };
   }
   if (reason === "device_revoked") {
     return {
-      message: "这台设备已被停用。",
-      hint: "点下面的「重新注册设备」，或先在账号菜单里退出这台设备。",
+      message: t("login.error.deviceRevoked"),
+      hint: t("login.hint.deviceRevoked"),
       reRegister: true,
     };
   }
   if (reason === "account_blocked") {
     return {
-      message: "这个账户已停用。",
-      hint: "换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
+      message: t("login.error.accountBlocked"),
+      hint: t("login.hint.accountBlocked"),
     };
   }
   if (problem.code === "UNSUPPORTED") {
-    return { message: problem.message, hint: "换一个版本再试。" };
+    return { message: problem.message, hint: t("login.hint.otherVersion") };
   }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
-    return { message: "没连上服务器。", hint: "检查网络后再点「登录」。" };
+    return { message: t("login.error.network"), hint: t("login.hint.network") };
   }
   return {
-    message: problem.message && problem.message !== "操作失败" ? problem.message : "登录没成功。",
-    hint: "稍后再点「登录」。",
+    message: problem.hasMessage ? problem.message : t("login.error.failed"),
+    hint: t("login.hint.failed"),
   };
 }
 
 /** 唯一的登录模态：邮箱 → 验证码；登录成功由父组件关闭并刷新列表。 */
 export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Props) {
+  const tr = useT();
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
@@ -166,7 +171,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
     if (busyRef.current) return;
     const value = email.trim();
     if (!EMAIL_RE.test(value)) {
-      setError({ message: "邮箱格式不对。", hint: "检查一下地址，再点「发送验证码」。" });
+      setError({ message: tr("login.error.emailInvalid"), hint: tr("login.hint.emailInvalid") });
       return;
     }
     busyRef.current = true;
@@ -202,7 +207,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
     const value = email.trim();
     const input = code.trim();
     if (!/^\d{6}$/.test(input)) {
-      setError({ message: "验证码是 6 位数字。", hint: "看一下邮件里的 6 位码。" });
+      setError({ message: tr("login.error.codeLength"), hint: tr("login.hint.codeLength") });
       return;
     }
     busyRef.current = true;
@@ -232,16 +237,16 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
       const ok = await onReRegister();
       setError(
         ok
-          ? { message: "设备已重新注册，再点一次「登录」。", tone: "notice" }
+          ? { message: tr("login.notice.reRegistered"), tone: "notice" }
           : {
-              message: "没能重新注册设备。",
-              hint: "账户和服务器都还在，检查网络后再试。",
+              message: tr("login.error.reRegisterFailed"),
+              hint: tr("login.hint.reRegisterFailed"),
             },
       );
     } catch {
       setError({
-        message: "没能重新注册设备。",
-        hint: "账户和服务器都还在，检查网络后再试。",
+        message: tr("login.error.reRegisterFailed"),
+        hint: tr("login.hint.reRegisterFailed"),
       });
     } finally {
       setReRegistering(false);
@@ -259,12 +264,12 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
       >
         <header className="modal__head">
           <h2 id="myservers-login-title" className="modal__title">
-            登录我的服务器
+            {tr("login.title")}
           </h2>
           <button
             type="button"
             className="modal__close"
-            aria-label="关闭"
+            aria-label={tr("common.close")}
             disabled={busy}
             onClick={onCancel}
           >
@@ -275,7 +280,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
         {step === "email" ? (
           <form className="myservers__login-form myservers-login__body" onSubmit={sendCode}>
             <label className="myservers__field">
-              <span>邮箱</span>
+              <span>{tr("login.email")}</span>
               <input
                 type="email"
                 value={email}
@@ -293,7 +298,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                 {error.hint ? <p className="myservers__hint">{error.hint}</p> : null}
               </>
             ) : (
-              <p className="myservers__hint">发一个 6 位验证码到这个邮箱。</p>
+              <p className="myservers__hint">{tr("login.sendHint")}</p>
             )}
             <div className="myservers__login-actions">
               <button
@@ -303,10 +308,10 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                 aria-busy={busy || undefined}
               >
                 {busy
-                  ? "正在发送…"
+                  ? tr("login.sending")
                   : cooldown > 0
-                    ? `${cooldown} 秒后可重发`
-                    : "发送验证码"}
+                    ? tr("login.resendIn", { seconds: cooldown })
+                    : tr("login.sendCode")}
               </button>
             </div>
           </form>
@@ -318,10 +323,10 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                 {error.hint ? ` ${error.hint}` : ""}
               </p>
             ) : (
-              <p className="myservers__hint">验证码已发到 {email.trim()}。</p>
+              <p className="myservers__hint">{tr("login.sentTo", { email: email.trim() })}</p>
             )}
             <label className="myservers__field">
-              <span>验证码</span>
+              <span>{tr("login.code")}</span>
               <input
                 inputMode="numeric"
                 value={code}
@@ -348,7 +353,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                   aria-busy={reRegistering || undefined}
                   onClick={() => void reRegisterDevice()}
                 >
-                  {reRegistering ? "正在重新注册…" : "重新注册设备"}
+                  {reRegistering ? tr("login.reRegistering") : tr("login.reRegister")}
                 </button>
               </div>
             ) : null}
@@ -363,7 +368,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                   setError(null);
                 }}
               >
-                换一个邮箱
+                {tr("login.changeEmail")}
               </button>
               <button
                 type="button"
@@ -371,7 +376,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                 disabled={busy || cooldown > 0}
                 onClick={() => void requestCode()}
               >
-                {cooldown > 0 ? `${cooldown} 秒后可重发` : "重发验证码"}
+                {cooldown > 0 ? tr("login.resendIn", { seconds: cooldown }) : tr("login.resend")}
               </button>
               <button
                 type="submit"
@@ -379,7 +384,7 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
                 disabled={busy}
                 aria-busy={busy || undefined}
               >
-                {busy ? "正在登录…" : "登录"}
+                {busy ? tr("login.signingIn") : tr("login.submit")}
               </button>
             </div>
           </form>

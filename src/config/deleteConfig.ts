@@ -1,5 +1,6 @@
 import type { ConfigDeleteData } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { t as translate } from "../i18n";
 
 export interface DeleteOutcome {
   ok: boolean;
@@ -32,19 +33,25 @@ export async function deleteConfigWithDisconnect(input: {
   }
 
   const failure = (message: string) =>
-    disconnected ? `已断开连接，但删除失败：${message}` : message;
+    disconnected
+      ? translate("config.delete.disconnected", { message })
+      : message;
 
   try {
     const result = await input.remove();
     if (result.already_absent) return { ok: true };
     if (!result.deleted) {
-      return { ok: false, message: failure("删除配置失败，请重试。") };
+      return { ok: false, message: failure(translate("config.delete.failed")) };
     }
     return { ok: true };
   } catch (err) {
     return {
       ok: false,
-      message: failure(toBridgeError(err).message || "删除配置失败，请重试。"),
+      message: failure(
+        toBridgeError(err).hasMessage
+          ? toBridgeError(err).message
+          : translate("config.delete.failed"),
+      ),
     };
   }
 }

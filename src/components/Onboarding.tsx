@@ -8,6 +8,7 @@ import { isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import { providerUsable } from "../config/onboarding";
 import { describeKeyError, describeProviderError } from "./Settings";
 import { isComposingEvent } from "../ui/ime";
+import { useT } from "../i18n";
 import { PRODUCT_NAME } from "../brand";
 import logoUrl from "../assets/logo.png";
 
@@ -34,9 +35,10 @@ const EMPTY_CUSTOM: CustomForm = {
 };
 
 function VerifyingDots() {
+  const t = useT();
   return (
     <>
-      <span className="sr-only">校验中</span>
+      <span className="sr-only">{t("onboarding.verifying")}</span>
       <span className="first-run__dots" aria-hidden="true">
         <span />
         <span />
@@ -57,6 +59,7 @@ function prefersReducedMotion(): boolean {
 }
 
 export function Onboarding({ bridge, onDone }: Props) {
+  const t = useT();
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState<"key" | "provider" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +86,7 @@ export function Onboarding({ bridge, onDone }: Props) {
     const key = value.trim();
     if (!key || saving) return;
     if (!key.startsWith("sk-")) {
-      setError("Key 应以 sk- 开头，请检查是否复制完整。");
+      setError(t("onboarding.error.keyPrefix"));
       return;
     }
 
@@ -106,7 +109,7 @@ export function Onboarding({ bridge, onDone }: Props) {
     try {
       await bridge.openExternal(PLATFORM_URL);
     } catch {
-      const message = `当前版本还不能直接打开浏览器，请手动访问 ${PLATFORM_URL}`;
+      const message = t("onboarding.error.openBrowser", { url: PLATFORM_URL });
       if (customOpen) setCustomError(message);
       else setError(message);
     }
@@ -137,17 +140,17 @@ export function Onboarding({ bridge, onDone }: Props) {
 
   const buildProviderInput = (): LlmProviderInput | string => {
     const model = custom.model.trim();
-    if (!model) return "模型不能为空";
+    if (!model) return t("onboarding.error.modelRequired");
 
     const baseUrl = custom.baseUrl.trim();
-    if (!isHttpUrl(baseUrl)) return "Base URL 必须以 http:// 或 https:// 开头";
+    if (!isHttpUrl(baseUrl)) return t("onboarding.error.baseUrlScheme");
     if (baseUrl.toLowerCase().startsWith("http://") && !isLocalEndpoint(baseUrl)) {
-      return "http 只允许本机地址（localhost / 127.0.0.1）；其他端点请用 https";
+      return t("onboarding.error.httpLocalOnly");
     }
 
     const apiKey = custom.apiKey.trim();
     if (!apiKey && !isLocalEndpoint(baseUrl)) {
-      return "请填写 API Key；只有本机端点可以免 Key";
+      return t("onboarding.error.apiKeyRequired");
     }
 
     return {
@@ -172,7 +175,7 @@ export function Onboarding({ bridge, onDone }: Props) {
     try {
       const result = await bridge.llmProviderTest(input);
       if (!result.ok) {
-        setCustomError(result.error || "连接失败，请检查端点和 Key。");
+        setCustomError(result.error || t("onboarding.error.providerTest"));
         return;
       }
       const saved = await bridge.llmProviderSave(input);
@@ -196,7 +199,7 @@ export function Onboarding({ bridge, onDone }: Props) {
       }
 
       if (activeId !== saved.providerId || !savedUsable) {
-        setCustomError("已保存，但没能设为当前 AI。请重试。");
+        setCustomError(t("onboarding.error.notActivated"));
         return;
       }
       onDone();
@@ -236,19 +239,17 @@ export function Onboarding({ bridge, onDone }: Props) {
                 className="first-run__back"
                 onClick={() => switchMode(false)}
               >
-                ← 使用 DeepSeek Key
+                {t("onboarding.backToKey")}
               </button>
 
               <div className="first-run__custom-head">
-                <h2 className="first-run__custom-title">其他 AI 服务</h2>
-                <p className="first-run__custom-sub">
-                  OpenAI 或 Anthropic 兼容端点。
-                </p>
+                <h2 className="first-run__custom-title">{t("onboarding.customTitle")}</h2>
+                <p className="first-run__custom-sub">{t("onboarding.customSub")}</p>
               </div>
 
               <div className="first-run__field">
                 <span className="first-run__label" id="first-run-protocol-label">
-                  接口类型
+                  {t("onboarding.protocolLabel")}
                 </span>
                 <div
                   className="first-run__segmented"
@@ -263,7 +264,7 @@ export function Onboarding({ bridge, onDone }: Props) {
                       setCustom((form) => ({ ...form, protocol: "openai" }))
                     }
                   >
-                    OpenAI 兼容
+                    {t("onboarding.protocolOpenai")}
                   </button>
                   <button
                     type="button"
@@ -275,7 +276,7 @@ export function Onboarding({ bridge, onDone }: Props) {
                       setCustom((form) => ({ ...form, protocol: "anthropic" }))
                     }
                   >
-                    Anthropic 兼容
+                    {t("onboarding.protocolAnthropic")}
                   </button>
                 </div>
               </div>
@@ -300,26 +301,26 @@ export function Onboarding({ bridge, onDone }: Props) {
                     }))
                   }
                 />
-                <p className="first-run__hint">http 只允许本机地址。</p>
+                <p className="first-run__hint">{t("onboarding.baseUrlHint")}</p>
               </div>
 
               <div className="first-run__field">
                 <label className="first-run__label" htmlFor="first-run-model">
-                  模型
+                  {t("onboarding.modelLabel")}
                 </label>
                 <input
                   id="first-run-model"
                   className="first-run__input"
                   type="text"
                   value={custom.model}
-                  placeholder="如 gpt-4.1-mini"
+                  placeholder={t("onboarding.modelPlaceholder")}
                   autoComplete="off"
                   spellCheck={false}
                   onChange={(event) =>
                     setCustom((form) => ({ ...form, model: event.target.value }))
                   }
                 />
-                <p className="first-run__hint">填服务商文档里的模型 id。</p>
+                <p className="first-run__hint">{t("onboarding.modelHint")}</p>
               </div>
 
               <div className="first-run__field">
@@ -345,7 +346,7 @@ export function Onboarding({ bridge, onDone }: Props) {
                   }
                 />
                 <p className="first-run__hint">
-                  只保存在本机；本机端点可以不填。
+                  {t("onboarding.keyHint")}
                 </p>
               </div>
 
@@ -362,7 +363,11 @@ export function Onboarding({ bridge, onDone }: Props) {
                 }`}
                 disabled={saving !== null || !customReady}
               >
-                {saving === "provider" ? <VerifyingDots /> : "连接"}
+                {saving === "provider" ? (
+                  <VerifyingDots />
+                ) : (
+                  t("onboarding.connect")
+                )}
               </button>
             </form>
           ) : (
@@ -420,7 +425,7 @@ export function Onboarding({ bridge, onDone }: Props) {
                   }`}
                   disabled={saving !== null || value.trim().length === 0}
                 >
-                  {saving === "key" ? <VerifyingDots /> : "连接"}
+                  {saving === "key" ? <VerifyingDots /> : t("onboarding.connect")}
                 </button>
               </form>
 
@@ -430,14 +435,14 @@ export function Onboarding({ bridge, onDone }: Props) {
                   className="first-run__link"
                   onClick={() => void openPlatform()}
                 >
-                  获取 Key <span aria-hidden>↗</span>
+                  {t("onboarding.getKey")} <span aria-hidden>↗</span>
                 </button>
                 <button
                   type="button"
                   className="first-run__link"
                   onClick={() => switchMode(true)}
                 >
-                  使用其他 AI 服务
+                  {t("onboarding.useOtherAi")}
                 </button>
               </div>
             </>

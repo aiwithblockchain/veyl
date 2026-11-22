@@ -1,3 +1,5 @@
+import { getLanguage, t } from "./i18n";
+
 /** 时长显示：面板与控制台共用，避免两处格式不一致。 */
 export function formatDuration(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds)) return "—";
@@ -19,11 +21,14 @@ export function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const at = Date.parse(iso);
   if (!Number.isFinite(at)) return "—";
-  return new Date(at).toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  });
+  return new Date(at).toLocaleDateString(
+    getLanguage() === "en" ? "en-US" : "zh-CN",
+    {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    },
+  );
 }
 
 /** 安装包大小：未知或非正数返回 null，由调用方决定「大小未知」等文案。 */
@@ -40,6 +45,6 @@ export function formatByteSize(bytes: number | null): string | null {
  * 否则按当前是否连接，选择「断开并重新连接」或「下次连接」。
  */
 export function upgradeEffectText(restartRequired: boolean, connected: boolean): string {
-  if (restartRequired) return "重启 Veyl 后生效";
-  return connected ? "断开并重新连接后生效" : "下次连接时生效";
+  if (restartRequired) return t("format.effect.restart");
+  return connected ? t("format.effect.reconnect") : t("format.effect.nextConnect");
 }

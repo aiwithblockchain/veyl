@@ -182,3 +182,65 @@ describe("AskQuestionDialog：接管方式确认卡", () => {
     await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("切换"));
   });
 });
+
+function rotateQuestion(overrides: Partial<PendingQuestion> = {}): PendingQuestion {
+  return {
+    ...confirmQuestion(),
+    kind: "node_rotate_confirm",
+    upgradeConfirm: null,
+    question: "重置这台服务器的节点端口与密码？",
+    options: ["重置", "取消"],
+    defaultIndex: 1,
+    ...overrides,
+  };
+}
+
+describe("AskQuestionDialog：节点端口重置确认卡", () => {
+  it("走阻塞对话框，写标题与影响，按钮是重置 / 取消", async () => {
+    renderQuestion(rotateQuestion());
+
+    expect(await screen.findByText("重置节点端口与密码")).toBeTruthy();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("重置会重启节点");
+    expect(screen.getByRole("button", { name: "重置" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
+  });
+
+  it("default_index=1：默认焦点在取消", async () => {
+    renderQuestion(rotateQuestion());
+    const cancel = await screen.findByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+  });
+
+  it("没给 default_index 也默认落在取消", async () => {
+    renderQuestion(rotateQuestion({ defaultIndex: null }));
+    const cancel = await screen.findByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+  });
+
+  it("default_index=0 时焦点落在重置", async () => {
+    renderQuestion(rotateQuestion({ defaultIndex: 0 }));
+    const reset = await screen.findByRole("button", { name: "重置" });
+    await waitFor(() => expect(document.activeElement).toBe(reset));
+  });
+
+  it("Esc 按取消选项原文回传", async () => {
+    const { onAnswer } = renderQuestion(
+      rotateQuestion({ options: ["确认重置", "暂不重置"] }),
+    );
+    await screen.findByText("重置节点端口与密码");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("暂不重置"));
+  });
+
+  it("点重置回传重置选项原文", async () => {
+    const { onAnswer } = renderQuestion(
+      rotateQuestion({ options: ["确认重置", "暂不重置"] }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "重置" }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("确认重置"));
+  });
+});

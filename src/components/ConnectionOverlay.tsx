@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ConfigConnectMode, RuntimeView } from "../agent/protocol";
 import type { VpnConnectionState } from "../config/useVpnSession";
 import { useFocusTrap } from "../ui/focus";
+import { t as translate, useT } from "../i18n";
 
 /** 超过这个时长仍在进行，就换成等待更久的说明；只改文案，不释放遮罩。 */
 export const SLOW_AFTER_MS = 10_000;
@@ -49,8 +50,8 @@ export function connectionStage({
     return {
       kind: "prepare",
       mode: "connect",
-      title: "正在准备连接",
-      caption: "正在检查后台组件。",
+      title: translate("connection.preparing.title"),
+      caption: translate("connection.preparing.checking"),
     };
   }
 
@@ -59,8 +60,8 @@ export function connectionStage({
     return {
       kind: "prepare_helper",
       mode: "connect",
-      title: "正在准备后台组件",
-      caption: "系统会请求一次授权。",
+      title: translate("connection.helper.title"),
+      caption: translate("connection.helper.caption"),
     };
   }
 
@@ -70,23 +71,23 @@ export function connectionStage({
       return {
         kind: "verify",
         mode: "connect",
-        title: "正在确认出口",
-        caption: "正在确认流量已经走节点。",
+        title: translate("connection.verify.title"),
+        caption: translate("connection.verify.caption"),
       };
     }
     if (health.process) {
       return {
         kind: "connect",
         mode: "connect",
-        title: "正在建立连接",
-        caption: "正在连接节点。",
+        title: translate("connection.connect.title"),
+        caption: translate("connection.connect.caption"),
       };
     }
     return {
       kind: "prepare",
       mode: "connect",
-      title: "正在准备连接",
-      caption: "正在启动后台组件。",
+      title: translate("connection.preparing.title"),
+      caption: translate("connection.preparing.starting"),
     };
   }
 
@@ -97,15 +98,18 @@ export function connectionStage({
       return {
         kind: "finish",
         mode: "disconnect",
-        title: "正在收尾",
-        caption: "正在停止后台组件并做收尾。",
+        title: translate("connection.finish.title"),
+        caption: translate("connection.finish.caption"),
       };
     }
     return {
       kind: "disconnect",
       mode: "disconnect",
-      title: "正在断开连接",
-      caption: connectMode === "tun" ? "使用「全部流量」时通常会久一些。" : null,
+      title: translate("connection.disconnect.title"),
+      caption:
+        connectMode === "tun"
+          ? translate("connection.disconnect.captionTun")
+          : null,
     };
   }
 
@@ -125,6 +129,7 @@ export function ConnectionOverlay({
   runtime: RuntimeView;
   connectMode: ConfigConnectMode | null;
 }) {
+  const t = useT();
   const stage = connectionStage({
     connection,
     preparingHelper,
@@ -177,8 +182,8 @@ export function ConnectionOverlay({
         {slow ? (
           <p className="connection-overlay__slow" role="status" aria-live="polite">
             {stage.mode === "connect"
-              ? "第一次连接需要准备一会儿，可能要半分钟。还在连，请稍候。"
-              : "还在断开，请稍候。"}
+              ? t("connection.slow.connect")
+              : t("connection.slow.disconnect")}
           </p>
         ) : null}
       </div>

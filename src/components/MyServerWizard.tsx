@@ -9,12 +9,14 @@ import { readInsufficientBalanceDetails } from "../agent/bridge";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { toBridgeError } from "../agent/errors";
 import {
-  CONTINENT_LABELS,
+  continentLabel,
   formatDailyPrice,
   formatMonthlyFromDaily,
   formatUsdCents,
 } from "../myservers/labels";
 import { IconChevronLeft } from "./icons";
+import { t, useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 
 interface Props {
   bridge: AgentBridge;
@@ -26,8 +28,6 @@ interface Props {
   onTopUp: () => void;
   /** 次级入口：让 AI 帮我选。 */
   onAskAi?: () => void;
-  /** 创建失败后带服务器 id 让 AI 定位。 */
-  onAiLocate?: (serverId: string) => void;
   /** Host 回 auth_required 时拉起登录框（不能只看本地 account）。 */
   onAuthRequired?: () => void;
   /** 地区和档位选择变化：用于上报 last_action。 */
@@ -64,7 +64,11 @@ const CONTINENT_ORDER: MyServerRegion["continent"][] = [
   "africa",
 ];
 
-const TIERS = ["入门", "标准", "进阶"];
+const TIERS: MessageKey[] = [
+  "wizard.tier.entry",
+  "wizard.tier.standard",
+  "wizard.tier.advanced",
+];
 
 const PREFERRED_PLAN = "s-1vcpu-1gb";
 
@@ -99,10 +103,8 @@ async function resolveOrderedServer(
 
 function errorText(error: unknown): { message: string; retryable: boolean } {
   const problem = toBridgeError(error);
-  const message =
-    problem.message && problem.message !== "操作失败"
-      ? problem.message
-      : "服务器没建起来。这笔订单已结束，没有产生服务器。";
+  // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
+  const message = problem.hasMessage ? problem.message : t("wizard.failed");
   return { message, retryable: problem.retryable };
 }
 
@@ -176,7 +178,6 @@ export function MyServerWizard({
   onEnsureIdentity,
   onTopUp,
   onAskAi,
-  onAiLocate,
   onSelect,
   onSelectionApplied,
   onBusyChange,
@@ -185,6 +186,7 @@ export function MyServerWizard({
   aiSelection = null,
   onAuthRequired,
 }: Props) {
+  const tr = useT();
   const [fetched, setFetched] = useState<MyServerCatalog | null>(null);
   const [fetchState, setFetchState] = useState<"loading" | "ready" | "failed">(
     catalog ? "ready" : "loading",
@@ -200,8 +202,6 @@ export function MyServerWizard({
   const [submitting, setSubmitting] = useState(false);
   const busy = phase !== null || submitting;
   const [error, setError] = useState<WizardError | null>(null);
-  /** 订单已经建出来但后续失败时记下服务器 id，AI 定位要用。 */
-  const [failedServerId, setFailedServerId] = useState<string | null>(null);
   // 同一组选择重试复用键：超时/网络失败时结果未知，换键会建第二台。
   // 键和地区+套餐绑定，换了选择必须换键，否则控制面按「同键不同请求」拒绝。
   const idempotencyKey = useRef({ key: "", region: "", plan: "" });
@@ -254,7 +254,7 @@ export function MyServerWizard({
 
   const groups = CONTINENT_ORDER.map((continent) => ({
     continent,
-    label: CONTINENT_LABELS[continent],
+    label: continentLabel(continent),
     regions: usableRegions.filter((region) => region.continent === continent),
   })).filter((group) => group.regions.length > 0);
 
@@ -335,9 +335,12 @@ export function MyServerWizard({
 
   const placeOrder = async () => {
     if (!currentPlan || !currentRegion || busy || combinationUnavailable) return;
+    /** 服务器行建出来之后才会写值：失败发生在结账阶段时据此跳失败详情。 */
+    let createdServerId: string | null = null;
+    /** create 只回订单；真实流程里服务器 id 要到结账（confirmOrder）才写回。 */
+    let createdOrderId: string | null = null;
     setSubmitting(true);
     setError(null);
-    setFailedServerId(null);
     // 创建前先看余额：建机门槛是日价 × 7（实际只扣 1 天），不够就不下单。
     let balanceCents: number | null = null;
     try {
@@ -346,7 +349,9 @@ export function MyServerWizard({
       const shortfall = currentPlan.daily_price_cents * 7 - wallet.balance_cents;
       if (shortfall > 0) {
         setError({
-          message: `余额不足，还差 ${formatUsdCents(shortfall)}。`,
+          message: tr("wizard.balanceShort", {
+            amount: formatUsdCents(shortfall),
+          }),
           retryable: true,
           shortfallCents: shortfall,
         });
@@ -361,7 +366,7 @@ export function MyServerWizard({
       const ready = await onEnsureIdentity();
       if (!ready) {
         setError({
-          message: "先登录，才能买服务器。",
+          message: tr("wizard.loginFirst"),
           retryable: true,
         });
         onAuthRequired?.();
@@ -381,14 +386,24 @@ export function MyServerWizard({
         plan: chosen.plan,
         idempotencyKey: idempotencyKey.current.key,
       });
-      setFailedServerId(created.server_id);
+      createdOrderId = created.order_id;
+      createdServerId = created.server_id;
       const order = await bridge.myServerCheckout(created.order_id);
-      setFailedServerId(null);
       // 结账只回订单：server_id 通常已写回订单，paid 路径下再按订单详情/列表解析。
       onOrdered(
         order.server_id ?? (await resolveOrderedServer(bridge, created.order_id)),
       );
     } catch (err) {
+      // 服务器行已经建出来了（失败发生在结账/安装之后）：直接去那台的失败详情，
+      // 重试入口在详情页，别把用户留在表单里。create 只回订单，服务器 id 要按订单反查；
+      // 反查不到（例如余额不足，结账没走到 confirmOrder）才就地报错。
+      if (createdServerId === null && createdOrderId !== null) {
+        createdServerId = await resolveOrderedServer(bridge, createdOrderId);
+      }
+      if (createdServerId !== null) {
+        onOrdered(createdServerId);
+        return;
+      }
       const problem = toBridgeError(err);
       const reason =
         typeof problem.details?.reason === "string" ? problem.details.reason : "";
@@ -406,14 +421,14 @@ export function MyServerWizard({
         reason === "device_missing" ||
         reason === "device_mismatch"
       ) {
-        setError({ message: "登录已过期。重新登录后再试。", retryable: true });
+        setError({ message: tr("wizard.loginExpired"), retryable: true });
         onAuthRequired?.();
       } else if (reason === "insufficient_balance") {
         setError({
           message:
             shortfall > 0
-              ? `余额不足，还差 ${formatUsdCents(shortfall)}。`
-              : "余额不足。",
+              ? tr("wizard.balanceShort", { amount: formatUsdCents(shortfall) })
+              : tr("wizard.balanceShortBare"),
           retryable: true,
           shortfallCents: shortfall,
         });
@@ -440,23 +455,23 @@ export function MyServerWizard({
               disabled={busy}
             >
               <IconChevronLeft size={14} />
-              返回
+              {tr("wizard.back")}
             </button>
           ) : null}
-          <h4 className="myservers__wizard-title">新建节点</h4>
+          <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
         </div>
         {pending ? (
           <p className="myservers__hint" role="status">
-            正在读取可选的地区…
+            {tr("wizard.loadingRegions")}
           </p>
         ) : (
           <>
             <p className="myservers__hint" role="alert">
-              暂时读不到可用地区和档位。关掉这个向导再打开，重试一次。
+              {tr("wizard.regionsUnreadable")}
             </p>
             <div className="myservers__actions">
               <button type="button" className="btn btn--primary" disabled>
-                创建
+                {tr("wizard.create")}
               </button>
             </div>
           </>
@@ -476,29 +491,29 @@ export function MyServerWizard({
             disabled={busy}
           >
             <IconChevronLeft size={14} />
-            返回
+            {tr("wizard.back")}
           </button>
         ) : null}
-        <h4 className="myservers__wizard-title">新建节点</h4>
+        <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
       </div>
 
       {noUsableRegion ? (
         <p className="myservers__hint wizard-no-region" role="status">
-          暂时没有可用的地区
+          {tr("wizard.noRegion")}
         </p>
       ) : null}
 
       {!noUsableRegion ? (
         <>
       <section className="wizard-block">
-        <p className="wizard-block__title">地区</p>
+        <p className="wizard-block__title">{tr("wizard.region")}</p>
         <p className="wizard-block__note wizard-block__note--fact">
-          只显示当前可开通的地区，DigitalOcean 的可用性会随时变化。
+          {tr("wizard.regionNote")}
         </p>
         <div
           className="myservers__regions"
           role="radiogroup"
-          aria-label="地区"
+          aria-label={tr("wizard.region")}
           onKeyDown={moveWithinGroup}
         >
           {groups.map((group) => (
@@ -537,16 +552,16 @@ export function MyServerWizard({
           ))}
         </div>
         <p className="wizard-block__note wizard-block__note--connect">
-          能不能连上，取决于你当前的网络到那个地区的线路。建好后到「连接」里点「测速」确认；连不上可以销毁重建，已扣的当天费用不退。
+          {tr("wizard.regionConnectNote")}
         </p>
       </section>
 
       <section className="wizard-block">
-        <p className="wizard-block__title">服务器类型</p>
+        <p className="wizard-block__title">{tr("wizard.plan")}</p>
         <div
           className="wizard-plan-cards"
           role="radiogroup"
-          aria-label="服务器类型"
+          aria-label={tr("wizard.plan")}
           onKeyDown={moveWithinGroup}
         >
           {plans.map((plan, index) => {
@@ -566,10 +581,10 @@ export function MyServerWizard({
                 disabled={busy || unsupported}
                 aria-label={
                   unsupported
-                    ? `${plan.label}：该地区不提供这个档位`
+                    ? tr("wizard.planUnsupportedAria", { plan: plan.label })
                     : undefined
                 }
-                title={unsupported ? "该地区不提供这个档位" : undefined}
+                title={unsupported ? tr("wizard.planUnsupported") : undefined}
                 onClick={() => {
                   setPlanId(plan.id);
                   onSelect?.("plan", plan.id);
@@ -582,23 +597,25 @@ export function MyServerWizard({
                   }
                 }}
               >
-                {tier ? <span className="wizard-plan__tier">{tier}</span> : null}
+                {tier ? <span className="wizard-plan__tier">{tr(tier)}</span> : null}
                 <span className="wizard-plan__spec">{plan.label}</span>
                 <span className="wizard-plan__sub">
                   <span className="wizard-plan__price">
-                    每天{" "}
+                    {tr("wizard.perDay")}{" "}
                     <span className="num">
                       {formatDailyPrice(plan.daily_price_cents)}
                     </span>
                   </span>
                   {plan.transfer_gib > 0 ? (
                     <span className="wizard-plan__transfer">
-                      每月 {plan.transfer_gib} GB 出站
+                      {tr("wizard.traffic", { gib: plan.transfer_gib })}
                     </span>
                   ) : null}
                 </span>
                 {unsupported ? (
-                  <span className="wizard-plan__unavailable">不可用</span>
+                  <span className="wizard-plan__unavailable">
+                    {tr("wizard.unavailable")}
+                  </span>
                 ) : null}
               </button>
             );
@@ -609,7 +626,7 @@ export function MyServerWizard({
       ) : null}
 
       <section className="wizard-block">
-        <p className="wizard-block__title">系统</p>
+        <p className="wizard-block__title">{tr("wizard.system")}</p>
         <p className="wizard-system">Ubuntu 24.04 LTS</p>
       </section>
 
@@ -620,26 +637,15 @@ export function MyServerWizard({
           </p>
           <p className="myservers__hint">
             {error.shortfallCents !== undefined
-              ? "充值后回到这里，再点「创建」。"
+              ? tr("wizard.shortfallHint")
               : error.retryable
-                ? "可以点「创建」再试一次。"
-                : "换一个地区或档位，再点「创建」。"}
+                ? tr("wizard.retryHint")
+                : tr("wizard.changeHint")}
           </p>
           {error.shortfallCents !== undefined ? (
             <div className="myservers__actions">
               <button type="button" className="btn btn--ghost" onClick={onTopUp}>
-                去充值
-              </button>
-            </div>
-          ) : null}
-          {failedServerId && onAiLocate ? (
-            <div className="myservers__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => onAiLocate(failedServerId)}
-              >
-                AI 定位
+                {tr("wizard.topUp")}
               </button>
             </div>
           ) : null}
@@ -648,7 +654,7 @@ export function MyServerWizard({
 
       {combinationUnavailable && !noUsableRegion ? (
         <p className="myservers__hint wizard-foot__blocked">
-          这个地区不提供该档位，换一个档位或地区。
+          {tr("wizard.combination")}
         </p>
       ) : null}
 
@@ -656,10 +662,12 @@ export function MyServerWizard({
         <div className="wizard-foot__meta">
           <p className="wizard-foot__price">
             {currentPlan
-              ? `${currentTier ? `${currentTier} · ` : ""}约 ${formatMonthlyFromDaily(currentPlan.daily_price_cents)}/月`
+              ? `${currentTier ? `${tr(currentTier)} · ` : ""}${tr("wizard.monthly", {
+                  price: formatMonthlyFromDaily(currentPlan.daily_price_cents),
+                })}`
               : null}
           </p>
-          <p className="myservers__demo">开通后开始计费，每天续扣；余额不足会提示充值。</p>
+          <p className="myservers__demo">{tr("wizard.demo")}</p>
         </div>
         <button
           type="button"
@@ -675,16 +683,16 @@ export function MyServerWizard({
           onClick={() => void placeOrder()}
         >
           {phase === "identity"
-            ? "正在登录…"
+            ? tr("wizard.signingIn")
             : phase === "creating"
-              ? "正在创建…"
-              : "创建"}
+              ? tr("wizard.creating")
+              : tr("wizard.create")}
         </button>
       </div>
 
       {onAskAi ? (
         <button type="button" className="settings-link wizard-ask-ai" onClick={onAskAi}>
-          让 AI 帮我选
+          {tr("controls.askAi")}
         </button>
       ) : null}
     </div>

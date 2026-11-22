@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ConfigConnectMode, ConfigRouteMode } from "../agent/protocol";
 import { modeScopePrompt } from "../ai/advancedPrompts";
+import { t as translate, useT } from "../i18n";
 
 export interface ModeSwitchResult {
   ok: boolean;
@@ -37,11 +38,11 @@ type Layer = "mode" | "scope";
 const ANNOUNCE_MS = 1500;
 
 function modeLabel(mode: ConfigConnectMode): string {
-  return mode === "tun" ? "Tun 模式" : "Proxy 模式";
+  return translate(mode === "tun" ? "stage.mode.tun" : "stage.mode.proxy");
 }
 
 function scopeLabel(mode: ConfigRouteMode | null): string {
-  return mode === "proxy_all" ? "全局" : "智能";
+  return translate(mode === "proxy_all" ? "stage.scope.global" : "stage.scope.smart");
 }
 
 /** 10×10 的展开箭头；展开时瞬时换成 ⌃，不做旋转动画。 */
@@ -77,6 +78,7 @@ export function StageQuickToggles({
   reportBusy = false,
   onAskAi,
 }: Props) {
+  const t = useT();
   const [openLayer, setOpenLayer] = useState<Layer | null>(null);
   const [pending, setPending] = useState<ConfigConnectMode | null>(null);
   const [switching, setSwitching] = useState<ConfigConnectMode | null>(null);
@@ -126,22 +128,28 @@ export function StageQuickToggles({
     setRestoring(false);
     setSwitching(null);
     if (result.ok) {
-      announce(`已切到 ${modeLabel(target)}`);
+      announce(t("stage.switched", { target: modeLabel(target) }));
       return;
     }
     const backLabel = modeLabel(connectMode);
     let text: string;
     if (result.restored === false) {
-      text = `没能切换到 ${modeLabel(target)}，连接已断开。`;
+      text = t("stage.modeFail.disconnected", { target: modeLabel(target) });
     } else if (result.restored === true) {
-      text = `没能切换到 ${modeLabel(target)}，已回到 ${backLabel}。`;
+      text = t("stage.modeFail.restored", {
+        target: modeLabel(target),
+        back: backLabel,
+      });
     } else if (result.actualMode === target) {
-      text = `没能切换到 ${modeLabel(target)}，连接已断开。`;
+      text = t("stage.modeFail.disconnected", { target: modeLabel(target) });
     } else if (result.actualMode === connectMode) {
-      text = `没能切换到 ${modeLabel(target)}，已回到 ${backLabel}。`;
+      text = t("stage.modeFail.restored", {
+        target: modeLabel(target),
+        back: backLabel,
+      });
     } else {
       // 回滚结果与库值都读不到：不猜「已回到」，也不断言断线。
-      text = `没能切换到 ${modeLabel(target)}，连接状态未知。`;
+      text = t("stage.modeFail.unknown", { target: modeLabel(target) });
     }
     setNotice({ kind: "error", text });
   };
@@ -170,11 +178,11 @@ export function StageQuickToggles({
     const result = await onSetRoutingMode(next);
     setScopeBusy(false);
     if (result.ok) {
-      announce(`已切到${scopeLabel(next)}`);
+      announce(t("stage.scopeSwitched", { target: scopeLabel(next) }));
     } else {
       setNotice({
         kind: "error",
-        text: result.message ?? "没切成功，还是原来的范围。",
+        text: result.message ?? t("stage.scopeFail"),
       });
     }
   };
@@ -263,23 +271,23 @@ export function StageQuickToggles({
   };
 
   const busyText = restoring
-    ? "正在恢复…"
+    ? t("stage.busy.restoring")
     : helperPreparing
-      ? "正在请求系统授权…"
+      ? t("stage.busy.authorizing")
       : switching !== null
-        ? `正在切换到 ${modeLabel(switching)}…`
+        ? t("stage.busy.switching", { mode: modeLabel(switching) })
         : null;
   // 旧数据的 proxy_selected 没有智能/全局二选一（同 TrafficScopeSwitch）：不显示范围入口。
   const scopeSwitchable = routingMode === "direct" || routingMode === "proxy_all";
   const confirming = pending !== null;
 
   const modeOptions: Array<{ value: ConfigConnectMode; label: string }> = [
-    { value: "system_proxy", label: "Proxy 模式" },
-    { value: "tun", label: "Tun 模式" },
+    { value: "system_proxy", label: modeLabel("system_proxy") },
+    { value: "tun", label: modeLabel("tun") },
   ];
   const scopeOptions: Array<{ value: "direct" | "proxy_all"; label: string }> = [
-    { value: "direct", label: "智能" },
-    { value: "proxy_all", label: "全局" },
+    { value: "direct", label: scopeLabel("direct") },
+    { value: "proxy_all", label: scopeLabel("proxy_all") },
   ];
   const currentScope: "direct" | "proxy_all" =
     routingMode === "proxy_all" ? "proxy_all" : "direct";
@@ -303,7 +311,7 @@ export function StageQuickToggles({
             className={`stage-quick__chip${openLayer === "mode" ? " is-open" : ""}`}
             aria-haspopup="listbox"
             aria-expanded={openLayer === "mode"}
-            aria-label={`接管方式，当前 ${modeLabel(connectMode)}`}
+            aria-label={t("stage.modeChipAria", { mode: modeLabel(connectMode) })}
             disabled={modeLocked || confirming}
             onClick={() => toggleLayer("mode")}
           >
@@ -317,7 +325,7 @@ export function StageQuickToggles({
               className={`stage-quick__chip${openLayer === "scope" ? " is-open" : ""}`}
               aria-haspopup="listbox"
               aria-expanded={openLayer === "scope"}
-              aria-label={`流量范围，当前 ${scopeLabel(routingMode)}`}
+              aria-label={t("stage.scopeChipAria", { scope: scopeLabel(routingMode) })}
               disabled={scopeBusy || confirming}
               onClick={() => toggleLayer("scope")}
             >
@@ -331,7 +339,7 @@ export function StageQuickToggles({
               className="stage-quick__ask"
               onClick={() => onAskAi(modeScopePrompt(connectMode, routingMode))}
             >
-              问 AI
+              {t("stage.askAi")}
             </button>
           ) : null}
         </div>
@@ -341,7 +349,7 @@ export function StageQuickToggles({
         <div
           className="stage-quick__menu"
           role="listbox"
-          aria-label="接管方式"
+          aria-label={t("stage.modeAria")}
           ref={menuRef}
           onKeyDown={onMenuKeyDown}
         >
@@ -370,7 +378,7 @@ export function StageQuickToggles({
         <div
           className="stage-quick__menu"
           role="listbox"
-          aria-label="流量范围"
+          aria-label={t("stage.scopeAria")}
           ref={menuRef}
           onKeyDown={onMenuKeyDown}
         >
@@ -400,9 +408,9 @@ export function StageQuickToggles({
           <p className="stage-quick-confirm__text">
             {pending === "tun"
               ? connected
-                ? "切到 Tun 模式？接管全部软件，会短暂断开当前连接。"
-                : "切到 Tun 模式？接管全部软件；首次使用需要系统授权。"
-              : "切回 Proxy 模式？会短暂断开当前连接。"}
+                ? t("stage.confirm.tunConnected")
+                : t("stage.confirm.tunDisconnected")
+              : t("stage.confirm.proxy")}
           </p>
           <div className="stage-quick-confirm__actions">
             <button
@@ -411,14 +419,14 @@ export function StageQuickToggles({
               className="stage-quick-confirm__cancel"
               onClick={() => setPending(null)}
             >
-              取消
+              {t("common.cancel")}
             </button>
             <button
               type="button"
               className="stage-quick-confirm__go"
               onClick={() => void commitMode(pending)}
             >
-              继续
+              {t("stage.continue")}
             </button>
           </div>
         </div>
@@ -439,7 +447,7 @@ export function StageQuickToggles({
               onClick={onReportProblem}
               disabled={reportBusy}
             >
-              报告问题
+              {t("stage.reportProblem")}
             </button>
           ) : null}
         </p>

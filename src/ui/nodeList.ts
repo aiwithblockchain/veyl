@@ -1,7 +1,8 @@
 import type { NodeSummary } from "../agent/protocol";
+import { t } from "../i18n";
 
 export function formatLatency(ms: number | null): string {
-  return ms === null ? "—" : `${Math.round(ms)} 毫秒`;
+  return ms === null ? "—" : t("node.latencyMs", { value: Math.round(ms) });
 }
 
 /**

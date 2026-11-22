@@ -580,6 +580,15 @@ describe("原生表单与输入法", () => {
     expect(fireEvent.keyDown(name, { key: "Enter", keyCode: 229 })).toBe(false);
     expect(fireEvent.keyDown(name, { key: "Enter" })).toBe(true);
   });
+
+  it("服务表单里没有行内「问 AI」，只剩顶部「咨询 AI」", async () => {
+    renderSettings(makeBridge(), { section: "ai" });
+    fireEvent.click(await screen.findByRole("button", { name: "添加 AI 服务" }));
+    await screen.findByLabelText("名称");
+
+    expect(screen.queryAllByRole("button", { name: "问 AI" })).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "咨询 AI" })).toBeTruthy();
+  });
 });
 
 describe("咨询 AI 的焦点", () => {
@@ -605,8 +614,8 @@ describe("咨询 AI 的焦点", () => {
   });
 });
 
-describe("咨询 AI 的设置总览", () => {
-  it("从关闭态打开：回调收到含当前设置的提示词", async () => {
+describe("咨询 AI 的提示词", () => {
+  it("从关闭态打开：回调收到带当前分区的咨询提示词", async () => {
     const onConsultAi = vi.fn();
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
@@ -621,11 +630,27 @@ describe("咨询 AI 的设置总览", () => {
 
     expect(onConsultAi).toHaveBeenCalledTimes(1);
     const prompt = onConsultAi.mock.calls[0][0] as string;
-    expect(prompt).toContain("接管方式：Proxy 模式（默认）");
-    expect(prompt).toContain("流量范围：全局");
-    expect(prompt).toContain("本地代理端口：127.0.0.1:7891");
-    expect(prompt).toContain("当前连接：已连接");
-    expect(prompt).toContain("当前服务：DeepSeek");
+    expect(prompt).toContain("我在 Veyl 的设置页（当前在「连接」）");
+    expect(prompt).toContain("想咨询哪个模块");
+    // 不再塞整份设置快照。
+    expect(prompt).not.toContain("接管方式");
+    expect(prompt).not.toContain("本地代理端口");
+    expect(prompt).not.toContain("当前服务");
+  });
+
+  it("分区名跟着页签走：AI / 账户 / 高级", async () => {
+    const cases = [
+      ["ai", "AI"],
+      ["account", "账户"],
+      ["advanced", "高级"],
+    ] as const;
+    for (const [section, label] of cases) {
+      const onConsultAi = vi.fn();
+      const view = renderSettings(makeBridge(), { section, onConsultAi });
+      fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+      expect(onConsultAi.mock.calls[0][0]).toContain(`当前在「${label}」`);
+      view.unmount();
+    }
   });
 
   it("开启态再点只关闭，不再发消息", async () => {

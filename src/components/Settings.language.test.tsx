@@ -10,9 +10,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, AppLanguageState } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
+import { getLanguage, setLanguage } from "../i18n";
 import { Settings } from "./Settings";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 function makeBridge({
   get = vi.fn(async (): Promise<AppLanguageState> => ({
@@ -234,6 +238,34 @@ describe("设置 › 高级 › 语言", () => {
     expect(segButton("English").getAttribute("aria-pressed")).toBe("true");
     expect(segButton("中文").getAttribute("aria-pressed")).toBe("false");
     expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("写入成功后全局语言 store 跟着变", async () => {
+    const { bridge, set } = makeBridge({
+      set: vi.fn(async () => ({
+        selected: "en" as const,
+        resolved: "en" as const,
+      })),
+    });
+    renderSettings(bridge);
+    await waitFor(() =>
+      expect(segButton("跟随系统").getAttribute("aria-pressed")).toBe("true"),
+    );
+
+    fireEvent.click(segButton("English"));
+
+    await waitFor(() => expect(getLanguage()).toBe("en"));
+    expect(set).toHaveBeenCalledWith("en");
+  });
+
+  it("英文界面下语言行取 en 字典", async () => {
+    setLanguage("en");
+    renderSettings(makeBridge().bridge);
+    expect(await screen.findByText("Language")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Follow system" })).toBeTruthy();
+    expect(
+      screen.getByText("Conversations already started keep their current language."),
+    ).toBeTruthy();
   });
 
   it("点当前档位不重复发命令", async () => {

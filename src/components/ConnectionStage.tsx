@@ -11,9 +11,11 @@ import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
-import { NODE_TOMBSTONE_WORD, trialGroupHint, trialPhase } from "../myservers/labels";
+import { nodeTombstoneWord, trialGroupHint, trialPhase } from "../myservers/labels";
 import type { PendingServerNode } from "../myservers/pendingServerNodes";
+import { nodeUnreachableAsk } from "../ui/assistantPrompts";
 import type { ActionCard } from "../ui/actionCard";
+import { useT } from "../i18n";
 import { StageQuickToggles, type ModeSwitchResult } from "./StageQuickToggles";
 
 interface Props {
@@ -67,7 +69,7 @@ interface Props {
   onSetRoutingMode?: (
     mode: "direct" | "proxy_all",
   ) => Promise<{ ok: boolean; message?: string }>;
-  /** 接管方式与流量范围的「问 AI」：交给 App 展开右栏并发送固定问题。 */
+  /** 接管方式、流量范围与「测不通问AI」：交给 App 展开右栏并发送固定问题。 */
   onAskAi?: (prompt: string) => void;
   /** 服务器已就绪、节点还在等断开后 attach：灰显列出，告诉用户重新连接后可用。 */
   pendingServerNodes?: PendingServerNode[];
@@ -75,15 +77,6 @@ interface Props {
 
 /** 待接入节点类型对外导出：调用方与测试都从这里取。 */
 export type { PendingServerNode };
-
-const NO_TRAFFIC_ACTION =
-  "网页打不开时，点上面的「重新连接」；还是不行，就换一个节点再试。";
-/** 隧道还在跑、当前目标不能连，但池里还有别的节点可换。 */
-const NO_TRAFFIC_ACTION_OTHER_NODE =
-  "先点「断开」停掉隧道，再选一个节点连接。";
-/** 隧道还在跑但已经没有可用节点：页面上没有「重新连接」可点的目标，只能先断开。 */
-const NO_TRAFFIC_ACTION_NO_NODE =
-  "没有可用节点了，点「断开」停掉隧道，再去处理节点。";
 
 /**
  * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
@@ -119,6 +112,7 @@ export function ConnectionStage({
   onAskAi,
   pendingServerNodes = [],
 }: Props) {
+  const t = useT();
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -331,14 +325,14 @@ export function ConnectionStage({
     setSwitching(null);
     if (!result.ok) {
       ownTargetRef.current = null;
-      setSwitchError(result.message ?? "没能切换节点，再试一次。");
+      setSwitchError(result.message ?? t("console.switchFailed"));
     }
   };
 
   const probeTitle = probeRunning
-    ? "测速中"
+    ? t("console.probing")
     : switching !== null || starting || stopping || helperPreparing
-      ? "正在切换，稍后再试"
+      ? t("console.probeLocked")
       : undefined;
 
   const onPrimary = async () => {
@@ -366,7 +360,9 @@ export function ConnectionStage({
       if (!result.ok) {
         ownTargetRef.current = null;
         setSwitchError(
-          `切换节点失败：${result.message ?? "没能切换，再试一次。"}这次没有发起连接。`,
+          t("console.switchNodeFailed", {
+            message: result.message ?? t("console.switchRetryShort"),
+          }),
         );
         return;
       }
@@ -376,14 +372,14 @@ export function ConnectionStage({
   };
 
   const stateText = noTraffic
-    ? "已连接，不通"
+    ? t("console.state.noTraffic")
     : failed
-      ? "连接失败"
+      ? t("console.state.failed")
       : stopping
-        ? "正在断开"
+        ? t("console.state.stopping")
         : starting
-          ? "正在连接"
-          : "未连接";
+          ? t("console.state.starting")
+          : t("console.state.idle");
   const stateTone = noTraffic || degraded
     ? "is-warn"
     : failed
@@ -458,26 +454,43 @@ export function ConnectionStage({
    * 目标不可用但池里还有别的节点，断完能换一个；一个都没有就别提换节点。
    */
   const noTrafficAction = connectTargetUsable
-    ? NO_TRAFFIC_ACTION
+    ? t("console.noTrafficAction")
     : hasUsableNode
-      ? NO_TRAFFIC_ACTION_OTHER_NODE
-      : NO_TRAFFIC_ACTION_NO_NODE;
+      ? t("console.noTrafficOtherNode")
+      : t("console.noTrafficNoNode");
 
-  const primaryLabel = helperPreparing
-    ? "连接中…"
-    : starting
-      ? "连接中…"
-      : stopping
-        ? "断开中…"
-        : connected && (!noTraffic || !connectTargetUsable)
-          ? "断开"
-          : failed && onDiagnose
-            ? "让 AI 检查"
-            : failed || noTraffic
-              ? "重新连接"
-              : "连接";
+  const primaryKind:
+    | "connecting"
+    | "disconnecting"
+    | "disconnect"
+    | "diagnose"
+    | "reconnect"
+    | "connect" = helperPreparing || starting
+    ? "connecting"
+    : stopping
+      ? "disconnecting"
+      : connected && (!noTraffic || !connectTargetUsable)
+        ? "disconnect"
+        : failed && onDiagnose
+          ? "diagnose"
+          : failed || noTraffic
+            ? "reconnect"
+            : "connect";
+  const primaryLabel = t(
+    primaryKind === "connecting"
+      ? "console.primary.connecting"
+      : primaryKind === "disconnecting"
+        ? "console.primary.disconnecting"
+        : primaryKind === "disconnect"
+          ? "console.primary.disconnect"
+          : primaryKind === "diagnose"
+            ? "console.primary.diagnose"
+            : primaryKind === "reconnect"
+              ? "console.primary.reconnect"
+              : "console.primary.connect",
+  );
   const connectBlocked =
-    (primaryLabel === "连接" || primaryLabel === "重新连接") &&
+    (primaryKind === "connect" || primaryKind === "reconnect") &&
     connectTarget !== null &&
     (isExpiredSeed(connectTarget) || connectTargetDangling);
   const primaryDisabled =
@@ -487,7 +500,7 @@ export function ConnectionStage({
     switching !== null ||
     connectBlocked ||
     // 没有任何节点行可当目标：「连接 / 重新连接」只会空转，按规则禁用。
-    ((primaryLabel === "连接" || primaryLabel === "重新连接") &&
+    ((primaryKind === "connect" || primaryKind === "reconnect") &&
       connectTarget === null);
 
   const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
@@ -506,32 +519,51 @@ export function ConnectionStage({
     const probeUntested = probe?.status === "untested";
     const probeError =
       probeBad || probeUntested ? probe?.error?.message ?? null : null;
-    const msText =
+    /** 未知状态用字符串枚举而不是比文案：英文界面下比较中文会失效。 */
+    const msState =
       switching === node.node_id
-        ? "切换中"
+        ? "switching"
         : nodeProbes.probing.has(node.node_id)
-          ? "测速中"
+          ? "probing"
           : latency !== null
-            ? formatLatency(latency)
+            ? "latency"
             : probeBad
-              ? "测不通"
-              : "未测";
+              ? "bad"
+              : "untested";
+    const msText =
+      msState === "switching"
+        ? t("console.node.switching")
+        : msState === "probing"
+          ? t("console.probing")
+          : msState === "latency" && latency !== null
+            ? formatLatency(latency)
+            : msState === "bad"
+              ? t("console.node.unreachable")
+              : t("console.node.untested");
     // 「测不通 / 未测」是文字不是读数：小一档，但右端仍对齐。
-    const msMuted = msText === "测不通" || msText === "未测";
+    const msMuted = msState === "bad" || msState === "untested";
+    /** 行内要放「测不通问AI」这个真按钮，容器不能再用 <button>（不能嵌套）。 */
+    const rowLocked = switching !== null || expired || dangling;
     return (
-      <button
+      <div
         key={node.node_id}
-        type="button"
         role="option"
         aria-selected={active}
-        aria-disabled={expired || dangling || undefined}
+        aria-disabled={rowLocked || undefined}
+        tabIndex={rowLocked ? -1 : 0}
         className={`stage-node ${active ? "is-selected" : ""} ${
           expired ? "is-expired" : ""
         } ${dangling ? "is-dangling" : ""}`}
         onClick={() => {
-          if (!expired && !dangling) void switchTo(node.node_id);
+          if (!rowLocked) void switchTo(node.node_id);
         }}
-        disabled={switching !== null || expired || dangling}
+        onKeyDown={(event) => {
+          // 内部真按钮自己处理 Enter/Space，别让它顺带选中这一行。
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          if (!rowLocked) void switchTo(node.node_id);
+        }}
       >
         <span
           className={`stage-node__name${expired || dangling ? " has-sub" : ""}`}
@@ -541,23 +573,36 @@ export function ConnectionStage({
             {displayNames[index] ?? node.name}
           </span>
           {fastestMarkId === node.node_id ? (
-            <span className="stage-node__fastest">最快</span>
+            <span className="stage-node__fastest">{t("console.node.fastest")}</span>
           ) : null}
-          {expired ? <span className="stage-node__sub">已到期</span> : null}
+          {expired ? (
+            <span className="stage-node__sub">{t("console.node.expired")}</span>
+          ) : null}
           {dangling ? (
-            <span className="stage-node__sub">{NODE_TOMBSTONE_WORD}</span>
+            <span className="stage-node__sub">{nodeTombstoneWord()}</span>
           ) : null}
         </span>
-        {dangling ? null : (
+        {dangling ? null : msState === "bad" && !expired && node.source === "owned" && onAskAi ? (
+          <button
+            type="button"
+            className="stage-node__ask"
+            onClick={(event) => {
+              event.stopPropagation();
+              onAskAi(nodeUnreachableAsk(displayNames[index] ?? node.name));
+            }}
+          >
+            {t("console.node.askAi")}
+          </button>
+        ) : (
           <span
             className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
-            aria-label={probeBad ? "这次没测通" : undefined}
+            aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
             title={probeError || undefined}
           >
             {msText}
           </span>
         )}
-      </button>
+      </div>
     );
   };
 
@@ -574,28 +619,28 @@ export function ConnectionStage({
       <span className="stage-node__name">
         <span className="stage-node__name-text">{pending.name}</span>
       </span>
-      <span className="stage-node__note">重新连接后可用</span>
+      <span className="stage-node__note">{t("console.node.pendingNote")}</span>
     </div>
   );
 
   return (
-    <main className="connection-stage" aria-label="连接">
+    <main className="connection-stage" aria-label={t("console.aria.main")}>
       <div className="connection-stage__col">
         <section className="stage-band" aria-live="polite">
           <p className="sr-only" role="status">
             {connected
               ? noTraffic
-                ? `已连接，不通。${noTrafficAction}`
+                ? t("console.srNoTraffic", { action: noTrafficAction })
                 : degraded
-                  ? "连接不稳定"
-                  : "已连接"
+                  ? t("console.state.degraded")
+                  : t("console.state.connected")
               : stateText}
           </p>
           {connected && !noTraffic ? (
             <span className="state-line">
               <span className={`state-line__label ${degraded ? "is-warn" : ""}`}>
                 <span className={`led ${degraded ? "is-warn" : "is-ok"}`} aria-hidden />
-                {degraded ? "连接不稳定" : "已连接"}
+                {degraded ? t("console.state.degraded") : t("console.state.connected")}
               </span>
               {showTimer ? (
                 <span className="timecode num">{formatClock(seconds)}</span>
@@ -632,12 +677,14 @@ export function ConnectionStage({
           </section>
         ))}
 
-        <section className="stage-card" aria-label="节点">
+        <section className="stage-card" aria-label={t("console.aria.nodes")}>
           <header className="stage-card__head">
-            <h2 className="stage-card__title">节点</h2>
+            <h2 className="stage-card__title">{t("console.title.nodes")}</h2>
             <div className="stage-card__subrow">
               <p className="stage-card__sub">
-                {`${nodes.length} 个节点${allSeed ? " · 7 天试用" : ""}`}
+                {allSeed
+                  ? t("console.nodes.countTrial", { count: nodes.length })
+                  : t("console.nodes.count", { count: nodes.length })}
               </p>
               {onProbe && nodes.length > 0 ? (
                 <button
@@ -658,53 +705,65 @@ export function ConnectionStage({
                         <span />
                         <span />
                       </span>
-                      测速中
+                      {t("console.probing")}
                     </>
                   ) : probeAllFailed ? (
-                    "再试一次"
+                    t("console.probe.again")
                   ) : (
-                    "测速"
+                    t("console.probe.action")
                   )}
                 </button>
               ) : null}
             </div>
             {probeAllFailed ? (
-              <p className="stage-card__probe-note">这次都没测通。</p>
+              <p className="stage-card__probe-note">{t("console.probe.allFailed")}</p>
             ) : probeAllUntested ? (
-              <p className="stage-card__probe-note">这次没测成。</p>
+              <p className="stage-card__probe-note">{t("console.probe.allUntested")}</p>
             ) : probeMixedUntested ? (
               <p className="stage-card__probe-note">
-                {probeUntestedCount} 个没测成。
+                {t("console.probe.mixed", { count: probeUntestedCount })}
               </p>
             ) : null}
             {selfOwnedUnreachable ? (
               <p className="stage-card__probe-note">
-                连不上不一定是机器的问题，你当前的网络到那个地区的线路不通很常见。可以销毁重建，当天已扣的费用不退。
+                {t("console.selfOwnedUnreachable")}
               </p>
             ) : null}
           </header>
-          <div className="stage-card__nodes" role="listbox" aria-label="节点">
+          <div className="stage-card__nodes" role="listbox" aria-label={t("console.aria.nodes")}>
             {mixedSources ? (
               <>
-                <div className="stage-node-group" role="group" aria-label="你的服务器">
+                <div
+                  className="stage-node-group"
+                  role="group"
+                  aria-label={t("console.group.owned")}
+                >
                   <div className="stage-node-group__head">
-                    <span>你的服务器</span>
+                    <span>{t("console.group.owned")}</span>
                   </div>
                   {ownedEntries.map(renderNode)}
                   {pendingEntries.map(renderPendingNode)}
                 </div>
-                <div className="stage-node-group" role="group" aria-label="免费节点">
+                <div
+                  className="stage-node-group"
+                  role="group"
+                  aria-label={t("console.group.free")}
+                >
                   <div className="stage-node-group__head">
-                    <span>免费节点</span>
+                    <span>{t("console.group.free")}</span>
                     <span className="stage-node-group__hint">{trialHint}</span>
                   </div>
                   {freeEntries.map(renderNode)}
                 </div>
               </>
             ) : ownedEntries.length === 0 && pendingEntries.length > 0 ? (
-              <div className="stage-node-group" role="group" aria-label="你的服务器">
+              <div
+                className="stage-node-group"
+                role="group"
+                aria-label={t("console.group.owned")}
+              >
                 <div className="stage-node-group__head">
-                  <span>你的服务器</span>
+                  <span>{t("console.group.owned")}</span>
                 </div>
                 {pendingEntries.map(renderPendingNode)}
               </div>
@@ -718,7 +777,7 @@ export function ConnectionStage({
         </section>
 
         {config !== null && nodes.length === 0 && pendingEntries.length === 0 ? (
-          <p className="stage-note">这条配置没有节点了</p>
+          <p className="stage-note">{t("console.empty")}</p>
         ) : null}
 
         <button
@@ -727,10 +786,10 @@ export function ConnectionStage({
           onClick={onPrimary}
           disabled={primaryDisabled}
           aria-label={
-            primaryLabel === "断开"
-              ? "断开连接"
-              : primaryLabel === "连接"
-                ? "连接节点"
+            primaryKind === "disconnect"
+              ? t("console.primary.disconnectAria")
+              : primaryKind === "connect"
+                ? t("console.primary.connectAria")
                 : primaryLabel
           }
         >
@@ -741,11 +800,11 @@ export function ConnectionStage({
           <p className="stage-note">
             {connectTargetDangling
               ? hasUsableNode
-                ? "当前节点已停机删除，换一个节点再连接。"
-                : "节点已停机删除，去我的服务器删除它，或新建一个节点。"
+                ? t("console.blocked.danglingHasOther")
+                : t("console.blocked.danglingNoOther")
               : hasUsableNode
-                ? "当前节点已到期，换一个节点再连接。"
-                : "试用已到期，免费节点已不可用。"}
+                ? t("console.blocked.expiredHasOther")
+                : t("console.blocked.expiredNoOther")}
           </p>
         ) : null}
 
@@ -756,7 +815,7 @@ export function ConnectionStage({
             onClick={onStart}
             disabled={!connectTargetUsable}
           >
-            重新连接
+            {t("console.reconnect")}
           </button>
         ) : null}
 
@@ -787,7 +846,7 @@ export function ConnectionStage({
                 onClick={onReportProblem}
                 disabled={reportBusy}
               >
-                报告问题
+                {t("stage.reportProblem")}
               </button>
             ) : null}
           </p>
@@ -801,7 +860,7 @@ export function ConnectionStage({
                 onClick={onReportProblem}
                 disabled={reportBusy}
               >
-                报告问题
+                {t("stage.reportProblem")}
               </button>
             ) : null}
           </p>
@@ -814,13 +873,12 @@ export function ConnectionStage({
           >
             {switchError ??
               (summary
-                ? `已加入 ${summary.count} 个免费节点${
-                    manualProbed
-                      ? ""
-                      : summary.fastestMs !== null
-                        ? `，最快 ${Math.round(summary.fastestMs)}ms`
-                        : ""
-                  }`
+                ? manualProbed || summary.fastestMs === null
+                  ? t("console.summary.joined", { count: summary.count })
+                  : t("console.summary.fastest", {
+                      base: t("console.summary.joined", { count: summary.count }),
+                      ms: Math.round(summary.fastestMs),
+                    })
                 : null)}
           </p>
         ) : null}

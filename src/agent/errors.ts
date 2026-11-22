@@ -12,18 +12,26 @@ export class BridgeError extends Error {
   readonly details: Record<string, unknown> | null;
   /** 后端标记为可重试（例如任务正在准备）；没给时按不可重试处理。 */
   readonly retryable: boolean;
+  /**
+   * message 是否真的来自后端。false 表示这里是本地补的通用占位，
+   * 调用方要显示自己的兜底文案，不要拿占位文案当后端原话。
+   * 批次 4 起后端只回错误码，调用方应改看 code / details。
+   */
+  readonly hasMessage: boolean;
 
   constructor(
     code: string,
     message: string,
     details: Record<string, unknown> | null = null,
     retryable = false,
+    hasMessage = message.trim().length > 0,
   ) {
     super(message);
     this.name = "BridgeError";
     this.code = code;
     this.details = details;
     this.retryable = retryable;
+    this.hasMessage = hasMessage;
   }
 }
 
@@ -38,7 +46,7 @@ export function toBridgeError(error: unknown, fallbackCode = "INTERNAL"): Bridge
   if (error instanceof BridgeError) return error;
 
   if (typeof error === "string") {
-    return new BridgeError(fallbackCode, error);
+    return new BridgeError(fallbackCode, error, null, false, error.trim().length > 0);
   }
 
   if (error instanceof Error) {
@@ -49,6 +57,7 @@ export function toBridgeError(error: unknown, fallbackCode = "INTERNAL"): Bridge
       record.message,
       readDetails(record.details),
       record.retryable === true,
+      record.message.trim().length > 0,
     );
   }
 
@@ -66,8 +75,9 @@ export function toBridgeError(error: unknown, fallbackCode = "INTERNAL"): Bridge
       message,
       readDetails(record.details),
       record.retryable === true,
+      typeof record.message === "string" && record.message.trim().length > 0,
     );
   }
 
-  return new BridgeError(fallbackCode, "操作失败");
+  return new BridgeError(fallbackCode, "操作失败", null, false, false);
 }

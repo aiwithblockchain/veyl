@@ -183,6 +183,8 @@ export interface PendingQuestion {
   upgradeConfirm?: CoreUpgradeConfirmData | null;
   /** kind = "config_set_mode_confirm" 时的接管方式明细。 */
   configSetModeConfirm?: ConfigSetModeConfirmData | null;
+  /** Host 给的默认焦点下标（0 起）；缺失时确认卡默认落在「取消」。 */
+  defaultIndex?: number | null;
 }
 
 export interface CoreUpgradeConfirmData {
@@ -201,9 +203,13 @@ export interface ConfigSetModeConfirmData {
   willDisconnect: boolean;
 }
 
-/** 阻塞确认卡的 kind：这两种走 AskQuestionDialog，其余提问走消息流内联。 */
+/** 阻塞确认卡的 kind：这几种走 AskQuestionDialog，其余提问走消息流内联。 */
 export function isConfirmQuestionKind(kind: string | null | undefined): boolean {
-  return kind === "core_upgrade_confirm" || kind === "config_set_mode_confirm";
+  return (
+    kind === "core_upgrade_confirm" ||
+    kind === "config_set_mode_confirm" ||
+    kind === "node_rotate_confirm"
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -232,10 +238,12 @@ function readSize(...values: unknown[]): number | null {
  */
 export function readQuestionDetail(raw: Record<string, unknown>): {
   kind: string | null;
+  defaultIndex: number | null;
   upgradeConfirm: CoreUpgradeConfirmData | null;
   configSetModeConfirm: ConfigSetModeConfirmData | null;
 } {
   const kind = readString(raw.kind);
+  const defaultIndex = readIndex(raw.default_index, raw.defaultIndex);
   if (kind === "core_upgrade_confirm") {
     const merged = {
       ...(asRecord(raw.upgrade) ?? {}),
@@ -246,6 +254,7 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
     };
     return {
       kind,
+      defaultIndex,
       upgradeConfirm: {
         currentVersion: readString(merged.current_version, merged.currentVersion),
         targetVersion: readString(merged.target_version, merged.targetVersion),
@@ -266,6 +275,7 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
     };
     return {
       kind,
+      defaultIndex,
       upgradeConfirm: null,
       configSetModeConfirm: {
         configId: readString(merged.config_id, merged.configId),
@@ -280,7 +290,17 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
     };
   }
 
-  return { kind, upgradeConfirm: null, configSetModeConfirm: null };
+  return { kind, defaultIndex, upgradeConfirm: null, configSetModeConfirm: null };
+}
+
+/** 默认焦点下标：只认 0 起的整数，其它形状当作没给。 */
+function readIndex(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+      return value;
+    }
+  }
+  return null;
 }
 
 function readConnectMode(...values: unknown[]): ConfigConnectMode | null {

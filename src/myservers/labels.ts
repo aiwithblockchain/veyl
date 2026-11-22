@@ -1,62 +1,89 @@
 import type { MyServer, MyServerRegion, MyServerState } from "../agent/bridge";
+import { t } from "../i18n";
+import { zh } from "../i18n/zh";
+import type { MessageKey } from "../i18n";
 
+const CONTINENT_KEYS: Record<MyServerRegion["continent"], MessageKey> = {
+  asia: "myservers.continent.asia",
+  europe: "myservers.continent.europe",
+  north_america: "myservers.continent.northAmerica",
+  south_america: "myservers.continent.southAmerica",
+  oceania: "myservers.continent.oceania",
+  africa: "myservers.continent.africa",
+};
+
+/** 兼容旧调用点（只有 mock 测试用）；按界面语言取词请用 continentLabel()。 */
 export const CONTINENT_LABELS: Record<MyServerRegion["continent"], string> = {
-  asia: "亚洲",
-  europe: "欧洲",
-  north_america: "北美洲",
-  south_america: "南美洲",
-  oceania: "大洋洲",
-  africa: "非洲",
+  asia: zh["myservers.continent.asia"],
+  europe: zh["myservers.continent.europe"],
+  north_america: zh["myservers.continent.northAmerica"],
+  south_america: zh["myservers.continent.southAmerica"],
+  oceania: zh["myservers.continent.oceania"],
+  africa: zh["myservers.continent.africa"],
 };
 
-export const MY_SERVER_STATE_LABEL: Record<MyServerState, string> = {
-  creating: "正在建机器",
-  booting: "等待开机",
-  installing: "安装服务端",
-  verifying: "检查是否可用",
-  healthy: "可用",
-  active: "已开通",
-  error: "出错了",
-  destroying: "正在销毁",
-  destroyed: "已停机删除",
-  gone: "已失效",
+export function continentLabel(continent: MyServerRegion["continent"]): string {
+  return t(CONTINENT_KEYS[continent]);
+}
+
+const STATE_KEYS: Record<MyServerState, MessageKey> = {
+  creating: "myservers.state.creating",
+  booting: "myservers.state.booting",
+  installing: "myservers.state.installing",
+  verifying: "myservers.state.verifying",
+  healthy: "myservers.state.healthy",
+  active: "myservers.state.active",
+  error: "myservers.state.error",
+  destroying: "myservers.state.destroying",
+  destroyed: "myservers.state.destroyed",
+  gone: "myservers.state.gone",
 };
 
-/** 停机删除：到期前扣费失败，后端停机销毁，只留一行墓碑等用户自己删。 */
-export const MY_SERVER_TOMBSTONE_WORD = "已停机删除";
+export function serverStateLabel(state: MyServerState): string {
+  return t(STATE_KEYS[state]);
+}
 
-/** 墓碑详情页只写这一句，不提供续费 / 重建 / 恢复。 */
-export const MY_SERVER_TOMBSTONE_TEXT =
-  "这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。";
+export function serverTombstoneWord(): string {
+  return t("myservers.tombstone.word");
+}
 
-/** 连接页上悬挂节点那一行的词，比左栏短。 */
-export const NODE_TOMBSTONE_WORD = "停机删除";
+export function serverTombstoneText(): string {
+  return t("myservers.tombstone.text");
+}
 
-/** 完成态的四个步骤词：进度块就绪后全部打勾，用完成式，不沿用进行中的状态词。 */
-export const MY_SERVER_STEP_DONE_LABEL: Record<
+export function nodeTombstoneWord(): string {
+  return t("myservers.nodeTombstone");
+}
+
+const STEP_DONE_KEYS: Record<
   "creating" | "booting" | "installing" | "verifying",
-  string
+  MessageKey
 > = {
-  creating: "已建机器",
-  booting: "已开机",
-  installing: "已安装服务端",
-  verifying: "已检查可用",
+  creating: "myservers.stepDone.creating",
+  booting: "myservers.stepDone.booting",
+  installing: "myservers.stepDone.installing",
+  verifying: "myservers.stepDone.verifying",
 };
 
-/** 左栏状态词：短一些，带百分比时一行放得下。 */
-export const MY_SERVER_RAIL_PHASE: Partial<Record<MyServerState, string>> = {
-  creating: "建机器中",
-  booting: "开机中",
-  installing: "安装中",
-  verifying: "检查中",
+export function serverStepDoneLabel(
+  stage: "creating" | "booting" | "installing" | "verifying",
+): string {
+  return t(STEP_DONE_KEYS[stage]);
+}
+
+const RAIL_PHASE_KEYS: Partial<Record<MyServerState, MessageKey>> = {
+  creating: "myservers.rail.creating",
+  booting: "myservers.rail.booting",
+  installing: "myservers.rail.installing",
+  verifying: "myservers.rail.verifying",
 };
 
 /** 欠费词只在这里出现一次：左栏与详情页同源，避免同一台机器两个说法。 */
 function billingStateWord(
   billing: MyServer["billing_state"],
-): "已欠费" | "已停用" | null {
-  if (billing === "past_due") return "已欠费";
-  if (billing === "expired") return "已停用";
+): MessageKey | null {
+  if (billing === "past_due") return "myservers.billing.pastDue";
+  if (billing === "expired") return "myservers.billing.expiredState";
   return null;
 }
 
@@ -67,23 +94,22 @@ function billingStateWord(
 export function serverRailState(
   server: Pick<MyServer, "state" | "billing_state">,
 ): string {
-  if (server.state === "destroyed") return MY_SERVER_TOMBSTONE_WORD;
-  return (
-    billingStateWord(server.billing_state) ??
-    MY_SERVER_RAIL_PHASE[server.state] ??
-    MY_SERVER_STATE_LABEL[server.state]
-  );
+  if (server.state === "destroyed") return serverTombstoneWord();
+  const billing = billingStateWord(server.billing_state);
+  if (billing) return t(billing);
+  const phase = RAIL_PHASE_KEYS[server.state];
+  if (phase) return t(phase);
+  return serverStateLabel(server.state);
 }
 
 /** 详情页标题词：用长词；停机删除与欠费覆盖同源。 */
 export function serverDetailState(
   server: Pick<MyServer, "state" | "billing_state">,
 ): string {
-  if (server.state === "destroyed") return MY_SERVER_TOMBSTONE_WORD;
-  return (
-    billingStateWord(server.billing_state) ??
-    MY_SERVER_STATE_LABEL[server.state]
-  );
+  if (server.state === "destroyed") return serverTombstoneWord();
+  const billing = billingStateWord(server.billing_state);
+  if (billing) return t(billing);
+  return serverStateLabel(server.state);
 }
 
 export function isProvisioning(state: MyServerState): boolean {
@@ -150,7 +176,10 @@ export function trialPhase(
 }
 
 export function formatTrialCountdown(days: number): string {
-  return days < 1 ? "不到 1 天后到期" : `${days} 天后到期`;
+  if (days < 1) return t("myservers.trial.endsLessThanOne");
+  return days === 1
+    ? t("myservers.trial.endsInOne", { days })
+    : t("myservers.trial.endsIn", { days });
 }
 
 /** 「我的服务器」空态那一行：available / counting 各一句，ended / unknown 不显示。 */
@@ -163,10 +192,13 @@ export function trialEmptyHint(
   if (seedNodeCount <= 0) return null;
   const phase = trialPhase(state, expiresAt, now);
   if (phase.kind === "available") {
-    return `还有 ${seedNodeCount} 个免费节点，试用 7 天。`;
+    return t("myservers.trial.emptyAvailable", { count: seedNodeCount });
   }
   if (phase.kind !== "counting") return null;
-  return `还有 ${seedNodeCount} 个免费节点，${formatTrialCountdown(phase.days)}。`;
+  return t("myservers.trial.emptyCounting", {
+    count: seedNodeCount,
+    countdown: formatTrialCountdown(phase.days),
+  });
 }
 
 /** 节点卡免费组标题右侧：拿不到时间写「试用中」，过期写「已到期」。 */
@@ -177,7 +209,9 @@ export function trialGroupHint(
 ): string {
   const phase = trialPhase(state, expiresAt, now);
   if (phase.kind === "counting") return formatTrialCountdown(phase.days);
-  return phase.kind === "ended" ? "已到期" : "试用中";
+  return phase.kind === "ended"
+    ? t("myservers.trial.ended")
+    : t("myservers.trial.onTrial");
 }
 
 /**
@@ -193,10 +227,13 @@ export function trialAvailableHint(
   if (seedNodeCount <= 0) return null;
   const phase = trialPhase(state, expiresAt, now);
   if (phase.kind === "available") {
-    return `还有 ${seedNodeCount} 个免费节点可用，试用 7 天。`;
+    return t("myservers.trial.availableHint", { count: seedNodeCount });
   }
   if (phase.kind !== "counting") return null;
-  return `还有 ${seedNodeCount} 个免费节点可用，${formatTrialCountdown(phase.days)}。`;
+  return t("myservers.trial.availableHintCounting", {
+    count: seedNodeCount,
+    countdown: formatTrialCountdown(phase.days),
+  });
 }
 
 /** 时长文案：满 1 小时报「2 小时 0 分」，满 1 分钟报「1 分 20 秒」，否则只报秒。 */
@@ -205,8 +242,10 @@ export function formatDuration(totalSeconds: number): string {
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
-  if (hours > 0) return `${hours} 小时 ${minutes} 分`;
-  return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+  if (hours > 0) return t("myservers.duration.hours", { hours, minutes });
+  return minutes > 0
+    ? t("myservers.duration.minutes", { minutes, seconds })
+    : t("myservers.duration.seconds", { seconds });
 }
 
 /** 创建用时：ready_at − created_at。旧机器没有 ready_at 时返回 null。 */
@@ -221,13 +260,6 @@ export function formatBuildDuration(
   return formatDuration((end - start) / 1000);
 }
 
-/** 计费截止措辞的唯一出处；定稿后只改这里。 */
-export const PAID_THROUGH_WORDING = "本期有效至";
-/** 覆盖期刚结束、下一轮计费任务还没跑：机器照常可用，不能说「到期」。 */
-export const PAID_EXPIRED_WORDING = "本期已过，服务正常";
-/** 建机成功、还没开通扣费时的费用行文案。 */
-export const PENDING_BILLING_WORDING = "创建中，开通后开始计费";
-
 /** 计费日期：本地日期 YYYY-MM-DD。 */
 export function formatPaidUntil(iso: string): string {
   const at = new Date(iso);
@@ -241,9 +273,13 @@ export function serverBillingText(
   server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
   now = Date.now(),
 ): string {
-  if (server.billing_state === "pending") return PENDING_BILLING_WORDING;
+  if (server.billing_state === "pending") {
+    return t("myservers.paid.pending");
+  }
   const price = formatDailyPrice(server.daily_price_cents);
-  if (!server.paid_until) return `每天 ${price}`;
+  if (!server.paid_until) {
+    return t("myservers.billing.daily", { price });
+  }
   const ends = new Date(server.paid_until).getTime();
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。
   if (
@@ -251,9 +287,16 @@ export function serverBillingText(
     !Number.isNaN(ends) &&
     ends <= now
   ) {
-    return `每天 ${price} · ${PAID_EXPIRED_WORDING}`;
+    return t("myservers.billing.dailyExpired", {
+      price,
+      word: t("myservers.paid.expired"),
+    });
   }
-  return `每天 ${price} · ${PAID_THROUGH_WORDING} ${formatPaidUntil(server.paid_until)}`;
+  return t("myservers.billing.dailyThrough", {
+    price,
+    word: t("myservers.paid.through"),
+    date: formatPaidUntil(server.paid_until),
+  });
 }
 
 /** 宽限剩余天数：向上取整，过期为 0。 */
@@ -272,11 +315,11 @@ export function billingNoticeText(
   if (server.billing_state === "past_due") {
     const days = graceDaysLeft(server.grace_ends_at, now);
     return days === null
-      ? "余额不足，最近一次扣费没成功。7 天内充值可继续使用。"
-      : `余额不足，最近一次扣费没成功。宽限还剩 ${days} 天，7 天内充值可继续使用。`;
+      ? t("myservers.billing.pastDueNoGrace")
+      : t("myservers.billing.pastDueGrace", { days });
   }
   if (server.billing_state === "expired") {
-    return "余额不足，服务已停用。服务器还在，停机期间不再产生费用；充值后自动补扣，最多补 30 天即可恢复。";
+    return t("myservers.billing.expired");
   }
   return null;
 }

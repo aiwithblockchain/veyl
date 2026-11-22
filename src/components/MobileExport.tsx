@@ -12,6 +12,8 @@ import { isServerNodeReady } from "../myservers/labels";
 import { copyText } from "../ui/clipboard";
 import { useFocusTrap } from "../ui/focus";
 import { IconClose } from "./icons";
+import { useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 
 /** 内部格式：只用于取数据，不出现在任何界面文本里。 */
 type FormatId = "singbox" | "clash" | "ss" | "shadowrocket";
@@ -58,7 +60,7 @@ export function hasReadyServer(servers: MyServer[]): boolean {
 interface AppDef {
   id: MobileClientId;
   name: string;
-  meta: string;
+  meta: MessageKey;
   /** 该 App 内部吃哪一份数据；用户看不到这层映射。 */
   format: FormatId;
 }
@@ -68,30 +70,30 @@ const APPS: AppDef[] = [
   {
     id: "singbox",
     name: "sing-box",
-    meta: "iPhone（需大陆以外 Apple 账号）/ Android",
+    meta: "mobile.meta.singbox",
     format: "singbox",
   },
   {
     id: "shadowrocket",
     name: "Shadowrocket",
-    meta: "iOS",
+    meta: "mobile.meta.ios",
     format: "shadowrocket",
   },
   {
     id: "cmfa",
     name: "Clash Meta for Android",
-    meta: "仅 Android",
+    meta: "mobile.meta.androidOnly",
     format: "clash",
   },
   {
     id: "hiddify",
     name: "Hiddify",
-    meta: "iPhone / Android",
+    meta: "mobile.meta.both",
     format: "singbox",
   },
 ];
 
-const OTHER_NAME = "我的 App 不在列表里";
+const OTHER_NAME: MessageKey = "mobile.otherName";
 
 /**
  * 下载码取不到时的兜底链接：与 Host 的固定映射逐条一致。
@@ -158,6 +160,7 @@ export function MobileExport({
   onGoServers,
   onAskAi,
 }: Props) {
+  const tr = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [openId, setOpenId] = useState<RowId | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
@@ -343,7 +346,7 @@ export function MobileExport({
       if (previous) {
         // 旧二维码还能用：保留它，只在操作区下方说明这次没成功。
         setPhase(previous);
-        setRotateError("没能重新生成。旧链接还在，稍后再试。");
+        setRotateError(tr("mobile.regenerateFailed"));
       } else {
         setPhase({ kind: "error" });
       }
@@ -380,7 +383,7 @@ export function MobileExport({
       <span className="mobile-export__step-num" aria-hidden="true">
         2
       </span>
-      用 {app.name} 扫码导入
+      {tr("mobile.scanWith", { app: app.name })}
     </h3>
   );
 
@@ -391,7 +394,7 @@ export function MobileExport({
         <section className="mobile-export__step">
           {stepTitle(app)}
           <p className="mobile-export__step-note">
-            手机端只能导出你自己创建的付费节点。免费和试用节点不包含。
+            {tr("mobile.paidOnly")}
           </p>
           <div className="mobile-export__actions">
             <button
@@ -399,7 +402,7 @@ export function MobileExport({
               className="btn btn--ghost"
               onClick={onGoServers}
             >
-              去创建服务器
+              {tr("mobile.goCreate")}
             </button>
           </div>
         </section>
@@ -415,19 +418,19 @@ export function MobileExport({
       qr = <div className="mobile-export__qr-skeleton" />;
       side = (
         <p className="mobile-export__side-title" role="status">
-          正在读取节点…
+          {tr("mobile.loadingNode")}
         </p>
       );
     } else if (phase.kind === "login_required") {
       side = (
         <>
-          <p className="mobile-export__side-title">先登录。</p>
+          <p className="mobile-export__side-title">{tr("mobile.loginFirst")}</p>
           <p className="mobile-export__side-note">
-            登录后可以把自己的节点导入手机。
+            {tr("mobile.loginNote")}
           </p>
           <div className="mobile-export__actions">
             <button type="button" className="btn btn--ghost" onClick={onLogin}>
-              登录
+              {tr("mobile.login")}
             </button>
           </div>
         </>
@@ -435,14 +438,14 @@ export function MobileExport({
     } else if (phase.kind === "error" || !entry) {
       side = (
         <>
-          <p className="mobile-export__side-title">暂时生成不了。</p>
+          <p className="mobile-export__side-title">{tr("mobile.genFailed")}</p>
           <div className="mobile-export__actions">
             <button
               type="button"
               className="btn btn--ghost"
               onClick={() => void load()}
             >
-              重试
+              {tr("mobile.retry")}
             </button>
           </div>
         </>
@@ -455,7 +458,7 @@ export function MobileExport({
           src={entry.qr_data_url}
           width={200}
           height={200}
-          alt="导入二维码"
+          alt={tr("mobile.qrAlt")}
         />
       );
       side = (
@@ -468,10 +471,10 @@ export function MobileExport({
             >
               <span role="status">
                 {copyState === "ok"
-                  ? "已复制"
+                  ? tr("chat.copy.copied")
                   : copyState === "fail"
-                    ? "复制失败"
-                    : "复制链接"}
+                    ? tr("chat.copy.failed")
+                    : tr("topup.copyLink")}
               </span>
             </button>
             {confirming ? null : (
@@ -481,14 +484,14 @@ export function MobileExport({
                 className="btn btn--link"
                 onClick={startRotate}
               >
-                重新生成
+                {tr("mobile.regenerate")}
               </button>
             )}
           </div>
           {confirming ? (
             <div className="mobile-export__confirm">
               <p className="mobile-export__confirm-text">
-                重新生成后，手机上所有 App 的旧配置下次更新时失效。
+                {tr("mobile.regenerateConfirm")}
               </p>
               <div className="mobile-export__confirm-actions">
                 <button
@@ -498,7 +501,7 @@ export function MobileExport({
                   disabled={rotating}
                   onClick={() => setConfirming(false)}
                 >
-                  取消
+                  {tr("common.cancel")}
                 </button>
                 <button
                   type="button"
@@ -506,14 +509,14 @@ export function MobileExport({
                   disabled={rotating}
                   onClick={() => void rotate()}
                 >
-                  重新生成
+                  {tr("mobile.regenerate")}
                 </button>
               </div>
             </div>
           ) : null}
           {rotated ? (
             <p className="mobile-export__status" role="status">
-              已重新生成；手机上所有 App 的旧配置下次更新时失效。
+              {tr("mobile.regenerated")}
             </p>
           ) : null}
           {rotateError ? (
@@ -541,7 +544,7 @@ export function MobileExport({
           </div>
         </div>
         {secure ? (
-          <p className="mobile-export__security">链接相当于密码，别转发。</p>
+          <p className="mobile-export__security">{tr("mobile.linkIsSecret")}</p>
         ) : null}
       </section>
     );
@@ -563,7 +566,7 @@ export function MobileExport({
           <span className="mobile-export__step-num" aria-hidden="true">
             1
           </span>
-          还没有 App？先下载
+          {tr("mobile.downloadFirst")}
         </h3>
         <div className="mobile-export__platforms">
           {platforms
@@ -616,7 +619,7 @@ export function MobileExport({
             <span className="mobile-export__app-name-row">
               <span className="mobile-export__app-name">{name}</span>
               {id === "singbox" ? (
-                <span className="mobile-export__badge">推荐</span>
+                <span className="mobile-export__badge">{tr("mobile.recommended")}</span>
               ) : null}
             </span>
             {meta ? (
@@ -664,12 +667,12 @@ export function MobileExport({
             id="mobile-export-title"
             className="modal__title mobile-export__title"
           >
-            在手机上使用
+            {tr("mobile.title")}
           </h2>
           <button
             type="button"
             className="modal__close"
-            aria-label="关闭"
+            aria-label={tr("common.close")}
             onClick={onClose}
           >
             <IconClose size={14} />
@@ -683,7 +686,7 @@ export function MobileExport({
             onScroll={updateFade}
           >
             <p className="mobile-export__intro">
-              选你手机上用的 App，还没有就先装一个。
+              {tr("mobile.intro")}
             </p>
 
             <ul className="mobile-export__apps">
@@ -691,7 +694,7 @@ export function MobileExport({
                 renderRow(
                   app.id,
                   app.name,
-                  app.meta,
+                  tr(app.meta),
                   <>
                     {downloadStep(app)}
                     {importStep(app)}
@@ -700,10 +703,10 @@ export function MobileExport({
               )}
               {renderRow(
                 OTHER_ID,
-                OTHER_NAME,
+                tr(OTHER_NAME),
                 null,
                 <p className="mobile-export__fallback">
-                  上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。
+                  {tr("mobile.otherNote")}
                 </p>,
               )}
             </ul>
@@ -716,16 +719,16 @@ export function MobileExport({
         <footer className="mobile-export__footer">
           <p
             className="mobile-export__attribution"
-            title="这些 App 不是我们开发的，Veyl 只提供节点。"
+            title={tr("mobile.attribution")}
           >
-            这些 App 不是我们开发的，Veyl 只提供节点。
+            {tr("mobile.attribution")}
           </p>
           <button
             type="button"
             className="btn btn--link mobile-export__ask-ai"
             onClick={onAskAi}
           >
-            不会操作？问 AI
+            {tr("mobile.askAi")}
           </button>
         </footer>
       </div>

@@ -2329,19 +2329,6 @@ body[data-resizing] {
   color: var(--warn-text);
 }
 
-.ask-ai {
-  flex: none;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink-3);
-  font-size: 11px;
-}
-
-.ask-ai:hover {
-  color: var(--link);
-}
-
 /* provider 列表与表单 */
 
 .settings-providers {
@@ -4131,6 +4118,14 @@ body[data-resizing] {
   color: var(--err-text);
 }
 
+/* 通用确认卡（节点端口重置）的说明正文。 */
+.ask-question__body {
+  margin: 16px 20px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
 /* AI 代劳升级的确认卡 */
 
 .core-confirm {
@@ -5782,9 +5777,11 @@ details[open] > .settings-fold__summary::before {
   cursor: pointer;
 }
 
-.stage-node:hover:not(:disabled) { background: var(--bg-hover); }
+.stage-node:hover:not([aria-disabled="true"]) { background: var(--bg-hover); }
 
-.stage-node:disabled { cursor: default; opacity: 0.7; }
+.stage-node[aria-disabled="true"] { cursor: default; opacity: 0.7; }
+
+.stage-node:focus-visible { outline-offset: -2px; }
 
 /* 选中行不再用粉色：粉是链接（测速）和聚焦描边的颜色，同一张卡里两处粉会互相抢。
    选中用中性底 + 墨色竖条 + 500 字重。底色取 12%：与 hover 的 5% 拉开 16 个色阶
@@ -5794,9 +5791,9 @@ details[open] > .settings-fold__summary::before {
   font-weight: 500;
 }
 
-/* 悬停选中行时保持选中底：`.stage-node:hover:not(:disabled)` 特异性 0,3,0 高于
-   `.is-selected` 的 0,2,0，不写这条，悬停瞬间底色会掉回 hover 的 5%，看着像闪一下。 */
-.stage-node.is-selected:hover:not(:disabled) {
+/* 悬停选中行时保持选中底：`.stage-node:hover:not([aria-disabled="true"])` 特异性高于
+   `.is-selected`，不写这条，悬停瞬间底色会掉回 hover 的 5%，看着像闪一下。 */
+.stage-node.is-selected:hover:not([aria-disabled="true"]) {
   background: color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
@@ -5850,6 +5847,20 @@ details[open] > .settings-fold__summary::before {
 .stage-node__ms.is-muted {
   font-size: 12px;
   color: var(--ink-3);
+}
+
+/* 测不通的问 AI 入口：一段带下划线的文字链接，不是实心按钮。 */
+.stage-node__ask {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--link);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .stage-primary {

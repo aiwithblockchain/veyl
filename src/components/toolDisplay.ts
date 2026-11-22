@@ -5,6 +5,8 @@
  * 永远不出现在用户界面里，技术细节除外。
  * 工具名集合必须与 `docs/contracts/tools.md` §3 完全一致（测试有集合断言）。
  */
+import { getLanguage, t } from "../i18n";
+import type { MessageKey } from "../i18n";
 
 export type ChangedState = "none" | "restored" | "unknown";
 
@@ -41,6 +43,15 @@ export interface ToolCopy {
   readOnly: boolean;
 }
 
+/** 表里存 key，取用时按当前语言翻译；测试在中文下看到的仍是原句。 */
+export interface ToolCopyKeys {
+  running: MessageKey;
+  done: MessageKey;
+  failed: MessageKey;
+  advice: MessageKey;
+  readOnly: boolean;
+}
+
 export const FALLBACK_COPY: ToolCopy = {
   running: "正在处理…",
   done: "已完成",
@@ -49,302 +60,338 @@ export const FALLBACK_COPY: ToolCopy = {
   readOnly: false,
 };
 
-export const TOOL_COPY: Record<string, ToolCopy> = {
-  RuntimeStatus: {
-    running: "正在检查连接状态",
-    done: "已查看连接状态",
-    failed: "读不到连接状态",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  RuntimeStart: {
-    running: "正在启动后台运行库",
-    done: "后台运行库已启动",
-    failed: "没能启动后台运行库",
-    advice: "可以再试一次。",
-    readOnly: false,
-  },
-  RuntimeStop: {
-    running: "正在停止后台运行库",
-    done: "后台运行库已停止",
-    failed: "没能停止后台运行库",
-    advice: "可以再试一次。",
-    readOnly: false,
-  },
-  RuntimeRestart: {
-    running: "正在重启后台运行库",
-    done: "后台运行库已重启",
-    failed: "没能重启后台运行库",
-    advice: "可以再试一次。",
-    readOnly: false,
-  },
-  RuntimeLogs: {
-    running: "正在取运行记录",
-    done: "已取到运行记录",
-    failed: "运行记录取不到",
-    advice: "不影响正常使用，可以稍后再试。",
-    readOnly: true,
-  },
-  CoreListVersions: {
-    running: "正在查看运行库版本",
-    done: "已查看运行库版本",
-    failed: "读不到运行库版本",
-    advice: "可以到设置里手动检查。",
-    readOnly: true,
-  },
-  CoreUpgrade: {
-    running: "正在检查运行库更新",
-    done: "运行库已检查",
-    failed: "没检查成运行库更新",
-    advice: "可以到设置里手动检查更新。",
-    readOnly: false,
-  },
-  CatalogSearch: {
-    running: "正在找可用节点",
-    done: "已查过可用节点",
-    failed: "没能查到可用节点",
-    advice: "可能是网络问题，可以再试一次。",
-    readOnly: true,
-  },
-  ConfigDetail: {
-    running: "正在看这套配置",
-    done: "已查看这套配置",
-    failed: "这套配置打不开",
-    advice: "可以换一套配置再试。",
-    readOnly: true,
-  },
-  ConfigUpdate: {
-    running: "正在修改配置",
-    done: "已更新配置",
-    failed: "没改成配置",
-    advice: "原设置不变，可以再试一次。",
-    readOnly: false,
-  },
-  NodeImportUrl: {
-    running: "正在从订阅导入节点",
-    done: "已导入节点",
-    failed: "没能导入节点",
-    advice: "检查订阅地址是否可用后再试。",
-    readOnly: false,
-  },
-  NodeImportText: {
-    running: "正在导入节点",
-    done: "已导入节点",
-    failed: "没能导入节点",
-    advice: "检查粘贴的内容是不是节点链接后再试。",
-    readOnly: false,
-  },
-  NodeCreate: {
-    running: "正在添加节点",
-    done: "已添加节点",
-    failed: "没添上节点",
-    advice: "检查地址和端口后再试。",
-    readOnly: false,
-  },
-  NodeSwitch: {
-    running: "正在切换节点",
-    done: "已切换节点",
-    failed: "没切成功节点",
-    advice: "还在原来节点，可以再试一次。",
-    readOnly: false,
-  },
-  NodeProbe: {
-    running: "正在测试这个节点",
-    done: "已测试这个节点",
-    failed: "这个节点连不上",
-    advice: "超时或被拒绝，可以换一个节点。",
-    readOnly: true,
-  },
-  VpnConnect: {
-    running: "正在连接",
-    done: "已连接",
-    failed: "没能连上",
-    advice: "可以换一个节点，或稍后再试。",
-    readOnly: false,
-  },
-  VpnDisconnect: {
-    running: "正在断开",
-    done: "已断开，已恢复直连",
-    failed: "没能断开",
-    advice: "仍在连接，可以再试一次。",
-    readOnly: false,
-  },
-  DiagRun: {
-    running: "正在做诊断",
-    done: "诊断已完成",
-    failed: "诊断没跑完",
-    advice: "可以再试一次。",
-    readOnly: true,
-  },
-  DeepseekSetupKey: {
-    running: "正在准备开通步骤",
-    done: "已给出开通步骤",
-    failed: "没能给出开通步骤",
-    advice: "可以再试一次。",
-    readOnly: true,
-  },
-  DeepseekSaveKey: {
-    running: "正在保存密钥",
-    done: "密钥已保存",
-    failed: "没能保存密钥",
-    advice: "检查密钥是否有效后再试。",
-    readOnly: false,
-  },
-  JobGet: {
-    running: "正在查任务进度",
-    done: "已查到任务进度",
-    failed: "任务找不到",
-    advice: "可能已经结束，刷新再看。",
-    readOnly: true,
-  },
-  AskUserQuestion: {
-    running: "正在等待回答",
-    done: "已回答",
-    failed: "没有回答",
-    advice: "可以再问一次。",
-    readOnly: true,
-  },
-  NetConfigGet: {
-    running: "正在检查系统网络设置",
-    done: "已检查系统网络设置",
-    failed: "读不到系统网络设置",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  NetRepair: {
-    running: "正在恢复网络",
-    done: "网络已恢复",
-    failed: "没能恢复网络",
-    advice: "可以再试一次。",
-    readOnly: false,
-  },
-  CatalogRefresh: {
-    running: "正在更新默认节点包",
-    done: "已更新默认节点包",
-    failed: "没能更新默认节点包",
-    advice: "原来的还在，可以再试一次。",
-    readOnly: false,
-  },
-  DefaultProfileStatus: {
-    running: "正在看内置配置状态",
-    done: "已查看内置配置状态",
-    failed: "内置配置状态读不到",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  RouteGet: {
-    running: "正在看哪些软件走 VPN",
-    done: "已查看哪些软件走 VPN",
-    failed: "读不到直连范围",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  ConfigSetMode: {
-    running: "正在切换接管方式",
-    done: "已切换接管方式",
-    failed: "没能切换接管方式",
-    advice: "连接可能短暂中断，可以再试一次。",
-    readOnly: false,
-  },
-  RouteSetMode: {
-    running: "正在切换走法",
-    done: "已切换走法",
-    failed: "没能切换走法",
-    advice: "还是原来的走法，可以再试一次。",
-    readOnly: false,
-  },
-  RouteTargetsSet: {
-    running: "正在调整直连范围",
-    done: "已调整直连范围",
-    failed: "没能调整直连范围",
-    advice: "可以再试一次。",
-    readOnly: false,
-  },
-  CategoryList: {
-    running: "正在看服务分类",
-    done: "已查看服务分类",
-    failed: "服务分类读不到",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  RulesStatus: {
-    running: "正在检查直连数据",
-    done: "已检查直连数据",
-    failed: "直连数据状态读不到",
-    advice: "可以稍后再试一次。",
-    readOnly: true,
-  },
-  IssueReport: {
-    running: "正在整理问题报告",
-    done: "问题报告已生成",
-    failed: "问题报告没生成",
-    advice: "可以再试一次；还是不行就先把日志留着。",
-    readOnly: false,
-  },
-  SetUserRegion: {
-    running: "正在记下地区",
-    done: "地区已记下",
-    failed: "没能记下地区",
-    advice: "可以在对话里再说一次你所在的地区。",
-    readOnly: false,
-  },
-  MyServers: {
-    running: "正在看服务器列表",
-    done: "已查看服务器列表",
-    failed: "服务器列表读不到",
-    advice: "可以稍后再试一次；已有节点不受影响。",
-    readOnly: true,
-  },
-  MyServerFailure: {
-    running: "正在看这次创建卡在哪",
-    done: "已查看创建失败详情",
-    failed: "失败详情读不到",
-    advice: "可以重试创建，或稍后再试一次。",
-    readOnly: true,
-  },
-  CatalogOptions: {
-    running: "正在看可选地区和规格",
-    done: "已看可选地区和规格",
-    failed: "读不到可选地区和规格",
-    advice: "可以直接在舞台上自己选。",
-    readOnly: true,
-  },
-  StageSelect: {
-    running: "正在选地区和规格",
-    done: "已选好地区和规格",
-    failed: "没能选好地区和规格",
-    advice: "可以直接在舞台上自己选。",
-    readOnly: false,
-  },
-  OpenSettings: {
-    running: "正在打开设置",
-    done: "已打开设置",
-    failed: "没能打开设置",
-    advice: "可以从左下角的设置图标自己进去。",
-    readOnly: true,
-  },
-  HttpCheck: {
-    running: "正在检查这个网站",
-    done: "已检查这个网站",
-    failed: "没能检查这个网站",
-    advice: "可以换一个地址再试。",
-    readOnly: true,
-  },
+const FALLBACK_KEYS: ToolCopyKeys = {
+  running: "tool.fallback.running",
+  done: "tool.fallback.done",
+  failed: "tool.fallback.failed",
+  advice: "tool.fallback.advice",
+  readOnly: false,
+};
+
+function entry(
+  running: MessageKey,
+  done: MessageKey,
+  failed: MessageKey,
+  advice: MessageKey,
+  readOnly: boolean,
+): ToolCopyKeys {
+  return { running, done, failed, advice, readOnly };
+}
+
+export const TOOL_COPY: Record<string, ToolCopyKeys> = {
+  RuntimeStatus: entry(
+    "tool.RuntimeStatus.running",
+    "tool.RuntimeStatus.done",
+    "tool.RuntimeStatus.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  RuntimeStart: entry(
+    "tool.RuntimeStart.running",
+    "tool.RuntimeStart.done",
+    "tool.RuntimeStart.failed",
+    "tool.advice.retry",
+    false,
+  ),
+  RuntimeStop: entry(
+    "tool.RuntimeStop.running",
+    "tool.RuntimeStop.done",
+    "tool.RuntimeStop.failed",
+    "tool.advice.retry",
+    false,
+  ),
+  RuntimeRestart: entry(
+    "tool.RuntimeRestart.running",
+    "tool.RuntimeRestart.done",
+    "tool.RuntimeRestart.failed",
+    "tool.advice.retry",
+    false,
+  ),
+  RuntimeLogs: entry(
+    "tool.RuntimeLogs.running",
+    "tool.RuntimeLogs.done",
+    "tool.RuntimeLogs.failed",
+    "tool.advice.unaffected",
+    true,
+  ),
+  CoreListVersions: entry(
+    "tool.CoreListVersions.running",
+    "tool.CoreListVersions.done",
+    "tool.CoreListVersions.failed",
+    "tool.advice.manualCheck",
+    true,
+  ),
+  CoreUpgrade: entry(
+    "tool.CoreUpgrade.running",
+    "tool.CoreUpgrade.done",
+    "tool.CoreUpgrade.failed",
+    "tool.advice.manualCheckUpdate",
+    false,
+  ),
+  CatalogSearch: entry(
+    "tool.CatalogSearch.running",
+    "tool.CatalogSearch.done",
+    "tool.CatalogSearch.failed",
+    "tool.advice.network",
+    true,
+  ),
+  ConfigDetail: entry(
+    "tool.ConfigDetail.running",
+    "tool.ConfigDetail.done",
+    "tool.ConfigDetail.failed",
+    "tool.advice.otherConfig",
+    true,
+  ),
+  ConfigUpdate: entry(
+    "tool.ConfigUpdate.running",
+    "tool.ConfigUpdate.done",
+    "tool.ConfigUpdate.failed",
+    "tool.advice.unchangedRetry",
+    false,
+  ),
+  NodeImportUrl: entry(
+    "tool.NodeImportUrl.running",
+    "tool.NodeImportUrl.done",
+    "tool.NodeImportUrl.failed",
+    "tool.advice.subscription",
+    false,
+  ),
+  NodeImportText: entry(
+    "tool.NodeImportText.running",
+    "tool.NodeImportText.done",
+    "tool.NodeImportText.failed",
+    "tool.advice.pasted",
+    false,
+  ),
+  NodeCreate: entry(
+    "tool.NodeCreate.running",
+    "tool.NodeCreate.done",
+    "tool.NodeCreate.failed",
+    "tool.advice.address",
+    false,
+  ),
+  NodeSwitch: entry(
+    "tool.NodeSwitch.running",
+    "tool.NodeSwitch.done",
+    "tool.NodeSwitch.failed",
+    "tool.advice.stillOldNode",
+    false,
+  ),
+  NodeProbe: entry(
+    "tool.NodeProbe.running",
+    "tool.NodeProbe.done",
+    "tool.NodeProbe.failed",
+    "tool.advice.probeTimeout",
+    true,
+  ),
+  VpnConnect: entry(
+    "tool.VpnConnect.running",
+    "tool.VpnConnect.done",
+    "tool.VpnConnect.failed",
+    "tool.advice.otherNode",
+    false,
+  ),
+  VpnDisconnect: entry(
+    "tool.VpnDisconnect.running",
+    "tool.VpnDisconnect.done",
+    "tool.VpnDisconnect.failed",
+    "tool.advice.stillConnected",
+    false,
+  ),
+  DiagRun: entry(
+    "tool.DiagRun.running",
+    "tool.DiagRun.done",
+    "tool.DiagRun.failed",
+    "tool.advice.retry",
+    true,
+  ),
+  DeepseekSetupKey: entry(
+    "tool.DeepseekSetupKey.running",
+    "tool.DeepseekSetupKey.done",
+    "tool.DeepseekSetupKey.failed",
+    "tool.advice.retry",
+    true,
+  ),
+  DeepseekSaveKey: entry(
+    "tool.DeepseekSaveKey.running",
+    "tool.DeepseekSaveKey.done",
+    "tool.DeepseekSaveKey.failed",
+    "tool.advice.keyCheck",
+    false,
+  ),
+  JobGet: entry(
+    "tool.JobGet.running",
+    "tool.JobGet.done",
+    "tool.JobGet.failed",
+    "tool.advice.jobEnded",
+    true,
+  ),
+  AskUserQuestion: entry(
+    "tool.AskUserQuestion.running",
+    "tool.AskUserQuestion.done",
+    "tool.AskUserQuestion.failed",
+    "tool.advice.askAgain",
+    true,
+  ),
+  NetConfigGet: entry(
+    "tool.NetConfigGet.running",
+    "tool.NetConfigGet.done",
+    "tool.NetConfigGet.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  NetRepair: entry(
+    "tool.NetRepair.running",
+    "tool.NetRepair.done",
+    "tool.NetRepair.failed",
+    "tool.advice.retry",
+    false,
+  ),
+  CatalogRefresh: entry(
+    "tool.CatalogRefresh.running",
+    "tool.CatalogRefresh.done",
+    "tool.CatalogRefresh.failed",
+    "tool.advice.oldKept",
+    false,
+  ),
+  DefaultProfileStatus: entry(
+    "tool.DefaultProfileStatus.running",
+    "tool.DefaultProfileStatus.done",
+    "tool.DefaultProfileStatus.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  RouteGet: entry(
+    "tool.RouteGet.running",
+    "tool.RouteGet.done",
+    "tool.RouteGet.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  ConfigSetMode: entry(
+    "tool.ConfigSetMode.running",
+    "tool.ConfigSetMode.done",
+    "tool.ConfigSetMode.failed",
+    "tool.advice.briefInterruption",
+    false,
+  ),
+  RouteSetMode: entry(
+    "tool.RouteSetMode.running",
+    "tool.RouteSetMode.done",
+    "tool.RouteSetMode.failed",
+    "tool.advice.oldRoute",
+    false,
+  ),
+  RouteTargetsSet: entry(
+    "tool.RouteTargetsSet.running",
+    "tool.RouteTargetsSet.done",
+    "tool.RouteTargetsSet.failed",
+    "tool.advice.retry",
+    false,
+  ),
+  CategoryList: entry(
+    "tool.CategoryList.running",
+    "tool.CategoryList.done",
+    "tool.CategoryList.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  RulesStatus: entry(
+    "tool.RulesStatus.running",
+    "tool.RulesStatus.done",
+    "tool.RulesStatus.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
+  IssueReport: entry(
+    "tool.IssueReport.running",
+    "tool.IssueReport.done",
+    "tool.IssueReport.failed",
+    "tool.advice.keepLogs",
+    false,
+  ),
+  SetUserRegion: entry(
+    "tool.SetUserRegion.running",
+    "tool.SetUserRegion.done",
+    "tool.SetUserRegion.failed",
+    "tool.advice.sayRegion",
+    false,
+  ),
+  MyServers: entry(
+    "tool.MyServers.running",
+    "tool.MyServers.done",
+    "tool.MyServers.failed",
+    "tool.advice.nodesUnaffected",
+    true,
+  ),
+  MyServerFailure: entry(
+    "tool.MyServerFailure.running",
+    "tool.MyServerFailure.done",
+    "tool.MyServerFailure.failed",
+    "tool.advice.retryCreate",
+    true,
+  ),
+  NodeRotateCredentials: entry(
+    "tool.NodeRotateCredentials.running",
+    "tool.NodeRotateCredentials.done",
+    "tool.NodeRotateCredentials.failed",
+    "tool.advice.rotateRetry",
+    false,
+  ),
+  CatalogOptions: entry(
+    "tool.CatalogOptions.running",
+    "tool.CatalogOptions.done",
+    "tool.CatalogOptions.failed",
+    "tool.advice.chooseOnStage",
+    true,
+  ),
+  StageSelect: entry(
+    "tool.StageSelect.running",
+    "tool.StageSelect.done",
+    "tool.StageSelect.failed",
+    "tool.advice.chooseOnStage",
+    false,
+  ),
+  OpenSettings: entry(
+    "tool.OpenSettings.running",
+    "tool.OpenSettings.done",
+    "tool.OpenSettings.failed",
+    "tool.advice.settingsIcon",
+    true,
+  ),
+  HttpCheck: entry(
+    "tool.HttpCheck.running",
+    "tool.HttpCheck.done",
+    "tool.HttpCheck.failed",
+    "tool.advice.otherAddress",
+    true,
+  ),
 };
 
 export const TOOL_NAMES = Object.keys(TOOL_COPY);
 
 const warnedTools = new Set<string>();
 
+function localizeCopy(keys: ToolCopyKeys): ToolCopy {
+  return {
+    running: t(keys.running),
+    done: t(keys.done),
+    failed: t(keys.failed),
+    advice: t(keys.advice),
+    readOnly: keys.readOnly,
+  };
+}
+
 export function toolCopy(tool: string): ToolCopy {
   const copy = TOOL_COPY[tool];
-  if (copy) return copy;
+  if (copy) return localizeCopy(copy);
   // 开发构建只提醒一次；原始工具名不是合法的兜底文案。
   if (import.meta.env.DEV && !warnedTools.has(tool)) {
     warnedTools.add(tool);
     console.warn(`[toolDisplay] 未映射的工具：${tool}`);
   }
-  return FALLBACK_COPY;
+  // 中文下返回原对象（测试对兜底对象做恒等断言）；英文现翻。
+  return getLanguage() === "zh" ? FALLBACK_COPY : localizeCopy(FALLBACK_KEYS);
 }
 
 function readText(value: unknown): string | null {
@@ -428,16 +475,16 @@ export function readToolDisplay(raw: unknown): ToolDisplayInfo | null {
 
 const FACT_KEYS: Array<{
   pattern: RegExp;
-  label: string;
+  label: MessageKey;
   format?: (value: string) => string;
 }> = [
-  { pattern: /^(config|configuration)_name$/, label: "配置" },
-  { pattern: /^node_name$/, label: "节点" },
-  { pattern: /^(exit_ip|public_ip)$/, label: "出口" },
+  { pattern: /^(config|configuration)_name$/, label: "tool.fact.config" },
+  { pattern: /^node_name$/, label: "tool.fact.node" },
+  { pattern: /^(exit_ip|public_ip)$/, label: "tool.fact.exit" },
   {
     pattern: /^(latency_ms|delay_ms|node_latency_ms)$/,
-    label: "延迟",
-    format: (value) => `${value} 毫秒`,
+    label: "tool.fact.latency",
+    format: (value) => t("tool.time.ms", { value }),
   },
 ];
 
@@ -453,28 +500,31 @@ export function factsFromArgs(
     if (typeof raw !== "string" && typeof raw !== "number") continue;
     const text = String(raw).trim();
     if (!text) continue;
-    facts.push({ label: spec.label, value: spec.format ? spec.format(text) : text });
+    facts.push({
+      label: t(spec.label),
+      value: spec.format ? spec.format(text) : text,
+    });
     if (facts.length >= 4) break;
   }
   return facts;
 }
 
 export function changedLabel(changed: ChangedState | null, readOnly: boolean): string {
-  if (changed === "none") return "没有改动任何设置";
-  if (changed === "restored") return "已经恢复原样";
-  if (changed === "unknown") return "不确定，诊断日志里有记录";
-  return readOnly ? "没有改动任何设置" : "不确定，诊断日志里有记录";
+  if (changed === "none") return t("tool.changed.none");
+  if (changed === "restored") return t("tool.changed.restored");
+  if (changed === "unknown") return t("tool.changed.unknown");
+  return t(readOnly ? "tool.changed.none" : "tool.changed.unknown");
 }
 
 /** 默认行只在 ≥3 秒时出现。 */
 export function shortDuration(ms: number): string {
-  return `${(ms / 1000).toFixed(1)} 秒`;
+  return t("tool.time.seconds", { value: (ms / 1000).toFixed(1) });
 }
 
 /** 展开里始终显示精确值。 */
 export function exactDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)} 毫秒`;
-  return `${(ms / 1000).toFixed(1)} 秒`;
+  if (ms < 1000) return t("tool.time.ms", { value: Math.round(ms) });
+  return t("tool.time.seconds", { value: (ms / 1000).toFixed(1) });
 }
 
 export const DURATION_THRESHOLD_MS = 3000;

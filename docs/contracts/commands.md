@@ -2296,7 +2296,7 @@ type UiContext = {
 | `client` | `client.primary`（启动 / 断开 / 重新连接同一个 id） / `client.node_pick` / `client.ask_ai` / `client.probe`（节点卡副行的「测速」文字入口） | button / choice / button / button |
 | `no_nodes` | `no_nodes.trial` / `no_nodes.new_node` | button |
 | `new_node` | `new_node.region` / `new_node.plan` / `new_node.create` / `new_node.ask_ai` | choice / choice / button / button |
-| `servers` | `servers.item` / `servers.connect` / `servers.rebuild`（端点未接入前不出现） / `servers.destroy` / `servers.ai_locate` | row / button / button / button / button |
+| `servers` | `servers.item` / `servers.destroy` / `servers.ai_locate` | row / button / button |
 | `trial_expired` | `trial_expired.new_node` | button |
 | `settings` | `settings.ai` / `settings.connection` / `settings.account` / `settings.advanced` | button |
 
@@ -2440,14 +2440,14 @@ type LlmTestResult = { ok: boolean; latency_ms: number | null; error?: string };
 | `answer` 取值（普通提问） | 接受**任何非空文本**，原样作为回答回给模型；空字符串 = 跳过。用户不必被选项卡住，打字说清楚就行 |
 | `answer` 取值（`core_upgrade_confirm`） | 装包授权**必须逐字等于该问题 `options` 之一**（不 trim、不归一大小写），否则 → `INVALID_ARGUMENT / answer_not_in_options`；空字符串仍是跳过 |
 | 默认节点同意 | 只有逐字选中规范选项「Veyl 免费节点（仅供试用）」才授予；用户自由作答不授予，模型重问一次是预期行为 |
-| 解释答案 | `解释这个设置的含义` 是提问卡片上的固定按钮，回传时就是这串字。协议上它仍是普通非空文本：Host 不解析、不拦截、不特殊处理；语义（不当作答、不推进、不构成节点同意）由提示词约束。Host 只在本请求内记一个「收到过解释串」的标记，用于 `ConfigCreate` 的解释门禁；用户任意其它回答即清除该标记 |
+| 解释答案 | 提问卡片上的固定按钮按界面语言回传两种原文之一：`解释这个设置的含义` / `Explain what this setting means`（前后空白不算内容）。协议上它们仍是普通非空文本：Host 不拦截、不特殊处理；语义（不当作答、不推进、不构成节点同意）由提示词约束。Host 只在本请求内记一个「收到过解释串」的标记，用于 `ConfigCreate` 的解释门禁；用户任意其它回答即清除该标记 |
 | 回答落库 | 送达模型后写一条 `role = "user"` 的聊天记录（`content` 为回答原文）；只是历史，不会重复喂给模型。空字符串（跳过）不写 |
 | 一个 `questionId` 只能回答一次 | 第二次及以后 → `NOT_FOUND / question_not_pending` |
 | 超时后 | 同上（Host 已代答空串） |
 | 会话不匹配 | **同样返回 `question_not_pending`**，不区分「不存在」与「属于别的会话」——否则这个命令会变成跨会话探测问题的工具 |
 
-**「解释这个设置的含义」不改变协议**：回答仍是非空文本，没有新增字段或事件，本文件版本不变（2.18.0）；
-它是提示词层的保留值，不是新的回答类型。
+**「解释这个设置的含义」/「Explain what this setting means」不改变协议**：回答仍是非空文本，没有新增字段或事件，本文件版本不变（2.18.0）；
+它们是提示词层的保留值，不是新的回答类型。中英两种原文由 Host 逐字识别，中文界面与老会话继续发中文串。
 
 ```ts
 type PendingQuestion = {

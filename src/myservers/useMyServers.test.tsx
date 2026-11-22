@@ -103,8 +103,29 @@ describe("「已下单但认不出新机器」的生命周期", () => {
     expect(catalog.mock.calls[0]).toEqual([]);
   });
 
-  it("新行出现在列表后自动解除占位并选中它", async () => {
+  it("选中刚下单的新 id、列表还没回来：awaitingSelected 为 true，回来后自动恢复", async () => {
     const list = { current: [] as MyServer[] };
+    const { result } = await mount(list);
+
+    // 下单成功立刻选中新 id；列表刷新返回时这台还没出现。
+    await act(async () => {
+      result.current.ordered("srv_new");
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(result.current.awaitingSelected).toBe(true);
+    expect(result.current.selected).toBeNull();
+
+    list.current = [{ ...SERVER_A, server_id: "srv_new" }];
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.awaitingSelected).toBe(false);
+    expect(result.current.selected?.server_id).toBe("srv_new");
+  });
+
+  it("新行出现在列表后自动解除占位并选中它", async () => {    const list = { current: [] as MyServer[] };
     const { result } = await mount(list);
 
     await act(async () => {

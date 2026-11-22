@@ -8,6 +8,7 @@ import type {
   ToolPermissionLevel,
 } from "../agent/protocol";
 import { readToolDisplay, toolCopy } from "../components/toolDisplay";
+import { t } from "../i18n";
 import type { ToolDisplayInfo } from "../components/toolDisplay";
 
 export type ToolCallState = "running" | "ok" | "error";
@@ -107,7 +108,7 @@ export function nextId(prefix: string): string {
 export function createSession(now = Date.now()): Session {
   return {
     id: nextId("session"),
-    title: "新会话",
+    title: t("chat.newSession"),
     createdAt: now,
     updatedAt: now,
     messages: [],
@@ -290,7 +291,7 @@ export function messagesFromStored(
 
 export function titleFromText(text: string): string {
   const clean = text.replace(/\s+/g, " ").trim();
-  return clean.length > 22 ? `${clean.slice(0, 22)}…` : clean || "新会话";
+  return clean.length > 22 ? `${clean.slice(0, 22)}…` : clean || t("chat.newSession");
 }
 
 /**
@@ -397,7 +398,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         title: isFirst ? titleFromText(action.text) : session.title,
         updatedAt: now,
         requesting: true,
-        status: { text: "正在思考", phase: "thinking" },
+        status: { text: t("chat.status.thinking"), phase: "thinking" },
         messages: [
           ...session.messages,
           {
@@ -420,7 +421,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...session,
         updatedAt: now,
         requesting: true,
-        status: { text: "正在思考", phase: "thinking" },
+        status: { text: t("chat.status.thinking"), phase: "thinking" },
         messages: [
           ...session.messages,
           {
@@ -456,7 +457,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return patchSession(state, target.id, (session) => ({
         ...session,
         requesting: true,
-        status: { text: "正在思考", phase: "thinking" },
+        status: { text: t("chat.status.thinking"), phase: "thinking" },
       }));
     }
 
@@ -573,7 +574,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               streaming: true,
               items: appendText(message.items, event.payload.chunk),
             })),
-            status: { text: "正在回复", phase: "streaming_answer" },
+            status: { text: t("chat.status.replying"), phase: "streaming_answer" },
           }));
 
         case AGENT_EVENTS.thinkingChunk:
@@ -655,7 +656,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 event.payload.phase === "running_tool"
                   ? session.status?.phase === "running_tool"
                     ? session.status.text
-                    : "正在处理…"
+                    : t("chat.status.working")
                   : event.payload.text,
               phase: event.payload.phase,
             },
@@ -667,7 +668,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               ...message,
               items: [
                 ...message.items,
-                { kind: "notice", id: nextId("notice"), text: event.payload.text || "上下文已压缩" },
+                { kind: "notice", id: nextId("notice"), text: event.payload.text || t("chat.notice.compacted") },
               ],
             })),
           );
@@ -692,8 +693,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             if (!REQUEST_RESULTS[result]) {
               const text =
                 result === "cancelled"
-                  ? "已停止"
-                  : error?.message ?? "本轮请求失败";
+                  ? t("chat.status.stopped")
+                  : error?.message ?? t("chat.status.requestFailed");
               return {
                 ...patched,
                 activeRequestId: null,
@@ -763,7 +764,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (!current) return state;
       return patchSession(state, current.id, (session) => ({
         ...session,
-        status: { text: "正在停止", phase: "thinking" },
+        status: { text: t("chat.status.stopping"), phase: "thinking" },
       }));
 
     case "hydrate_history": {
@@ -781,7 +782,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
       const sessions: Session[] = history.sessions.map((summary) => ({
         id: summary.id,
-        title: summary.title || "未命名会话",
+        title: summary.title || t("chat.untitled"),
         createdAt: parseTime(summary.created_at),
         updatedAt: parseTime(summary.created_at),
         messages: [],

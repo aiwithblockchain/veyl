@@ -175,6 +175,7 @@ interface StageOverrides {
   ) => Promise<{ ok: boolean; message?: string }>;
   onReportProblem?: () => void;
   reportBusy?: boolean;
+  onAskAi?: (prompt: string) => void;
   pendingServerNodes?: PendingServerNode[];
 }
 
@@ -203,6 +204,7 @@ function stageElement(over: StageOverrides = {}) {
       onSetRoutingMode={over.onSetRoutingMode}
       onReportProblem={over.onReportProblem}
       reportBusy={over.reportBusy}
+      onAskAi={over.onAskAi}
       pendingServerNodes={over.pendingServerNodes}
     />
   );
@@ -1765,8 +1767,7 @@ describe("免费节点到期后就地拒绝", () => {
       onStart,
     });
 
-    const freeRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
-    expect(freeRow.disabled).toBe(true);
+    const freeRow = screen.getAllByRole("option")[1] as HTMLElement;
     expect(freeRow.getAttribute("aria-disabled")).toBe("true");
     expect(freeRow.classList.contains("is-expired")).toBe(true);
     expect(freeRow.querySelector(".stage-node__sub")?.textContent).toBe("已到期");
@@ -1821,9 +1822,9 @@ describe("免费节点到期后就地拒绝", () => {
       onSwitchNode,
     });
 
-    const [ownedRow, freeRow] = screen.getAllByRole("option") as HTMLButtonElement[];
-    expect(ownedRow.disabled).toBe(false);
-    expect(freeRow.disabled).toBe(true);
+    const [ownedRow, freeRow] = screen.getAllByRole("option") as HTMLElement[];
+    expect(ownedRow.getAttribute("aria-disabled")).toBeNull();
+    expect(freeRow.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(freeRow);
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(
@@ -1884,8 +1885,7 @@ describe("免费节点到期后就地拒绝", () => {
       onSwitchNode,
     });
 
-    const freeRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
-    expect(freeRow.disabled).toBe(false);
+    const freeRow = screen.getAllByRole("option")[1] as HTMLElement;
     expect(freeRow.getAttribute("aria-disabled")).toBeNull();
     expect(freeRow.classList.contains("is-expired")).toBe(false);
     expect(freeRow.querySelector(".stage-node__sub")).toBeNull();
@@ -2182,8 +2182,7 @@ describe("停机删除的悬挂节点", () => {
       onSwitchNode,
     });
 
-    const deadRow = screen.getAllByRole("option")[0] as HTMLButtonElement;
-    expect(deadRow.disabled).toBe(true);
+    const deadRow = screen.getAllByRole("option")[0] as HTMLElement;
     expect(deadRow.getAttribute("aria-disabled")).toBe("true");
     expect(deadRow.classList.contains("is-dangling")).toBe(true);
     expect(deadRow.querySelector(".stage-node__sub")?.textContent).toBe("停机删除");
@@ -2195,8 +2194,8 @@ describe("停机删除的悬挂节点", () => {
     expect(deadRow.getAttribute("aria-selected")).toBe("true");
 
     // 另一台正常节点照旧能选：点一下就顶掉当前那台。
-    const aliveRow = screen.getAllByRole("option")[1] as HTMLButtonElement;
-    expect(aliveRow.disabled).toBe(false);
+    const aliveRow = screen.getAllByRole("option")[1] as HTMLElement;
+    expect(aliveRow.getAttribute("aria-disabled")).toBeNull();
     fireEvent.click(aliveRow);
     expect(aliveRow.getAttribute("aria-selected")).toBe("true");
     expect(deadRow.getAttribute("aria-selected")).toBe("false");
@@ -2261,5 +2260,158 @@ describe("停机删除的悬挂节点", () => {
     expect(again.disabled).toBe(true);
     fireEvent.click(again);
     expect(onStart).not.toHaveBeenCalled();
+  });
+});
+
+describe("测不通问AI", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    ...CONFIG.nodes[1],
+    node_id: "o1",
+    name: "悉尼0.2u",
+    source: "owned",
+  };
+
+  function withNodes(
+    nodes: ConfigDetail["nodes"],
+    current: string | null = nodes[0]?.node_id ?? null,
+  ): ConfigDetail {
+    return { ...CONFIG, node_count: nodes.length, current_node_id: current, nodes };
+  }
+
+  it("测不通的行给出「测不通问AI」：点了发带节点名的提示，不切节点", () => {
+    const onAskAi = vi.fn();
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      nodeProbes: probes({
+        results: { o1: failedProbe("o1"), n1: probeResult("n1", 42) },
+      }),
+      onAskAi,
+      onSwitchNode,
+    });
+
+    const rows = screen.getAllByRole("option");
+    // 正常行没有入口，只有测不通的那行有。
+    expect(
+      within(rows[1]).queryByRole("button", { name: "测不通问AI" }),
+    ).toBeNull();
+    const ask = within(rows[0]).getByRole("button", { name: "测不通问AI" });
+    expect(ask.tagName).toBe("BUTTON");
+
+    fireEvent.click(ask);
+    expect(onAskAi).toHaveBeenCalledTimes(1);
+    const prompt = String(onAskAi.mock.calls[0][0]);
+    expect(prompt).toContain("悉尼0.2u");
+    expect(prompt).toContain("测不通");
+    expect(prompt).toContain("智能恢复");
+    expect(prompt).toContain("销毁重建");
+    expect(onSwitchNode).not.toHaveBeenCalled();
+    expect(rows[0].getAttribute("aria-selected")).toBe("true");
+    expect(rows[1].getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("免费种子节点测不通：不出现入口，仍写纯文本「测不通」", () => {
+    const onAskAi = vi.fn();
+    renderStage({
+      config: withNodes(
+        [CONFIG.nodes[0], CONFIG.nodes[1]],
+        CONFIG.nodes[0].node_id,
+      ),
+      nodeProbes: probes({
+        results: { n1: failedProbe("n1"), n2: probeResult("n2", 42) },
+      }),
+      onAskAi,
+    });
+
+    const rows = screen.getAllByRole("option");
+    expect(
+      within(rows[0]).queryByRole("button", { name: "测不通问AI" }),
+    ).toBeNull();
+    expect(rows[0].querySelector(".stage-node__ms")?.textContent).toBe("测不通");
+  });
+
+  it("点行的其它区域仍然选中该节点，不触发 AI", () => {
+    const onAskAi = vi.fn();
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], CONFIG.nodes[0].node_id),
+      nodeProbes: probes({
+        results: { o1: failedProbe("o1"), n1: probeResult("n1", 42) },
+      }),
+      onAskAi,
+      onSwitchNode,
+    });
+
+    const rows = screen.getAllByRole("option");
+    fireEvent.click(rows[0].querySelector(".stage-node__name") as HTMLElement);
+    // 未连接时点行只做本地选中，不切隧道。
+    expect(rows[0].getAttribute("aria-selected")).toBe("true");
+    expect(onAskAi).not.toHaveBeenCalled();
+  });
+
+  it("行是键盘可达的容器，AI 入口是原生按钮", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    renderStage({
+      config: withNodes([OWNED], OWNED.node_id),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      onAskAi: vi.fn(),
+      onSwitchNode,
+    });
+
+    const row = screen.getAllByRole("option")[0];
+    expect(row.getAttribute("tabindex")).toBe("0");
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(row.getAttribute("aria-selected")).toBe("true");
+    // 真按钮：没有覆盖 tabIndex，跟随原生 Tab 顺序。
+    expect(
+      within(row).getByRole("button", { name: "测不通问AI" }).getAttribute(
+        "tabindex",
+      ),
+    ).toBeNull();
+  });
+
+  it("延迟、未测、测速中、到期、停机删除都不出现入口", () => {
+    const onAskAi = vi.fn();
+
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      nodeProbes: probes({
+        results: { o1: probeResult("o1", 42), n1: untestedProbe("n1") },
+      }),
+      onAskAi,
+    });
+    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    cleanup();
+
+    // 测速中：旧结果还是测不通，但这一行正在测，先不出现入口。
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      nodeProbes: probes({
+        probing: new Set(["o1"]),
+        results: { o1: failedProbe("o1") },
+      }),
+      onAskAi,
+    });
+    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    cleanup();
+
+    renderStage({
+      config: withNodes([CONFIG.nodes[0], CONFIG.nodes[1]], CONFIG.nodes[1].node_id),
+      trialExpiresAt: new Date(Date.now() - 1000).toISOString(),
+      nodeProbes: probes({
+        results: { n1: failedProbe("n1"), n2: failedProbe("n2") },
+      }),
+      onAskAi,
+    });
+    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
+    cleanup();
+
+    renderStage({
+      config: withNodes([OWNED, CONFIG.nodes[0]], OWNED.node_id),
+      danglingNodeIds: new Set(["o1"]),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+      onAskAi,
+    });
+    expect(screen.queryByRole("button", { name: "测不通问AI" })).toBeNull();
   });
 });

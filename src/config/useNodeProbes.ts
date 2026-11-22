@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentBridge, NodeProbeRun } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { t as translate } from "../i18n";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   NodeProbeData,
@@ -66,7 +67,7 @@ function isMissingCommand(error: unknown): boolean {
 
 function messageOf(error: unknown, fallback: string): string {
   const bridgeError = toBridgeError(error);
-  return bridgeError.message || fallback;
+  return bridgeError.hasMessage ? bridgeError.message : fallback;
 }
 
 /**
@@ -282,8 +283,11 @@ export function useNodeProbes({
         showNotice(
           payload.config_id,
           payload.reason === "connected"
-            ? "连接后测速已停止"
-            : `已停止 · 已测 ${payload.ok + payload.failed + untested}/${payload.total}`,
+            ? translate("probe.notice.connected")
+            : translate("probe.notice.stopped", {
+              done: payload.ok + payload.failed + untested,
+              total: payload.total,
+            }),
         );
       }
     },
@@ -362,12 +366,12 @@ export function useNodeProbes({
   const start = useCallback(
     async (configId: string, nodeIds?: string[]) => {
       if (nodeIds && nodeIds.length === 0) {
-        return { ok: false, message: "没有可测的节点。" };
+        return { ok: false, message: translate("probe.error.noNodes") };
       }
-      if (runRef.current) return { ok: false, message: "已经有测速在跑，等它结束再试。" };
+      if (runRef.current) return { ok: false, message: translate("probe.error.busy") };
       // 子集在启动这一刻固定，之后搜索变化不再影响批次分母。
       const scope = nodeIds ?? knownNodeIds.current;
-      if (scope.length === 0) return { ok: false, message: "这套配置还没有节点。" };
+      if (scope.length === 0) return { ok: false, message: translate("probe.error.noConfigNodes") };
       clearNotice();
       runScope.current = scope;
       startingConfigRef.current = configId;
@@ -415,9 +419,9 @@ export function useNodeProbes({
         runScope.current = [];
         if (isMissingCommand(error)) {
           setAvailable(false);
-          return { ok: false, message: "这个版本还不能批量测速。" };
+          return { ok: false, message: translate("probe.error.unsupported") };
         }
-        return { ok: false, message: messageOf(error, "没能开始测速，请稍后再试。") };
+        return { ok: false, message: messageOf(error, translate("probe.error.startFailed")) };
       } finally {
         setStarting(false);
       }

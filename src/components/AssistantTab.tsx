@@ -1,4 +1,5 @@
 import type { Ref } from "react";
+import { useT } from "../i18n";
 
 interface Props {
   unread: boolean;
@@ -9,16 +10,19 @@ interface Props {
 
 /** 助手收起后的右边缘 56px tab：整个 tab 是一个按钮，竖排「助手」+ 未读点。 */
 export function AssistantTab({ unread, onOpen, openButtonRef }: Props) {
+  const t = useT();
   return (
-    <aside className="assistant-tab" aria-label="助手已收起">
+    <aside className="assistant-tab" aria-label={t("assistantTab.collapsedAria")}>
       <button
         ref={openButtonRef}
         type="button"
         className="assistant-tab__open"
         onClick={onOpen}
-        aria-label={unread ? "展开助手，有新消息" : "展开助手"}
+        aria-label={
+          unread ? t("assistantTab.openUnreadAria") : t("assistantTab.openAria")
+        }
         aria-expanded={false}
-        title="展开助手"
+        title={t("assistantTab.open")}
       >
         <span className="assistant-tab__icon">
           <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
@@ -32,7 +36,7 @@ export function AssistantTab({ unread, onOpen, openButtonRef }: Props) {
           </svg>
           {unread ? <span className="assistant-tab__dot" aria-hidden /> : null}
         </span>
-        <span className="assistant-tab__label">助手</span>
+        <span className="assistant-tab__label">{t("assistant.name")}</span>
       </button>
     </aside>
   );

@@ -8,13 +8,14 @@ import {
   formatUsdCents,
   isProvisioning,
   isServerNodeReady,
-  MY_SERVER_TOMBSTONE_TEXT,
   serverBillingText,
+  serverTombstoneText,
   serverDetailState,
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
 import { copyText } from "../ui/clipboard";
+import { t, useT } from "../i18n";
 
 interface Props {
   bridge: AgentBridge;
@@ -45,9 +46,12 @@ export const DESTROY_RETRY_MS = 60_000;
 
 function errorText(error: unknown): string {
   const problem = toBridgeError(error);
-  const message = problem.message && problem.message !== "操作失败" ? problem.message : "";
-  const tail = problem.retryable ? "没有改动这台服务器；稍后再试。" : "没有改动这台服务器。";
-  return message ? `${message}${tail}` : `这次操作没完成。${tail}`;
+  // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
+  const message = problem.hasMessage ? problem.message : "";
+  const tail = problem.retryable
+    ? t("detail.error.noChangeRetry")
+    : t("detail.error.noChange");
+  return message ? `${message}${tail}` : `${t("detail.error.incomplete")}${tail}`;
 }
 
 /** 服务器详情：事实 + 底部操作行（销毁在左，主按钮在右）。 */
@@ -65,6 +69,7 @@ export function MyServerDetail({
   onForget,
   onRenamed,
 }: Props) {
+  const tr = useT();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,10 +115,10 @@ export function MyServerDetail({
   }, [renaming]);
 
   const validateName = (raw: string): string | null => {
-    if (raw.length === 0) return "名字不能为空。";
+    if (raw.length === 0) return tr("detail.name.empty");
     const trimmed = raw.trim();
-    if (trimmed.length === 0) return "名字不能只有空格。";
-    if (Array.from(trimmed).length > 24) return "名字最多 24 个字符。";
+    if (trimmed.length === 0) return tr("detail.name.spaces");
+    if (Array.from(trimmed).length > 24) return tr("detail.name.tooLong");
     return null;
   };
 
@@ -237,7 +242,7 @@ export function MyServerDetail({
         </div>
 
         <p className="myservers__billing is-expired" role="status">
-          {MY_SERVER_TOMBSTONE_TEXT}
+          {serverTombstoneText()}
         </p>
 
         {error ? (
@@ -250,7 +255,7 @@ export function MyServerDetail({
           <div className="myservers__danger">
             {confirming ? (
               <div className="myservers__confirm" role="alert">
-                <p>删除后这台机器和它的节点都不再显示，也不能恢复。</p>
+                <p>{tr("detail.delete.body")}</p>
                 <div className="myservers__actions">
                   <button
                     type="button"
@@ -258,7 +263,7 @@ export function MyServerDetail({
                     disabled={busy}
                     onClick={() => setConfirming(false)}
                   >
-                    取消
+                    {tr("common.cancel")}
                   </button>
                   <button
                     type="button"
@@ -266,7 +271,7 @@ export function MyServerDetail({
                     disabled={busy}
                     onClick={() => void forget()}
                   >
-                    {busy ? "正在删除…" : "确认删除"}
+                    {busy ? tr("detail.deleting") : tr("detail.confirmDelete")}
                   </button>
                 </div>
               </div>
@@ -276,11 +281,11 @@ export function MyServerDetail({
                 className="btn btn--danger-ghost"
                 disabled={locked || !server.local_node_id}
                 title={
-                  server.local_node_id ? undefined : "这台服务器没有留下本地节点。"
+                  server.local_node_id ? undefined : tr("detail.noLocalNode")
                 }
                 onClick={() => setConfirming(true)}
               >
-                删除
+                {tr("detail.delete")}
               </button>
             )}
           </div>
@@ -292,9 +297,9 @@ export function MyServerDetail({
   const primary = isProvisioning(server.state)
     ? null
     : server.state === "error"
-      ? { label: "重新建一台", disabled: locked, onClick: onCreateAnother }
+      ? { label: tr("detail.primary.rebuild"), disabled: locked, onClick: onCreateAnother }
       : server.state === "gone"
-        ? { label: "重新购买", disabled: locked, onClick: onCreateAnother }
+        ? { label: tr("detail.primary.rebuy"), disabled: locked, onClick: onCreateAnother }
         : null;
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
@@ -307,14 +312,16 @@ export function MyServerDetail({
   const settleFailed =
     server.state === "error" && server.failure?.code === "settle_insufficient";
   const failedBilling = settleFailed
-    ? "本次没有扣费"
+    ? tr("detail.billing.noCharge")
     : chargedCents === undefined || refundedCents === undefined
-      ? "费用信息暂时读不到"
+      ? tr("detail.billing.unavailable")
       : refundedCents > 0
-        ? `已退回 ${formatUsdCents(refundedCents)}`
+        ? tr("detail.billing.refunded", { amount: formatUsdCents(refundedCents) })
         : chargedCents === 0
-          ? "本次没有扣费"
-          : `已扣 ${formatUsdCents(chargedCents)}，退款处理中`;
+          ? tr("detail.billing.noCharge")
+          : tr("detail.billing.chargedPending", {
+              amount: formatUsdCents(chargedCents),
+            });
 
   return (
     <div className="myservers__detail">
@@ -327,7 +334,7 @@ export function MyServerDetail({
                 className={`myservers__rename-input${
                   savingName ? " is-saving" : ""
                 }`}
-                aria-label="服务器名称"
+                aria-label={tr("detail.renameAria")}
                 aria-invalid={renameError ? true : undefined}
                 aria-describedby={renameError ? "server-name-error" : undefined}
                 value={nameDraft}
@@ -367,7 +374,7 @@ export function MyServerDetail({
               ref={renameButtonRef}
               type="button"
               className="myservers__rename"
-              aria-label={`重命名 ${server.name}`}
+              aria-label={tr("detail.rename", { name: server.name })}
               onClick={startRename}
             >
               <IconPencil size={14} />
@@ -386,7 +393,7 @@ export function MyServerDetail({
 
       <dl className="myservers__facts">
         <div>
-          <dt>地区</dt>
+          <dt>{tr("detail.region")}</dt>
           <dd>{regionLabel}</dd>
         </div>
         {ready && (server.ip ?? "").trim() !== "" ? (
@@ -398,36 +405,36 @@ export function MyServerDetail({
                 type="button"
                 className="copy-btn"
                 onClick={() => void copyIp()}
-                aria-label="复制 IP"
+                aria-label={tr("detail.copyIp")}
               >
                 {ipCopy === "copied"
-                  ? "已复制"
+                  ? tr("chat.copy.copied")
                   : ipCopy === "failed"
-                    ? "复制失败"
-                    : "复制"}
+                    ? tr("chat.copy.failed")
+                    : tr("detail.copy")}
               </button>
               <span className="sr-only" role="status">
                 {ipCopy === "copied"
-                  ? "已复制"
+                  ? tr("chat.copy.copied")
                   : ipCopy === "failed"
-                    ? "复制失败"
+                    ? tr("chat.copy.failed")
                     : ""}
               </span>
             </dd>
           </div>
         ) : null}
         <div>
-          <dt>节点</dt>
-          <dd>{isServerNodeReady(server) ? "已就绪" : "未就绪"}</dd>
+          <dt>{tr("detail.node")}</dt>
+          <dd>{isServerNodeReady(server) ? tr("detail.nodeReady") : tr("detail.nodeNotReady")}</dd>
         </div>
         <div>
-          <dt>费用</dt>
+          <dt>{tr("detail.cost")}</dt>
           <dd className="num">{failed ? failedBilling : serverBillingText(server)}</dd>
         </div>
         {!failed && server.transfer_gib > 0 ? (
           <div>
-            <dt>流量</dt>
-            <dd>{`每月 ${server.transfer_gib} GB 出站`}</dd>
+            <dt>{tr("detail.traffic")}</dt>
+            <dd>{tr("detail.trafficMonthly", { gib: server.transfer_gib })}</dd>
           </div>
         ) : null}
       </dl>
@@ -447,12 +454,12 @@ export function MyServerDetail({
         <div className="myservers__failure" role="alert">
           <p>
             {settleFailed
-              ? "服务器没开通，本次没有扣费。"
+              ? tr("detail.settleFailed")
               : server.failure.message}
           </p>
           {settleFailed && onTopUp && !readOnly ? (
             <button type="button" className="btn btn--ghost" onClick={onTopUp}>
-              去充值
+              {tr("detail.topUp")}
             </button>
           ) : null}
           {onAiLocate ? (
@@ -461,7 +468,7 @@ export function MyServerDetail({
               className="btn btn--ghost"
               onClick={() => onAiLocate(server.server_id)}
             >
-              AI 定位
+              {tr("controls.aiLocate")}
             </button>
           ) : null}
         </div>
@@ -480,14 +487,14 @@ export function MyServerDetail({
         <div className="myservers__danger">
           {destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
-              正在销毁…
+              {tr("detail.destroying")}
             </p>
           ) : confirming ? (
             <div className="myservers__confirm" role="alert">
               <p>
                 {isProvisioning(server.state)
-                  ? "取消创建并销毁这台服务器？正在进行的安装会中断。"
-                  : "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。"}
+                  ? tr("detail.destroyConfirmProvisioning")
+                  : tr("detail.destroyConfirm")}
               </p>
               <div className="myservers__actions">
                 <button
@@ -496,7 +503,7 @@ export function MyServerDetail({
                   disabled={busy}
                   onClick={() => setConfirming(false)}
                 >
-                  取消
+                  {tr("common.cancel")}
                 </button>
                 <button
                   type="button"
@@ -504,7 +511,7 @@ export function MyServerDetail({
                   disabled={busy}
                   onClick={() => void destroy()}
                 >
-                  {busy ? "正在销毁…" : "确认销毁"}
+                  {busy ? tr("detail.destroying") : tr("detail.confirmDestroy")}
                 </button>
               </div>
             </div>
@@ -515,7 +522,7 @@ export function MyServerDetail({
               disabled={locked}
               onClick={() => setConfirming(true)}
             >
-              {destroying ? "重试销毁" : "销毁"}
+              {destroying ? tr("detail.retryDestroy") : tr("detail.destroy")}
             </button>
           )}
         </div>

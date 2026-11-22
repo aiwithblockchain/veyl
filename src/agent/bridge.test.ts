@@ -244,6 +244,7 @@ describe("readQuestionDetail", () => {
       }),
     ).toEqual({
       kind: "core_upgrade_confirm",
+      defaultIndex: null,
       upgradeConfirm: {
         currentVersion: "1.14.4",
         targetVersion: "1.15.0",
@@ -264,6 +265,7 @@ describe("readQuestionDetail", () => {
       }),
     ).toEqual({
       kind: "core_upgrade_confirm",
+      defaultIndex: null,
       upgradeConfirm: {
         currentVersion: "1.14.4",
         targetVersion: "1.15.0",
@@ -287,6 +289,7 @@ describe("readQuestionDetail", () => {
       }),
     ).toEqual({
       kind: "config_set_mode_confirm",
+      defaultIndex: null,
       upgradeConfirm: null,
       configSetModeConfirm: {
         configId: "cfg_1",
@@ -297,14 +300,36 @@ describe("readQuestionDetail", () => {
     });
   });
 
+  it("读取节点重置确认卡的默认焦点", () => {
+    expect(
+      readQuestionDetail({
+        kind: "node_rotate_confirm",
+        default_index: 1,
+        details: { will_disconnect: true },
+      }),
+    ).toEqual({
+      kind: "node_rotate_confirm",
+      defaultIndex: 1,
+      upgradeConfirm: null,
+      configSetModeConfirm: null,
+    });
+    // 非法下标当作没给：确认卡回落到「取消」。
+    expect(
+      readQuestionDetail({ kind: "node_rotate_confirm", default_index: -2 })
+        .defaultIndex,
+    ).toBeNull();
+  });
+
   it("普通提问不产出升级明细", () => {
     expect(readQuestionDetail({ kind: null })).toEqual({
       kind: null,
+      defaultIndex: null,
       upgradeConfirm: null,
       configSetModeConfirm: null,
     });
     expect(readQuestionDetail({ question: "要升级吗？" })).toEqual({
       kind: null,
+      defaultIndex: null,
       upgradeConfirm: null,
       configSetModeConfirm: null,
     });

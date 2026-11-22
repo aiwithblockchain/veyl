@@ -12,6 +12,7 @@ import type {
 import type { AgentEvent } from "../agent/protocol";
 import { AGENT_EVENTS } from "../agent/protocol";
 import { useMyServers } from "../myservers/useMyServers";
+import { setLanguage } from "../i18n";
 import { MyServersPage } from "./MyServersPage";
 import { MyServersRail } from "./MyServersRail";
 import { MyServerLogin } from "./MyServerLogin";
@@ -199,21 +200,27 @@ type TrialProp = NonNullable<
   Parameters<typeof MyServersPage>[0]["trial"]
 >;
 
+type ServersState = ReturnType<typeof useMyServers>;
+
 function Harness({
   bridge,
   rootSignal = 0,
   trial = null,
   onGoConnect = vi.fn(),
+  stateRef,
 }: {
   bridge: StubBridge;
   rootSignal?: number;
   trial?: TrialProp | null;
   onGoConnect?: () => void;
+  /** 和 App.tsx 一样把 hook 状态接到页面上，用例里通过它触发下单。 */
+  stateRef?: { current: ServersState | null };
 }) {
   const state = useMyServers(bridge as unknown as AgentBridge, {
     active: true,
     rootSignal,
   });
+  if (stateRef) stateRef.current = state;
   return (
     <>
       <MyServersRail
@@ -251,6 +258,7 @@ function Harness({
         onRetryDetail={state.retryDetail}
         trial={trial}
         onGoConnect={onGoConnect}
+        pendingServer={state.pendingServer || state.awaitingSelected}
       />
       {state.loginOpen ? (
         <MyServerLogin
@@ -294,6 +302,18 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  setLanguage("zh");
+});
+
+describe("英文界面", () => {
+  it("未登录空态取 en 字典", async () => {
+    setLanguage("en");
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    renderHarness(bridge);
+    expect(await screen.findByText("Sign in first")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+  });
 });
 
 describe("我的服务器 destination", () => {
@@ -368,6 +388,49 @@ describe("我的服务器 destination", () => {
     expect(
       screen.getAllByRole("button", { name: "新建节点" }).length,
     ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("下单后列表还没回来：显示「正在创建」而不是空态，列表出现后恢复详情", async () => {
+    let list: MyServer[] = [];
+    const bridge = makeBridge([]);
+    bridge.myServerList.mockImplementation(async () => ({ servers: list }));
+    // 新机器还没进列表时，详情接口自然查不到：不能靠它先渲染出一台机器。
+    bridge.myServerGet.mockImplementation(async (serverId: string) => {
+      const found = list.find((item) => item.server_id === serverId);
+      if (!found) throw { code: "NOT_FOUND", message: "没有这台服务器" };
+      return found;
+    });
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+
+    await screen.findByRole("heading", { name: "还没有服务器" });
+
+    // 下单成功：选中新 id，刷新还在路上，列表仍是空的。
+    await act(async () => {
+      stateRef.current!.ordered("srv_new");
+    });
+    expect(
+      screen.getByText("服务器已下单，正在创建，稍后会自动出现。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("还没有服务器")).toBeNull();
+
+    // 列表返回这台新机器：自动回到它的详情，不再停在「正在创建」。
+    list = [
+      server({
+        server_id: "srv_new",
+        name: "新建的一台",
+        state: "installing",
+        node_id: null,
+      }),
+    ];
+    await act(async () => {
+      await stateRef.current!.refresh();
+    });
+
+    expect(await screen.findByRole("heading", { name: "新建的一台" })).toBeTruthy();
+    expect(
+      screen.queryByText("服务器已下单，正在创建，稍后会自动出现。"),
+    ).toBeNull();
   });
 
   it("列表失败：只保留中间一个重试按钮，重试可恢复", async () => {

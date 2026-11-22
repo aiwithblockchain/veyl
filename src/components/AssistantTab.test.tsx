@@ -2,9 +2,13 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setLanguage } from "../i18n";
 import { AssistantTab } from "./AssistantTab";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 describe("AssistantTab", () => {
   it("整个 tab 是一个按钮，竖排文字也在命中区内", () => {
@@ -45,5 +49,14 @@ describe("AssistantTab", () => {
     const ref = createRef<HTMLButtonElement>();
     render(<AssistantTab unread={false} onOpen={() => {}} openButtonRef={ref} />);
     expect(ref.current).toBe(screen.getByRole("button", { name: "展开助手" }));
+  });
+
+  it("英文界面下标签与 aria 走 en 字典", () => {
+    setLanguage("en");
+    render(<AssistantTab unread onOpen={() => {}} />);
+    expect(
+      screen.getByRole("button", { name: "Open assistant, new message" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Assistant")).toBeTruthy();
   });
 });

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { NextAction } from "../agent/protocol";
 import type { ToolCall } from "../state/chatStore";
 import { copyText } from "../ui/clipboard";
+import { useT } from "../i18n";
 import {
   DURATION_THRESHOLD_MS,
   changedLabel,
@@ -28,6 +29,7 @@ export function ToolCallCard({
   onNextAction: (action: NextAction) => void;
   onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [techOpen, setTechOpen] = useState(false);
   const [actionPending, setActionPending] = useState(false);
@@ -71,7 +73,7 @@ export function ToolCallCard({
       const outcome = await onDisplayAction(action);
       setActionOutcome(outcome);
     } catch {
-      setActionOutcome({ message: "没打开成功，再试一次。" });
+      setActionOutcome({ message: t("tool.action.openFailed") });
     } finally {
       setActionPending(false);
     }
@@ -86,8 +88,8 @@ export function ToolCallCard({
         ? {
             ...previous,
             message: ok
-              ? "正文已复制，可以粘贴到邮件里。"
-              : "复制失败，可以到报告文件夹里手动复制。",
+              ? t("tool.action.bodyCopied")
+              : t("tool.action.copyFailed"),
           }
         : previous,
     );
@@ -101,7 +103,9 @@ export function ToolCallCard({
       disabled={!action.reportId || actionPending}
       onClick={() => void runDisplayAction(action)}
     >
-      {action.kind === "reveal_report_dir" ? "在文件夹中显示" : "打开发送邮件"}
+      {action.kind === "reveal_report_dir"
+        ? t("tool.action.reveal")
+        : t("tool.action.compose")}
     </button>
   );
 
@@ -118,10 +122,16 @@ export function ToolCallCard({
         <StateIcon state={call.state} />
         <span className="tool-line__text">{text}</span>
         <span className="sr-only">
-          {running ? "进行中" : failed ? "失败" : "已完成"}
+          {running
+            ? t("tool.status.running")
+            : failed
+              ? t("tool.status.failed")
+              : t("tool.status.done")}
         </span>
         {showDuration ? (
-          <span className="tool-line__duration">用时 {shortDuration(call.durationMs!)}</span>
+          <span className="tool-line__duration">
+            {t("tool.duration.short", { value: shortDuration(call.durationMs!) })}
+          </span>
         ) : null}
         {hasBody ? (
           <span className={`tool-line__chevron ${open ? "is-open" : ""}`} aria-hidden>
@@ -150,7 +160,7 @@ export function ToolCallCard({
             className="chip chip--small"
             onClick={() => void copyReportBody()}
           >
-            复制正文
+            {t("tool.action.copyBody")}
           </button>
         </div>
       ) : null}
@@ -159,13 +169,13 @@ export function ToolCallCard({
         <div className="tool-line__body">
           {failed ? (
             <dl className="tool-line__facts">
-              <FactRow label="发生了什么" value={call.display?.text ?? copy.failed} />
+              <FactRow label={t("tool.body.what")} value={call.display?.text ?? copy.failed} />
               <FactRow
-                label="有没有改动"
+                label={t("tool.body.changed")}
                 value={changedLabel(changed, copy.readOnly)}
               />
               <FactRow
-                label="现在能做什么"
+                label={t("tool.body.next")}
                 value={nextAction?.label ?? copy.advice}
               />
             </dl>
@@ -175,10 +185,10 @@ export function ToolCallCard({
                 <FactRow key={`${fact.label}-${index}`} label={fact.label} value={fact.value} />
               ))}
               {call.durationMs !== undefined ? (
-                <FactRow label="用时" value={exactDuration(call.durationMs)} />
+                <FactRow label={t("tool.body.duration")} value={exactDuration(call.durationMs)} />
               ) : null}
               {call.source === "ui" ? (
-                <FactRow label="来源" value="从设置页发起" />
+                <FactRow label={t("tool.body.source")} value={t("tool.body.fromSettings")} />
               ) : null}
             </dl>
           )}
@@ -206,28 +216,28 @@ export function ToolCallCard({
                 aria-expanded={techOpen}
                 onClick={() => setTechOpen((value) => !value)}
               >
-                技术细节
+                {t("tool.tech.title")}
               </button>
               {techOpen ? (
                 <dl className="tool-line__tech-body">
-                  <FactRow label="工具" value={call.tool} mono />
+                  <FactRow label={t("tool.tech.tool")} value={call.tool} mono />
                   {call.argsPreview !== undefined ? (
                     <FactRow
-                      label="参数"
+                      label={t("tool.tech.args")}
                       value={JSON.stringify(call.argsPreview, null, 2)}
                       mono
                     />
                   ) : null}
                   <FactRow
-                    label="结果"
-                    value={call.result ?? (running ? "等待返回…" : "无摘要")}
+                    label={t("tool.tech.result")}
+                    value={call.result ?? (running ? t("tool.tech.waiting") : t("tool.tech.noSummary"))}
                     mono
                   />
                   {call.errorCode ? (
-                    <FactRow label="错误码" value={call.errorCode} mono />
+                    <FactRow label={t("tool.tech.errorCode")} value={call.errorCode} mono />
                   ) : null}
                   {call.durationMs !== undefined ? (
-                    <FactRow label="耗时" value={exactDuration(call.durationMs)} mono />
+                    <FactRow label={t("tool.tech.duration")} value={exactDuration(call.durationMs)} mono />
                   ) : null}
                 </dl>
               ) : null}
@@ -249,6 +259,7 @@ export function ToolCallGroup({
   onNextAction: (action: NextAction) => void;
   onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <div className="tool-group">
@@ -259,8 +270,10 @@ export function ToolCallGroup({
         onClick={() => setOpen((value) => !value)}
       >
         <StateIcon state="ok" />
-        <span className="tool-line__text">完成 {calls.length} 步</span>
-        <span className="sr-only">已完成</span>
+        <span className="tool-line__text">
+          {t("tool.group.done", { count: calls.length })}
+        </span>
+        <span className="sr-only">{t("tool.status.done")}</span>
         <span className={`tool-line__chevron ${open ? "is-open" : ""}`} aria-hidden>
           <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
             <path d="m6 4 4 4-4 4" />

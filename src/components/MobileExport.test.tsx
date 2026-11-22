@@ -10,6 +10,7 @@ import type {
 } from "../agent/bridge";
 import { MockAgentBridge } from "../agent/mockAgent";
 import { MobileExport, hasReadyServer } from "./MobileExport";
+import { setLanguage } from "../i18n";
 
 const SINGBOX_URL =
   "https://veyl:secret-token@veyl.dessage.xyz/v1/mobile/profile";
@@ -175,9 +176,29 @@ function server(over: Partial<MyServer> = {}): MyServer {
 
 afterEach(() => {
   cleanup();
+  setLanguage("zh");
   vi.restoreAllMocks();
   delete (Element.prototype as unknown as Record<string, unknown>)
     .scrollIntoView;
+});
+
+describe("MobileExport：英文界面", () => {
+  it("标题与入口取 en 字典", async () => {
+    setLanguage("en");
+    render(
+      <MobileExport
+        bridge={makeBridge(async () => OK)}
+        onClose={vi.fn()}
+        onLogin={vi.fn()}
+        onGoServers={vi.fn()}
+        onAskAi={vi.fn()}
+      />,
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "Use on phone" }),
+    ).toBeTruthy();
+    expect(screen.getByText("Use on phone")).toBeTruthy();
+  });
 });
 
 describe("在手机上使用：按 App 分类", () => {

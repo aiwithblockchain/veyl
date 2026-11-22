@@ -3,6 +3,7 @@ import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, isProvisioning, serverRailState, serverTone } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
 import { IconClose, IconPhone, IconPlus } from "./icons";
+import { useT } from "../i18n";
 
 interface Props {
   servers: MyServer[];
@@ -41,19 +42,20 @@ function ServerRow({
   regionLabel: string;
   onSelect: (serverId: string) => void;
 }) {
+  const t = useT();
   // 失败机器的计费字段可能是 0：副行不写日价，避免读成「免费 / 计费坏了」。
   // 停机删除的墓碑也不再报价：机器已经没了，价格只会误导。
   const billingPart =
     server.state === "error" || isTombstone(server)
       ? null
       : server.billing_state === "pending" && isProvisioning(server.state)
-        ? "开通中"
+        ? t("rail.enabling")
         : (
             <>
               <span className="num">
                 {formatDailyPrice(server.daily_price_cents)}
               </span>
-              /天
+              {t("rail.perDay")}
             </>
           );
   return (
@@ -98,6 +100,7 @@ export function MyServersRail({
   onSelect,
   onNew,
 }: Props) {
+  const t = useT();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const regionName = (regionId: string) =>
     catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
@@ -116,11 +119,11 @@ export function MyServersRail({
             ))}
           </div>
           <p className="rail__empty-text myservers__rail-hint">
-            连不上服务器，稍后再试
+            {t("rail.error")}
           </p>
         </>
       ) : loading ? (
-        <div className="rail__loading" role="status" aria-busy="true" aria-label="正在读取服务器">
+        <div className="rail__loading" role="status" aria-busy="true" aria-label={t("rail.loading")}>
           {[0, 1, 2].map((row) => (
             <div className="skeleton-row" key={row} aria-hidden>
               <span className="skeleton skeleton--name" />
@@ -161,7 +164,7 @@ export function MyServersRail({
             disabled={disabled}
             onClick={onGoConnect}
           >
-            去控制台
+            {t("serversPage.goConsole")}
           </button>
         ) : null}
       </p>
@@ -171,13 +174,16 @@ export function MyServersRail({
     <aside
       id="config-rail"
       className={`rail ${compact ? "rail--compact" : ""} ${disabled ? "rail--locked" : ""}`.trim()}
-      aria-label="服务器列表"
+      aria-label={t("rail.listAria")}
     >
       {compact ? (
         <button
           type="button"
           className="rail__drawer-btn"
-          aria-label={`服务器列表，${servers.length} 台`}
+          aria-label={t(
+            servers.length === 1 ? "rail.drawerAriaOne" : "rail.drawerAria",
+            { count: servers.length },
+          )}
           aria-expanded={drawerOpen}
           onClick={() => setDrawerOpen(true)}
         >
@@ -186,13 +192,13 @@ export function MyServersRail({
       ) : (
         <>
           <div className="rail__section">
-            <span className="rail__label">我的服务器</span>
+            <span className="rail__label">{t("rail.myServers")}</span>
             <span className="rail__count">{servers.length}</span>
             <button
               type="button"
               className="icon-btn rail__add"
-              aria-label="新建节点"
-              title="新建节点"
+              aria-label={t("rail.newNode")}
+              title={t("rail.newNode")}
               disabled={disabled}
               onClick={onNew}
             >
@@ -220,7 +226,7 @@ export function MyServersRail({
               <span className="rail__new-row__icon">
                 <IconPlus size={14} />
               </span>
-              <span>新建节点</span>
+              <span>{t("rail.newNode")}</span>
             </button>
           ) : null}
           {showMobile && onMobile && !loading && !error ? (
@@ -234,7 +240,7 @@ export function MyServersRail({
               <span className="rail__new-row__icon">
                 <IconPhone size={14} />
               </span>
-              <span>在手机上使用</span>
+              <span>{t("rail.useOnPhone")}</span>
             </button>
           ) : null}
         </>
@@ -252,15 +258,15 @@ export function MyServersRail({
             className="rail-drawer"
             role="dialog"
             aria-modal="true"
-            aria-label="服务器列表"
+            aria-label={t("rail.listAria")}
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="rail-drawer__head">
-              <span className="rail__label">我的服务器 {servers.length}</span>
+              <span className="rail__label">{t("rail.myServers")} {servers.length}</span>
               <button
                 type="button"
                 className="icon-btn"
-                aria-label="关闭服务器列表"
+                aria-label={t("rail.closeList")}
                 onClick={() => setDrawerOpen(false)}
               >
                 <IconClose size={14} />
@@ -275,7 +281,7 @@ export function MyServersRail({
                 onNew();
               }}
             >
-              新建节点
+              {t("rail.newNode")}
             </button>
             {/* 抽屉的「新建节点」沿用顶部动作位；试用旁注固定在底部。
                 两者相对位置与左栏不同，是有意保留抽屉既有结构。 */}

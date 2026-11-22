@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ConfigRouteMode } from "../agent/protocol";
+import { t as translate, useT } from "../i18n";
 
 interface Props {
   /** 当前配置的流量范围；旧数据的 proxy_selected 不显示开关。 */
@@ -19,14 +20,14 @@ function scopeNote(
   region: string | null,
   connected: boolean,
 ): string {
-  if (mode === "proxy_all") return "所有流量走 VPN。";
+  if (mode === "proxy_all") return translate("scope.note.global");
   if (!region) {
     return connected
-      ? "没识别出你在哪个地区，现在所有网站都会走 VPN。"
-      : "没识别出你在哪个地区，连接后所有网站都会走 VPN。";
+      ? translate("scope.note.unknownConnected")
+      : translate("scope.note.unknownDisconnected");
   }
-  if (region === "cn") return "国内网站直连，其它走 VPN。";
-  return "本国网站直连，其它走 VPN。";
+  if (region === "cn") return translate("scope.note.cn");
+  return translate("scope.note.other");
 }
 
 export function TrafficScopeSwitch({
@@ -37,6 +38,7 @@ export function TrafficScopeSwitch({
   disabled = false,
   onChange,
 }: Props) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (mode !== "direct" && mode !== "proxy_all") return null;
@@ -48,7 +50,7 @@ export function TrafficScopeSwitch({
     try {
       const result = await onChange(next);
       if (!result.ok) {
-        setError(result.message ?? "没切成功，还是原来的范围。");
+        setError(result.message ?? t("stage.scopeFail"));
       }
     } finally {
       setBusy(false);
@@ -58,15 +60,15 @@ export function TrafficScopeSwitch({
   const note = scopeNote(mode, region, connected);
   const suffix =
     !connected && !(mode === "direct" && !region)
-      ? "连接后生效。"
+      ? t("scope.suffix.afterConnect")
       : connected && regionChanged
-        ? "地区已改，下次连接生效。"
+        ? t("scope.suffix.regionChanged")
         : "";
 
   return (
     <div className="scope">
-      <span className="scope__label">流量范围</span>
-      <div className="scope__switch" role="group" aria-label="流量范围">
+      <span className="scope__label">{t("stage.scopeAria")}</span>
+      <div className="scope__switch" role="group" aria-label={t("stage.scopeAria")}>
         <button
           type="button"
           className={`scope__option ${mode === "direct" ? "is-selected" : ""}`}
@@ -75,7 +77,7 @@ export function TrafficScopeSwitch({
           disabled={busy || disabled}
           onClick={() => void switchTo("direct")}
         >
-          智能模式
+          {t("scope.smart")}
         </button>
         <button
           type="button"
@@ -85,7 +87,7 @@ export function TrafficScopeSwitch({
           disabled={busy || disabled}
           onClick={() => void switchTo("proxy_all")}
         >
-          全局模式
+          {t("scope.global")}
         </button>
       </div>
       <p

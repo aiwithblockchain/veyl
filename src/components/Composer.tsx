@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isComposingEvent } from "../ui/ime";
+import { useT } from "../i18n";
 
 interface Props {
   streaming: boolean;
@@ -30,6 +31,7 @@ export function Composer({
   value: controlledValue,
   onValueChange,
 }: Props) {
+  const t = useT();
   const [innerValue, setInnerValue] = useState("");
   const value = controlledValue ?? innerValue;
   const valueRef = useRef(value);
@@ -117,7 +119,7 @@ export function Composer({
           rows={1}
           // 只在禁用时说明原因；可用时不写例句——预设的话会替用户
           // 设想下一步，而这个助手要接的是用户自己说的话。
-          placeholder={disabled ? "配置 AI 后可以直接对话" : undefined}
+          placeholder={disabled ? t("composer.placeholderNoAi") : undefined}
           disabled={disabled}
           onChange={(event) => setValue(event.target.value)}
           onCompositionStart={() => {
@@ -141,7 +143,7 @@ export function Composer({
         <div className="composer__actions">
           {streaming ? (
             <button type="button" className="btn btn--ghost" onClick={onStop}>
-              停止
+              {t("composer.stop")}
             </button>
           ) : null}
           <span
@@ -157,7 +159,7 @@ export function Composer({
               style={blocked ? { pointerEvents: "none" } : undefined}
               onClick={submit}
             >
-              {blocked ? "等待回复" : "发送"}
+              {blocked ? t("composer.waiting") : t("composer.send")}
             </button>
           </span>
         </div>
@@ -165,21 +167,21 @@ export function Composer({
       <div className="composer__hint">
         {questionPending ? (
           <span className="composer__question-hint">
-            回答上面的问题，也可以直接说你的想法
+            {t("composer.answerHint")}
           </span>
         ) : statusText ? (
           <span className="composer__status">{statusText}</span>
         ) : null}
         {questionPending ? null : blockedHint ? (
           <span className="composer__blocked" role="status">
-            上一条还在回复，回完再发
+            {t("composer.blocked")}
           </span>
         ) : disabled && onConfigure ? (
           <button type="button" className="composer__configure" onClick={onConfigure}>
-            去配置 AI
+            {t("composer.configure")}
           </button>
         ) : (
-          <span>Enter 发送 · Shift + Enter 换行</span>
+          <span>{t("composer.enterHint")}</span>
         )}
       </div>
     </div>

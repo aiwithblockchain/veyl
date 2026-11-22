@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PendingQuestion } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
-import { EXPLAIN_ANSWER } from "../ui/askQuestion";
+import { isExplainAnswer } from "../ui/askQuestion";
+import { useT } from "../i18n";
 
 interface Props {
   question: PendingQuestion;
@@ -13,7 +14,7 @@ interface Props {
 }
 
 const CANCEL_LABEL =
-  /^(取消|关闭|不了|暂不|暂时不|不用|稍后|先不|不创建|不升级|不更新)$/;
+  /^(取消|关闭|不了|暂不|暂时不|不用|稍后|先不|不创建|不升级|不更新|cancel|no|not now|later|skip|don'?t)$/i;
 
 /** 两选一且有一个是取消，就是确认卡：没有「设置」可解释，解释答案也最容易被当成同意。 */
 function isConfirmCard(options: readonly string[]): boolean {
@@ -29,6 +30,7 @@ function formatCountdown(ms: number): string {
 
 /** 普通提问的内联卡片：挂在消息流末尾，不挡输入框，也不加焦点陷阱。 */
 export function AskQuestionCard({ question, onAnswer, onExpire, expired = false }: Props) {
+  const t = useT();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remaining, setRemaining] = useState(() =>
@@ -71,12 +73,16 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
         await onAnswer(value);
       } catch (failure) {
         const bridgeError = toBridgeError(failure);
-        setError(bridgeError.message || "回答失败，请重试");
+        setError(
+          bridgeError.hasMessage
+            ? bridgeError.message
+            : t("ask.error.answer"),
+        );
         submittingRef.current = false;
         setSubmitting(false);
       }
     },
-    [onAnswer, expired, remaining],
+    [onAnswer, expired, remaining, t],
   );
 
   const skip = useCallback(() => {
@@ -84,22 +90,23 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
   }, [answer]);
 
   // 模型可能把解释文案写进选项：界面固定行只留一个，尾随空格的变体也算。
-  const options = question.options.filter((option) => option.trim() !== EXPLAIN_ANSWER);
+  // 中英两种文案都认（英文界面的回传值是英文）。
+  const options = question.options.filter((option) => !isExplainAnswer(option));
   const hasOptions = options.length > 0;
   // 墙钟到点先按下状态渲染，等 Host 把 expired 传回来时两者一致。
   const isExpired = expired || remaining <= 0;
   const showExplain = hasOptions && !isConfirmCard(options) && !isExpired;
 
   return (
-    <section className="ask-card" aria-label="需要你的回答">
+    <section className="ask-card" aria-label={t("ask.cardAria")}>
       <div className="ask-card__head">
         <p className="ask-card__question">{question.question}</p>
         {isExpired ? null : (
           <span
             className="ask-card__countdown"
-            aria-label={`还剩 ${formatCountdown(remaining)}`}
+            aria-label={t("ask.countdownAria", { time: formatCountdown(remaining) })}
           >
-            剩 {formatCountdown(remaining)}
+            {t("ask.countdown", { time: formatCountdown(remaining) })}
           </span>
         )}
       </div>
@@ -119,7 +126,7 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
           ))}
         </div>
       ) : isExpired ? null : (
-        <p className="ask-card__hint">直接在下面说你的想法。</p>
+        <p className="ask-card__hint">{t("ask.hint")}</p>
       )}
 
       {showExplain ? (
@@ -127,14 +134,14 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
           type="button"
           className="ask-card__explain"
           disabled={submitting}
-          onClick={() => void answer(EXPLAIN_ANSWER)}
+          onClick={() => void answer(t("ask.explain"))}
         >
-          {EXPLAIN_ANSWER}
+          {t("ask.explain")}
         </button>
       ) : null}
 
       {isExpired ? (
-        <p className="ask-card__expired">这个问题已过期。</p>
+        <p className="ask-card__expired">{t("ask.expired")}</p>
       ) : (
         <button
           type="button"
@@ -142,7 +149,7 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
           disabled={submitting}
           onClick={skip}
         >
-          跳过
+          {t("ask.skip")}
         </button>
       )}
 
@@ -162,13 +169,14 @@ export function QuestionAwayLine({
   away: { text: string; expiresAt: number };
   onReturn?: () => void;
 }) {
+  const t = useT();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
   if (away.expiresAt <= now) {
-    return <p className="ask-card-away is-expired">这个问题已过期。</p>;
+    return <p className="ask-card-away is-expired">{t("ask.expired")}</p>;
   }
   return (
     <button type="button" className="ask-card-away" onClick={onReturn}>

@@ -23,10 +23,11 @@ import type {
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
+import { setLanguage, t as translate, useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 import { formatUsdCents } from "../myservers/labels";
 import type { WalletTrigger } from "../myservers/useMyServers";
-import { advancedPrompt, ADVANCED_FIELDS } from "../ai/advancedPrompts";
-import { settingsOverviewPrompt } from "../ai/settingsOverview";
+import { settingsConsultPrompt } from "../ai/settingsConsult";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
 import { copyText } from "../ui/clipboard";
@@ -58,7 +59,7 @@ interface Props {
   onReportProblem?: () => void;
   /** 正在开会话发开场：期间禁用入口，防止连点。 */
   reportBusy?: boolean;
-  /** 带着当前 tab 一起回到 App，重新打开设置时落回原处。 */
+  /** 行内「问 AI」已删除；保留签名等 App 侧一并清理。 */
   onAskAi: (text: string, section: SectionId) => void;
   /** 从导入入口进来时直接落到「网络」；默认「账号与 AI」。 */
   initialSection?: SectionId;
@@ -106,6 +107,14 @@ interface Props {
 
 type SectionId = "ai" | "network" | "account" | "advanced";
 
+/** 咨询提示词里用的分区名，与页签同一套文案。 */
+const SECTION_NAMES: Record<SectionId, MessageKey> = {
+  ai: "controls.ai",
+  network: "settings.tab.connection",
+  account: "controls.account",
+  advanced: "controls.advanced",
+};
+
 interface ProviderForm {
   providerId?: string;
   name: string;
@@ -146,49 +155,49 @@ const RESET_STEP_ALIASES: Record<string, ResetStepKey> = {
   verify: "verify",
 };
 
-const RESET_STEP_LABELS: Record<ResetStepKey, string> = {
-  stop_runtime: "停止连接程序",
-  stop_tun: "关闭接管",
-  sweep_processes: "清理残留组件",
-  clear_routes: "恢复系统路由",
-  flush_dns: "恢复 DNS",
-  restore_proxy: "撤销系统代理",
-  clear_plaintext: "删除临时配置",
-  verify: "复查网络状态",
+const RESET_STEP_LABELS: Record<ResetStepKey, MessageKey> = {
+  stop_runtime: "settings.reset.step.stopRuntime",
+  stop_tun: "settings.reset.step.stopTun",
+  sweep_processes: "settings.reset.step.sweep",
+  clear_routes: "settings.reset.step.routes",
+  flush_dns: "settings.reset.step.dns",
+  restore_proxy: "settings.reset.step.proxy",
+  clear_plaintext: "settings.reset.step.temp",
+  verify: "settings.reset.step.verify",
 };
 
-const RESET_STEP_NEXT: Record<ResetStepKey, string> = {
-  stop_runtime: "退出其它 VPN 后点「再试一次」；仍失败就重启电脑。",
-  stop_tun: "点「再试一次」；仍失败就重启电脑。",
-  sweep_processes: "退出其它 VPN 或安全软件后点「再试一次」。",
-  clear_routes: "重启电脑后再试一次；仍然不行，展开「手动清理路由」。",
-  flush_dns: "点「再试一次」；仍失败就在系统设置里把 DNS 改回自动。",
-  restore_proxy: "点「再试一次」；仍失败就重启电脑后再试。",
-  clear_plaintext: "点「再试一次」；这不影响上网。",
-  verify: "点「再试一次」；仍失败就复制诊断信息发给助手。",
+const RESET_STEP_NEXT: Record<ResetStepKey, MessageKey> = {
+  stop_runtime: "settings.reset.next.stopRuntime",
+  stop_tun: "settings.reset.next.stopTun",
+  sweep_processes: "settings.reset.next.sweep",
+  clear_routes: "settings.reset.next.routes",
+  flush_dns: "settings.reset.next.dns",
+  restore_proxy: "settings.reset.next.proxy",
+  clear_plaintext: "settings.reset.next.temp",
+  verify: "settings.reset.next.verify",
 };
 
 /** 成功行用设计文档的固定说明；后端 detail 可能带内部路径，不适合直接展示。 */
-const RESET_STEP_DONE: Record<ResetStepKey, string> = {
-  stop_runtime: "连接程序已停止。",
-  stop_tun: "接管已关闭。",
-  sweep_processes: "没有遗留的 Veyl 网络组件。",
-  clear_routes: "系统路由已恢复。",
-  flush_dns: "DNS 已恢复为系统默认。",
-  restore_proxy: "系统代理已恢复到连接前的设置。",
-  clear_plaintext: "临时配置文件已删除。",
-  verify: "代理、路由、DNS 和组件都符合预期。",
+const RESET_STEP_DONE: Record<ResetStepKey, MessageKey> = {
+  stop_runtime: "settings.reset.done.stopRuntime",
+  stop_tun: "settings.reset.done.stopTun",
+  sweep_processes: "settings.reset.done.sweep",
+  clear_routes: "settings.reset.done.routes",
+  flush_dns: "settings.reset.done.dns",
+  restore_proxy: "settings.reset.done.proxy",
+  clear_plaintext: "settings.reset.done.temp",
+  verify: "settings.reset.done.verify",
 };
 
-const RESET_STEP_FAILED: Record<ResetStepKey, string> = {
-  stop_runtime: "还有连接程序没停下来。",
-  stop_tun: "接管没有关闭。",
-  sweep_processes: "还有残留组件。",
-  clear_routes: "系统路由还有残留。",
-  flush_dns: "DNS 没有恢复。",
-  restore_proxy: "系统代理没有恢复。",
-  clear_plaintext: "临时配置没有删掉。",
-  verify: "复查没有通过。",
+const RESET_STEP_FAILED: Record<ResetStepKey, MessageKey> = {
+  stop_runtime: "settings.reset.failed.stopRuntime",
+  stop_tun: "settings.reset.failed.stopTun",
+  sweep_processes: "settings.reset.failed.sweep",
+  clear_routes: "settings.reset.failed.routes",
+  flush_dns: "settings.reset.failed.dns",
+  restore_proxy: "settings.reset.failed.proxy",
+  clear_plaintext: "settings.reset.failed.temp",
+  verify: "settings.reset.failed.verify",
 };
 
 /** 前五步失败说明网络还处于半接管状态；后三步只影响完整性。 */
@@ -206,7 +215,7 @@ export function canonicalResetStep(id: string): ResetStepKey | null {
 
 export function resetStepLabel(id: string): string {
   const key = canonicalResetStep(id);
-  return key ? RESET_STEP_LABELS[key] : "其它检查";
+  return key ? translate(RESET_STEP_LABELS[key]) : translate("settings.reset.otherCheck");
 }
 
 export function resetStepStatus(
@@ -219,7 +228,7 @@ export function resetStepStatus(
 
 export function resetStepNext(id: string): string | null {
   const key = canonicalResetStep(id);
-  return key ? RESET_STEP_NEXT[key] : null;
+  return key ? translate(RESET_STEP_NEXT[key]) : null;
 }
 
 export interface ResetOutcome {
@@ -232,15 +241,23 @@ export function resetOutcome(result: NetworkForceResetResult): ResetOutcome {
   const unfinished = result.steps.filter((step) => resetStepStatus(step) !== "ok");
   const partial: ResetOutcome = {
     kind: "partial",
-    title: `网络已重置，但有 ${Math.max(unfinished.length, 1)} 项没完成`,
-    sub: "其它检查已经通过；按下面的提示处理没完成的项。",
+    title: (() => {
+      const count = Math.max(unfinished.length, 1);
+      return translate(
+        count === 1
+          ? "settings.reset.partialTitleOne"
+          : "settings.reset.partialTitle",
+        { count },
+      );
+    })(),
+    sub: translate("settings.reset.partialSub"),
   };
 
   if (unfinished.length === 0) {
     if (result.ok && result.verified) {
       return {
         kind: "success",
-        title: "网络已恢复。可以重新连接了。",
+        title: translate("settings.reset.successTitle"),
         sub: "",
       };
     }
@@ -248,14 +265,14 @@ export function resetOutcome(result: NetworkForceResetResult): ResetOutcome {
     if (result.steps.length === 0) {
       return {
         kind: "unverified",
-        title: "没拿到逐项结果",
-        sub: "请复制诊断信息发给助手，或再试一次。",
+        title: translate("settings.reset.unverifiedTitle"),
+        sub: translate("settings.reset.unverifiedSub"),
       };
     }
     return {
       kind: "unverified",
-      title: "网络已重置，但复查没有通过",
-      sub: "每一步都执行了，但复查没有通过。请复制诊断信息发给助手，或再试一次。",
+      title: translate("settings.reset.verifyFailedTitle"),
+      sub: translate("settings.reset.verifyFailedSub"),
     };
   }
 
@@ -267,17 +284,17 @@ export function resetOutcome(result: NetworkForceResetResult): ResetOutcome {
 
   return {
     kind: "failed",
-    title: "重置没有完成",
-    sub: "中途有步骤失败，网络可能还没有恢复。按下面的提示处理后再试。",
+    title: translate("settings.reset.failedTitle"),
+    sub: translate("settings.reset.failedSub"),
   };
 }
 
 export function resetTimeLabel(at: number, now = Date.now()): string {
-  if (now - at < 60_000) return "刚刚";
+  if (now - at < 60_000) return translate("settings.reset.justNow");
   const date = new Date(at);
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
-  return `今天 ${hh}:${mm}`;
+  return translate("settings.reset.today", { time: `${hh}:${mm}` });
 }
 
 /**
@@ -307,12 +324,22 @@ export function seedTimestamp(value: string | number | null | undefined): number
 }
 
 export function seedAgeLabel(at: number | null, now = Date.now()): string {
-  if (at === null) return "从未";
+  if (at === null) return translate("settings.seed.never");
   const diff = Math.max(0, now - at);
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  return `${Math.floor(diff / 86_400_000)} 天前`;
+  if (diff < 60_000) return translate("settings.seed.justNow");
+  if (diff < 3_600_000) {
+    return translate("settings.seed.minutesAgo", {
+      count: Math.floor(diff / 60_000),
+    });
+  }
+  if (diff < 86_400_000) {
+    return translate("settings.seed.hoursAgo", {
+      count: Math.floor(diff / 3_600_000),
+    });
+  }
+  return translate("settings.seed.daysAgo", {
+    count: Math.floor(diff / 86_400_000),
+  });
 }
 
 function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
@@ -321,11 +348,20 @@ function seedCheckedAt(info: SeedRefreshInfo | null): number | null {
 }
 
 export function seedSummary(info: SeedRefreshInfo | null): string {
-  if (!info) return "还没有 Veyl 免费节点 · 从未检查过";
+  if (!info) return translate("settings.seed.noNodesNever");
   const head =
-    info.nodeCount > 0 ? `${info.nodeCount} 个节点` : "还没有 Veyl 免费节点";
-  const age = seedAgeLabel(seedCheckedAt(info));
-  return `${head} · ${age === "从未" ? "从未检查过" : `${age}检查过`}`;
+    info.nodeCount > 0
+      ? translate(
+          info.nodeCount === 1 ? "settings.seed.nodesOne" : "settings.seed.nodes",
+          { count: info.nodeCount },
+        )
+      : translate("settings.seed.noNodes");
+  const checkedAt = seedCheckedAt(info);
+  const checked =
+    checkedAt === null
+      ? translate("settings.seed.neverChecked")
+      : translate("settings.seed.checked", { age: seedAgeLabel(checkedAt) });
+  return `${head} · ${checked}`;
 }
 
 function seedChanged(before: SeedRefreshInfo | null, next: SeedRefreshInfo): boolean {
@@ -341,26 +377,29 @@ function seedChanged(before: SeedRefreshInfo | null, next: SeedRefreshInfo): boo
 function seedStatusText(phase: SeedPhase, connected: boolean, nodeCount: number): string | null {
   switch (phase.kind) {
     case "checking":
-      return "正在检查…";
+      return translate("settings.seed.checking");
     case "latest":
-      return "刚刚检查过，已经是最新。";
+      return translate("settings.seed.latest");
     case "updated": {
       const text =
         phase.added !== null && phase.added > 0
-          ? `已更新 ${phase.added} 个节点，共 ${phase.total} 个。`
-          : `已更新，共 ${phase.total} 个节点。`;
-      return connected ? `${text}下次连接生效。` : text;
+          ? translate("settings.seed.updatedAdded", {
+              added: phase.added,
+              total: phase.total,
+            })
+          : translate("settings.seed.updated", { total: phase.total });
+      return connected ? `${text}${translate("settings.seed.nextConnect")}` : text;
     }
     case "offline":
       return nodeCount > 0
-        ? `暂时连不上，继续用上次的 ${nodeCount} 个节点。`
-        : "暂时连不上，继续用上次的节点。";
+        ? translate("settings.seed.offlineCount", { count: nodeCount })
+        : translate("settings.seed.offline");
     case "invalid":
-      return "新内容有问题，保留了原来的节点。";
+      return translate("settings.seed.invalid");
     case "local_write":
-      return "没能保存到本机，检查磁盘空间后重试。";
+      return translate("settings.seed.localWrite");
     case "failed":
-      return "拿不到 Veyl 免费节点，请检查网络。";
+      return translate("settings.seed.failed");
     default:
       return null;
   }
@@ -397,6 +436,7 @@ function SeedRefreshRow({
   connected: boolean;
   open: boolean;
 }) {
+  const t = useT();
   const [phase, setPhase] = useState<SeedPhase>({ kind: "idle" });
   const [removedNotice, setRemovedNotice] = useState<{
     from: string;
@@ -477,7 +517,7 @@ function SeedRefreshRow({
   return (
     <div className="settings-row seed-refresh">
       <div className="seed-refresh__main">
-        <div className="settings-row__label">更新 Veyl 免费节点</div>
+        <div className="settings-row__label">{t("settings.seed.rowLabel")}</div>
         <div className="settings-row__value">{withMonoDigits(seedSummary(info))}</div>
         {status ? (
           <p
@@ -492,10 +532,11 @@ function SeedRefreshRow({
         {removedNotice ? (
           <p className="seed-refresh__note">
             {removedNotice.to
-              ? `原来的「${removedNotice.from}」已下架，已切换到「${removedNotice.to}」${
-                  connected ? "，下次连接生效" : ""
-                }`
-              : `原来的「${removedNotice.from}」已下架，这套配置现在没有节点`}
+              ? `${t("settings.seed.replaced", {
+                  from: removedNotice.from,
+                  to: removedNotice.to,
+                })}${connected ? t("settings.seed.replacedNext") : ""}`
+              : t("settings.seed.removedNoNodes", { from: removedNotice.from })}
           </p>
         ) : null}
         {phase.kind === "invalid" ? (
@@ -504,7 +545,11 @@ function SeedRefreshRow({
             className="seed-refresh__copy"
             onClick={() => void copyDiagnostics(phase)}
           >
-            {copyState === "ok" ? "已复制" : copyState === "error" ? "复制失败" : "复制诊断信息"}
+            {copyState === "ok"
+              ? t("chat.copy.copied")
+              : copyState === "error"
+                ? t("chat.copy.failed")
+                : t("settings.advanced.copyDiagnostics")}
           </button>
         ) : null}
       </div>
@@ -516,23 +561,24 @@ function SeedRefreshRow({
           disabled={checking}
           onClick={() => void refresh()}
         >
-          {checking ? "检查中…" : "检查更新"}
+          {checking ? t("settings.seed.checkingShort") : t("settings.seed.check")}
         </button>
       </div>
     </div>
   );
 }
 
-const SECTIONS: Array<{ id: SectionId; label: string }> = [
-  { id: "ai", label: "AI" },
-  { id: "network", label: "连接" },
-  { id: "account", label: "账户" },
-  { id: "advanced", label: "高级" },
+const SECTIONS: Array<{ id: SectionId; label: MessageKey }> = [
+  { id: "ai", label: "controls.ai" },
+  { id: "network", label: "settings.tab.connection" },
+  { id: "account", label: "controls.account" },
+  { id: "advanced", label: "controls.advanced" },
 ];
 
 const PRESETS: Array<{
   id: string;
   label: string;
+  labelKey?: MessageKey;
   name: string;
   protocol: LlmProtocol;
   baseUrl: string;
@@ -572,7 +618,8 @@ const PRESETS: Array<{
   },
   {
     id: "ollama",
-    label: "Ollama（本地）",
+    label: "Ollama",
+    labelKey: "settings.preset.ollamaLocal",
     name: "Ollama",
     protocol: "openai",
     baseUrl: "http://localhost:11434",
@@ -581,20 +628,25 @@ const PRESETS: Array<{
 ];
 
 function protocolLabel(protocol: LlmProtocol): string {
-  return protocol === "anthropic" ? "anthropic 兼容" : "openai 兼容";
+  return translate(
+    protocol === "anthropic" ? "settings.protocol.anthropic" : "settings.protocol.openai",
+  );
 }
 
 /** 连接方式与左栏、主界面用同一套词；设置里只读，只看 connect_mode。 */
-const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], string> = {
-  duplicate: "已有同名节点",
-  unsupported_scheme: "不是 ss:// 链接",
-  unsupported_method: "加密方式不支持",
-  malformed: "内容不完整",
-  subscription_empty: "订阅里没有节点",
+const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], MessageKey> = {
+  duplicate: "settings.import.skip.duplicate",
+  unsupported_scheme: "settings.import.skip.scheme",
+  unsupported_method: "settings.import.skip.method",
+  malformed: "settings.import.skip.malformed",
+  subscription_empty: "settings.import.skip.empty",
 };
 
 function importSkipReason(reason: string): string {
-  return IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ?? "没法导入";
+  return translate(
+    IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ??
+      "settings.import.skip.other",
+  );
 }
 
 function fileNameOf(path: string): string {
@@ -608,22 +660,22 @@ function describeFileImportError(error: unknown): string {
     typeof bridgeError.details?.reason === "string" ? bridgeError.details.reason : null;
   switch (reason) {
     case "invalid_path":
-      return "这个文件路径用不了。重新选一次文件。";
+      return translate("settings.error.filePath");
     case "file_unreadable":
-      return "读不了这个文件。它可能已被移动、删除，或没有读取权限。重新选一次。";
+      return translate("settings.error.fileUnreadable");
     case "file_too_large":
-      return "文件太大了，最大 1 MB。换一个小一点的文件。";
+      return translate("settings.error.fileTooLarge");
     case "not_node_text":
-      return "这个文件里没有可用的节点（支持多行 ss:// 链接）。换一个文件。";
+      return translate("settings.error.notNodeText");
     default:
       break;
   }
   if (bridgeError.code === "NOT_FOUND") {
-    return "这套配置已经不在了。先在左侧重新选一套，再导入。";
+    return translate("settings.error.configGone");
   }
-  return bridgeError.message && bridgeError.message !== "操作失败"
+  return bridgeError.hasMessage
     ? bridgeError.message
-    : "没有导入成功。再试一次。";
+    : translate("settings.error.importFailed");
 }
 
 /** 只把数字送进 mono；中文和单位保持正文。 */
@@ -663,7 +715,6 @@ export function Settings({
   onRestoreNetwork,
   onReportProblem,
   reportBusy = false,
-  onAskAi,
   initialSection = "ai",
   routingMode = null,
   onSetRoutingMode,
@@ -687,6 +738,7 @@ export function Settings({
   mobileExportOpen = false,
   onOpenMobileExport,
 }: Props) {
+  const t = useT();
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
     runtime.state === "running" ||
@@ -863,7 +915,7 @@ export function Settings({
       value < 1 ||
       value > 65535
     ) {
-      setPortError("端口要填 1–65535 之间的整数。");
+      setPortError(t("settings.port.invalid"));
       setPortFeedback(null);
       return;
     }
@@ -890,18 +942,16 @@ export function Settings({
         runtime.port_fallback !== null &&
         result.port !== runtime.port_fallback.requested;
       setPortFeedback(
-        pendingNext ? null : connected ? "已保存，下次连接生效" : "已保存",
+        pendingNext ? null : connected ? t("settings.port.savedNext") : t("settings.port.saved"),
       );
       returnPortFocusRef.current = true;
       setPortEditing(false);
       onProxyPortSaved?.(result.port);
     } catch (error) {
-      const message = toBridgeError(error).message;
-      // toBridgeError 对没有 message 的错误会补「操作失败」，那不是后端原话。
+      const failure = toBridgeError(error);
+      // 批次 4 起改看稳定错误码；现在只认后端是否真的给了 message。
       setPortError(
-        message && message !== "操作失败"
-          ? message
-          : "没有保存，端口还是原来的。再试一次。",
+        failure.hasMessage ? failure.message : t("settings.port.saveFailed"),
       );
     } finally {
       portSavingRef.current = false;
@@ -989,53 +1039,8 @@ export function Settings({
     }
     setConsulting(true);
     onConsultingChange?.(true);
-    // 打开即把点击当刻的设置发给 AI，不让它等用户再描述一遍。
-    onConsultAi?.(
-      settingsOverviewPrompt({
-        connection: {
-          connectMode,
-          routingMode,
-          proxyPort: connectMode === "system_proxy" ? proxyPort : null,
-          portFallback:
-            connectMode === "system_proxy" ? runtime.port_fallback : null,
-          runtimeState: runtime.state,
-          cleanupProxyAvailable: showCleanupProxy,
-          hasConfig: configId !== null,
-          seed: seedInfo
-            ? {
-                nodeCount: seedInfo.nodeCount,
-                version: seedInfo.version,
-                newVersionAvailable: seedInfo.newVersionAvailable,
-              }
-            : null,
-        },
-        ai: {
-          providers: providers.map((provider) => ({
-            name: provider.name,
-            model: provider.model,
-            baseUrl: provider.baseUrl,
-            hasKey: provider.hasKey,
-            isActive:
-              provider.isActive || provider.providerId === activeProviderId,
-          })),
-        },
-        account: {
-          loggedIn: account?.logged_in === true,
-          email: account?.email ?? null,
-          balanceCents: wallet?.balance_cents ?? null,
-        },
-        advanced: {
-          includeDomains,
-          appVersion,
-          helper: tunHelper.info
-            ? {
-                state: tunHelper.info.state,
-                version: tunHelper.info.helperVersion,
-              }
-            : null,
-        },
-      }),
-    );
+    // 打开即告诉 AI 用户在看哪个分区；先读文档，再问要咨询哪个模块。
+    onConsultAi?.(settingsConsultPrompt(t(SECTION_NAMES[section])));
   };
 
   const commitConnectMode = useCallback(
@@ -1050,7 +1055,7 @@ export function Settings({
           const result = await onSetConnectMode(next);
           if (!result.ok) {
             setModeError(
-              result.message || "没能切换接管方式，稍后再试。",
+              result.message || t("settings.error.modeSwitch"),
             );
             return;
           }
@@ -1060,7 +1065,12 @@ export function Settings({
         }
       } catch (error) {
         setModeError(
-          toBridgeError(error).message || "没能切换接管方式，稍后再试。",
+          (() => {
+            const failure = toBridgeError(error);
+            return failure.hasMessage
+              ? failure.message
+              : t("settings.error.modeSwitch");
+          })(),
         );
       } finally {
         setModeBusy(false);
@@ -1085,7 +1095,7 @@ export function Settings({
     setScopeError(null);
     const result = await onSetRoutingMode(mode);
     if (!result.ok) {
-      setScopeError(result.message ?? "没切成功，还是原来的范围。");
+      setScopeError(result.message ?? t("stage.scopeFail"));
     }
   };
 
@@ -1094,12 +1104,15 @@ export function Settings({
     setLanguageBusy(true);
     setLanguageError(null);
     try {
-      setAppLanguage(await bridge.appLanguageSet(lang));
+      const saved = await bridge.appLanguageSet(lang);
+      setAppLanguage(saved);
+      // 批次 2：让界面当场换语言；其余设置文案仍按原语言，逐批迁移。
+      setLanguage(saved.resolved);
       // 写入成功后的选中态是新的：之前发出的读取结果已经过时。
       languageReadEpochRef.current += 1;
     } catch {
       // 后端错误码 → 文案的映射（批次 4）未就绪前，统一用这一句。
-      setLanguageError("语言没有切换。本地设置写入失败。再试一次。");
+      setLanguageError(t("settings.language.error"));
     } finally {
       setLanguageBusy(false);
     }
@@ -1220,17 +1233,17 @@ export function Settings({
 
   const buildProviderInput = (form: ProviderForm): LlmProviderInput | string => {
     const model = form.model.trim();
-    if (!model) return "模型不能为空";
+    if (!model) return t("settings.provider.modelRequired");
 
     const baseUrl = form.baseUrl.trim();
-    if (!isHttpUrl(baseUrl)) return "Base URL 必须以 http:// 或 https:// 开头";
+    if (!isHttpUrl(baseUrl)) return t("settings.provider.baseUrlScheme");
     if (baseUrl.toLowerCase().startsWith("http://") && !isLocalEndpoint(baseUrl)) {
-      return "http 只允许本机地址（localhost / 127.0.0.1）；其他端点请用 https";
+      return t("settings.provider.httpLocalOnly");
     }
 
     const apiKey = form.apiKey.trim();
     if (!form.hasKey && !apiKey && !isLocalEndpoint(baseUrl)) {
-      return "请填写 API Key；只有本机端点可以免 Key";
+      return t("settings.provider.apiKeyRequired");
     }
 
     return {
@@ -1260,7 +1273,7 @@ export function Settings({
       setProviderForm(null);
       setProviderNotice({
         kind: "ok",
-        text: hadActive ? "已保存。" : "已保存，并设为当前。",
+        text: hadActive ? t("settings.provider.saved") : t("settings.provider.savedActive"),
       });
       await refreshProviders();
     } catch (error) {
@@ -1274,12 +1287,12 @@ export function Settings({
     if (!providerForm || providerTest.state === "running") return;
     const model = providerForm.model.trim();
     if (!model) {
-      setProviderError("模型不能为空");
+      setProviderError(t("settings.provider.modelRequired"));
       return;
     }
 
     setProviderError(null);
-    setProviderTest({ state: "running", text: "正在发送最小请求…" });
+    setProviderTest({ state: "running", text: t("settings.provider.testing") });
     try {
       const result = await bridge.llmProviderTest({
         providerId: providerForm.providerId,
@@ -1293,9 +1306,11 @@ export function Settings({
         result.ok
           ? {
               state: "ok",
-              text: `连接成功${result.latencyMs !== null ? ` · ${result.latencyMs} ms` : ""}`,
+              text: `${t("settings.provider.testOk")}${
+                result.latencyMs !== null ? ` · ${result.latencyMs} ms` : ""
+              }`,
             }
-          : { state: "error", text: result.error || "测试失败，请检查端点和 Key" },
+          : { state: "error", text: result.error || t("settings.provider.testFailed") },
       );
     } catch (error) {
       setProviderTest({ state: "error", text: describeProviderError(error) });
@@ -1307,7 +1322,7 @@ export function Settings({
     setListTest({
       providerId: provider.providerId,
       state: "running",
-      text: "正在发送最小请求…",
+      text: t("settings.provider.testing"),
     });
     try {
       const result = await bridge.llmProviderTest({
@@ -1322,8 +1337,10 @@ export function Settings({
         providerId: provider.providerId,
         state: result.ok ? "ok" : "error",
         text: result.ok
-          ? `连接成功${result.latencyMs !== null ? ` · ${result.latencyMs} ms` : ""}`
-          : result.error || "测试失败，请检查端点和 Key",
+          ? `${t("settings.provider.testOk")}${
+              result.latencyMs !== null ? ` · ${result.latencyMs} ms` : ""
+            }`
+          : result.error || t("settings.provider.testFailed"),
       });
     } catch (error) {
       setListTest({
@@ -1337,7 +1354,10 @@ export function Settings({
   const activateProvider = async (provider: LlmProvider) => {
     try {
       await bridge.llmProviderActivate(provider.providerId);
-      setProviderNotice({ kind: "ok", text: `已切换到「${provider.name}」。` });
+      setProviderNotice({
+        kind: "ok",
+        text: t("settings.provider.switchedTo", { name: provider.name }),
+      });
       await refreshProviders();
     } catch (error) {
       setProviderNotice({ kind: "error", text: describeProviderError(error) });
@@ -1352,18 +1372,14 @@ export function Settings({
       setProviderNotice({
         kind: "ok",
         text: wasActive
-          ? "已删除，同时清除了它的 Key。没有当前服务，请选择一个。"
-          : "已删除，同时清除了它的 Key。",
+          ? t("settings.provider.deletedNoActive")
+          : t("settings.provider.deleted"),
       });
       await refreshProviders();
     } catch (error) {
       setPendingDelete(null);
       setProviderNotice({ kind: "error", text: describeProviderError(error) });
     }
-  };
-
-  const askAi = (field: string, value: string) => {
-    onAskAi(advancedPrompt(field, value), section);
   };
 
   const importFirstLine =
@@ -1383,7 +1399,10 @@ export function Settings({
       if (result.imported === 0) return;
       setImportText("");
       setImportFile(null);
-      onNotice({ level: "info", text: `已添加 ${result.imported} 个节点` });
+      onNotice({
+        level: "info",
+        text: t("settings.import.added", { count: result.imported }),
+      });
     };
 
     if (importFile) {
@@ -1402,7 +1421,7 @@ export function Settings({
     const text = importText.trim();
     if (!text) return;
     if (/^http:\/\//i.test(importFirstLine)) {
-      setImportError("订阅地址要用 https，不能是 http。");
+      setImportError(t("settings.import.httpsOnly"));
       return;
     }
     setImportBusy(true);
@@ -1413,11 +1432,9 @@ export function Settings({
           : await bridge.nodeImportText(text),
       );
     } catch (error) {
-      const message = toBridgeError(error).message;
+      const failure = toBridgeError(error);
       setImportError(
-        message && message !== "操作失败"
-          ? message
-          : "没有添加成功，检查地址后再试。",
+        failure.hasMessage ? failure.message : t("settings.import.addFailed"),
       );
     } finally {
       setImportBusy(false);
@@ -1434,7 +1451,7 @@ export function Settings({
       setImportText("");
       setImportResult(null);
     } catch {
-      setImportError("没有打开文件选择器，再试一次。");
+      setImportError(t("settings.import.noPicker"));
     }
   };
 
@@ -1485,7 +1502,6 @@ export function Settings({
       .then(
         (state) => {
           // 等结果期间用户点过档位并写成功了：这次读取已经过时，丢弃。
-          // 等结果期间用户点过档位并写成功了：这次读取已经过时，丢弃。
           if (alive && epoch === languageReadEpochRef.current) {
             setAppLanguage(state);
           }
@@ -1509,7 +1525,7 @@ export function Settings({
         if (alive) setIncludeDomains(preference.includeDomains);
       },
       () => {
-        if (alive) setDomainError("没读到报告偏好，先按关闭处理。");
+        if (alive) setDomainError(t("settings.report.prefReadFailed"));
       },
     );
     return () => {
@@ -1529,7 +1545,7 @@ export function Settings({
     } catch {
       // 写入失败回滚勾选，不能只改界面骗人。
       setIncludeDomains(!next);
-      setDomainError("没保存成功，设置没有改。");
+      setDomainError(t("settings.report.saveFailed"));
     } finally {
       setDomainBusy(false);
     }
@@ -1550,9 +1566,9 @@ export function Settings({
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-      setDiagnosticNotice("诊断信息已复制，可直接粘贴给支持人员。");
+      setDiagnosticNotice(t("settings.report.copied"));
     } catch {
-      setDiagnosticNotice("复制失败，请检查系统剪贴板权限。");
+      setDiagnosticNotice(t("settings.report.copyFailed"));
     }
   };
 
@@ -1579,19 +1595,30 @@ export function Settings({
     if (portFallback) {
       if (proxyPort !== portFallback.requested) {
         const short =
-          portFallback.reason === "unavailable" ? "需要管理员权限" : "被占用";
-        portNote = `这次连接用的是 ${portFallback.actual}（${portFallback.requested} ${short}）；保存的是 ${proxyPort}，下次连接生效。`;
+          portFallback.reason === "unavailable"
+            ? t("settings.port.admin")
+            : t("settings.port.occupied");
+        portNote = t("settings.port.fallbackShort", {
+          actual: portFallback.actual,
+          requested: portFallback.requested,
+          reason: short,
+          saved: proxyPort,
+        });
       } else {
         const why =
           portFallback.reason === "unavailable"
-            ? "这个端口需要管理员权限"
-            : "被别的软件占用了";
-        portNote = `保存的是 ${portFallback.requested}；现在用的是 ${portFallback.actual}，${why}。`;
+            ? t("settings.port.adminLong")
+            : t("settings.port.occupiedLong");
+        portNote = t("settings.port.fallbackLong", {
+          requested: portFallback.requested,
+          actual: portFallback.actual,
+          reason: why,
+        });
       }
     } else if (connected && runtime.system_proxy_enabled) {
-      portNote = "浏览器已经设好了；其它软件填这个地址。";
+      portNote = t("settings.port.browserReady");
     } else {
-      portNote = "别的软件要填代理地址时，填这个。";
+      portNote = t("settings.port.others");
     }
   }
 
@@ -1646,7 +1673,7 @@ export function Settings({
 
   const copyRouteCommand = async () => {
     try {
-      await navigator.clipboard.writeText("sudo route -n delete -net <残留网段>");
+      await navigator.clipboard.writeText(t("settings.reset.sudoTemplate"));
       flashCopy(setRouteCopy, "ok");
     } catch {
       flashCopy(setRouteCopy, "error");
@@ -1654,16 +1681,16 @@ export function Settings({
   };
 
   const outcome = resetError
-    ? { kind: "failed" as const, title: "重置没有开始", sub: resetError }
+    ? { kind: "failed" as const, title: t("settings.reset.notStarted"), sub: resetError }
     : resetResult
       ? resetOutcome(resetResult)
       : null;
   const resetTitle =
     resetPhase === "confirm"
-      ? "重置网络？"
+      ? t("settings.reset.titleQuestion")
       : resetPhase === "running"
-        ? "正在重置网络"
-        : "重置网络";
+        ? t("settings.reset.running")
+        : t("settings.reset.title");
 
   const resetStepItems = resetResult
     ? resetResult.steps.map((step, index) => {
@@ -1672,14 +1699,14 @@ export function Settings({
         const next = status === "failed" ? resetStepNext(step.id) : null;
         const detail =
           status === "skipped"
-            ? "前面一步没有完成，已跳过。"
+            ? t("settings.reset.skipped")
             : status === "ok"
               ? key
-                ? RESET_STEP_DONE[key]
+                ? t(RESET_STEP_DONE[key])
                 : ""
               : key
-                ? RESET_STEP_FAILED[key]
-                : "这一步没有完成。";
+                ? t(RESET_STEP_FAILED[key])
+                : t("settings.reset.stepFailed");
         return (
           <li key={`${step.id}-${index}`} className={`reset-step is-${status}`}>
             <span className="reset-step__icon" aria-hidden="true">
@@ -1691,7 +1718,11 @@ export function Settings({
               {next ? <span className="reset-step__next">{next}</span> : null}
             </div>
             <span className="reset-step__status">
-              {status === "ok" ? "已完成" : status === "failed" ? "未完成" : "未执行"}
+              {status === "ok"
+                ? t("settings.reset.doneShort")
+                : status === "failed"
+                  ? t("settings.reset.notDone")
+                  : t("settings.reset.notRun")}
             </span>
           </li>
         );
@@ -1719,7 +1750,7 @@ export function Settings({
         >
         <header className="modal__head settings-head">
           <h2 id="settings-title" className="modal__title">
-            设置
+            {t("settings.nav.title")}
           </h2>
           <div className="settings-head__actions">
             <button
@@ -1728,13 +1759,13 @@ export function Settings({
               aria-pressed={consulting}
               onClick={toggleConsulting}
             >
-              咨询 AI
+              {t("settings.consult.button")}
             </button>
             <button
               type="button"
               className="modal__close"
               onClick={closeSettings}
-              aria-label="关闭设置"
+              aria-label={t("settings.nav.closeAria")}
             >
               <IconClose size={14} />
             </button>
@@ -1742,7 +1773,7 @@ export function Settings({
         </header>
 
         <div className="settings-body">
-        <div className="settings-nav" role="tablist" aria-label="设置分区">
+        <div className="settings-nav" role="tablist" aria-label={t("settings.nav.aria")}>
           {SECTIONS.map((item, index) => {
             const selected = section === item.id;
             return (
@@ -1761,7 +1792,7 @@ export function Settings({
                 onClick={() => selectSection(item.id)}
                 onKeyDown={(event) => onTabKeyDown(event, index)}
               >
-                {item.label}
+                {t(item.label)}
               </button>
             );
           })}
@@ -1778,21 +1809,21 @@ export function Settings({
             <div className="settings-providers">
               <div className="settings-row" {...pointAttrs("ai.provider")}>
                 <div>
-                  <div className="settings-row__label">用哪个 AI 服务</div>
+                  <div className="settings-row__label">{t("settings.ai.title")}</div>
                   <div className="settings-row__value">
-                    AI 助手用这里的服务回答你；换服务或换模型都在这里。
+                    {t("settings.ai.subtitle")}
                   </div>
                 </div>
               </div>
-                <p className="settings-risk">请求会发往你填写的端点，请确认你信任它。</p>
+                <p className="settings-risk">{t("settings.ai.risk")}</p>
                 <p className="settings-note">
-                  切换当前使用的服务会开始一个新会话，之前对话的上下文不会带过去。
+                  {t("settings.ai.switchNote")}
                 </p>
 
                 {providersLoading ? (
-                  <p className="settings-muted">读取服务…</p>
+                  <p className="settings-muted">{t("settings.ai.reading")}</p>
                 ) : providers.length === 0 ? (
-                  <p className="settings-muted">还没有服务。可以从下面的预设一键添加。</p>
+                  <p className="settings-muted">{t("settings.ai.empty")}</p>
                 ) : (
                   <ul className="provider-list">
                     {providers.map((provider) => {
@@ -1808,17 +1839,17 @@ export function Settings({
                         >
                           <div className="provider-item__head">
                             <span className="provider-item__name">{provider.name}</span>
-                            {isActive ? <span className="provider-item__badge">当前</span> : null}
+                            {isActive ? <span className="provider-item__badge">{t("settings.ai.current")}</span> : null}
                             {provider.isBuiltin ? (
-                              <span className="provider-item__tag">内置</span>
+                              <span className="provider-item__tag">{t("settings.ai.builtin")}</span>
                             ) : null}
                           </div>
                           <div className="provider-item__meta">
                             {protocolLabel(provider.protocol)} · {provider.model}
-                            {provider.hasKey ? "" : " · 无 Key"}
+                            {provider.hasKey ? "" : t("settings.provider.noKey")}
                           </div>
                           <code className="provider-item__url">
-                            {provider.baseUrl || "官方默认地址"}
+                            {provider.baseUrl || t("settings.provider.officialDefault")}
                           </code>
                           <div className="provider-item__actions">
                             {!isActive ? (
@@ -1827,9 +1858,9 @@ export function Settings({
                                 className="btn btn--ghost provider-item__btn"
                                 onClick={() => void activateProvider(provider)}
                                 disabled={!canActivate}
-                                title={canActivate ? undefined : "先编辑并保存 API Key"}
+                                title={canActivate ? undefined : t("settings.provider.editFirst")}
                               >
-                                设为当前
+                                {t("settings.provider.setActive")}
                               </button>
                             ) : null}
                             <button
@@ -1837,28 +1868,28 @@ export function Settings({
                               className="btn btn--ghost provider-item__btn"
                               onClick={() => void testExistingProvider(provider)}
                               disabled={!canActivate || listTest?.state === "running"}
-                              title={canActivate ? undefined : "先编辑并保存 API Key"}
+                              title={canActivate ? undefined : t("settings.provider.editFirst")}
                             >
                               {listTest?.providerId === provider.providerId &&
                               listTest.state === "running"
-                                ? "测试中…"
-                                : "测试"}
+                                ? t("settings.provider.testingShort")
+                                : t("settings.provider.test")}
                             </button>
                             <button
                               type="button"
                               className="btn btn--ghost provider-item__btn"
                               onClick={() => openEditProvider(provider)}
                             >
-                              编辑
+                              {t("settings.common.edit")}
                             </button>
                             <button
                               type="button"
                               className="btn provider-item__btn provider-item__btn--danger"
                               onClick={() => setPendingDelete(provider)}
                               disabled={provider.isBuiltin}
-                              title={provider.isBuiltin ? "内置服务不可删除" : undefined}
+                              title={provider.isBuiltin ? t("settings.provider.builtinNoDelete") : undefined}
                             >
-                              删除
+                              {t("settings.common.delete")}
                             </button>
                           </div>
 
@@ -1878,21 +1909,25 @@ export function Settings({
 
                           {pendingDelete?.providerId === provider.providerId ? (
                             <div className="provider-item__confirm">
-                              <p>删除「{provider.name}」会同时删除它的 Key，无法恢复。</p>
+                              <p>
+                                {t("settings.provider.deleteBody", {
+                                  name: provider.name,
+                                })}
+                              </p>
                               <div className="settings-actions">
                                 <button
                                   type="button"
                                   className="btn btn--ghost"
                                   onClick={() => setPendingDelete(null)}
                                 >
-                                  取消
+                                  {t("common.cancel")}
                                 </button>
                                 <button
                                   type="button"
                                   className="btn btn--danger-ghost"
                                   onClick={() => void deleteProvider(provider)}
                                 >
-                                  确认删除
+                                  {t("settings.provider.confirmDelete")}
                                 </button>
                               </div>
                             </div>
@@ -1905,7 +1940,7 @@ export function Settings({
 
                 <div className="settings-actions" {...pointAttrs("ai.other")}>
                   <button type="button" className="btn btn--ghost" onClick={openNewProvider}>
-                    添加 AI 服务
+                    {t("settings.provider.titleAdd")}
                   </button>
                 </div>
 
@@ -1928,7 +1963,9 @@ export function Settings({
                     }}
                   >
                     <h4 className="provider-form__title">
-                      {providerForm.providerId ? "编辑 AI 服务" : "添加 AI 服务"}
+                      {providerForm.providerId
+                        ? t("settings.provider.titleEdit")
+                        : t("settings.provider.titleAdd")}
                     </h4>
 
                     <div className="provider-form__presets">
@@ -1939,38 +1976,24 @@ export function Settings({
                           className="chip chip--small"
                           onClick={() => applyPreset(preset)}
                         >
-                          {preset.label}
+                          {preset.labelKey ? t(preset.labelKey) : preset.label}
                         </button>
                       ))}
                     </div>
 
                     <label className="provider-field">
-                      <span>名称</span>
+                      <span>{t("settings.provider.name")}</span>
                       <input
                         value={providerForm.name}
                         onChange={(event) =>
                           setProviderForm({ ...providerForm, name: event.target.value })
                         }
-                        placeholder="例如 我的 DeepSeek"
+                        placeholder={t("settings.provider.namePlaceholder")}
                       />
                     </label>
 
                     <div className="provider-field">
-                      <span className="provider-field__label">
-                        API 类型
-                        <button
-                          type="button"
-                          className="ask-ai"
-                          onClick={() =>
-                            askAi(
-                              ADVANCED_FIELDS.apiProtocol,
-                              `${providerForm.protocol === "anthropic" ? "anthropic 兼容" : "openai 兼容"} / ${providerForm.baseUrl || "官方地址"}`,
-                            )
-                          }
-                        >
-                          问 AI
-                        </button>
-                      </span>
+                      <span className="provider-field__label">{t("settings.provider.apiType")}</span>
                       <select
                         value={providerForm.protocol}
                         onChange={(event) =>
@@ -1980,8 +2003,8 @@ export function Settings({
                           })
                         }
                       >
-                        <option value="openai">OpenAI 兼容</option>
-                        <option value="anthropic">Anthropic 兼容</option>
+                        <option value="openai">{t("settings.provider.protocolOpenai")}</option>
+                        <option value="anthropic">{t("settings.provider.protocolAnthropic")}</option>
                       </select>
                     </div>
 
@@ -2001,23 +2024,12 @@ export function Settings({
                     </label>
                     <p className="provider-form__hint">
                       {providerForm.protocol === "anthropic"
-                        ? "需要兼容 /v1/messages；留空则使用官方地址。"
-                        : "需要兼容 /v1/chat/completions；留空则使用官方地址。"}
+                        ? t("settings.provider.anthropicPathHint")
+                        : t("settings.provider.openaiPathHint")}
                     </p>
 
                     <div className="provider-field">
-                      <span className="provider-field__label">
-                        模型 *
-                        <button
-                          type="button"
-                          className="ask-ai"
-                          onClick={() =>
-                            askAi(ADVANCED_FIELDS.model, providerForm.model || "（空）")
-                          }
-                        >
-                          问 AI
-                        </button>
-                      </span>
+                      <span className="provider-field__label">{t("settings.provider.modelLabel")}</span>
                       <input
                         value={providerForm.model}
                         onChange={(event) =>
@@ -2037,11 +2049,15 @@ export function Settings({
                         }
                         autoComplete="off"
                         spellCheck={false}
-                        placeholder={providerForm.hasKey ? "已保存，留空不修改" : "sk-..."}
+                        placeholder={
+                          providerForm.hasKey
+                            ? t("settings.provider.keySavedPlaceholder")
+                            : "sk-..."
+                        }
                       />
                     </label>
                     <p className="provider-form__hint">
-                      本机 Ollama 可免 Key；http 仅允许 localhost / 127.0.0.1。
+                      {t("settings.provider.localHint")}
                     </p>
 
                     {providerError ? (
@@ -2067,7 +2083,7 @@ export function Settings({
                         className="btn btn--primary"
                         disabled={providerSaving}
                       >
-                        {providerSaving ? "保存中…" : "保存"}
+                        {providerSaving ? t("settings.provider.saving") : t("settings.provider.save")}
                       </button>
                       <button
                         type="button"
@@ -2075,14 +2091,16 @@ export function Settings({
                         onClick={() => void testProvider()}
                         disabled={providerTest.state === "running"}
                       >
-                        {providerTest.state === "running" ? "测试中…" : "测试连接"}
+                        {providerTest.state === "running"
+                          ? t("settings.provider.testingShort")
+                          : t("settings.provider.testConnection")}
                       </button>
                       <button
                         type="button"
                         className="btn btn--ghost"
                         onClick={() => setProviderForm(null)}
                       >
-                        取消
+                        {t("common.cancel")}
                       </button>
                     </div>
                   </form>
@@ -2100,9 +2118,9 @@ export function Settings({
           >
             <div className="settings-row settings-row--stack" {...pointAttrs("connection.mode")}>
               <div className="settings-row__main">
-                <div className="settings-row__label">接管方式</div>
+                <div className="settings-row__label">{t("stage.modeAria")}</div>
                 <p className="settings-note">
-                  Proxy 模式只给设了代理的软件用；Tun 模式接管全部流量。切换会短暂断开当前连接。
+                  {t("settings.connection.modeNote")}
                 </p>
                 {modeError ? (
                   <p className="settings-feedback settings-feedback--error" role="alert">
@@ -2110,7 +2128,7 @@ export function Settings({
                   </p>
                 ) : null}
               </div>
-              <div className="settings-seg" role="group" aria-label="接管方式">
+              <div className="settings-seg" role="group" aria-label={t("stage.modeAria")}>
                 <button
                   type="button"
                   className={connectMode === "system_proxy" ? "is-selected" : ""}
@@ -2118,7 +2136,7 @@ export function Settings({
                   disabled={!configId || modeBusy}
                   onClick={() => requestConnectMode("system_proxy")}
                 >
-                  Proxy 模式
+                  {t("stage.mode.proxy")}
                 </button>
                 <button
                   type="button"
@@ -2127,28 +2145,28 @@ export function Settings({
                   disabled={!configId || modeBusy}
                   onClick={() => requestConnectMode("tun")}
                 >
-                  Tun 模式
+                  {t("stage.mode.tun")}
                 </button>
               </div>
             </div>
 
             {pendingMode ? (
               <div className="settings-confirm">
-                <p className="settings-confirm__text">切换会短暂断开当前连接。</p>
+                <p className="settings-confirm__text">{t("settings.connection.modeConfirm")}</p>
                 <div className="settings-confirm__actions">
                   <button
                     type="button"
                     className="btn btn--ghost"
                     onClick={() => setPendingMode(null)}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                   <button
                     type="button"
                     className="btn btn--primary"
                     onClick={() => void commitConnectMode(pendingMode)}
                   >
-                    切换
+                    {t("settings.connection.switch")}
                   </button>
                 </div>
               </div>
@@ -2156,9 +2174,9 @@ export function Settings({
 
             <div className="settings-row settings-row--stack" {...pointAttrs("connection.scope")}>
               <div className="settings-row__main">
-                <div className="settings-row__label">流量范围</div>
+                <div className="settings-row__label">{t("stage.scopeAria")}</div>
                 <p className="settings-note">
-                  智能只让需要的流量走节点，全局让所有流量都走。
+                  {t("settings.connection.scopeNote")}
                 </p>
                 {scopeError ? (
                   <p className="settings-feedback settings-feedback--error" role="alert">
@@ -2166,7 +2184,7 @@ export function Settings({
                   </p>
                 ) : null}
               </div>
-              <div className="settings-seg" role="group" aria-label="流量范围">
+              <div className="settings-seg" role="group" aria-label={t("stage.scopeAria")}>
                 <button
                   type="button"
                   className={routingMode === "proxy_all" ? "" : "is-selected"}
@@ -2174,7 +2192,7 @@ export function Settings({
                   disabled={!onSetRoutingMode}
                   onClick={() => void changeScope("direct")}
                 >
-                  智能
+                  {t("stage.scope.smart")}
                 </button>
                 <button
                   type="button"
@@ -2183,17 +2201,17 @@ export function Settings({
                   disabled={!onSetRoutingMode}
                   onClick={() => void changeScope("proxy_all")}
                 >
-                  全局
+                  {t("stage.scope.global")}
                 </button>
               </div>
             </div>
 
             {!configId ? (
               <p className="settings-note">
-                还没有配置。先在连接屏加一个节点。
+                {t("settings.connection.noConfig")}
                 {onNewConfig ? (
                   <button type="button" className="settings-link" onClick={onNewConfig}>
-                    新建节点
+                    {t("controls.newNode")}
                   </button>
                 ) : null}
               </p>
@@ -2207,7 +2225,7 @@ export function Settings({
                     className="settings-row__label"
                     htmlFor="settings-proxy-port"
                   >
-                    本地代理端口
+                    {t("settings.port.askAiField")}
                   </label>
                   <div className="settings-port-line">
                     <span className="settings-port__prefix">127.0.0.1:</span>
@@ -2242,7 +2260,7 @@ export function Settings({
                   ) : null}
                   {portLow ? (
                     <p id="settings-proxy-port-low" className="settings-note">
-                      小于 1024 的端口通常要管理员权限，不建议用。
+                      {t("settings.port.lowHint")}
                     </p>
                   ) : null}
                   {portError ? (
@@ -2262,7 +2280,7 @@ export function Settings({
                     onClick={() => void saveProxyPort()}
                     disabled={portSaving}
                   >
-                    {portSaving ? "保存中…" : "保存"}
+                    {portSaving ? t("settings.provider.saving") : t("settings.provider.save")}
                   </button>
                   <button
                     type="button"
@@ -2270,25 +2288,14 @@ export function Settings({
                     onClick={cancelProxyPortEdit}
                     disabled={portSaving}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                 </div>
               </div>
             ) : (
               <div className="settings-row" {...pointAttrs("connection.port")}>
                 <div>
-                  <div className="settings-row__label">
-                    本地代理端口{" "}
-                    <button
-                      type="button"
-                      className="ask-ai"
-                      onClick={() =>
-                        askAi("本地代理端口", `127.0.0.1:${displayPort}`)
-                      }
-                    >
-                      问 AI
-                    </button>
-                  </div>
+                  <div className="settings-row__label">{t("settings.port.askAiField")}</div>
                   <div className="settings-port-line">
                     <code className="settings-port-address num">
                       127.0.0.1:{displayPort}
@@ -2307,12 +2314,12 @@ export function Settings({
                   ) : null}
                   {!portFallback && portAvailability === "occupied" ? (
                     <p className="settings-feedback settings-feedback--warn">
-                      现在被别的软件占用，连接时会自动顺延。
+                      {t("settings.port.occupiedHint")}
                     </p>
                   ) : null}
                   {!portFallback && portAvailability === "unavailable" ? (
                     <p className="settings-feedback settings-feedback--warn">
-                      这台机器绑不了这个端口（需要管理员权限），连接时会自动顺延。
+                      {t("settings.port.unavailableHint")}
                     </p>
                   ) : null}
                 </div>
@@ -2323,10 +2330,10 @@ export function Settings({
                     onClick={() => void copyProxyAddress()}
                   >
                     {proxyCopy === "ok"
-                      ? "已复制"
+                      ? t("chat.copy.copied")
                       : proxyCopy === "error"
-                        ? "复制失败"
-                        : "复制"}
+                        ? t("chat.copy.failed")
+                        : t("detail.copy")}
                   </button>
                   <button
                     ref={portEditButtonRef}
@@ -2334,7 +2341,7 @@ export function Settings({
                     className="btn btn--ghost"
                     onClick={beginProxyPortEdit}
                   >
-                    编辑
+                    {t("settings.common.edit")}
                   </button>
                 </div>
               </div>
@@ -2353,14 +2360,14 @@ export function Settings({
 
                 <div className="settings-row">
                   <div>
-                    <div className="settings-row__label">添加节点</div>
+                    <div className="settings-row__label">{t("settings.import.title")}</div>
                   </div>
                   <button
                     type="button"
                     className="btn btn--ghost"
                     onClick={() => setImportOpen(true)}
                   >
-                    添加
+                    {t("settings.import.add")}
                   </button>
                 </div>
               </>
@@ -2381,30 +2388,31 @@ export function Settings({
                 >
                   <header className="modal__head">
                     <h2 id="import-dialog-title" className="modal__title">
-                      添加节点
+                      {t("settings.import.title")}
                     </h2>
                     <button
                       type="button"
                       className="modal__close"
                       onClick={() => setImportOpen(false)}
-                      aria-label="关闭"
+                      aria-label={t("common.close")}
                     >
                       <IconClose size={14} />
                     </button>
                   </header>
 
                   <p className="settings-note">
-                    支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。
+                    {t("settings.import.note")}
                   </p>
 
                   {importFile ? (
                     <p className="settings-row__value">
-                      将导入：<span className="num">{fileNameOf(importFile)}</span>
+                      {t("settings.import.willImport")}{" "}
+                      <span className="num">{fileNameOf(importFile)}</span>
                     </p>
                   ) : (
                     <div className="settings-input">
                       <textarea
-                        aria-label="节点链接或订阅地址"
+                        aria-label={t("settings.import.urlAria")}
                         value={importText}
                         rows={4}
                         disabled={importBusy}
@@ -2425,7 +2433,7 @@ export function Settings({
                           className="settings-feedback settings-feedback--warn"
                           role="status"
                         >
-                          没有添加节点
+                          {t("settings.import.noneAdded")}
                         </p>
                       ) : null}
                       {importResult.skipped.length > 0 ? (
@@ -2459,7 +2467,7 @@ export function Settings({
                           onClick={() => void chooseImportFile()}
                           disabled={importBusy}
                         >
-                          重新选择
+                          {t("settings.import.reselect")}
                         </button>
                         <button
                           type="button"
@@ -2467,7 +2475,7 @@ export function Settings({
                           onClick={() => setImportFile(null)}
                           disabled={importBusy}
                         >
-                          改用文本
+                          {t("settings.import.useText")}
                         </button>
                       </>
                     ) : (
@@ -2477,7 +2485,7 @@ export function Settings({
                         onClick={() => void chooseImportFile()}
                         disabled={importBusy}
                       >
-                        从文件导入
+                        {t("settings.import.fromFile")}
                       </button>
                     )}
                     <button
@@ -2486,7 +2494,7 @@ export function Settings({
                       onClick={() => setImportOpen(false)}
                       disabled={importBusy}
                     >
-                      取消
+                      {t("common.cancel")}
                     </button>
                     <button
                       type="button"
@@ -2499,13 +2507,13 @@ export function Settings({
                     >
                       {importBusy
                         ? importFile
-                          ? "正在导入…"
+                          ? t("settings.import.busy")
                           : importIsUrl
-                            ? "正在获取…"
-                            : "正在添加…"
+                            ? t("settings.import.busyUrl")
+                            : t("settings.import.busyText")
                         : importFile
-                          ? "导入"
-                          : "添加"}
+                          ? t("settings.import.action")
+                          : t("settings.import.add")}
                     </button>
                   </div>
                 </div>
@@ -2521,11 +2529,10 @@ export function Settings({
             id="settings-panel-advanced"
             aria-labelledby="settings-tab-advanced"
           >
-            {/* 批次 1 先直接写中文；批次 2 把这一行迁进 i18n 字典。 */}
             <div className="settings-row settings-row--stack">
               <div className="settings-row__main">
-                <div className="settings-row__label">语言</div>
-                <p className="settings-note">已开始的对话保持原语言。</p>
+                <div className="settings-row__label">{t("settings.language.label")}</div>
+                <p className="settings-note">{t("settings.language.note")}</p>
                 {languageError ? (
                   <p className="settings-feedback settings-feedback--error" role="alert">
                     {languageError}
@@ -2535,7 +2542,7 @@ export function Settings({
               <div
                 className="settings-seg settings-seg--language"
                 role="group"
-                aria-label="语言"
+                aria-label={t("settings.language.label")}
               >
                 <button
                   type="button"
@@ -2544,7 +2551,7 @@ export function Settings({
                   disabled={languageBusy}
                   onClick={() => void changeLanguage("system")}
                 >
-                  跟随系统
+                  {t("settings.language.followSystem")}
                 </button>
                 <button
                   type="button"
@@ -2553,7 +2560,7 @@ export function Settings({
                   disabled={languageBusy}
                   onClick={() => void changeLanguage("zh")}
                 >
-                  中文
+                  {t("settings.language.zh")}
                 </button>
                 <button
                   type="button"
@@ -2562,28 +2569,28 @@ export function Settings({
                   disabled={languageBusy}
                   onClick={() => void changeLanguage("en")}
                 >
-                  English
+                  {t("settings.language.en")}
                 </button>
               </div>
             </div>
 
-            <div className="settings-subhead">修复网络</div>
+            <div className="settings-subhead">{t("settings.advanced.repair")}</div>
 
             <p className="settings-note">
-              这里的东西平时不用改。连不上网、打不开网页时再看。
+              {t("settings.advanced.intro")}
             </p>
 
             {showCleanupProxy ? (
               <div className="settings-row">
                 <div>
-                  <div className="settings-row__label">清除残留代理</div>
+                  <div className="settings-row__label">{t("settings.advanced.cleanupProxy")}</div>
                   <div className="settings-row__value">
-                    清除系统里残留的代理设置；已经断开 VPN，但仍上不了网时用。
+                    {t("settings.advanced.cleanupProxyValue")}
                   </div>
-                  <p className="settings-note">不会影响「全部流量」的接管。</p>
+                  <p className="settings-note">{t("settings.advanced.cleanupProxyNote")}</p>
                 </div>
                 <button type="button" className="btn btn--ghost" onClick={onRestoreNetwork}>
-                  清除残留代理
+                  {t("settings.advanced.cleanupProxy")}
                 </button>
               </div>
             ) : null}
@@ -2592,9 +2599,9 @@ export function Settings({
               <>
                 <div className="settings-row">
                   <div>
-                    <div className="settings-row__label">生成问题报告</div>
+                    <div className="settings-row__label">{t("settings.advanced.report")}</div>
                     <div className="settings-row__value">
-                      把现场材料和日志整理成一个文件夹，放到桌面上。
+                      {t("settings.advanced.reportValue")}
                     </div>
                   </div>
                   <button
@@ -2603,7 +2610,7 @@ export function Settings({
                     disabled={reportBusy}
                     onClick={onReportProblem}
                   >
-                    生成问题报告
+                    {t("settings.advanced.report")}
                   </button>
                 </div>
 
@@ -2613,10 +2620,10 @@ export function Settings({
                       className="settings-row__label"
                       htmlFor="report-include-domains"
                     >
-                      报告中包含我访问过的网站域名
+                      {t("settings.advanced.reportDomains")}
                     </label>
                     <p className="settings-hint">
-                      开启后诊断更准确；关闭时域名会打码成 ***.google.com。
+                      {t("settings.advanced.reportDomainsHint")}
                     </p>
                     {domainError ? (
                       <p className="settings-note settings-feedback settings-feedback--error">
@@ -2638,11 +2645,11 @@ export function Settings({
 
             <div className="danger-zone" {...pointAttrs("advanced.reset")}>
               <div className="danger-zone__body">
-                <div className="danger-zone__title">重置网络</div>
+                <div className="danger-zone__title">{t("settings.advanced.resetTitle")}</div>
                 <p className="settings-row__value">
-                  把网络恢复成没装 VPN 的样子。不会删除配置和节点。
+                  {t("settings.advanced.resetValue")}
                 </p>
-                <p className="settings-note">只在连不上网、其它方法都无效时用。</p>
+                <p className="settings-note">{t("settings.advanced.resetNote")}</p>
                 {lastReset ? (
                   <p
                     className={`settings-note ${
@@ -2650,8 +2657,14 @@ export function Settings({
                     }`}
                   >
                     {lastReset.failed > 0
-                      ? `上次重置：${resetTimeLabel(lastReset.at)} · ${lastReset.failed} 项未完成`
-                      : `上次重置：${resetTimeLabel(lastReset.at)} · ${lastReset.total} 项全部完成`}
+                      ? t("settings.reset.lastPartial", {
+                          time: resetTimeLabel(lastReset.at),
+                          count: lastReset.failed,
+                        })
+                      : t("settings.reset.lastDone", {
+                          time: resetTimeLabel(lastReset.at),
+                          count: lastReset.total,
+                        })}
                   </p>
                 ) : null}
               </div>
@@ -2661,12 +2674,12 @@ export function Settings({
                 className="btn btn--danger-ghost"
                 onClick={() => setResetPhase("confirm")}
               >
-                重置网络
+                {t("settings.advanced.resetTitle")}
               </button>
             </div>
 
             <details className="settings-fold">
-              <summary className="settings-fold__summary">更新与诊断</summary>
+              <summary className="settings-fold__summary">{t("settings.advanced.fold")}</summary>
               <div className="settings-fold__body">
                 <div {...pointAttrs("advanced.core")}>
                   <RuntimeUpgradeRow controller={coreUpgrade} />
@@ -2677,21 +2690,21 @@ export function Settings({
 
                 <div className="settings-row" {...pointAttrs("advanced.logs")}>
                   <div>
-                    <div className="settings-row__label">打开日志</div>
+                    <div className="settings-row__label">{t("settings.advanced.openLogs")}</div>
                     <div className="settings-row__value">
-                      在文件管理器中定位最近的日志文件。
+                      {t("settings.advanced.logsValue")}
                     </div>
                   </div>
                   <button type="button" className="btn btn--ghost" onClick={onOpenLogs}>
-                    打开日志目录
+                    {t("settings.advanced.openLogsDir")}
                   </button>
                 </div>
 
                 <div className="settings-row">
                   <div>
-                    <div className="settings-row__label">复制诊断信息</div>
+                    <div className="settings-row__label">{t("settings.advanced.copyDiagnostics")}</div>
                     <div className="settings-row__value">
-                      复制当前状态，便于排查问题；不包含 Key。
+                      {t("settings.advanced.diagValue")}
                     </div>
                   </div>
                   <div className="settings-row__aside">
@@ -2700,7 +2713,7 @@ export function Settings({
                       className="btn btn--ghost"
                       onClick={() => void copyDiagnostics()}
                     >
-                      复制诊断信息
+                      {t("settings.advanced.copyDiagnostics")}
                     </button>
                   </div>
                 </div>
@@ -2708,15 +2721,15 @@ export function Settings({
                   <p className="settings-feedback settings-feedback--ok">{diagnosticNotice}</p>
                 ) : null}
 
-                {/* tun_probe 只在 debug 构建注册，release 里连入口一起隐藏。 */}
+                {/* tun_probe is registered only in debug builds; the entry is hidden in release too. */}
                 {import.meta.env.DEV ? <TunDiagnosticsRow bridge={bridge} /> : null}
 
                 {import.meta.env.DEV ? (
                   <div className="settings-row">
                     <div>
-                      <div className="settings-row__label">重新运行引导</div>
+                      <div className="settings-row__label">{t("settings.advanced.restartOnboarding")}</div>
                       <div className="settings-row__value">
-                        不会删除已有 Key 或节点。仅开发构建可见。
+                        {t("settings.advanced.restartNote")}
                       </div>
                     </div>
                     <button
@@ -2724,7 +2737,7 @@ export function Settings({
                       className="btn btn--ghost"
                       onClick={onRestartOnboarding}
                     >
-                      重新运行
+                      {t("settings.advanced.rerun")}
                     </button>
                   </div>
                 ) : null}
@@ -2733,13 +2746,13 @@ export function Settings({
 
             <div className="settings-row">
               <div>
-                <div className="settings-row__label">版本</div>
+                <div className="settings-row__label">{t("settings.advanced.version")}</div>
                 <div className="settings-row__value num">v{appVersion ?? "—"}</div>
               </div>
             </div>
 
             <p className="settings-note">
-              AI 对话会发给你选的服务；配置、节点和日志都留在本机。
+              {t("settings.about.aiNote")}
             </p>
           </section>
         ) : null}
@@ -2755,45 +2768,45 @@ export function Settings({
               <>
                 <div className="settings-row" {...pointAttrs("account.login")}>
                   <div className="settings-account__identity">
-                    <div className="settings-row__label">邮箱</div>
+                    <div className="settings-row__label">{t("settings.account.email")}</div>
                     <div
                       className="settings-account__email"
                       title={account.email ?? undefined}
                     >
-                      {account.email ?? "已登录"}
+                      {account.email ?? t("settings.account.signedIn")}
                     </div>
                   </div>
                 </div>
                 <div className="settings-row" {...pointAttrs("account.balance")}>
                   <div>
-                    <div className="settings-row__label">余额</div>
+                    <div className="settings-row__label">{t("settings.account.balance")}</div>
                     {walletError ? (
                       <p className="settings-account__error">
-                        余额暂时读不到。
+                        {t("account.walletError")}
                         <button
                           type="button"
                           className="settings-link"
                           onClick={() => onRefreshWallet?.("retry")}
                           disabled={!onRefreshWallet}
                         >
-                          重试
+                          {t("account.retry")}
                         </button>
                       </p>
                     ) : (
                       <div className="settings-account__amount num">
                         {walletLoading
-                          ? "读取中"
+                          ? t("settings.account.loading")
                           : wallet
                             ? formatUsdCents(wallet.balance_cents)
                             : "—"}
                       </div>
                     )}
                     <p className="settings-note">
-                      余额按天扣费，每台服务器单独计费。
+                      {t("settings.account.billingNote")}
                     </p>
                     {walletStale && wallet && !walletError ? (
                       <p className="settings-note">
-                        没刷新成功，显示的是上次的余额。
+                        {t("account.stale")}
                       </p>
                     ) : null}
                   </div>
@@ -2805,7 +2818,7 @@ export function Settings({
                         onClick={onForceRefresh}
                         disabled={!onForceRefresh || walletRefreshing}
                       >
-                        {walletRefreshing ? "刷新中" : "刷新"}
+                        {walletRefreshing ? t("settings.account.refreshing") : t("settings.account.refresh")}
                       </button>
                     )}
                     <button
@@ -2814,7 +2827,7 @@ export function Settings({
                       onClick={onTopUp}
                       disabled={!onTopUp}
                     >
-                      充值
+                      {t("account.topUp")}
                     </button>
                   </div>
                 </div>
@@ -2822,8 +2835,8 @@ export function Settings({
             ) : (
               <div className="settings-row" {...pointAttrs("account.login")}>
                 <div>
-                  <div className="settings-row__label">未登录</div>
-                  <p className="settings-note">登录后才能充值、购买自己的服务器。</p>
+                  <div className="settings-row__label">{t("settings.account.signedOut")}</div>
+                  <p className="settings-note">{t("settings.account.signedOutNote")}</p>
                 </div>
                 <button
                   type="button"
@@ -2831,15 +2844,15 @@ export function Settings({
                   onClick={onLogin}
                   disabled={!onLogin}
                 >
-                  登录
+                  {t("serversPage.login")}
                 </button>
               </div>
             )}
             <div className="settings-row" {...pointAttrs("account.mobile")}>
               <div>
-                <div className="settings-row__label">在手机上使用</div>
+                <div className="settings-row__label">{t("settings.account.mobile")}</div>
                 <p className="settings-note">
-                  下载 sing-box 官方客户端，扫码导入你的节点。
+                  {t("settings.account.mobileNote")}
                 </p>
               </div>
               <div className="settings-row__aside">
@@ -2849,7 +2862,7 @@ export function Settings({
                   onClick={(event) => onOpenMobileExport?.(event.currentTarget)}
                   disabled={!onOpenMobileExport}
                 >
-                  查看
+                  {t("settings.account.view")}
                 </button>
               </div>
             </div>
@@ -2892,7 +2905,7 @@ export function Settings({
                 type="button"
                 className="modal__close"
                 onClick={closeReset}
-                aria-label="关闭"
+                aria-label={t("common.close")}
                 disabled={resetPhase === "running"}
               >
                 <IconClose size={14} />
@@ -2902,9 +2915,9 @@ export function Settings({
             {resetPhase === "confirm" ? (
               <div className="reset-confirm">
                 <p className="reset-confirm__warning">
-                  会立刻断开当前连接，并撤销 Veyl 对网络的改动。不会删除配置和节点。
+                  {t("settings.reset.confirmBody")}
                 </p>
-                <p className="reset-confirm__text">正在开会或下载时，等结束再做。</p>
+                <p className="reset-confirm__text">{t("settings.reset.confirmNote")}</p>
                 <div className="settings-actions">
                   <button
                     ref={resetCancelRef}
@@ -2912,14 +2925,14 @@ export function Settings({
                     className="btn btn--ghost"
                     onClick={closeReset}
                   >
-                    取消
+                    {t("common.cancel")}
                   </button>
                   <button
                     type="button"
                     className="btn btn--danger-ghost"
                     onClick={() => void runNetworkReset()}
                   >
-                    重置网络
+                    {t("settings.advanced.resetTitle")}
                   </button>
                 </div>
               </div>
@@ -2927,15 +2940,15 @@ export function Settings({
 
             {resetPhase === "running" ? (
               <div className="reset-running" role="status" aria-live="polite">
-                <p className="reset-running__text">不要关闭 Veyl。网络会短暂中断。</p>
+                <p className="reset-running__text">{t("settings.reset.runningNote")}</p>
                 <div
                   className="reset-progress"
                   role="progressbar"
-                  aria-label="正在重置网络"
+                  aria-label={t("settings.reset.ariaProgress")}
                 />
                 <div className="settings-actions">
                   <button type="button" className="btn btn--ghost" disabled>
-                    正在重置…
+                    {t("settings.reset.runningShort")}
                   </button>
                 </div>
               </div>
@@ -2954,14 +2967,14 @@ export function Settings({
 
                 {resetResult && !resetResult.verified ? (
                   <p className="reset-result__hint">
-                    网络状态没有通过复查。先点「再试一次」；仍不通过就复制诊断信息发给助手。
+                    {t("settings.reset.failedRetry")}
                   </p>
                 ) : null}
 
                 {resetResult && resetResult.steps.length > 0 ? (
                   outcome.kind === "success" ? (
                     <details className="reset-route-help">
-                      <summary>查看详情</summary>
+                      <summary>{t("settings.reset.details")}</summary>
                       <ul className="reset-steps">{resetStepItems}</ul>
                     </details>
                   ) : (
@@ -2975,34 +2988,34 @@ export function Settings({
                     canonicalResetStep(step.id) === "clear_routes",
                 ) ? (
                   <details className="reset-route-help">
-                    <summary>手动清理路由（高级）</summary>
+                    <summary>{t("settings.reset.manualRoutes")}</summary>
                     <ol>
                       <li>
-                        先确认当前默认网关：<code>route -n get default</code>
+                        {t("settings.reset.gatewayCheck")} <code>route -n get default</code>
                       </li>
                       <li>
-                        只删除诊断信息里标出的那一条残留路由：
+                        {t("settings.reset.deleteOne")}
                         <span className="reset-route-help__code">
-                          <code>sudo route -n delete -net &lt;残留网段&gt;</code>
+                          <code>{t("settings.reset.sudoTemplate")}</code>
                           <button
                             type="button"
                             className="btn btn--ghost reset-route-help__copy"
                             onClick={() => void copyRouteCommand()}
                           >
-                            复制模板（替换 &lt;网段&gt;）
+                            {t("settings.reset.copyTemplate")}
                           </button>
                         </span>
-                        如果命令提示需要网关，按诊断信息里的网关补在末尾；不要删 default。
+                        {t("settings.reset.gatewayNote")}
                       </li>
-                      <li>不要删除 default，也不要删除你不认识的路由。</li>
-                      <li>删除后重新运行「重置网络」做复查。</li>
+                      <li>{t("settings.reset.manualWarn")}</li>
+                      <li>{t("settings.reset.manualAfter")}</li>
                       <li>
-                        Windows 用户不要执行上面的命令；请在系统设置里使用「网络重置」，或重启电脑。
+                        {t("settings.reset.windowsNote")}
                       </li>
                     </ol>
                     {routeCopy !== "idle" ? (
                       <p className="settings-feedback settings-feedback--ok">
-                        {routeCopy === "ok" ? "已复制" : "复制失败"}
+                        {routeCopy === "ok" ? t("chat.copy.copied") : t("chat.copy.failed")}
                       </p>
                     ) : null}
                   </details>
@@ -3015,7 +3028,7 @@ export function Settings({
                       className="btn btn--ghost"
                       onClick={() => void runNetworkReset()}
                     >
-                      再试一次
+                      {t("settings.reset.tryAgain")}
                     </button>
                   ) : null}
                   <button
@@ -3024,7 +3037,7 @@ export function Settings({
                     className="btn btn--ghost"
                     onClick={closeReset}
                   >
-                    关闭
+                    {t("common.close")}
                   </button>
                   {outcome.kind !== "success" ? (
                     <button
@@ -3032,13 +3045,13 @@ export function Settings({
                       className="btn btn--link"
                       onClick={() => void copyResetReport()}
                     >
-                      复制诊断信息
+                      {t("settings.advanced.copyDiagnostics")}
                     </button>
                   ) : null}
                 </div>
                 {resetCopy !== "idle" ? (
                   <p className="settings-feedback settings-feedback--ok">
-                    {resetCopy === "ok" ? "已复制" : "复制失败"}
+                    {resetCopy === "ok" ? t("chat.copy.copied") : t("chat.copy.failed")}
                   </p>
                 ) : null}
               </div>
@@ -3086,27 +3099,35 @@ function ResetStepIcon({ status }: { status: "ok" | "failed" | "skipped" }) {
 function describeResetError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
-    return "当前版本还没有接入重置网络，请更新应用后再试。";
+    return translate("settings.error.resetUnsupported");
   }
   // 原始错误可能带路径或英文命令，只进「复制诊断信息」。
-  return "重置没有开始，请稍后再试；仍失败就复制诊断信息发给助手。";
+  return translate("settings.error.resetFailed");
 }
 
 export function describeProviderError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
-    return "AI 服务功能还没有接入当前版本，请稍后再试。";
+    return translate("settings.error.providerUnsupported");
   }
   if (bridgeError.code === "NOT_FOUND") {
-    return "这个 provider 已经不存在了。";
+    return translate("settings.error.providerGone");
   }
   if (bridgeError.code === "PRECONDITION_FAILED") {
     const reason = bridgeError.details?.reason;
-    if (reason === "builtin_provider") return "内置服务不可删除";
-    if (reason === "no_active_provider") return "没有可用的 AI 服务，请到设置里选择一个";
-    return bridgeError.message || "这个操作暂时不可用。";
+    if (reason === "builtin_provider") {
+      return translate("settings.error.builtinCannotDelete");
+    }
+    if (reason === "no_active_provider") {
+      return translate("settings.error.noActiveProvider");
+    }
+    return bridgeError.hasMessage
+      ? bridgeError.message
+      : translate("settings.error.actionUnavailable");
   }
-  return bridgeError.message || "操作失败，请重试";
+  return bridgeError.hasMessage
+    ? bridgeError.message
+    : translate("settings.error.generic");
 }
 
 export function describeKeyError(error: unknown): string {
@@ -3114,20 +3135,22 @@ export function describeKeyError(error: unknown): string {
 
   switch (code) {
     case "INVALID_ARGUMENT":
-      return "Key 格式不对：应以 sk- 开头，长度至少 20 位。";
+      return translate("settings.key.invalidFormat");
     case "INVALID_KEY":
-      return "Key 已保存在本机，但 DeepSeek 鉴权失败（可能无效或已被吊销）。请重新输入一个有效的 Key。";
+      return translate("settings.key.authFailed");
     case "SECRET_STORE":
-      return "本地加密凭据文件写入失败（secrets.enc），请检查磁盘权限或空间后重试。";
+      return translate("settings.key.storeFailed");
     case "NETWORK":
     case "TIMEOUT":
-      return "网络不通，没能验证 Key。稍后再试一次。";
+      return translate("settings.key.network");
     default:
       break;
   }
 
   const message = readMessage(error);
-  return message ? `保存失败：${message}` : "保存失败，请稍后重试。";
+  return message
+    ? translate("settings.key.saveFailedWith", { message })
+    : translate("settings.key.saveFailed");
 }
 
 function readCode(error: unknown): string {
@@ -3152,18 +3175,18 @@ export function describeImportError(error: unknown): string {
 
   switch (reason) {
     case "not_json_file":
-      return "请选择 .json 文件。";
+      return translate("settings.import.notJson");
     case "file_too_large":
-      return "文件过大，最大 1 MB。";
+      return translate("settings.import.tooLarge");
     case "file_unreadable":
-      return "无法读取这个文件。";
+      return translate("settings.import.unreadable");
     case "invalid_json":
-      return "这个文件不是有效的节点文件。";
+      return translate("settings.import.invalidJson");
     case "no_importable_nodes": {
       const skipped = bridgeError.details?.skipped;
       return typeof skipped === "number"
-        ? `已跳过 ${skipped} 个，但没有可导入的节点。`
-        : "文件里没有支持的节点。";
+        ? translate("settings.import.allSkipped", { count: skipped })
+        : translate("settings.import.noSupported");
     }
     default:
       break;
@@ -3172,13 +3195,15 @@ export function describeImportError(error: unknown): string {
   if (bridgeError.code === "UNSUPPORTED") {
     const method = bridgeError.details?.method;
     return typeof method === "string"
-      ? `不支持加密方式 ${method}，目前只支持 aes-256-gcm。`
-      : "不支持这种加密方式，目前只支持 aes-256-gcm。";
+      ? translate("settings.import.methodUnsupportedWith", { method })
+      : translate("settings.import.methodUnsupported");
   }
 
   if (bridgeError.code === "SECRET_STORE") {
-    return "凭据保存失败，请重试。";
+    return translate("settings.import.secretStore");
   }
 
-  return bridgeError.message || "导入失败，请重试。";
+  return bridgeError.hasMessage
+    ? bridgeError.message
+    : translate("settings.import.failed");
 }

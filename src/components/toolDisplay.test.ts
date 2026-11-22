@@ -25,7 +25,7 @@ describe("工具名映射集合", () => {
     expect(new Set(names)).toEqual(new Set(TOOL_NAMES));
     // 新工具必须有文案，避免整表对上了却漏掉刚加的两条。
     expect(TOOL_NAMES).toEqual(
-      expect.arrayContaining(["OpenSettings", "MyServerFailure"]),
+      expect.arrayContaining(["OpenSettings", "MyServerFailure", "NodeRotateCredentials"]),
     );
   });
 

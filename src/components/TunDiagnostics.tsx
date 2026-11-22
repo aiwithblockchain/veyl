@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, TunProbeData } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { t as translate, useT } from "../i18n";
 
 type Phase =
   | { kind: "idle" }
@@ -18,11 +19,13 @@ interface Props {
 function announcement(phase: Phase): string {
   switch (phase.kind) {
     case "running":
-      return "正在运行网络诊断";
+      return translate("tunDiag.announce.running");
     case "precondition":
-      return "还没有连接，无法运行诊断";
+      return translate("tunDiag.announce.notConnected");
     case "done":
-      return `${phase.result.conclusion}，诊断报告已生成`;
+      return translate("tunDiag.announce.done", {
+        conclusion: phase.result.conclusion,
+      });
     default:
       return "";
   }
@@ -33,6 +36,7 @@ function announcement(phase: Phase): string {
  * 所以整行由调用方用 `import.meta.env.DEV` 挂载。
  */
 export function TunDiagnosticsRow({ bridge }: Props) {
+  const t = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [copy, setCopy] = useState<CopyState>("idle");
   const copyTimer = useRef<number | null>(null);
@@ -60,7 +64,8 @@ export function TunDiagnosticsRow({ bridge }: Props) {
       } else {
         setPhase({
           kind: "error",
-          text: bridgeError.message.trim() || "诊断没有完成，请稍后重试。",
+          text:
+            bridgeError.message.trim() || t("tunDiag.failed"),
         });
       }
     } finally {
@@ -86,16 +91,16 @@ export function TunDiagnosticsRow({ bridge }: Props) {
   return (
     <div className="settings-row settings-row--stack">
       <div className="tun-probe">
-        <div className="settings-row__label">运行诊断</div>
+        <div className="settings-row__label">{t("tunDiag.title")}</div>
         <div className="settings-row__value">
-          只在 debug 构建可用；采集接口、节点、DNS 与出站，写一份报告。
+          {t("tunDiag.debugOnly")}
         </div>
 
         {phase.kind === "running" ? (
-          <p className="settings-note tun-probe__status">正在诊断…</p>
+          <p className="settings-note tun-probe__status">{t("tunDiag.running")}</p>
         ) : null}
         {phase.kind === "precondition" ? (
-          <p className="settings-note tun-probe__status">连上之后再运行诊断</p>
+          <p className="settings-note tun-probe__status">{t("tunDiag.connectFirst")}</p>
         ) : null}
         {phase.kind === "error" ? (
           <p className="settings-feedback settings-feedback--error" role="alert">
@@ -107,7 +112,7 @@ export function TunDiagnosticsRow({ bridge }: Props) {
             <p className="tun-probe__conclusion">{phase.result.conclusion}</p>
             <dl className="tun-probe__items">
               <div className="tun-probe__item">
-                <dt>接口</dt>
+                <dt>{t("tunDiag.iface")}</dt>
                 <dd>
                   {phase.result.utun.length > 0
                     ? phase.result.utun.map((line) => (
@@ -115,23 +120,23 @@ export function TunDiagnosticsRow({ bridge }: Props) {
                           {line}
                         </span>
                       ))
-                    : "未发现 utun 接口"}
+                    : t("tunDiag.noIface")}
                 </dd>
               </div>
               <div className="tun-probe__item">
-                <dt>节点直连</dt>
+                <dt>{t("tunDiag.direct")}</dt>
                 <dd>{phase.result.node || "—"}</dd>
               </div>
               <div className="tun-probe__item">
-                <dt>系统 DNS</dt>
+                <dt>{t("tunDiag.dns")}</dt>
                 <dd>{phase.result.dns || "—"}</dd>
               </div>
               <div className="tun-probe__item">
-                <dt>经隧道 HTTPS</dt>
+                <dt>{t("tunDiag.tunnel")}</dt>
                 <dd>{phase.result.https || "—"}</dd>
               </div>
               <div className="tun-probe__item">
-                <dt>进程</dt>
+                <dt>{t("tunDiag.process")}</dt>
                 <dd>{phase.result.process || "—"}</dd>
               </div>
             </dl>
@@ -139,12 +144,16 @@ export function TunDiagnosticsRow({ bridge }: Props) {
               <button
                 type="button"
                 className="tun-probe__path"
-                title="点击复制报告路径"
+                title={t("tunDiag.copyPathTitle")}
                 onClick={() => void copyPath(phase.result.reportPath)}
               >
                 {phase.result.reportPath}
                 <span className="tun-probe__copy">
-                  {copy === "ok" ? "已复制" : copy === "error" ? "复制失败" : "复制路径"}
+                  {copy === "ok"
+                  ? t("chat.copy.copied")
+                  : copy === "error"
+                    ? t("chat.copy.failed")
+                    : t("tunDiag.copyPath")}
                 </span>
               </button>
             ) : null}
@@ -162,7 +171,7 @@ export function TunDiagnosticsRow({ bridge }: Props) {
           disabled={running}
           onClick={() => void run()}
         >
-          {canRerun ? "重新诊断" : "运行诊断"}
+          {canRerun ? t("tunDiag.rerun") : t("tunDiag.title")}
         </button>
       </div>
     </div>

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { MyServer } from "../agent/bridge";
 import {
-  MY_SERVER_STATE_LABEL,
-  MY_SERVER_STEP_DONE_LABEL,
   formatBuildDuration,
   formatDuration,
+  serverStateLabel,
+  serverStepDoneLabel,
 } from "../myservers/labels";
+import { useT } from "../i18n";
 
 const STAGES = ["creating", "booting", "installing", "verifying"] as const;
 /** 某一阶段超过这么久就换一句「还在继续」，不再说「通常 2–4 分钟」。 */
@@ -32,6 +33,7 @@ function stageStartedAt(server: MyServer): number | null {
 }
 
 export function ServerProgress({ server }: { server: MyServer }) {
+  const t = useT();
   // 建好之后这块原地换成完成态：四个步骤全打勾 + 创建用时，页面不位移。
   const ready = server.state === "healthy" || server.state === "active";
   const stageIndex = STAGES.indexOf(server.state as (typeof STAGES)[number]);
@@ -103,7 +105,7 @@ export function ServerProgress({ server }: { server: MyServer }) {
       <div
         className="myservers__progress is-done"
         role="group"
-        aria-label="建机进度"
+        aria-label={t("progress.groupAria")}
       >
         <ol className="myservers__steps">
           {STAGES.map((stage) => (
@@ -111,17 +113,17 @@ export function ServerProgress({ server }: { server: MyServer }) {
               <span className="myservers__step-tick" aria-hidden="true">
                 ✓
               </span>
-              {MY_SERVER_STEP_DONE_LABEL[stage]}
+              {serverStepDoneLabel(stage)}
             </li>
           ))}
         </ol>
         <p className="myservers__created-in">
           {buildDuration ? (
             <>
-              创建用时 <span className="num">{buildDuration}</span>
+              {t("progress.createdIn")} <span className="num">{buildDuration}</span>
             </>
           ) : (
-            "用时未记录"
+            t("progress.durationMissing")
           )}
         </p>
       </div>
@@ -133,17 +135,21 @@ export function ServerProgress({ server }: { server: MyServer }) {
   const overtime =
     stageElapsed !== null && stageElapsed > STAGE_TIMEOUT_MS;
   const note = overtime
-    ? `这一步已经 ${Math.floor((stageElapsed ?? 0) / 60_000)} 分钟，还在继续。`
+    ? t("progress.overtime", {
+        minutes: Math.floor((stageElapsed ?? 0) / 60_000),
+      })
     : server.state === "installing" && server.singbox_version
-      ? `正在安装 sing-box ${server.singbox_version}`
-      : "通常 2–4 分钟。";
+      ? t("progress.installing", { version: server.singbox_version })
+      : t("progress.typical");
 
   return (
-    <div className="myservers__progress" role="group" aria-label="建机进度">
+    <div className="myservers__progress" role="group" aria-label={t("progress.groupAria")}>
       <div className="myservers__progress-head">
-        <span>{MY_SERVER_STATE_LABEL[server.state] ?? "正在处理"}</span>
+        <span>{serverStateLabel(server.state) || t("progress.processing")}</span>
         <span className="num">
-          已等待 {formatDuration((now - (baseRef.current ?? now)) / 1000)}
+          {t("progress.waited", {
+            duration: formatDuration((now - (baseRef.current ?? now)) / 1000),
+          })}
         </span>
       </div>
       <div className="myservers__bar">
@@ -174,7 +180,7 @@ export function ServerProgress({ server }: { server: MyServer }) {
                   : ""
             }
           >
-            {MY_SERVER_STATE_LABEL[stage]}
+            {serverStateLabel(stage)}
           </li>
         ))}
       </ol>

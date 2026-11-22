@@ -3,6 +3,7 @@ import type {
   MouseEventHandler,
   PointerEventHandler,
 } from "react";
+import { useT } from "../i18n";
 
 interface Props {
   side: "rail" | "assistant";
@@ -37,6 +38,7 @@ export function PaneHandle({
   onKeyDown,
   onDoubleClick,
 }: Props) {
+  const t = useT();
   return (
     <div
       role="separator"
@@ -47,7 +49,7 @@ export function PaneHandle({
       aria-valuenow={Math.round(value)}
       aria-valuemin={Math.round(min)}
       aria-valuemax={Math.round(max)}
-      aria-valuetext={`${Math.round(value)} 像素`}
+      aria-valuetext={t("pane.pixels", { value: Math.round(value) })}
       className={`pane-handle pane-handle--${side} ${dragging ? "is-dragging" : ""}`}
       data-dragging={dragging ? "true" : undefined}
       onPointerDown={onPointerDown}

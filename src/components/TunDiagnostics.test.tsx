@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, TunProbeData } from "../agent/bridge";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
+import { setLanguage } from "../i18n";
 
 const RESULT: TunProbeData = {
   conclusion: "隧道与出站均正常",
@@ -24,7 +25,10 @@ beforeEach(() => {
   writeText.mockClear();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 function makeBridge(tunProbe: AgentBridge["tunProbe"]): AgentBridge {
   return { mode: "mock", tunProbe } as unknown as AgentBridge;
@@ -39,6 +43,16 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+describe("TunDiagnosticsRow：英文界面", () => {
+  it("入口按钮取 en 字典", () => {
+    setLanguage("en");
+    render(<TunDiagnosticsRow bridge={makeBridge(async () => RESULT)} />);
+    expect(
+      screen.getByRole("button", { name: "Run diagnostics" }),
+    ).toBeTruthy();
+  });
+});
 
 describe("TunDiagnosticsRow", () => {
   it("未连接时就地提示，不弹错误框", async () => {

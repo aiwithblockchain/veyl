@@ -3,6 +3,7 @@ import type { MyServerWallet } from "../agent/bridge";
 import type { LogoutResult, WalletTrigger } from "../myservers/useMyServers";
 import { useFocusTrap } from "../ui/focus";
 import { formatUsdCents } from "../myservers/labels";
+import { useT } from "../i18n";
 
 interface Props {
   /** 账号邮箱；菜单头部只显示这一行，不重复头像。 */
@@ -26,9 +27,6 @@ interface Props {
   onClose: () => void;
 }
 
-const LOGOUT_FAILED = "没能退出登录，稍后再试。";
-const RECOVER_FAILED = "这一步没完成。检查网络后再试一次；账户和服务器都还在。";
-
 /** 账号菜单：邮箱 / 余额 / 充值 / 退出登录；不做二次确认，失败才给结果。 */
 export function AccountMenu({
   email,
@@ -45,6 +43,7 @@ export function AccountMenu({
   onLogout,
   onClose,
 }: Props) {
+  const t = useT();
   const panelRef = useRef<HTMLDivElement>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
@@ -62,20 +61,20 @@ export function AccountMenu({
     identityProblem === "lost"
       ? {
           kind: "register" as const,
-          text: "这台设备的身份丢了，需要重新注册设备；账户和服务器都在。",
-          label: "重新注册设备",
+          text: t("account.identity.lost"),
+          label: t("account.identity.lostLabel"),
         }
       : identityProblem === "device_revoked"
         ? {
             kind: "logout" as const,
-            text: "这台设备已被停用。退出这台设备后可以重新登录。",
-            label: "退出这台设备",
+            text: t("account.identity.revoked"),
+            label: t("account.identity.revokedLabel"),
           }
         : identityProblem === "account_blocked"
           ? {
               kind: "switch" as const,
-              text: "这个账户已停用。换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
-              label: "换一个账户",
+              text: t("account.identity.blocked"),
+              label: t("account.identity.blockedLabel"),
             }
           : null;
   const blocked =
@@ -100,7 +99,7 @@ export function AccountMenu({
       onClose();
       return;
     }
-    setLogoutError(result.message ?? LOGOUT_FAILED);
+    setLogoutError(result.message ?? t("account.logoutFailed"));
   };
 
   const recover = async () => {
@@ -116,7 +115,7 @@ export function AccountMenu({
     setReRegisterError(null);
     const ok = await run();
     setBusy(false);
-    if (!ok) setReRegisterError(RECOVER_FAILED);
+    if (!ok) setReRegisterError(t("account.recoverFailed"));
   };
   // 换账户、重新注册、退出三件事互斥：任一件在途，另一件的按钮也不能点。
   const actionBusy = loggingOut || switching || reRegistering;
@@ -131,7 +130,7 @@ export function AccountMenu({
         ref={panelRef}
         className="account-menu"
         role="dialog"
-        aria-label="账户菜单"
+        aria-label={t("account.menuAria")}
       >
         {email ? (
           <>
@@ -146,16 +145,16 @@ export function AccountMenu({
           <>
             <div className="account-menu__balance">
               <div className="account-menu__balance-main">
-                <span className="account-menu__label">余额</span>
+                <span className="account-menu__label">{t("account.balance")}</span>
                 {walletError ? (
                   <span className="account-menu__balance-error">
-                    余额暂时读不到。
+                    {t("account.walletError")}
                     <button
                       type="button"
                       className="account-menu__link"
                       onClick={() => onRefreshWallet("retry")}
                     >
-                      重试
+                      {t("account.retry")}
                     </button>
                   </span>
                 ) : (
@@ -163,7 +162,7 @@ export function AccountMenu({
                     {wallet
                       ? formatUsdCents(wallet.balance_cents)
                       : walletLoading
-                        ? "读取中"
+                        ? t("account.loading")
                         : "—"}
                   </span>
                 )}
@@ -174,18 +173,18 @@ export function AccountMenu({
                 disabled={disabled}
                 onClick={onTopUp}
               >
-                充值
+                {t("account.topUp")}
               </button>
             </div>
             {walletStale && !walletError ? (
               <p className="account-menu__balance-error">
-                没刷新成功，显示的是上次的余额。
+                {t("account.stale")}
                 <button
                   type="button"
                   className="account-menu__link"
                   onClick={() => onRefreshWallet("retry")}
                 >
-                  重试
+                  {t("account.retry")}
                 </button>
               </p>
             ) : null}
@@ -217,14 +216,14 @@ export function AccountMenu({
             >
               {recovery.kind === "logout"
                 ? loggingOut
-                  ? "正在退出…"
+                  ? t("account.loggingOut")
                   : recovery.label
                 : recovery.kind === "switch"
                   ? switching
-                    ? "正在切换…"
+                    ? t("account.switching")
                     : recovery.label
                   : reRegistering
-                    ? "正在处理…"
+                    ? t("account.working")
                     : recovery.label}
             </button>
             {recovery.kind === "switch" ? (
@@ -235,7 +234,7 @@ export function AccountMenu({
                 aria-busy={loggingOut || undefined}
                 onClick={() => void logout()}
               >
-                {loggingOut ? "正在退出…" : "退出这台设备"}
+                {loggingOut ? t("account.loggingOut") : t("account.logoutDevice")}
               </button>
             ) : null}
             <div className="account-menu__divider" />
@@ -251,7 +250,7 @@ export function AccountMenu({
               disabled={loggingOut}
               onClick={() => void logout()}
             >
-              重试
+              {t("account.retry")}
             </button>
           </p>
         ) : null}
@@ -264,7 +263,7 @@ export function AccountMenu({
             aria-busy={loggingOut || undefined}
             onClick={() => void logout()}
           >
-            {loggingOut ? "正在退出…" : "退出登录"}
+            {loggingOut ? t("account.loggingOut") : t("account.logout")}
           </button>
         ) : null}
       </div>

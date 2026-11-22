@@ -3,8 +3,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, TunHelperInfo, TunHelperState } from "../agent/bridge";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
+import { setLanguage } from "../i18n";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 function helperInfo(state: TunHelperState, extra: Partial<TunHelperInfo> = {}): TunHelperInfo {
   return {
@@ -48,6 +52,15 @@ function harness(
   render(<Harness />);
   return { bridge };
 }
+
+describe("TunHelperRow：英文界面", () => {
+  it("标签与状态取 en 字典", async () => {
+    setLanguage("en");
+    harness(helperInfo("running"));
+    expect(await screen.findByText("Update background helper")).toBeTruthy();
+    expect(screen.getByText("Up to date (2026.11.1)")).toBeTruthy();
+  });
+});
 
 describe("TunHelperRow", () => {
   it("已是最新时只报状态，不给任何操作", async () => {

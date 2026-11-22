@@ -55,7 +55,7 @@ import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession"
 import { createRuntimeAuthority } from "./config/runtimeAuthority";
 import { actionCardControls, readActionCards } from "./ui/actionCard";
 import { buildUiContext } from "./ui/controlIds";
-import { CONNECT_DIAG_ASK, SERVER_FAILURE_ASK } from "./ui/assistantPrompts";
+import { connectDiagAsk, serverFailureAsk } from "./ui/assistantPrompts";
 import { mobileExportPrompt } from "./ai/advancedPrompts";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
@@ -64,7 +64,7 @@ import {
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
 import { displayNodeNames } from "./ui/nodeList";
-import { ISSUE_REPORT_OPENING } from "./ui/issueReport";
+import { issueReportOpening } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { IconConsole, IconServer, IconSliders } from "./components/icons";
@@ -72,6 +72,8 @@ import { AccountAvatar } from "./components/AccountAvatar";
 import { AccountMenu } from "./components/AccountMenu";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
+import { t as translate, useT } from "./i18n";
+import type { MessageKey } from "./i18n";
 import "./styles/app.css";
 
 const AI_EVENTS = new Set<AgentEvent["name"]>([
@@ -91,13 +93,14 @@ type Destination = "client" | "servers";
 
 /** 免费节点试用到期：节点已被清走，只留「新建节点」。 */
 function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
+  const t = useT();
   return (
-    <main className="start-choice" aria-label="试用已到期">
+    <main className="start-choice" aria-label={t("trial.expired.aria")}>
       <section className="start-choice__col">
-        <h1 className="start-choice__title">试用已到期</h1>
-        <p className="start-choice__note">免费节点已从节点池移除。</p>
+        <h1 className="start-choice__title">{t("trial.expired.title")}</h1>
+        <p className="start-choice__note">{t("trial.expired.note")}</p>
         <button type="button" className="trial-expired__action" onClick={onNewNode}>
-          新建节点
+          {t("trial.expired.newNode")}
         </button>
       </section>
     </main>
@@ -123,10 +126,10 @@ interface TrialFlow {
   summary: { configId: string; count: number; fastestMs: number | null } | null;
 }
 
-const TRIAL_STEPS: Array<{ key: "fetch" | "join" | "probe"; title: string }> = [
-  { key: "fetch", title: "拉取预置配置" },
-  { key: "join", title: "加入免费节点" },
-  { key: "probe", title: "逐个测速" },
+const TRIAL_STEPS: Array<{ key: "fetch" | "join" | "probe"; title: MessageKey }> = [
+  { key: "fetch", title: "trial.step.fetch" },
+  { key: "join", title: "trial.step.join" },
+  { key: "probe", title: "trial.step.probe" },
 ];
 
 function TrialDots() {
@@ -148,20 +151,21 @@ function TrialFlowPanel({
   onRetry: () => void;
   onSkipProbe: () => void;
 }) {
+  const t = useT();
   return (
-    <div className="stage-steps" aria-label="加入免费节点">
+    <div className="stage-steps" aria-label={t("trial.flow.aria")}>
       <ol className="stage-steps__list">
         {TRIAL_STEPS.map(({ key, title }) => {
           const step = flow[key];
           return (
             <li key={key} className={`stage-step is-${step.status}`}>
-              <span className="stage-step__title">{title}</span>
+              <span className="stage-step__title">{t(title)}</span>
               <span className="stage-step__state">
                 {step.status === "running" ? <TrialDots /> : null}
                 {step.status === "done" && step.ms !== null
-                  ? `${(step.ms / 1000).toFixed(1)} 秒`
+                  ? t("trial.flow.seconds", { value: (step.ms / 1000).toFixed(1) })
                   : null}
-                {step.status === "failed" ? "没完成" : null}
+                {step.status === "failed" ? t("trial.flow.notDone") : null}
               </span>
             </li>
           );
@@ -175,11 +179,11 @@ function TrialFlowPanel({
       {flow.phase === "failed" ? (
         <div className="stage-steps__actions">
           <button type="button" className="stage-primary" onClick={onRetry}>
-            重试
+            {t("trial.flow.retry")}
           </button>
           {flow.failedStep === "probe" ? (
             <button type="button" className="stage-secondary" onClick={onSkipProbe}>
-              跳过测速
+              {t("trial.flow.skipProbe")}
             </button>
           ) : null}
         </div>
@@ -215,12 +219,15 @@ function StartChoice({
   /** 账户读失败时也同样用短句：离线用户可能本来是登录的。 */
   accountError: boolean;
 }) {
+  const t = useT();
   if (trial && trial.phase !== "done") {
     return (
       <main className="start-choice">
-        <section className="start-choice__col" aria-label="正在加入免费节点">
+        <section className="start-choice__col" aria-label={t("trial.starting.aria")}>
           <h1 className="start-choice__title">
-            {trial.phase === "failed" ? "免费节点没加完" : "正在加入免费节点"}
+            {trial.phase === "failed"
+              ? t("trial.failed.title")
+              : t("trial.starting.title")}
           </h1>
           <TrialFlowPanel
             flow={trial}
@@ -233,12 +240,12 @@ function StartChoice({
   }
   return (
     <main className="start-choice">
-      <section className="start-choice__col" aria-label="还没有节点">
-        <h1 className="start-choice__title">从哪里开始？</h1>
+      <section className="start-choice__col" aria-label={t("trial.start.aria")}>
+        <h1 className="start-choice__title">{t("trial.start.title")}</h1>
         <p className="start-choice__note">
           {accountLoaded && !loggedIn && !accountError
-            ? "免费节点不保证稳定，试用 7 天；建自己的服务器要先登录。"
-            : "免费节点不保证稳定，试用 7 天。"}
+            ? t("trial.start.noteGuest")
+            : t("trial.start.note")}
         </p>
 
         <div className="start-choice__picks">
@@ -247,8 +254,8 @@ function StartChoice({
             className="start-choice__pick start-choice__pick--primary"
             onClick={onNewNode}
           >
-            <span className="start-choice__pick-title">新建节点</span>
-            <span className="start-choice__pick-sub">用自己的服务器，更稳定</span>
+            <span className="start-choice__pick-title">{t("trial.start.newNode")}</span>
+            <span className="start-choice__pick-sub">{t("trial.start.newNodeSub")}</span>
           </button>
           <button
             type="button"
@@ -257,13 +264,13 @@ function StartChoice({
             disabled={busy}
           >
             <span className="start-choice__pick-title">
-              {busy ? "正在加入免费节点" : "先试用免费节点"}
+              {busy ? t("trial.start.busy") : t("trial.start.free")}
             </span>
-            <span className="start-choice__pick-sub">2 个节点，7 天试用</span>
+            <span className="start-choice__pick-sub">{t("trial.start.freeSub")}</span>
           </button>
         </div>
         {emptyConfig ? (
-          <p className="start-choice__empty">这条配置没有节点了</p>
+          <p className="start-choice__empty">{t("trial.start.emptyConfig")}</p>
         ) : null}
       </section>
     </main>
@@ -275,14 +282,14 @@ const PANEL_CLOSED_BY_USER_KEY = "veyl.ui.panelClosedByUser";
 const PANEL_AUTO_OPENED_KEY = "veyl.ui.panelAutoOpened";
 
 /** 折叠行里的页面名：与发起提问的屏幕一一对应。 */
-const QUESTION_SCREEN_LABEL: Record<UiScreen, string> = {
-  onboarding: "开始页",
-  client: "连接页",
-  no_nodes: "连接页",
-  trial_expired: "连接页",
-  new_node: "新建节点页",
-  servers: "服务器页",
-  settings: "设置页",
+const QUESTION_SCREEN_LABEL: Record<UiScreen, MessageKey> = {
+  onboarding: "app.screen.onboarding",
+  client: "app.screen.client",
+  no_nodes: "app.screen.client",
+  trial_expired: "app.screen.client",
+  new_node: "app.screen.new_node",
+  servers: "app.screen.servers",
+  settings: "app.screen.settings",
 };
 
 function readFlag(key: string): boolean {
@@ -316,6 +323,7 @@ function readInitialPanelOpen(): boolean {
 }
 
 export default function App() {
+  const t = useT();
   const bridge = useMemo(() => getAgentBridge(), []);
   const [state, dispatch] = useReducer(chatReducer, undefined, createInitialState);
   // 输入框草稿存在 App：咨询模式切换会让助手搬进弹层并重挂载，草稿不能跟着丢。
@@ -421,7 +429,7 @@ export default function App() {
     openSettings("account");
     setAppNotice({
       level: "info",
-      text: "账单明细下一版接入，当前余额可在充值里查看。",
+      text: translate("app.billsNotice"),
     });
   }, [myServers.loggedIn, myServers.loginOpen]);
 
@@ -439,7 +447,7 @@ export default function App() {
       userLogoutRef.current = false;
       return;
     }
-    setAppNotice({ level: "info", text: "登录已过期，请重新登录。" });
+    setAppNotice({ level: "info", text: translate("app.loginExpired") });
   }, [myServers.loggedIn]);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
@@ -702,12 +710,12 @@ export default function App() {
     const starting =
       vpn.connection === "starting" || runtime.state === "starting";
     uiLabels["client.primary"] = starting
-      ? "连接中"
+      ? t("app.label.connecting")
       : online
-        ? "断开"
+        ? t("console.primary.disconnect")
         : runtime.state === "failed"
-          ? "重新连接"
-          : "连接";
+          ? t("console.primary.reconnect")
+          : t("console.primary.connect");
     const nodes = vpn.activeConfig?.nodes ?? [];
     const currentNodeIndex = nodes.findIndex(
       (node) => node.node_id === vpn.activeConfig?.current_node_id,
@@ -718,7 +726,7 @@ export default function App() {
     }
   }
   if (uiScreen === "new_node") {
-    uiLabels["new_node.create"] = "创建";
+    uiLabels["new_node.create"] = t("app.label.create");
   }
   if (uiScreen === "servers" && myServers.selected) {
     uiLabels["servers.item"] = myServers.selected.name;
@@ -785,12 +793,12 @@ export default function App() {
         if (report.recovery?.status === "restored") {
           setAppNotice({
             level: "info",
-            text: "上次没退出干净，网络设置已恢复。",
+            text: translate("app.proxyRestored"),
           });
         } else if (report.recovery?.status === "failed") {
           setAppNotice({
             level: "error",
-            text: "网络设置没能自动恢复。打开「设置 → 遇到问题 → 强制重置网络」。",
+            text: translate("app.proxyRestoreFailed"),
           });
         }
       })
@@ -843,7 +851,7 @@ export default function App() {
       if (!/\.json$/i.test(path)) {
         setAppNotice({
           level: "error",
-          text: "窗口拖入只支持 .json 种子文件；节点文本请到 设置 › 连接 › 添加节点导入。",
+          text: translate("app.importJsonOnly"),
         });
         return;
       }
@@ -852,7 +860,10 @@ export default function App() {
       importingRef.current = true;
       try {
         const result = await bridge.importSeedFile(path);
-        setAppNotice({ level: "info", text: `已导入 ${result.imported} 个节点` });
+        setAppNotice({
+          level: "info",
+          text: translate("app.imported", { count: result.imported }),
+        });
       } catch (error) {
         setAppNotice({ level: "error", text: describeImportError(error) });
       } finally {
@@ -875,7 +886,7 @@ export default function App() {
         if (payload.paths.length > 1) {
           setAppNotice({
             level: "error",
-            text: `一次只能导入一个文件，你拖入了 ${payload.paths.length} 个，请逐个拖入。`,
+            text: translate("app.dropOneFile", { count: payload.paths.length }),
           });
           return;
         }
@@ -997,6 +1008,7 @@ export default function App() {
             createdAt: payload.created_at,
             expiresAt: payload.expires_at,
             kind: detail.kind,
+            defaultIndex: detail.defaultIndex,
             upgradeConfirm: detail.upgradeConfirm,
             configSetModeConfirm: detail.configSetModeConfirm,
           },
@@ -1227,7 +1239,11 @@ export default function App() {
           const error = toBridgeError(failure);
           quitBusyRef.current = false;
           setQuitBusy(false);
-          setQuitError(error.message || "没能把选择交给后台，请再试一次。");
+          setQuitError(
+            error.hasMessage
+              ? error.message
+              : translate("app.quitDeliverFailed"),
+          );
         });
     },
     [bridge],
@@ -1287,7 +1303,7 @@ export default function App() {
     }
 
     if (!target.activeRequestId && target.requesting) {
-      return { ok: false, message: "这条消息正在发出，请稍候再删除。" };
+      return { ok: false, message: translate("app.deleteBusy") };
     }
 
     if (target.activeRequestId) {
@@ -1312,12 +1328,17 @@ export default function App() {
         return { ok: true };
       }
       if (bridgeError.code === "PRECONDITION_FAILED") {
-        return { ok: false, message: "这个会话还有进行中的请求，先停止再删除。" };
+        return { ok: false, message: translate("app.deleteActive") };
       }
       if (/not found|unknown command/i.test(bridgeError.message)) {
-        return { ok: false, message: "当前版本还没有接入删除会话命令，请稍后再试。" };
+        return { ok: false, message: translate("app.deleteUnsupported") };
       }
-      return { ok: false, message: bridgeError.message || "删除失败，请重试" };
+      return {
+        ok: false,
+        message: bridgeError.hasMessage
+          ? bridgeError.message
+          : translate("app.deleteFailed"),
+      };
     }
 
     dispatch({ type: "session_removed", sessionId });
@@ -1364,7 +1385,7 @@ export default function App() {
 
       if (bridgeError.code === "NOT_FOUND") {
         dispatch({ type: "session_removed", sessionId });
-        return { ok: false, removed: true, message: "这个会话已经不存在了" };
+        return { ok: false, removed: true, message: translate("app.sessionGone") };
       }
       return { ok: false, message: describeRenameError(bridgeError) };
     }
@@ -1394,9 +1415,7 @@ export default function App() {
     const waiting = pendingQuestions.some((item) => item.sessionId === sessionId);
     setAppNotice({
       level: "info",
-      text: waiting
-        ? "先回答上面的问题，或者点跳过。"
-        : "上一条还在回复，等它结束再发。",
+      text: waiting ? translate("app.busyAnswer") : translate("app.busyReplying"),
     });
   };
 
@@ -1406,7 +1425,7 @@ export default function App() {
     options: { hidden?: boolean; lastAction?: UiLastAction } = {},
   ): Promise<boolean> => {
     if (!aiConfiguredRef.current) {
-      setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
+      setAppNotice({ level: "error", text: translate("app.noAi") });
       openSettings("ai");
       return false;
     }
@@ -1460,7 +1479,9 @@ export default function App() {
       dispatch({
         type: "request_failed",
         sessionId,
-        message: bridgeError.message || "这条没有发出去，再试一次。",
+        message: bridgeError.hasMessage
+          ? bridgeError.message
+          : translate("app.sendFailed"),
       });
       return true;
     }
@@ -1477,7 +1498,7 @@ export default function App() {
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
-    void sendToSession(fresh.id, ISSUE_REPORT_OPENING, { hidden: true }).finally(() => {
+    void sendToSession(fresh.id, issueReportOpening(), { hidden: true }).finally(() => {
       reportOpeningRef.current = false;
       setReportOpening(false);
     });
@@ -1495,23 +1516,25 @@ export default function App() {
       if (result.opened) return {};
       if (action.kind === "compose_report_mail" && result.method === "copy_only") {
         return {
-          message: "没有打开邮件客户端。可以复制正文，或先打开报告文件夹。",
+          message: translate("app.displayMailCopyOnly"),
           copyBody: result.body ?? undefined,
         };
       }
       return {
         message:
           action.kind === "compose_report_mail"
-            ? "没有打开邮件客户端。可以点「在文件夹中显示」，把报告附到邮件里。"
-            : "没能打开文件夹。可以到桌面的「Veyl 问题报告」里找。",
+            ? translate("app.displayMailFailed")
+            : translate("app.displayRevealFailed"),
       };
     } catch (error: unknown) {
       const failure = toBridgeError(error);
       return {
         message:
           failure.code === "NOT_FOUND"
-            ? "没找到这个报告，可能已被删除；请重新生成一次。"
-            : failure.message || "没打开成功，再试一次。",
+            ? translate("app.displayNotFound")
+            : failure.hasMessage
+            ? failure.message
+            : translate("tool.action.openFailed"),
       };
     }
   };
@@ -1527,7 +1550,7 @@ export default function App() {
 
   const handleAskAi = (text: string) => {
     if (!aiReady) {
-      setAppNotice({ level: "error", text: "还没有配置 AI，先配置后再对话。" });
+      setAppNotice({ level: "error", text: translate("app.noAi") });
       openSettings("ai");
       return;
     }
@@ -1549,7 +1572,10 @@ export default function App() {
   };
 
   const handleNextAction = (action: NextAction) => {
-    const args = Object.keys(action.args).length > 0 ? `（参数：${JSON.stringify(action.args)}）` : "";
+    const args =
+      Object.keys(action.args).length > 0
+        ? translate("app.nextActionArgs", { args: JSON.stringify(action.args) })
+        : "";
     handleSend(`${action.label}${args}`);
   };
 
@@ -1561,11 +1587,18 @@ export default function App() {
       const result = await bridge.netRepair("restore_direct");
       setAppNotice({
         level: result.ok ? "info" : "error",
-        text: result.detail || (result.ok ? "网络已恢复直连。" : "恢复网络失败，请重试。"),
+        text:
+          result.detail ||
+          (result.ok
+            ? translate("app.netRestored")
+            : translate("app.netRestoreFailed")),
       });
       refreshSnapshot();
     } catch (error) {
-      setAppNotice({ level: "error", text: describeCommandError(error, "恢复网络") });
+      setAppNotice({
+        level: "error",
+        text: describeCommandError(error, translate("app.action.restoreNetwork")),
+      });
     } finally {
       setRepairing(false);
     }
@@ -1573,7 +1606,10 @@ export default function App() {
 
   const handleOpenLogs = () => {
     void bridge.openLogDir().catch((error: unknown) => {
-      setAppNotice({ level: "error", text: describeCommandError(error, "打开日志") });
+      setAppNotice({
+        level: "error",
+        text: describeCommandError(error, translate("app.action.openLogs")),
+      });
     });
   };
 
@@ -1684,7 +1720,7 @@ export default function App() {
     } catch (error) {
       setAppNotice({
         level: "error",
-        text: describeCommandError(error, "回答失败"),
+        text: describeCommandError(error, translate("app.action.answer")),
       });
       return false;
     }
@@ -1705,7 +1741,7 @@ export default function App() {
     mode: "direct" | "proxy_all",
   ): Promise<{ ok: boolean; message?: string }> => {
     const config = vpn.activeConfig;
-    if (!config) return { ok: false, message: "先建一套配置。" };
+    if (!config) return { ok: false, message: translate("app.needConfig") };
     try {
       const result = await bridge.routeSetMode(mode, config.config_id);
       setRoutingOverride({ configId: config.config_id, mode: result.routing_mode });
@@ -1714,7 +1750,7 @@ export default function App() {
       return { ok: true };
     } catch {
       // 行内说一次，不弹 toast；控件保持原值。
-      return { ok: false, message: "没切成功，还是原来的范围。" };
+      return { ok: false, message: translate("stage.scopeFail") };
     }
   };
 
@@ -1733,7 +1769,7 @@ export default function App() {
         ok: false,
         restored: null,
         actualMode: null,
-        message: "先建一套配置。",
+        message: translate("app.needConfig"),
       };
     }
     try {
@@ -1757,7 +1793,9 @@ export default function App() {
         ok: false,
         restored,
         actualMode,
-        message: bridgeError.message || "没能切换接管方式，稍后再试。",
+        message: bridgeError.hasMessage
+          ? bridgeError.message
+          : translate("app.modeSwitchFailed"),
       };
     }
   };
@@ -1770,7 +1808,7 @@ export default function App() {
         setHelperGuideOpen(true);
         return;
       }
-      showActionResult(result, "启动失败");
+      showActionResult(result, translate("app.startFailed"));
       if (!result.connected) return;
       // start 成功说明后端已经连上。事件/快照可能还停在 starting 或 failed，
       // 不校正的话中间区会继续显示未连接/失败。先按在线显示，再拉快照补细节。
@@ -1791,7 +1829,7 @@ export default function App() {
     stoppingRef.current = true;
     return vpn.stop().then(
       (result) => {
-        showActionResult(result, "断开失败");
+        showActionResult(result, translate("app.stopFailed"));
         stoppingRef.current = false;
         if (result.stopped) {
           // stop 成功说明已经断开；清掉连接期字段，别让界面停在已连接。
@@ -1902,14 +1940,14 @@ export default function App() {
     panelOpenRef.current = true;
     setPanelOpen(true);
     setAiUnread(false);
-    void sendToSession(target.id, SERVER_FAILURE_ASK, {
+    void sendToSession(target.id, serverFailureAsk(), {
       hidden: true,
       lastAction: { id: "servers.ai_locate", value: serverId },
     });
   };
 
   const handleDiagnose = () => {
-    askAiInPanel(CONNECT_DIAG_ASK);
+    askAiInPanel(connectDiagAsk());
   };
 
   // 查看账单：先确认登录；没登录就拉起登录，成功后回到账户页。
@@ -1923,7 +1961,7 @@ export default function App() {
     pendingBillsRef.current = null;
     setAppNotice({
       level: "info",
-      text: "账单明细下一版接入，当前余额可在充值里查看。",
+      text: translate("app.billsNotice"),
     });
   };
 
@@ -1934,7 +1972,7 @@ export default function App() {
     const result = await myServers.logout();
     if (result.ok) {
       setAccountMenu(null);
-      setAppNotice({ level: "info", text: "已退出登录" });
+      setAppNotice({ level: "info", text: translate("app.loggedOut") });
       // 原本就没登录时不会触发过期 effect，这里自己把标志清掉。
       if (!wasLoggedIn) userLogoutRef.current = false;
     } else {
@@ -2003,13 +2041,15 @@ export default function App() {
       const status = await bridge.defaultProfileStatus();
       if (status.nodeCount === 0) await bridge.defaultProfileRefresh();
     } catch (error) {
-      const message = toBridgeError(error).message;
+      // 不看后端文案：hasMessage=false 表示只有本地占位，直接给纯后缀句。
+      // 批次 4 后端稳定错误码落地后，这里改成按 code 取文案。
+      const failure = toBridgeError(error);
       failTrial(
         trialFlowRef.current ?? start,
         "fetch",
-        message && message !== "操作失败"
-          ? `没拉到预置配置。${message}`
-          : "没拉到预置配置，再试一次。",
+        failure.hasMessage
+          ? translate("trial.error.fetchWith", { message: failure.message })
+          : translate("trial.error.fetch"),
       );
       return;
     }
@@ -2028,7 +2068,7 @@ export default function App() {
       failTrial(
         trialFlowRef.current ?? afterFetch,
         "join",
-        attached.message ?? "没能加入免费节点，再试一次。",
+        attached.message ?? translate("trial.error.join"),
         Date.now() - joinStartedAt,
       );
       return;
@@ -2056,7 +2096,7 @@ export default function App() {
       failTrial(
         trialFlow,
         "probe",
-        vpn.error ?? "免费节点没加进来，再试一次。",
+        vpn.error ?? translate("trial.error.empty"),
       );
       return;
     }
@@ -2115,10 +2155,10 @@ export default function App() {
           current,
           "probe",
           allUntested
-            ? "两个节点都没测成，可以重试，或跳过测速后自己点连接。"
+            ? translate("trial.error.allUntested")
             : allUnreachable
-              ? "两个节点都没测通，可以重试，或跳过测速后自己点连接。"
-              : "两个节点都没测出可用结果，可以重试，或跳过测速后自己点连接。",
+              ? translate("trial.error.allUnreachable")
+              : translate("trial.error.noResult"),
           elapsed,
         );
         return;
@@ -2220,7 +2260,9 @@ export default function App() {
       question={currentQuestion}
       questionAwayText={
         questionAway && questionOrigin
-          ? `有一个问题在${QUESTION_SCREEN_LABEL[questionOrigin]}等你回答`
+          ? t("app.questionAway", {
+              screen: t(QUESTION_SCREEN_LABEL[questionOrigin]),
+            })
           : null
       }
       questionExpired={questionExpired}
@@ -2254,13 +2296,13 @@ export default function App() {
 
   return (
     <div style={appStyle} className={`app ${destination === "servers" ? "" : "app--solo"}`.trim()}>
-      <nav className="activity" aria-label="切换主区">
+      <nav className="activity" aria-label={t("activity.navAria")}>
         <button
           type="button"
           className={`activity__item ${destination === "client" ? "is-active" : ""}`}
           aria-pressed={destination === "client"}
-          aria-label="连接"
-          title="连接"
+          aria-label={t("activity.client")}
+          title={t("activity.client")}
           disabled={newNodeBusy}
           onClick={() => changeDestination("client")}
         >
@@ -2272,10 +2314,10 @@ export default function App() {
           aria-pressed={destination === "servers"}
           aria-label={
             installingServerCount > 0
-              ? `我的服务器，${installingServerCount} 台安装中`
-              : "我的服务器"
+              ? t("activity.serversInstalling", { count: installingServerCount })
+              : t("activity.servers")
           }
-          title="我的服务器"
+          title={t("activity.servers")}
           disabled={newNodeBusy}
           onClick={() => {
             if (destination === "servers") {
@@ -2296,8 +2338,8 @@ export default function App() {
           <button
             type="button"
             className="activity__item"
-            aria-label="设置"
-            title="设置"
+            aria-label={t("activity.settings")}
+            title={t("activity.settings")}
             onClick={() => openSettings()}
           >
             <IconSliders size={18} />
@@ -2307,15 +2349,17 @@ export default function App() {
             className="activity__item activity__account"
             aria-label={
               myServers.accountError && !myServers.account
-                ? "账户暂时读不到，点一下重试"
+                ? t("activity.accountError")
                 : myServers.loggedIn
-                  ? `账户，${myServers.account?.email ?? ""}`
-                  : "账户，未登录"
+                  ? t("activity.accountEmail", {
+                      email: myServers.account?.email ?? "",
+                    })
+                  : t("activity.accountLoggedOut")
             }
             title={
               myServers.accountError && !myServers.account
-                ? "账户暂时读不到，点一下重试"
-                : "账户"
+                ? t("activity.accountError")
+                : t("activity.account")
             }
             aria-expanded={accountMenu === "nav"}
             onClick={() => {
@@ -2393,7 +2437,7 @@ export default function App() {
       {destination === "servers" && panes.canDragRail ? (
         <PaneHandle
           side="rail"
-          label="调整列表宽度"
+          label={t("pane.railWidth")}
           controls="config-rail"
           value={panes.rail}
           min={RAIL_MIN}
@@ -2405,7 +2449,7 @@ export default function App() {
       {newNodeOpen ? (
         <main
           className="connection-stage connection-stage--new-node"
-          aria-label="新建节点"
+          aria-label={t("app.newNodeAria")}
         >
           <div className="connection-stage__col">
             <MyServerWizard
@@ -2422,9 +2466,8 @@ export default function App() {
               onAuthRequired={myServers.openLogin}
               onAskAi={() => {
                 lastActionRef.current = { id: "new_node.ask_ai" };
-                askAiInPanel("帮我选一个地区和规格。");
+                askAiInPanel(t("assistant.prompt.pickRegion"));
               }}
-              onAiLocate={handleAiLocate}
               aiSelection={stageSelect}
               initialSelection={newNodeSelection}
               onBusyChange={(busy) => {
@@ -2476,7 +2519,7 @@ export default function App() {
               : null
           }
           onGoConnect={() => changeDestination("client")}
-          pendingServer={myServers.pendingServer}
+          pendingServer={myServers.pendingServer || myServers.awaitingSelected}
           onForget={async (serverId, nodeId) => {
             await myServers.forgetServer(serverId, nodeId);
             // 节点真的删掉了：连接页按新配置重读，悬挂行不会留到下次启动。
@@ -2563,7 +2606,7 @@ export default function App() {
       {panes.canDragPanel ? (
         <PaneHandle
           side="assistant"
-          label="调整 AI 对话宽度"
+          label={t("pane.assistantWidth")}
           controls="ai-panel"
           value={panes.assistant}
           min={ASSISTANT_MIN}
@@ -2599,7 +2642,7 @@ export default function App() {
           <button
             type="button"
             className="app-toast__close"
-            aria-label="关闭提示"
+            aria-label={t("app.toastClose")}
             onClick={() => setAppNotice(null)}
           >
             ×
@@ -2712,7 +2755,7 @@ export default function App() {
           onAskAi={() => {
             closeMobileExport(false);
             closeSettings();
-            askAiInPanel(mobileExportPrompt);
+            askAiInPanel(mobileExportPrompt());
           }}
         />
       ) : null}
@@ -2742,9 +2785,11 @@ export default function App() {
 function describeCommandError(error: unknown, label: string): string {
   const bridgeError = toBridgeError(error);
   if (/not found|unknown command/i.test(bridgeError.message)) {
-    return `${label}还没有接入当前版本，请稍后再试。`;
+    return translate("app.commandUnavailable", { label });
   }
-  return bridgeError.message || `${label}失败，请重试。`;
+  return bridgeError.hasMessage
+    ? bridgeError.message
+    : translate("app.commandFailed", { label });
 }
 
 interface AppNotice {
@@ -2755,9 +2800,9 @@ interface AppNotice {
 function describeRenameError(error: BridgeError): string {
   if (error.code === "INVALID_ARGUMENT") {
     const reason = error.details?.reason;
-    if (reason === "empty_title") return "标题不能为空";
-    if (reason === "title_too_long") return "标题最多 80 个字符";
+    if (reason === "empty_title") return translate("app.renameEmpty");
+    if (reason === "title_too_long") return translate("app.renameTooLong");
   }
-  if (error.code === "NOT_FOUND") return "这个会话已经不存在了";
-  return "保存失败，请重试";
+  if (error.code === "NOT_FOUND") return translate("app.sessionGone");
+  return translate("app.renameFailed");
 }

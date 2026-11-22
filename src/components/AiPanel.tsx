@@ -7,6 +7,7 @@ import type { DisplayActionOutcome } from "./ToolCallCard";
 import type { ToolDisplayAction } from "./toolDisplay";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
+import { getLanguage, t as translate, useT } from "../i18n";
 import { AskQuestionCard, QuestionAwayLine } from "./AskQuestionCard";
 import { ChatView } from "./ChatView";
 import { Composer } from "./Composer";
@@ -72,21 +73,32 @@ interface Props {
 }
 
 /** 对话空态的预制问题（assistant-empty-state.md §2）；它们是按钮文案，句末不加问号。 */
-const PRESET_QUESTIONS = [
-  "连上了，但网页打不开",
-  "怎么换成更快的节点",
-  "为什么有的软件没走 VPN",
-  "为什么个别网站还是打不开",
-  "终端里的命令也想走 VPN",
-];
+const PRESET_KEYS = [
+  "assistant.preset.connectIssue",
+  "assistant.preset.fasterNode",
+  "assistant.preset.appBypass",
+  "assistant.preset.siteBlocked",
+  "assistant.preset.terminal",
+] as const;
 
 function relativeTime(at: number): string {
   const diff = Date.now() - at;
   const minute = 60_000;
-  if (diff < minute) return "刚刚";
-  if (diff < 60 * minute) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < 24 * 60 * minute) return `${Math.floor(diff / (60 * minute))} 小时前`;
-  return new Date(at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+  if (diff < minute) return translate("assistant.time.justNow");
+  if (diff < 60 * minute) {
+    return translate("assistant.time.minutesAgo", {
+      count: Math.floor(diff / minute),
+    });
+  }
+  if (diff < 24 * 60 * minute) {
+    return translate("assistant.time.hoursAgo", {
+      count: Math.floor(diff / (60 * minute)),
+    });
+  }
+  return new Date(at).toLocaleDateString(
+    getLanguage() === "en" ? "en-US" : "zh-CN",
+    { month: "numeric", day: "numeric" },
+  );
 }
 
 /** 右栏：一级是对话，二级是历史会话。设置沿用现有设置页。 */
@@ -122,6 +134,7 @@ export function AiPanel({
   composerDraft,
   onComposerDraftChange,
 }: Props) {
+  const t = useT();
   const [view, setView] = useState<View>("chat");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -184,7 +197,7 @@ export function AiPanel({
       setEditingId(null);
       return;
     }
-    setEditError(result.message ?? "保存失败，请重试");
+    setEditError(result.message ?? t("assistant.error.rename"));
     if (result.removed) setEditingId(null);
   };
 
@@ -195,7 +208,7 @@ export function AiPanel({
     const result = await onDeleteSession(confirming.id);
     setDeleting(false);
     if (result.ok) setConfirming(null);
-    else setDeleteError(result.message ?? "删除失败，请重试");
+    else setDeleteError(result.message ?? t("assistant.error.delete"));
   };
 
   const hasMessages = Boolean(session && session.messages.length > 0);
@@ -215,7 +228,7 @@ export function AiPanel({
     canAnswer && onAnswerFromComposer ? onAnswerFromComposer : undefined;
 
   return (
-    <aside id="ai-panel" className="ai-panel" aria-label="AI 对话">
+    <aside id="ai-panel" className="ai-panel" aria-label={t("assistant.panelAria")}>
       <header className="ai-panel__head">
         {view === "history" ? (
           <div className="ai-panel__id">
@@ -223,18 +236,18 @@ export function AiPanel({
               type="button"
               className="ai-panel__icon"
               onClick={() => setView("chat")}
-              aria-label="返回对话"
-              title="返回对话"
+              aria-label={t("assistant.backToChat")}
+              title={t("assistant.backToChat")}
             >
               <IconChevronLeft size={16} />
             </button>
-            <span className="ai-panel__name">历史会话</span>
+            <span className="ai-panel__name">{t("assistant.history")}</span>
           </div>
         ) : (
           <div className="ai-panel__id">
-            <span className="ai-panel__name">助手</span>
+            <span className="ai-panel__name">{t("assistant.name")}</span>
             <span className="ai-panel__model">
-              {aiReady ? aiProviderName?.trim() || "AI" : "未连接 AI"}
+              {aiReady ? aiProviderName?.trim() || "AI" : t("assistant.notConnected")}
             </span>
           </div>
         )}
@@ -246,8 +259,8 @@ export function AiPanel({
               onNewSession();
               setView("chat");
             }}
-            aria-label="新对话"
-            title="新对话"
+            aria-label={t("assistant.newChat")}
+            title={t("assistant.newChat")}
           >
             <IconPlus size={16} />
           </button>
@@ -256,8 +269,8 @@ export function AiPanel({
               type="button"
               className="ai-panel__icon"
               onClick={() => setView("history")}
-              aria-label="历史会话"
-              title="历史会话"
+              aria-label={t("assistant.history")}
+              title={t("assistant.history")}
             >
               <IconList size={16} />
             </button>
@@ -266,8 +279,8 @@ export function AiPanel({
             type="button"
             className="ai-panel__icon"
             onClick={onCollapse}
-            aria-label="收起助手"
-            title="收起助手"
+            aria-label={t("assistant.collapse")}
+            title={t("assistant.collapse")}
           >
             <IconChevronRight size={16} />
           </button>
@@ -276,9 +289,9 @@ export function AiPanel({
 
       {!aiReady ? (
         <div className="ai-panel__banner">
-          还没有配置 AI，现在只能手动操作网络。
+          {t("assistant.banner.noAi")}
           <button type="button" className="ai-panel__banner-action" onClick={onOpenSettings}>
-            去配置
+            {t("assistant.banner.configure")}
           </button>
         </div>
       ) : null}
@@ -287,7 +300,7 @@ export function AiPanel({
         {view === "history" ? (
           <div className="ai-history">
             {sessions.length === 0 ? (
-              <p className="ai-history__empty">还没有对话。新建一个，或者直接问我。</p>
+              <p className="ai-history__empty">{t("assistant.historyEmpty")}</p>
             ) : (
               <ul className="ai-history__list">
                 {sessions.map((item) => (
@@ -298,7 +311,7 @@ export function AiPanel({
                           ref={editRef}
                           className="ai-history__input"
                           value={draft}
-                          aria-label="会话标题"
+                          aria-label={t("assistant.sessionTitle")}
                           disabled={saving}
                           onChange={(event) => {
                             setDraft(event.target.value);
@@ -327,7 +340,7 @@ export function AiPanel({
                           className={`ai-history__item ${
                             item.id === activeSessionId ? "is-active" : ""
                           }`}
-                          title="双击改名"
+                          title={t("assistant.renameHint")}
                           onClick={() => {
                             onSelectSession(item.id);
                             setView("chat");
@@ -343,8 +356,8 @@ export function AiPanel({
                           <button
                             type="button"
                             className="ai-history__action"
-                            aria-label={`重命名会话 ${item.title}`}
-                            title={`重命名「${item.title}」`}
+                            aria-label={t("assistant.renameSessionAria", { title: item.title })}
+                            title={t("assistant.renameSessionTitle", { title: item.title })}
                             onClick={() => startEdit(item)}
                           >
                             <IconPencil size={13} />
@@ -352,8 +365,8 @@ export function AiPanel({
                           <button
                             type="button"
                             className="ai-history__action ai-history__action--danger"
-                            aria-label={`删除会话 ${item.title}`}
-                            title={`删除「${item.title}」`}
+                            aria-label={t("assistant.deleteSessionAria", { title: item.title })}
+                            title={t("assistant.deleteSessionTitle", { title: item.title })}
                             onClick={() => {
                               setConfirming(item);
                               setDeleteError(null);
@@ -395,30 +408,30 @@ export function AiPanel({
             <div className="ai-empty">
               <p className="ai-empty__line">
                 {needsFirstConfig
-                  ? "还没有配置。直接跟我说你想怎么用，我来帮你建一套。"
+                  ? t("assistant.empty.noConfig")
                   : hasEverConnected
-                    ? "问点什么，或者让我诊断网络"
-                    : "先连上，再聊。"}
+                    ? t("assistant.empty.connected")
+                    : t("assistant.empty.notConnected")}
               </p>
               {!hasEverConnected && !needsFirstConfig ? (
-                <p className="ai-empty__text">连接在中间；需要我帮你配好，就在下面说。</p>
+                <p className="ai-empty__text">{t("assistant.empty.connectHint")}</p>
               ) : null}
               {aiReady && !question && presetsVisible ? (
                 <div
                   className="ai-empty__suggest"
                   role="group"
-                  aria-label="可以这样问"
+                  aria-label={t("assistant.presetsAria")}
                 >
-                  {PRESET_QUESTIONS.map((preset) => (
+                  {PRESET_KEYS.map((preset) => (
                     <button
                       key={preset}
                       type="button"
                       onClick={() => {
-                        void onEmptySend(preset);
+                        void onEmptySend(t(preset));
                         setMessagesFocusSignal((value) => value + 1);
                       }}
                     >
-                      {preset}
+                      {t(preset)}
                     </button>
                   ))}
                 </div>
@@ -478,19 +491,21 @@ export function AiPanel({
           >
             <header className="modal__head">
               <h2 id="ai-delete-session-title" className="modal__title">
-                删除对话
+                {t("assistant.delete.title")}
               </h2>
               <button
                 type="button"
                 className="modal__close"
                 onClick={() => setConfirming(null)}
                 disabled={deleting}
-                aria-label="关闭"
+                aria-label={t("common.close")}
               >
                 <IconClose size={14} />
               </button>
             </header>
-            <p className="confirm__text">「{confirming.title}」删除后无法恢复。</p>
+            <p className="confirm__text">
+              {t("assistant.delete.body", { title: confirming.title })}
+            </p>
             {deleteError ? <p className="confirm__error">{deleteError}</p> : null}
             <div className="confirm__actions">
               <button
@@ -499,7 +514,7 @@ export function AiPanel({
                 onClick={() => setConfirming(null)}
                 disabled={deleting}
               >
-                取消
+                {t("common.cancel")}
               </button>
               <button
                 type="button"
@@ -507,7 +522,7 @@ export function AiPanel({
                 onClick={() => void submitDelete()}
                 disabled={deleting}
               >
-                {deleting ? "删除中…" : "删除"}
+                {deleting ? t("assistant.delete.deleting") : t("assistant.delete.action")}
               </button>
             </div>
           </div>

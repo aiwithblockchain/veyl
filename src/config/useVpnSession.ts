@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, ConfigCreateInput, NodeAttachInput } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
+import { t as translate } from "../i18n";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
   ConfigDetail,
@@ -127,7 +128,7 @@ function toConnectionState(state: RuntimeSnapshot["state"]): VpnConnectionState 
 
 function actionMessage(error: unknown, fallback: string): string {
   const bridgeError = toBridgeError(error);
-  return bridgeError.message || fallback;
+  return bridgeError.hasMessage ? bridgeError.message : fallback;
 }
 
 function actionReason(error: unknown): string | undefined {
@@ -142,16 +143,18 @@ function attachMessage(error: unknown): string {
     typeof bridgeError.details?.reason === "string"
       ? bridgeError.details.reason
       : null;
-  if (reason === "source_required") return "缺少节点来源，没能加入节点。";
+  if (reason === "source_required") return translate("vpn.error.sourceRequired");
   if (reason === "source_and_node_ids_conflict") {
-    return "一次只能用一种节点来源。";
+    return translate("vpn.error.sourceConflict");
   }
-  if (reason === "invalid_source") return "这个节点来源不能用。";
-  if (reason === "not_global_config") return "节点只能加进全局配置。";
+  if (reason === "invalid_source") return translate("vpn.error.invalidSource");
+  if (reason === "not_global_config") return translate("vpn.error.notGlobalConfig");
   if (reason === "switch_in_progress") {
-    return "接管方式正在切换，稍后再加入节点。";
+    return translate("vpn.error.switchInProgress");
   }
-  return bridgeError.message || "没能加入节点，稍后再试。";
+  return bridgeError.hasMessage
+    ? bridgeError.message
+    : translate("vpn.error.addFailed");
 }
 
 /** Tauri 对未注册命令的报错形如 `Command node_probe not found`。 */
@@ -346,7 +349,7 @@ export function useVpnSession(
         try {
           detail = await bridge.configDetail(list.active_config_id);
         } catch {
-          if (!disposed.current) setError("读取节点详情失败。");
+          if (!disposed.current) setError(translate("vpn.error.detailFailed"));
         }
       }
       if (disposed.current) return;
@@ -367,7 +370,7 @@ export function useVpnSession(
       }
       if (detail !== null || list.active_config_id === null) setError(null);
     } catch (err) {
-      if (!disposed.current) setError(actionMessage(err, "读取配置失败"));
+      if (!disposed.current) setError(actionMessage(err, translate("vpn.error.loadConfig")));
     }
   }, [bridge, applySnapshot]);
 
@@ -504,14 +507,14 @@ export function useVpnSession(
         } catch (retryErr) {
           return {
             ok: false,
-            message: actionMessage(retryErr, "创建配置失败"),
+            message: actionMessage(retryErr, translate("vpn.error.createConfig")),
             reason: actionReason(retryErr),
           };
         }
       }
       return {
         ok: false,
-        message: actionMessage(err, "创建配置失败"),
+        message: actionMessage(err, translate("vpn.error.createConfig")),
         reason: actionReason(err),
       };
     }
@@ -543,7 +546,7 @@ export function useVpnSession(
       } else {
         return {
           ok: false,
-          message: "缺少节点来源，没能加入节点。",
+          message: translate("vpn.error.sourceRequired"),
           reason: "source_required",
         };
       }
@@ -597,7 +600,7 @@ export function useVpnSession(
       const store = mockStore.current;
       if (store.activeId === configId) return { ok: true };
       if (!store.configs.some((config) => config.config_id === configId)) {
-        return { ok: false, message: "这套配置已经不存在了。" };
+        return { ok: false, message: translate("vpn.error.configGone") };
       }
       // 只换 active：模拟「连接保持原样」，断开只发生在下次启动。
       commitMock({ ...store, activeId: configId });
@@ -609,7 +612,7 @@ export function useVpnSession(
       await refreshReal();
       return { ok: true };
     } catch (err) {
-      return { ok: false, message: actionMessage(err, "切换配置失败") };
+      return { ok: false, message: actionMessage(err, translate("vpn.error.switchConfig")) };
     }
   };
 
@@ -617,7 +620,7 @@ export function useVpnSession(
     if (mock) {
       const store = mockStore.current;
       const targetId = configId ?? store.activeId;
-      if (!targetId) return { ok: false, message: "还没有配置。" };
+      if (!targetId) return { ok: false, message: translate("vpn.error.noConfig") };
       commitMock({
         ...store,
         configs: store.configs.map((config) =>
@@ -630,7 +633,8 @@ export function useVpnSession(
     }
 
     const targetConfigId = configId ?? activeConfigId;
-    if (!targetConfigId) return { ok: false, message: "还没有配置。" };
+    if (!targetConfigId)
+      return { ok: false, message: translate("vpn.error.noConfig") };
     try {
       await bridge.nodeSwitch(targetConfigId, nodeId);
       await refreshReal();
@@ -639,7 +643,7 @@ export function useVpnSession(
       await refreshReal();
       if (isMissingCommand(err)) {
         setNodeSwitchAvailable(false);
-        return { ok: false, message: "这个版本还不能切换节点。" };
+        return { ok: false, message: translate("vpn.error.nodeSwitchUnsupported") };
       }
       const reason = actionReason(err);
       if (reason === "config_launching") {
@@ -647,8 +651,8 @@ export function useVpnSession(
         return {
           ok: false,
           message: another
-            ? "另一套配置正在连接，等它连上或断开后再切换节点。"
-            : "这套配置正在连接，等连上以后再切换节点。",
+            ? translate("vpn.error.otherConfigConnecting")
+            : translate("vpn.error.thisConfigConnecting"),
           reason,
         };
       }
@@ -656,18 +660,19 @@ export function useVpnSession(
         // 连的是另一套：节点属于这套配置，等这套连上才能热切换。
         return {
           ok: false,
-          message: "当前连着另一套配置，先连这套再换节点。",
+          message: translate("vpn.error.otherConnected"),
           reason,
         };
       }
-      return { ok: false, message: actionMessage(err, "切换节点失败") };
+      return { ok: false, message: actionMessage(err, translate("vpn.error.switchNode")) };
     }
   };
 
   const start = async (): Promise<ActionResult> => {
-    if (!activeConfigId) return { ok: false, message: "还没有配置。" };
+    if (!activeConfigId)
+      return { ok: false, message: translate("vpn.error.noConfig") };
     if (!activeConfig || activeConfig.node_count === 0) {
-      return { ok: false, message: "这套配置还没有节点。" };
+      return { ok: false, message: translate("vpn.error.noNodes") };
     }
     // 同一意图的重复触发：首次还在跑，这里按成功返回，调用方不会弹错误。
     // 首次失败时自己会报错，重复这次不再重复报。
@@ -770,9 +775,13 @@ export function useVpnSession(
         return { ok: false, reason };
       }
       if (permission === "retry" || isHelperAdminFailure(err)) {
-        return { ok: false, message: "这次没有授权，可以再试一次。", reason };
+        return {
+          ok: false,
+          message: translate("vpn.error.noPermission"),
+          reason,
+        };
       }
-      return { ok: false, message: actionMessage(err, "启动失败"), reason };
+      return { ok: false, message: actionMessage(err, translate("vpn.error.startFailed")), reason };
     } finally {
       if (startSeqRef.current === startSeq) {
         startingRef.current = false;
@@ -830,7 +839,7 @@ export function useVpnSession(
       runtimeAuthority.current.markLocal(wasConnected ? "running" : "idle");
       setConnection(wasConnected ? "connected" : "idle");
       setConnectedConfigId(wasConnected ? wasConfigId : null);
-      return { ok: false, message: actionMessage(err, "断开失败") };
+      return { ok: false, message: actionMessage(err, translate("vpn.error.stopFailed")) };
     }
   };
 
@@ -866,7 +875,7 @@ export function useVpnSession(
       );
       return { ok: true };
     } catch (err) {
-      return { ok: false, message: actionMessage(err, "改名失败") };
+      return { ok: false, message: actionMessage(err, translate("vpn.error.renameFailed")) };
     }
   };
 
@@ -929,14 +938,14 @@ export function useVpnSession(
         return {
           ok: false,
           latencyMs: null,
-          message: "这个版本还不能测试连通。",
+          message: translate("vpn.error.probeUnsupported"),
           unreachable: false,
         };
       }
       return {
         ok: false,
         latencyMs: null,
-        message: actionMessage(err, "测试失败"),
+        message: actionMessage(err, translate("vpn.error.probeFailed")),
         unreachable: false,
       };
     }

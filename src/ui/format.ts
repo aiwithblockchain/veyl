@@ -1,3 +1,5 @@
+import { t } from "../i18n";
+
 /** 两位小数精度，去掉末尾多余的 0：1.00 → 1.0，1.04 → 1.04。 */
 function twoDecimals(value: number, unit: "MB" | "GB"): string {
   const fixed = value.toFixed(2);
@@ -32,10 +34,12 @@ export function formatClock(totalSeconds: number): string {
 /** 延迟读数右侧的「刚刚检测 / N 秒前检测」。 */
 export function formatCheckedAgo(iso: string | null, now: number): string {
   const at = iso ? Date.parse(iso) : Number.NaN;
-  if (!Number.isFinite(at)) return "确认中…";
+  if (!Number.isFinite(at)) return t("format.checking");
   const seconds = Math.max(0, Math.floor((now - at) / 1000));
-  if (seconds < 5) return "刚刚检测";
-  if (seconds < 60) return `${seconds} 秒前检测`;
+  if (seconds < 5) return t("format.checkedJustNow");
+  if (seconds < 60) return t("format.checkedSecondsAgo", { count: seconds });
   const minutes = Math.floor(seconds / 60);
-  return minutes < 60 ? `${minutes} 分钟前检测` : "很久没检测";
+  return minutes < 60
+    ? t("format.checkedMinutesAgo", { count: minutes })
+    : t("format.checkedLongAgo");
 }

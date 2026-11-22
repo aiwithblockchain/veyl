@@ -5,6 +5,7 @@ import { formatUsdCents } from "../myservers/labels";
 import { IconClose } from "./icons";
 import { useFocusTrap } from "../ui/focus";
 import { copyText } from "../ui/clipboard";
+import { t, useT } from "../i18n";
 
 interface Props {
   wallet: MyServerWallet | null;
@@ -19,23 +20,22 @@ function topupError(error: unknown): string {
   const problem = toBridgeError(error);
   const reason = typeof problem.details?.reason === "string" ? problem.details.reason : "";
   if (reason === "invalid_denomination") {
-    return "这个充值档位现在不可用。换一档再试。";
+    return t("topup.invalidDenomination");
   }
   if (reason === "checkout_unavailable") {
-    return "收银台暂时打不开。没有扣钱，稍后再点一次。";
+    return t("topup.checkoutUnavailable");
   }
   if (reason === "auth_required" || reason === "token_invalid") {
-    return "登录已过期。重新登录后再充值。";
+    return t("topup.authRequired");
   }
   if (reason === "channel_not_allowed") {
-    return "这个环境不能充值。换正式环境再试。";
+    return t("topup.channelNotAllowed");
   }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
-    return "没连上服务器。没有扣钱，稍后再试。";
+    return t("topup.network");
   }
-  return problem.message && problem.message !== "操作失败"
-    ? problem.message
-    : "没发起充值。稍后再试。";
+  // 批次 4 起改看稳定错误码；现在只看后端是否真的给了 message。
+  return problem.hasMessage ? problem.message : t("topup.failed");
 }
 
 /** 充值模态：档位直接来自 wallet 的 denominations_cents。 */
@@ -47,6 +47,7 @@ export function MyServerTopUp({
   onTopUp,
   onClose,
 }: Props) {
+  const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<{
@@ -77,8 +78,10 @@ export function MyServerTopUp({
       const result = await onTopUp(cents);
       setNotice(
         result.checkout_url
-          ? "已打开支付页面。付完回到这里，余额会自动刷新。"
-          : `已充值 ${formatUsdCents(result.denomination_cents)}。`,
+          ? tr("topup.opened")
+          : tr("topup.charged", {
+              amount: formatUsdCents(result.denomination_cents),
+            }),
       );
     } catch (err) {
       const details = toBridgeError(err).details;
@@ -110,12 +113,12 @@ export function MyServerTopUp({
       >
         <header className="modal__head">
           <h2 id="myservers-topup-title" className="modal__title">
-            充值
+            {tr("topup.title")}
           </h2>
           <button
             type="button"
             className="modal__close"
-            aria-label="关闭"
+            aria-label={tr("common.close")}
             disabled={busy}
             onClick={onClose}
           >
@@ -125,16 +128,16 @@ export function MyServerTopUp({
 
         <div className="myservers-login__body">
           <p className="myservers__hint">
-            当前余额{" "}
+            {tr("topup.balance")}{" "}
             <span className="num">
               {wallet ? formatUsdCents(wallet.balance_cents) : "—"}
             </span>
-            {loading ? " · 正在刷新" : null}
+            {loading ? ` · ${tr("topup.refreshing")}` : null}
           </p>
 
           {!wallet && loading ? (
             <p className="myservers__hint" role="status">
-              正在读取充值档位…
+              {tr("topup.loading")}
             </p>
           ) : !wallet && error ? (
             <>
@@ -143,22 +146,22 @@ export function MyServerTopUp({
               </p>
               <div className="myservers__login-actions">
                 <button type="button" className="btn btn--ghost" onClick={onRetry}>
-                  重试
+                  {tr("topup.retry")}
                 </button>
               </div>
             </>
           ) : denominations.length === 0 ? (
             <>
-              <p className="myservers__hint">现在没有可用的充值档位。</p>
+              <p className="myservers__hint">{tr("topup.none")}</p>
               <div className="myservers__login-actions">
                 <button type="button" className="btn btn--ghost" onClick={onRetry}>
-                  刷新
+                  {tr("topup.refresh")}
                 </button>
               </div>
             </>
           ) : (
             <>
-              <p className="myservers__hint">选一档充值。</p>
+              <p className="myservers__hint">{tr("topup.pick")}</p>
               <div className="myservers-topup__grid">
                 {denominations.map((cents) => (
                   <button
@@ -195,7 +198,7 @@ export function MyServerTopUp({
                       className="btn btn--ghost"
                       onClick={() => void start(failure.cents)}
                     >
-                      重新打开支付页面
+                      {tr("topup.reopenCheckout")}
                     </button>
                     <button
                       type="button"
@@ -207,7 +210,7 @@ export function MyServerTopUp({
                         });
                       }}
                     >
-                      {copied ? "已复制" : "复制链接"}
+                      {copied ? tr("chat.copy.copied") : tr("topup.copyLink")}
                     </button>
                   </div>
                 </>
@@ -218,7 +221,7 @@ export function MyServerTopUp({
                     className="btn btn--ghost"
                     onClick={() => void start(failure.cents)}
                   >
-                    重试
+                    {tr("topup.retry")}
                   </button>
                 </div>
               )}
@@ -233,11 +236,11 @@ export function MyServerTopUp({
           <div className="myservers__login-actions">
             {notice ? (
               <button type="button" className="btn btn--ghost" onClick={onRetry}>
-                刷新余额
+                {tr("topup.refreshBalance")}
               </button>
             ) : null}
             <button type="button" className="btn btn--ghost" disabled={busy} onClick={onClose}>
-              关闭
+              {tr("common.close")}
             </button>
           </div>
         </div>

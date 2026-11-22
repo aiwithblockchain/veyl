@@ -122,6 +122,8 @@ describe("端口行默认态", () => {
     expect(screen.getByRole("button", { name: "复制" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑" })).toBeTruthy();
     expect(screen.queryByLabelText("本地代理端口")).toBeNull();
+    // 行内「问 AI」已删除，咨询只在设置顶部。
+    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
     expect(screen.getByText("别的软件要填代理地址时，填这个。")).toBeTruthy();
   });
 
@@ -199,6 +201,8 @@ describe("端口行编辑态", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
+    // 编辑态也没有行内「问 AI」。
+    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
   });
 
   it("编辑态保留说明句，下方行不因切换而位移", () => {

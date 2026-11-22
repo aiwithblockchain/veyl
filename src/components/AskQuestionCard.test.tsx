@@ -3,10 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PendingQuestion } from "../agent/bridge";
 import { AskQuestionCard, QuestionAwayLine } from "./AskQuestionCard";
+import { setLanguage } from "../i18n";
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  setLanguage("zh");
 });
 
 function question(overrides: Partial<PendingQuestion> = {}): PendingQuestion {
@@ -35,6 +37,22 @@ describe("AskQuestionCard", () => {
     expect(screen.getByRole("button", { name: "桌面软件" })).toBeTruthy();
     expect(screen.getByText("剩 5:00")).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("英文界面点「解释」回传英文固定串", async () => {
+    setLanguage("en");
+    const onAnswer = vi.fn(async () => {});
+    render(
+      <AskQuestionCard question={question()} onAnswer={onAnswer} onExpire={() => {}} />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Explain what this setting means" }),
+    );
+
+    await waitFor(() =>
+      expect(onAnswer).toHaveBeenCalledWith("Explain what this setting means"),
+    );
   });
 
   it("点选项按选项原文回答", async () => {

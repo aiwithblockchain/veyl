@@ -5,6 +5,7 @@
  * 这里只保留仍被 App 与连接舞台使用的纯函数。
  */
 import type { RuntimeView } from "../agent/protocol";
+import { t } from "../i18n";
 
 /**
  * 失败是不是「本来连着，突然断了」。
@@ -20,5 +21,7 @@ export function isDisconnectFailure(
 
 /** 失败时 H1 下面那行小字：区分「没连上」与「连接断了」。只有这一处。 */
 export function failureHeadline(wasConnected: boolean): string {
-  return wasConnected ? "连接断了。" : "没有连上节点。";
+  return t(
+    wasConnected ? "console.failure.disconnected" : "console.failure.notConnected",
+  );
 }

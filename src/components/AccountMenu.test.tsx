@@ -5,8 +5,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerWallet } from "../agent/bridge";
 import { AccountMenu } from "./AccountMenu";
+import { setLanguage } from "../i18n";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 const css = readFileSync("src/styles/app.css", "utf8");
 
@@ -42,6 +46,16 @@ function renderMenu(over: Partial<Parameters<typeof AccountMenu>[0]> = {}) {
       view.rerender(<AccountMenu {...props} {...next} />),
   };
 }
+
+describe("AccountMenu：英文界面", () => {
+  it("余额、充值、退出都用 en 文案", () => {
+    setLanguage("en");
+    renderMenu();
+    expect(screen.getByText("Balance")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Top up" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+  });
+});
 
 describe("账号菜单", () => {
   it("头部只有邮箱一行，带全量 title，不再出现头像与已登录副行", () => {

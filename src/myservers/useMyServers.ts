@@ -13,6 +13,7 @@ import { toBridgeError } from "../agent/errors";
 import { AGENT_EVENTS } from "../agent/protocol";
 import { uiLog } from "../log/uiLog";
 import { isProvisioning } from "./labels";
+import { t } from "../i18n";
 
 export type ServersView = "detail" | "wizard";
 
@@ -23,10 +24,7 @@ interface Options {
   rootSignal: number;
 }
 
-const LIST_ERROR = "读不到你的服务器。已有服务器和节点不受影响；稍后再试。";
 /** 设备身份丢了：不是网络问题，重试同一个请求不会变好，只能重新注册。 */
-const REGISTER_ERROR = "没能重新注册设备。账户和服务器都还在，检查网络后再试一次。";
-const DETAIL_ERROR = "这台服务器的详情暂时读不到。已有服务器和节点不受影响；稍后再试。";
 /** 详情请求失败后的后台重试节奏：1s → 2s → 4s → 8s，之后封顶 8s。 */
 const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
 /** 没有任何可读数据时，连续失败累计这么久才给错误；首次失败不报。 */
@@ -35,10 +33,6 @@ const DETAIL_ERROR_AFTER_MS = 10_000;
 export const WALLET_REFRESH_GATE_MS = 30_000;
 /** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
 const PROVISIONING_POLL_MS = 2000;
-const WALLET_ERROR = "余额暂时读不到。";
-const LOGOUT_OFFLINE = "没退出登录。需要联网才能退出；服务器没有变化。";
-const LOGOUT_FAILED = "没退出登录。服务器没有变化，可以再试一次。";
-const LOGIN_UNSUPPORTED = "这个版本还不支持登录。";
 
 /**
  * 谁触发了这次余额刷新。设计文档点名的来源之外，顺带刷新余额的用户动作
@@ -304,7 +298,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           setWalletError(null);
         } else if (walletRef.current === null) {
           // 从未取到值：只能明说读不到。
-          setWalletError(WALLET_ERROR);
+          setWalletError(t("account.walletError"));
         }
         // 已有旧值：保留数字，由 walletStale 写「显示的是上次的余额」。
       } finally {
@@ -366,7 +360,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         setIdentityPresent(false);
         setError(null);
       } else {
-        setError(LIST_ERROR);
+        setError(t("myservers.error.list"));
       }
       return false;
     } finally {
@@ -412,7 +406,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setRetryNotice(null);
     const ok = await refresh();
     setRetrying(false);
-    if (ok) setRetryNotice("已重新读取服务器列表。");
+    if (ok) setRetryNotice(t("myservers.notice.relisted"));
   }, [refresh]);
 
   // 打开页面先读公开目录与本地登录态；已登录才拉服务器列表。
@@ -587,6 +581,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     servers.find((server) => server.server_id === selectedId) ?? null;
   // 重建后新机器还没进列表时也要能选中：详情以 selectedId 为准。
   const selectedKey = selectedId;
+  /** 已选中但还不在列表里（刚下单的新机器）：中间区要显示「正在创建」，不能落空态。 */
+  const awaitingSelected =
+    selectedId !== null &&
+    !servers.some((server) => server.server_id === selectedId);
 
   // 详情以 my_server_get 为准；列表快照只作首帧占位。
   // 切换节点会改网络路径，在飞的详情请求失败一次是正常的：有数据就保持数据后台重试，
@@ -643,7 +641,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
             setDetailError(null);
           } else if (gaveUp) {
             // 错误态也继续重试（8s 封顶）：网络恢复后自动清错，手动重试只是兜底。
-            setDetailError(DETAIL_ERROR);
+            setDetailError(t("myservers.error.detail"));
           }
           record.attempt += 1;
           const backoff =
@@ -717,7 +715,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       void refreshAccount();
       return ok;
     } catch {
-      setError(REGISTER_ERROR);
+      setError(t("myservers.error.register"));
       return false;
     }
   };
@@ -760,7 +758,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const loginStart = async (email: string): Promise<MyServerLoginTicket> => {
     const source = (bridge as AccountCapable).myServerLoginStart;
     if (!source) {
-      throw { code: "UNSUPPORTED", message: LOGIN_UNSUPPORTED, retryable: false };
+      throw { code: "UNSUPPORTED", message: t("myservers.error.loginUnsupported"), retryable: false };
     }
     return source.call(bridge, email);
   };
@@ -771,7 +769,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   ): Promise<MyServerAccount> => {
     const source = (bridge as AccountCapable).myServerLoginVerify;
     if (!source) {
-      throw { code: "UNSUPPORTED", message: LOGIN_UNSUPPORTED, retryable: false };
+      throw { code: "UNSUPPORTED", message: t("myservers.error.loginUnsupported"), retryable: false };
     }
     const next = await source.call(bridge, email, code);
     // 换了账户：上一个账户的余额与门禁时间都不能留；同一账户重登沿用缓存。
@@ -792,7 +790,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
 
   const logout = async (): Promise<LogoutResult> => {
     const source = (bridge as AccountCapable).myServerLogout;
-    if (!source) return { ok: false, message: LOGIN_UNSUPPORTED };
+    if (!source) return { ok: false, message: t("myservers.error.loginUnsupported") };
     // Host 可能先发 account-cleared 再返回；事件与这次调用是同一件事。
     selfLogoutAtRef.current = Date.now();
     try {
@@ -808,13 +806,17 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       selfLogoutAtRef.current = 0;
       const problem = toBridgeError(error);
       const reason = errorReason(error);
-      const message = AUTH_REASONS.has(reason)
-        ? LOGOUT_OFFLINE
-        : problem.code === "TIMEOUT" || problem.code === "NETWORK"
-          ? LOGOUT_OFFLINE
-          : problem.message && problem.message !== "操作失败"
-            ? `${problem.message}${problem.message.endsWith("。") ? "" : "。"}服务器没有变化，可以再试一次。`
-            : LOGOUT_FAILED;
+      const offline =
+        AUTH_REASONS.has(reason) ||
+        problem.code === "TIMEOUT" ||
+        problem.code === "NETWORK";
+      const message = offline
+        ? t("myservers.error.logoutOffline")
+        : problem.hasMessage
+          ? `${problem.message}${
+              /[.。!?！？]$/.test(problem.message) ? "" : "。"
+            }${t("myservers.error.logoutTail")}`
+          : t("myservers.error.logoutFailed");
       return { ok: false, message };
     }
   };
@@ -822,7 +824,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const topup = async (denominationCents: number): Promise<MyServerTopup> => {
     const source = (bridge as AccountCapable).myServerTopup;
     if (!source) {
-      throw { code: "UNSUPPORTED", message: "这个版本还不支持充值。", retryable: false };
+      throw { code: "UNSUPPORTED", message: t("myservers.error.topupUnsupported"), retryable: false };
     }
     const result = await source.call(bridge, denominationCents);
     // 服务端一定返回 checkout_url，Host 已用系统浏览器打开。
@@ -1036,6 +1038,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     selected,
     selectedId: selected?.server_id ?? null,
     pendingServer,
+    awaitingSelected,
     detailError,
     detailRetrying,
     retryDetail,
