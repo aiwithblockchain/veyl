@@ -48,7 +48,12 @@ import { uiLog } from "./log/uiLog";
 import { rotateFailureReason, rotateNodeCredentials } from "./myservers/rotateCredentials";
 import { staleConfigNodeId } from "./myservers/staleConfig";
 import { repairAvailableFor } from "./myservers/repairAvailability";
-import type { DiagnosisDeps, DiagnosisFacts } from "./myservers/useNodeDiagnosis";
+import type {
+  DiagnosisDeps,
+  DiagnosisFacts,
+  ProbeOutcome,
+  ReconnectOutcome,
+} from "./myservers/useNodeDiagnosis";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -2123,14 +2128,46 @@ export default function App() {
       uiLogPath: null,
       controlPlaneError: myServers.error,
     };
-    const probeNode = async (): Promise<boolean> => {
-      if (!localNodeId) return false;
+    /** 本次诊断的关联短码，由面板在开始时回传，供探测/等待日志复用。 */
+    let runCode: string | null = null;
+    const probeNode = async (): Promise<ProbeOutcome> => {
+      if (!localNodeId) {
+        uiLog(
+          "warn",
+          `diagnosis run=${runCode ?? "none"} probe status=none reason=no_local_node`,
+          "node-diagnosis",
+        );
+        return null;
+      }
       try {
         const result = await bridge.nodeProbe(localNodeId);
         nodeProbes.recordResults([result]);
-        return result.reachable === true;
-      } catch {
-        return false;
+        if (result.status === "untested") {
+          // untested = 没测成（connection_busy / other_config / clash_unavailable），不是不通。
+          uiLog(
+            "warn",
+            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=untested reason=${result.error?.code ?? "none"}`,
+            "node-diagnosis",
+          );
+          return null;
+        }
+        if (result.reachable !== true) {
+          uiLog(
+            "warn",
+            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=${result.status} reason=${result.error?.code ?? "none"}`,
+            "node-diagnosis",
+          );
+          return false;
+        }
+        return true;
+      } catch (error) {
+        // 命令本身没跑成：不知道通不通，按「没测成」处理。
+        uiLog(
+          "warn",
+          `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=none reason=${toBridgeError(error).code || "throw"}`,
+          "node-diagnosis",
+        );
+        return null;
       }
     };
     const isRuntimeUp = () => {
@@ -2143,7 +2180,8 @@ export default function App() {
       runtimeRef.current.node_id === localNodeId;
     /** stop → start 返回 ok 不等于运行时已就绪：轮询快照，别在 starting 上测。 */
     const waitForRuntimeReady = async (): Promise<boolean> => {
-      const deadline = Date.now() + 20_000;
+      const startedAt = Date.now();
+      const deadline = startedAt + 20_000;
       while (Date.now() < deadline) {
         try {
           const snapshot = await bridge.getRuntimeSnapshot();
@@ -2160,6 +2198,11 @@ export default function App() {
               await new Promise((resolve) => setTimeout(resolve, 500));
               continue;
             }
+            uiLog(
+              "info",
+              `diagnosis run=${runCode ?? "none"} reconnect ready ms=${Date.now() - startedAt}`,
+              "node-diagnosis",
+            );
             return true;
           }
           if (snapshot?.state === "failed") return false;
@@ -2168,7 +2211,11 @@ export default function App() {
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      uiLog("warn", "diagnosis reconnect timeout", "node-diagnosis");
+      uiLog(
+        "warn",
+        `diagnosis run=${runCode ?? "none"} reconnect timeout ms=${Date.now() - startedAt}`,
+        "node-diagnosis",
+      );
       return false;
     };
     const deps: DiagnosisDeps = {
@@ -2187,22 +2234,37 @@ export default function App() {
         return bridge.nodeProbeReachability(server.ip, 32100);
       },
       syncConfig: async () => {
+        // 同步前现读本地配置里的端口做基准：面板打开时的快照可能已经过期。
+        let baseline = initialPort;
+        const configId = vpn.activeConfig?.config_id;
+        if (configId && localNodeId) {
+          try {
+            const detail = await bridge.configDetail(configId);
+            baseline =
+              detail.nodes.find((node) => node.node_id === localNodeId)?.port ??
+              initialPort;
+          } catch {
+            // 读不到当前配置就退回打开面板时的端口。
+          }
+        }
         // 单台凭据，只比端口；请求失败原样抛给 hook，按控制面不可达处理。
         const node = await bridge.myServerCredentials(server.server_id);
         vpn.reload();
         void myServers.refresh();
         return {
-          changed: initialPort === null || node.port !== initialPort,
+          changed: baseline === null || node.port !== baseline,
           port: node.port,
         };
       },
       reprobe: probeNode,
-      reconnectAndProbe: async () => {
+      reconnectAndProbe: async (): Promise<ReconnectOutcome> => {
         const connected = await handleReconnectAndTest();
-        if (!connected) return false;
+        if (!connected) return "reconnect-failed";
         const ready = await waitForRuntimeReady();
-        if (!ready) return false;
-        return probeNode();
+        if (!ready) return "reconnect-failed";
+        const probed = await probeNode();
+        if (probed === null) return "probe-untested";
+        return probed ? "ok" : "probe-failed";
       },
       rotateCredentials: async () => {
         try {
@@ -2226,6 +2288,9 @@ export default function App() {
         setDiagnosis(null);
         changeDestination("servers");
         myServers.select(server.server_id);
+      },
+      onRunStart: (run) => {
+        runCode = run;
       },
     };
     setDiagnosis({ nodeName: target.nodeName || server.name, deps });
@@ -3157,6 +3222,7 @@ export default function App() {
           nodeName={diagnosis.nodeName}
           deps={diagnosis.deps}
           onClose={() => setDiagnosis(null)}
+          trapPaused={aiRequiredOpen}
         />
       ) : null}
 

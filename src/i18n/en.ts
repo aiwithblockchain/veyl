@@ -1579,6 +1579,11 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.connectivity.localNetwork": "Your local network may be down",
   "diagnosis.config.pending": "Updating config…",
   "diagnosis.config.controlPlane": "Control plane is temporarily unreachable",
+  "diagnosis.config.timeout":
+    "Updating the config hasn't returned yet; it may still be running. Check the connection again later.",
+  "diagnosis.config.untested":
+    "Couldn't re-test this time: the probe didn't run, so this isn't a failure.",
+  "diagnosis.config.reconnectFailed": "Config updated, but reconnecting failed.",
   "diagnosis.config.recovered": "Config updated; connection restored",
   "diagnosis.config.recoveredNoChange": "Config unchanged; connection restored",
   "diagnosis.config.stillDown": "Config updated, but still unreachable",
@@ -1588,9 +1593,13 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.rotate.pending": "Resetting port and password…",
   "diagnosis.rotate.recovered": "Port and password reset; connection restored",
   "diagnosis.rotate.reconnectFailed":
-    "Port and password reset, but still unreachable after reconnecting",
+    "Port and password reset, but reconnecting failed",
   "diagnosis.rotate.stillFailed":
     "Port and password reset, but still unreachable",
+  "diagnosis.rotate.timeout":
+    "Resetting hasn't returned yet; it may still be running. Check the port again later.",
+  "diagnosis.rotate.untested":
+    "Port and password reset, but couldn't re-test this time.",
   "diagnosis.rotate.appliedIdle": "Reset done; reconnect to apply",
   "diagnosis.rotate.failed": "Reset failed: {reason}",
   "diagnosis.rotate.failedNoReason": "Reset failed",

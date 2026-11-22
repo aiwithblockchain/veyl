@@ -1513,6 +1513,11 @@ export const zh = {
   "diagnosis.connectivity.localNetwork": "本机网络可能不通",
   "diagnosis.config.pending": "正在更新配置…",
   "diagnosis.config.controlPlane": "控制面暂时不可达",
+  "diagnosis.config.timeout":
+    "更新配置还没返回结果，可能仍在进行；稍后再看连接是否恢复。",
+  "diagnosis.config.untested":
+    "这次没能重测：探针没有跑起来，不能当成不通。",
+  "diagnosis.config.reconnectFailed": "配置已更新，但没能重连。",
   "diagnosis.config.recovered": "配置已更新，连接已恢复",
   "diagnosis.config.recoveredNoChange": "配置没有变化，连接已恢复",
   "diagnosis.config.stillDown": "配置已更新，但仍然不通",
@@ -1521,8 +1526,11 @@ export const zh = {
   "diagnosis.config.unchanged": "配置没有变化",
   "diagnosis.rotate.pending": "正在重置端口与密码…",
   "diagnosis.rotate.recovered": "端口与密码已重置，连接已恢复",
-  "diagnosis.rotate.reconnectFailed": "端口与密码已重置，但重连后仍不通",
+  "diagnosis.rotate.reconnectFailed": "端口与密码已重置，但没能重连",
   "diagnosis.rotate.stillFailed": "端口与密码已重置，但仍然不通",
+  "diagnosis.rotate.timeout":
+    "重置还没返回结果，可能仍在进行；稍后再看端口是否变化。",
+  "diagnosis.rotate.untested": "端口与密码已重置，但这次没能重测。",
   "diagnosis.rotate.appliedIdle": "已重置，重新连接后生效",
   "diagnosis.rotate.failed": "重置失败：{reason}",
   "diagnosis.rotate.failedNoReason": "重置失败",

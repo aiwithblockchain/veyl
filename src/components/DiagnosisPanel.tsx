@@ -17,6 +17,8 @@ interface Props {
   nodeName: string;
   deps: DiagnosisDeps;
   onClose: () => void;
+  /** 上层还有告警弹层时暂停焦点陷阱，让告警能拿到焦点。 */
+  trapPaused?: boolean;
 }
 
 const STEP_TITLE: Record<DiagnosisStepId, MessageKey> = {
@@ -63,7 +65,12 @@ const PROBE_ERROR_KEY: Record<string, MessageKey> = {
   io_error: "diagnosis.probeError.ioError",
 };
 
-export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
+export function DiagnosisPanel({
+  nodeName,
+  deps,
+  onClose,
+  trapPaused = false,
+}: Props) {
   const t = useT();
   const diagnosis = useNodeDiagnosis(deps);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -72,15 +79,16 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const firstRenderRef = useRef(true);
 
-  useFocusTrap(true, dialogRef);
+  useFocusTrap(!trapPaused, dialogRef);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (trapPaused) return;
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [onClose, trapPaused]);
 
   // 旧动作按钮消失后，焦点跟着新的主按钮；没有下一步就回到关闭。
   useEffect(() => {
@@ -88,6 +96,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
       firstRenderRef.current = false;
       return;
     }
+    if (trapPaused) return;
     if (diagnosis.phase === "confirming") {
       cancelRef.current?.focus();
     } else if (diagnosis.action !== null) {
@@ -95,7 +104,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
     } else {
       closeRef.current?.focus();
     }
-  }, [diagnosis.action, diagnosis.phase]);
+  }, [diagnosis.action, diagnosis.phase, trapPaused]);
 
   const conclusionText = (conclusion: DiagnosisConclusion): ReactNode => {
     switch (conclusion.kind) {
@@ -131,6 +140,12 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
         return t("diagnosis.config.pending");
       case "config-control-plane":
         return t("diagnosis.config.controlPlane");
+      case "config-timeout":
+        return t("diagnosis.config.timeout");
+      case "config-untested":
+        return t("diagnosis.config.untested");
+      case "config-reconnect-failed":
+        return t("diagnosis.config.reconnectFailed");
       case "config-recovered":
         return conclusion.changed
           ? t("diagnosis.config.recovered")
@@ -149,6 +164,10 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
         return t("diagnosis.rotate.recovered");
       case "rotate-reconnect-failed":
         return t("diagnosis.rotate.reconnectFailed");
+      case "rotate-timeout":
+        return t("diagnosis.rotate.timeout");
+      case "rotate-untested":
+        return t("diagnosis.rotate.untested");
       case "rotate-still-failed":
         return t("diagnosis.rotate.stillFailed");
       case "rotate-applied-idle":
@@ -172,7 +191,10 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
   const willDisconnect = deps.isTunnelRunning();
 
   return (
-    <div className="quit-backdrop" onMouseDown={onClose}>
+    <div
+      className="quit-backdrop diagnosis-backdrop"
+      onMouseDown={onClose}
+    >
       <div
         ref={dialogRef}
         className="quit-dialog diagnosis"

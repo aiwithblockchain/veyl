@@ -47,6 +47,67 @@ const SERVER: MyServer = {
 const bridge = getAgentBridge();
 const modeDescriptor = Object.getOwnPropertyDescriptor(bridge, "mode");
 
+/** 诊断用的配置详情：本地节点端口可变，用来验证「同步前现读基准」。 */
+function ownedDetail(localPort: number): ConfigDetail {
+  return {
+    config_id: CONFIG_ID,
+    name: SUMMARY.name,
+    connect_mode: "tun",
+    routing_mode: "proxy_all",
+    node_count: 2,
+    listen_port: null,
+    is_active: true,
+    current_node_id: "node_1",
+    created_at: 0,
+    updated_at: 0,
+    last_used_at: null,
+    nodes: [
+      {
+        node_id: "node_1",
+        name: "东京 01",
+        server: "203.0.113.1",
+        port: 8388,
+        method: "aes-128-gcm",
+        protocol: "shadowsocks",
+        source: "seed",
+        created_at: 0,
+      },
+      {
+        node_id: "local_node_srv_1",
+        name: "新加坡 1 01",
+        server: "45.76.20.100",
+        port: localPort,
+        method: "aes-256-gcm",
+        protocol: "shadowsocks",
+        source: "owned",
+        created_at: 0,
+      },
+    ],
+    dns: { mode: "auto", local: [], remote: [] },
+    tun_excludes: [],
+    layout: null,
+    layout_revision: null,
+  };
+}
+
+function unreachableProbeSnapshot() {
+  return {
+    configId: CONFIG_ID,
+    results: [
+      {
+        node_id: "local_node_srv_1",
+        status: "unreachable" as const,
+        reachable: false,
+        latency_ms: null,
+        probe_method: "clash_delay" as const,
+        checked_at: Date.now(),
+        error: { code: "probe_failed", message: "" },
+      },
+    ],
+    run: null,
+  };
+}
+
 
 function navConnect() {
   const nav = screen.getByRole("navigation", { name: "切换主区" });
@@ -1182,5 +1243,88 @@ describe("节点诊断入口", () => {
       expect(reachability).toHaveBeenCalledWith("45.76.20.100", 32100),
     );
     expect(await screen.findByText(/ICMP 通/)).toBeTruthy();
+  });
+
+  it("AI 未配置：点「去问 AI」弹告警，面板留着，焦点在告警里", async () => {
+    prepare([SERVER]);
+    // 未配置 AI 会先挡首启；这里只要告警本身，跳过首启直接进主界面。
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+      providers: [],
+      activeProviderId: null,
+    });
+    vi.mocked(bridge.configDetail).mockResolvedValue(ownedDetail(8388));
+    vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue(
+      unreachableProbeSnapshot() as never,
+    );
+    vi.spyOn(bridge, "nodeProbeReachability").mockResolvedValue({
+      icmp: { ok: false, rtt_ms: null, loss: 100 },
+      tcp: { ok: false, ms: null, error: "refused" },
+    });
+
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "智能分析" }),
+    );
+    await screen.findByRole("dialog", {
+      name: "诊断：新加坡 1 · DigitalOcean",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "去问 AI" }));
+
+    const alert = await screen.findByRole("dialog", {
+      name: "还没有配置 AI 服务",
+    });
+    expect(
+      screen.getByRole("dialog", { name: "诊断：新加坡 1 · DigitalOcean" }),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(alert.contains(document.activeElement)).toBe(true),
+    );
+  });
+
+  it("面板打开后本地端口已被同步改过：更新配置判为无变化", async () => {
+    prepare([SERVER]);
+    let localPort = 8388;
+    vi.mocked(bridge.configDetail).mockImplementation(async () =>
+      ownedDetail(localPort),
+    );
+    vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue(
+      unreachableProbeSnapshot() as never,
+    );
+    vi.spyOn(bridge, "nodeProbeReachability").mockResolvedValue({
+      icmp: { ok: true, rtt_ms: 20, loss: 0 },
+      tcp: { ok: true, ms: 15, error: null },
+    });
+    vi.spyOn(bridge, "myServerCredentials").mockImplementation(async () => ({
+      server_id: SERVER.server_id,
+      node_id: "local_node_srv_1",
+      name: "新加坡 1 01",
+      host: SERVER.ip ?? "",
+      port: localPort,
+      method: "aes-256-gcm",
+    }));
+
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "智能分析" }),
+    );
+    await screen.findByRole("dialog", {
+      name: "诊断：新加坡 1 · DigitalOcean",
+    });
+
+    // 面板打开后本地端口已经被别处同步改过：基准必须现读，不能用打开时的快照。
+    localPort = 9999;
+
+    fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
+    fireEvent.click(await screen.findByRole("button", { name: "更新配置" }));
+
+    expect(await screen.findByText("配置没有变化")).toBeTruthy();
+    expect(screen.queryByText("配置已更新，重新连接后生效")).toBeNull();
   });
 });

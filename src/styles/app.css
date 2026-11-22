@@ -6951,6 +6951,11 @@ details[open] > .settings-fold__summary::before {
 
 /* ---------- 节点诊断面板（node-diagnosis-flow.md） ---------- */
 
+/* 低于设置 70 与告警 90：AI 未配置时告警必须能盖在诊断面板上。 */
+.diagnosis-backdrop {
+  z-index: 60;
+}
+
 .diagnosis {
   width: min(420px, calc(100vw - 48px));
 }

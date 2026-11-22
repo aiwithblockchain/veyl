@@ -56,7 +56,7 @@ function makeDeps(over: Partial<DiagnosisDeps> = {}): DiagnosisDeps {
     probeReachability: vi.fn(async () => reachable),
     syncConfig: vi.fn(async () => ({ changed: false, port: 20343 })),
     reprobe: vi.fn(async () => false),
-    reconnectAndProbe: vi.fn(async () => true),
+    reconnectAndProbe: vi.fn(async () => "ok" as const),
     rotateCredentials: vi.fn(async () => ({ ok: true as const, port: 21345 })),
     openAi: vi.fn(),
     onGoToServers: vi.fn(),
@@ -186,7 +186,7 @@ describe("节点诊断面板", () => {
   });
 
   it("同步有变化且重连成功：结束在「配置已更新，连接已恢复」", async () => {
-    const reconnectAndProbe = vi.fn(async () => true);
+    const reconnectAndProbe = vi.fn(async () => "ok" as const);
     const deps = makeDeps({
       syncConfig: vi.fn(async () => ({ changed: true, port: 21345 })),
       reconnectAndProbe,
@@ -221,7 +221,7 @@ describe("节点诊断面板", () => {
     const deps = makeDeps({
       rotateCredentials: vi.fn(async () => ({
         ok: false as const,
-        reason: "agent_timeout",
+        reason: "agent_unreachable",
       })),
       openAi,
     });
@@ -239,18 +239,18 @@ describe("节点诊断面板", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
 
-    expect(await screen.findByText("重置失败：服务器在重置时没有响应。")).toBeTruthy();
-    expect(document.body.textContent).not.toContain("agent_timeout");
+    expect(await screen.findByText("重置失败：没能连上这台服务器。")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("agent_unreachable");
     fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
 
     expect(openAi).toHaveBeenCalledTimes(1);
     const context = openAi.mock.calls[0][0] as Record<string, unknown>;
-    expect(context.rotate).toEqual({ ok: false, reason: "agent_timeout" });
+    expect(context.rotate).toEqual({ ok: false, reason: "agent_unreachable" });
     expect(JSON.stringify(context)).not.toContain("password");
   });
 
   it("配置有变化但隧道没在跑：不重连、不探测，提示重新连接后生效", async () => {
-    const reconnectAndProbe = vi.fn(async () => true);
+    const reconnectAndProbe = vi.fn(async () => "ok" as const);
     const reprobe = vi.fn(async () => true);
     const deps = makeDeps({
       isRuntimeRunning: () => false,
@@ -271,7 +271,7 @@ describe("节点诊断面板", () => {
   });
 
   it("重置后隧道没在跑：不探测、不自动连接", async () => {
-    const reconnectAndProbe = vi.fn(async () => true);
+    const reconnectAndProbe = vi.fn(async () => "ok" as const);
     const reprobe = vi.fn(async () => true);
     const deps = makeDeps({
       isRuntimeRunning: () => false,
@@ -298,7 +298,7 @@ describe("节点诊断面板", () => {
   });
 
   it("重置后跑的是别的节点：只重测、不重启", async () => {
-    const reconnectAndProbe = vi.fn(async () => true);
+    const reconnectAndProbe = vi.fn(async () => "ok" as const);
     const reprobe = vi.fn(async () => false);
     const deps = makeDeps({
       isRuntimeRunning: () => true,
@@ -415,7 +415,7 @@ describe("节点诊断面板", () => {
       await screen.findByRole("button", { name: "重置端口与密码" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
-    await screen.findByText("重置失败：服务器在重置时没有响应。");
+    await screen.findByText(/重置还没返回结果/);
 
     const line = logLines().find((item) => item.includes("rotate ok=false"));
     expect(line).toBeTruthy();
@@ -454,5 +454,174 @@ describe("节点诊断面板", () => {
     );
     expect(line).toBeTruthy();
     expect(line).toMatch(/run=\d{6}/);
+  });
+
+  it("配置有变化且重测仍不通：仍然给重置（配置可能是别的设备改的）", async () => {
+    const deps = makeDeps({
+      syncConfig: vi.fn(async () => ({ changed: true, port: 21345 })),
+      isTunnelRunning: () => false,
+      isRuntimeRunning: () => true,
+      reprobe: vi.fn(async () => false),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(await screen.findByText("配置已更新，但仍然不通")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "重置端口与密码" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去问 AI" })).toBeNull();
+  });
+
+  it("重测没跑成：结论是没能重测，下一步重新测一次而不是重置", async () => {
+    const reprobe = vi.fn(async () => null);
+    const deps = makeDeps({ reprobe });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(await screen.findByText(/这次没能重测/)).toBeTruthy();
+    expect(reprobe).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
+  });
+
+  it("重置后重测没跑成：结论是没能重测，绝不再给重置", async () => {
+    const reprobe = vi
+      .fn<() => Promise<boolean | null>>(async () => false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(null);
+    const deps = makeDeps({
+      isTunnelRunning: () => false,
+      isRuntimeRunning: () => true,
+      reprobe,
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(
+      await screen.findByText("端口与密码已重置，但这次没能重测。"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("重连本身失败：说没能重连，不说不通，也不给重置", async () => {
+    const deps = makeDeps({
+      syncConfig: vi.fn(async () => ({ changed: true, port: 21345 })),
+      reconnectAndProbe: vi.fn(async () => "reconnect-failed" as const),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(await screen.findByText("配置已更新，但没能重连。")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("仍然不通");
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("重置后重连本身失败：说没能重连，不说不通", async () => {
+    const deps = makeDeps({
+      reprobe: vi.fn(async () => false),
+      reconnectAndProbe: vi.fn(async () => "reconnect-failed" as const),
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(
+      await screen.findByText("端口与密码已重置，但没能重连"),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain(
+      "端口与密码已重置，但仍然不通",
+    );
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("同步超时：说还没返回结果，不按控制面不可达处理", async () => {
+    const deps = makeDeps({
+      syncConfig: vi.fn(async () => {
+        throw {
+          code: "TIMEOUT",
+          message: "",
+          retryable: true,
+          details: { reason: "timeout" },
+        };
+      }),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(await screen.findByText(/更新配置还没返回结果/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("控制面暂时不可达");
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+  });
+
+  it("重置超时：说还没返回结果，不说失败", async () => {
+    const deps = makeDeps({
+      rotateCredentials: vi.fn(async () => {
+        throw {
+          code: "TIMEOUT",
+          message: "",
+          retryable: true,
+          details: { reason: "agent_timeout" },
+        };
+      }),
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(await screen.findByText(/重置还没返回结果/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("重置失败");
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+  });
+
+  it("告警盖在上面时暂停焦点陷阱，Esc 不先关面板", async () => {
+    const onClose = vi.fn();
+    render(
+      <DiagnosisPanel
+        nodeName="东京 01"
+        deps={makeDeps()}
+        onClose={onClose}
+        trapPaused
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: "诊断：东京 01" }),
+    ).toBeTruthy();
   });
 });
