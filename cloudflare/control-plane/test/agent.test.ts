@@ -793,6 +793,37 @@ describe("POST /v1/agent/fail", () => {
     expect(detail.log_excerpt).toContain("INFO boot");
   });
 
+  it("cloud-init 回传的错误入审计前再脱敏一次", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          stage: "download",
+          line: 12,
+          error: "curl failed token=abc123 enr_deadbeef agt_live",
+        }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail.error).toContain("curl failed");
+    expect(detail.error).not.toContain("abc123");
+    expect(detail.error).not.toContain("enr_deadbeef");
+    expect(detail.error).not.toContain("agt_live");
+  });
+
   it("未知阶段与非整行号只落 null，不写任意文本进审计", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());

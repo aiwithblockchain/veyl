@@ -1153,6 +1153,17 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
 /** cloud-init 装机失败的固定阶段；只认这几个值，其余一律当未知。 */
 const FAIL_STAGES = new Set(["download", "checksum", "install", "config", "systemd"]);
 
+/**
+ * 防御性脱敏：cloud-init 的 stderr 可能回显命令参数。agent 侧已经脱敏过一次，
+ * 但这条是异常路径，控制面再抹一遍凭据形态才写日志与审计。
+ */
+function redactAgentText(input: string): string {
+  return input
+    .replace(/agt_[A-Za-z0-9_-]+/g, "agt_***")
+    .replace(/enr_[A-Za-z0-9_-]+/g, "enr_***")
+    .replace(/(password|token|authorization)\s*[=:]\s*[^\s,"}]+/gi, "$1=***");
+}
+
 interface AgentFailDetail {
   stage: string | null;
   line: number | null;
@@ -1181,7 +1192,7 @@ async function readAgentFailDetail(request: Request): Promise<AgentFailDetail> {
       : null;
   const error =
     typeof value.error === "string" && value.error.trim() !== ""
-      ? value.error.replace(/\s+/g, " ").trim().slice(0, 300)
+      ? redactAgentText(value.error.replace(/\s+/g, " ").trim()).slice(0, 300)
       : null;
   return { stage, line, error };
 }
