@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toBridgeError } from "../agent/errors";
-import { uiLog } from "../log/uiLog";
+import { uiLog, type UiLogLevel } from "../log/uiLog";
 
 /** ICMP 一项（Host `node_probe_reachability` 的原样结果）。 */
 export interface IcmpProbe {
@@ -361,8 +361,17 @@ function withTimeout<T>(
   });
 }
 
+/** 一次诊断的关联短码：时间戳后 6 位，短、可 grep，同一次运行内每行一致。 */
+function makeRunCode(): string {
+  return String(Date.now() % 1_000_000).padStart(6, "0");
+}
+
 /** 关闭时写一条固定模板日志；只含步骤名、布尔与错误码，不含任何凭据。 */
-function logClosed(steps: DiagnosisStep[], collected: Collected): void {
+function logClosed(
+  run: string | null,
+  steps: DiagnosisStep[],
+  collected: Collected,
+): void {
   if (steps.length === 0) return;
   const codes = steps.map((step) => `${step.id}:${step.status}`).join(",");
   const rotate =
@@ -373,7 +382,7 @@ function logClosed(steps: DiagnosisStep[], collected: Collected): void {
         : `fail:${collected.rotateReason ?? "unknown"}`;
   uiLog(
     "info",
-    `diagnosis steps=${codes} icmp=${boolCode(collected.icmp?.ok ?? null)} tcp=${boolCode(collected.tcp?.ok ?? null)} changed=${triCode(collected.syncChanged)} reprobe=${triCode(collected.reprobe)} reconnect=${triCode(collected.reconnect)} rotate=${rotate}`,
+    `diagnosis run=${run ?? "none"} steps=${codes} icmp=${boolCode(collected.icmp?.ok ?? null)} tcp=${boolCode(collected.tcp?.ok ?? null)} changed=${triCode(collected.syncChanged)} reprobe=${triCode(collected.reprobe)} reconnect=${triCode(collected.reconnect)} rotate=${rotate}`,
     "node-diagnosis",
   );
 }
@@ -392,12 +401,22 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   const mountedRef = useRef(true);
   const busyRef = useRef(false);
   const collectedRef = useRef<Collected>(emptyCollected());
+  const runRef = useRef<string | null>(null);
+
+  /** 每行都带本次诊断的 run 码，方便在 logs/ 里串起一次分析。 */
+  const log = (level: UiLogLevel, body: string) => {
+    uiLog(
+      level,
+      `diagnosis run=${runRef.current ?? "none"} ${body}`,
+      "node-diagnosis",
+    );
+  };
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      logClosed(stepsRef.current, collectedRef.current);
+      logClosed(runRef.current, stepsRef.current, collectedRef.current);
     };
   }, []);
 
@@ -423,10 +442,10 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     setSteps([
       { id: "connectivity", status: "running", conclusion: { kind: "connectivity-pending" } },
     ]);
-    uiLog(
+    runRef.current = makeRunCode();
+    log(
       "info",
-      `diagnosis start server=${depsRef.current.facts.serverId} node=${depsRef.current.facts.localNodeId ?? "none"} runtime=${runtimeLabel()}`,
-      "node-diagnosis",
+      `start server=${depsRef.current.facts.serverId} node=${depsRef.current.facts.localNodeId ?? "none"} runtime=${runtimeLabel()}`,
     );
 
     let report: ProbeReport | null = null;
@@ -447,11 +466,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     if (report === null) {
       // 命令没跑起来（IP / 端口非法、Host 超时…）不等于机器死了：不给销毁。
-      uiLog(
-        "warn",
-        `diagnosis connectivity probe-error code=${probeError ?? "none"}`,
-        "node-diagnosis",
-      );
+      log("warn", `connectivity probe-error code=${probeError ?? "none"}`);
       setSteps([
         {
           id: "connectivity",
@@ -465,10 +480,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     collectedRef.current.icmp = report.icmp;
     collectedRef.current.tcp = report.tcp;
-    uiLog(
+    log(
       "info",
-      `diagnosis connectivity icmp=${report.icmp.ok ? "ok" : report.icmp.error ? `error:${report.icmp.error}` : "fail"} rtt=${report.icmp.rtt_ms ?? "none"} tcp=${report.tcp.ok ? "ok" : `fail:${report.tcp.error ?? "unknown"}`} ms=${report.tcp.ms ?? "none"}`,
-      "node-diagnosis",
+      `connectivity icmp=${report.icmp.ok ? "ok" : report.icmp.error ? `error:${report.icmp.error}` : "fail"} rtt=${report.icmp.rtt_ms ?? "none"} tcp=${report.tcp.ok ? "ok" : `fail:${report.tcp.error ?? "unknown"}`} ms=${report.tcp.ms ?? "none"}`,
     );
 
     if (report.icmp.ok || report.tcp.ok) {
@@ -536,6 +550,10 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     if (outcome.controlPlaneError) {
       collectedRef.current.controlPlaneError = outcome.controlPlaneError;
+      log(
+        "warn",
+        `config control-plane error=${outcome.controlPlaneError} changed=${outcome.changed}`,
+      );
       busyRef.current = false;
       if (mountedRef.current) {
         replaceLast({
@@ -555,10 +573,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     // 没在跑隧道：不自动连接、也不探测，只把配置结果说清楚。
     if (!depsRef.current.isRuntimeRunning()) {
-      uiLog(
+      log(
         "info",
-        `diagnosis config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=idle result=${outcome.changed ? "applied" : "unchanged"}`,
-        "node-diagnosis",
+        `config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=idle result=${outcome.changed ? "applied" : "unchanged"}`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -581,8 +598,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     }
 
     // 面板关掉也把已经开始的同步收尾：配置变了就必须重启隧道，否则用户仍连着旧端口。
+    const reconnect = outcome.changed && depsRef.current.isTunnelRunning();
     let ok: boolean;
-    if (outcome.changed && depsRef.current.isTunnelRunning()) {
+    if (reconnect) {
       try {
         ok = await depsRef.current.reconnectAndProbe();
       } catch {
@@ -599,10 +617,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.reprobe = ok;
     }
 
-    uiLog(
+    log(
       "info",
-      `diagnosis config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=${runtimeLabel()} result=${ok ? "ok" : "fail"}`,
-      "node-diagnosis",
+      `config changed=${outcome.changed} port=${outcome.port ?? "none"} runtime=${runtimeLabel()} via=${reconnect ? "reconnect" : "reprobe"} result=${ok ? "ok" : "fail"}`,
     );
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -646,10 +663,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     if (!outcome.ok) {
       const reason = outcome.reason.trim() === "" ? null : outcome.reason;
-      uiLog(
+      log(
         "warn",
-        `diagnosis rotate ok=false reason=${reason ?? "none"} runtime=${runtimeLabel()}`,
-        "node-diagnosis",
+        `rotate ok=false reason=${reason ?? "none"} runtime=${runtimeLabel()}`,
       );
       collectedRef.current.rotateOk = false;
       collectedRef.current.rotateReason = reason;
@@ -670,10 +686,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     // 没在跑隧道：端口已经换了，但不探测、也不替用户自动连接。
     if (!depsRef.current.isRuntimeRunning()) {
-      uiLog(
+      log(
         "info",
-        `diagnosis rotate ok=true port=${outcome.port} runtime=idle result=applied`,
-        "node-diagnosis",
+        `rotate ok=true port=${outcome.port} runtime=idle result=applied`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -705,10 +720,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.reprobe = ok;
     }
 
-    uiLog(
+    log(
       "info",
-      `diagnosis rotate ok=true port=${outcome.port} runtime=${reconnected ? "this" : "other"} result=${ok ? "ok" : "fail"}`,
-      "node-diagnosis",
+      `rotate ok=true port=${outcome.port} runtime=${reconnected ? "this" : "other"} via=${reconnected ? "reconnect" : "reprobe"} result=${ok ? "ok" : "fail"}`,
     );
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -738,10 +752,13 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     );
     if (handed === false) {
       // AI 还没配置：面板留着，用户配好后可以再点一次。
-      uiLog("warn", "diagnosis ai blocked", "node-diagnosis");
+      log("warn", "ai blocked");
       return;
     }
-    uiLog("info", "diagnosis ai handed", "node-diagnosis");
+    log(
+      "info",
+      `ai handed steps=${stepsRef.current.map((step) => `${step.id}:${step.status}`).join(",")}`,
+    );
     setSteps((prev) => [
       ...prev,
       { id: "ai", status: "passed", conclusion: { kind: "ai-handed" } },

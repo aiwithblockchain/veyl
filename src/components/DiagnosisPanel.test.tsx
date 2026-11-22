@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { uiLog } from "../log/uiLog";
 import type {
   DiagnosisDeps,
   DiagnosisFacts,
@@ -8,7 +9,17 @@ import type {
 } from "../myservers/useNodeDiagnosis";
 import { DiagnosisPanel } from "./DiagnosisPanel";
 
+vi.mock("../log/uiLog", () => ({ uiLog: vi.fn() }));
+
 afterEach(cleanup);
+
+beforeEach(() => {
+  vi.mocked(uiLog).mockClear();
+});
+
+function logLines(): string[] {
+  return vi.mocked(uiLog).mock.calls.map(([, message]) => message);
+}
 
 function facts(over: Partial<DiagnosisFacts> = {}): DiagnosisFacts {
   return {
@@ -369,5 +380,79 @@ describe("节点诊断面板", () => {
     open(makeDeps());
     expect(screen.getByRole("button", { name: "开始分析" })).toBeTruthy();
     expect(screen.queryByText("连通性")).toBeNull();
+  });
+
+  it("开始分析：开始与连通性日志共用同一个 run 短码", async () => {
+    open(makeDeps());
+
+    await start();
+    await screen.findByText(/ICMP 通/);
+
+    const lines = logLines();
+    const startLine = lines.find((line) => line.includes("start server=srv_1"));
+    expect(startLine).toBeTruthy();
+    expect(startLine!.length).toBeLessThanOrEqual(300);
+
+    const run = /run=(\d{6})/.exec(startLine ?? "")?.[1];
+    expect(run).toBeTruthy();
+    expect(lines.find((line) => line.includes("connectivity icmp=ok"))).toContain(
+      `run=${run}`,
+    );
+    expect(vi.mocked(uiLog).mock.calls[0][2]).toBe("node-diagnosis");
+  });
+
+  it("重置失败：日志带 reason 与同一个 run 码", async () => {
+    const deps = makeDeps({
+      rotateCredentials: vi.fn(async () => ({
+        ok: false as const,
+        reason: "agent_timeout",
+      })),
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    await screen.findByText("重置失败：服务器在重置时没有响应。");
+
+    const line = logLines().find((item) => item.includes("rotate ok=false"));
+    expect(line).toBeTruthy();
+    expect(line).toContain("reason=agent_timeout");
+    expect(line).toMatch(/run=\d{6}/);
+  });
+
+  it("配置同步撞上控制面不可达：补一条带短码的日志", async () => {
+    const deps = makeDeps({
+      syncConfig: vi.fn(async () => ({
+        changed: false,
+        controlPlaneError: "control_plane_unreachable",
+      })),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(await screen.findByText("控制面暂时不可达")).toBeTruthy();
+    const line = logLines().find((item) =>
+      item.includes("config control-plane"),
+    );
+    expect(line).toContain("error=control_plane_unreachable");
+    expect(line).toMatch(/run=\d{6}/);
+  });
+
+  it("关闭面板：收尾日志带 run 码与步骤结果", async () => {
+    const view = open(makeDeps());
+
+    await start();
+    await screen.findByText(/ICMP 通/);
+    view.unmount();
+
+    const line = logLines().find((item) =>
+      item.includes("steps=connectivity:passed"),
+    );
+    expect(line).toBeTruthy();
+    expect(line).toMatch(/run=\d{6}/);
   });
 });
