@@ -912,6 +912,46 @@ describe("阶段超时清理（列表/详情入口）", () => {
     expect(body.failure?.stage).toBe("verifying");
     expect(body.failure?.code).toBe("verify_timeout");
   });
+
+  it("补 IP 时把 booting 推进到 installing，安装过程不再藏在「等待开机」里", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "booting");
+    Object.assign(db.rows("servers")[0], {
+      ip: null,
+      enrollment_expires_at: Date.now() + 600_000,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              droplet: {
+                id: 4242,
+                status: "active",
+                networks: { v4: [{ ip_address: "198.51.100.7", type: "public" }] },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+
+    const res = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as { state: string; ip: string | null };
+    expect(body.state).toBe("installing");
+    expect(body.ip).toBe("198.51.100.7");
+    expect(db.rows("servers")[0].state).toBe("installing");
+    expect(db.rows("servers")[0].installing_at).toBeTruthy();
+  });
 });
 
 describe("用户销毁退款", () => {

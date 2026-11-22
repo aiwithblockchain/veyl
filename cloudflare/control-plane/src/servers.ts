@@ -1625,8 +1625,20 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
     const droplet = await getDroplet(env.DO_API_TOKEN, row.provider_id);
     if (!droplet.ok || !droplet.value.ipv4) continue;
     row.ip = droplet.value.ipv4;
-    await env.DB.prepare("UPDATE servers SET ip = ?, updated_at = ? WHERE id = ?")
-      .bind(row.ip, Date.now(), row.id)
+    // 有地址说明机器已经在跑，接下来就是装服务端（cloud-init 下载 agent →
+    // agent 装 sing-box）。让 installing 覆盖这一段，否则界面会一直停在
+    // 「等待开机」，真正的安装过程反而看不见。
+    if (row.state === "booting") {
+      row.state = "installing";
+      row.installing_at = Date.now();
+    }
+    await env.DB.prepare(
+      "UPDATE servers SET ip = ?, updated_at = ?, " +
+        "state = CASE WHEN state = 'booting' THEN 'installing' ELSE state END, " +
+        "installing_at = CASE WHEN state = 'booting' THEN ? ELSE installing_at END " +
+        "WHERE id = ?",
+    )
+      .bind(row.ip, Date.now(), row.installing_at ?? Date.now(), row.id)
       .run();
   }
 }

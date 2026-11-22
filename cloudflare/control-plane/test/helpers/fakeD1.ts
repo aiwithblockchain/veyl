@@ -1470,6 +1470,26 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set ip = ?, updated_at = ?") && sql.includes("installing_at")) {
+      const row = this.tables.servers.find((server) => server.id === a[3]);
+      if (row) {
+        row.ip = a[0];
+        row.updated_at = a[1];
+        if (row.state === "booting") {
+          row.state = "installing";
+          row.installing_at = a[2];
+        }
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set ip = ?, updated_at = ?")) {
+      const row = this.tables.servers.find((server) => server.id === a[2]);
+      if (row) {
+        row.ip = a[0];
+        row.updated_at = a[1];
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set billing_state")) {
       const row = this.tables.servers.find((server) => server.id === a[2]);
       if (row) {
