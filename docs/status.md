@@ -18,6 +18,7 @@
 | 节点自救链路：共享防火墙、agent、控制面 agent 接口、桌面端 `NodeRotateCredentials`、发版流水线 | `edd46c3`、`4173443`、`8578dbd`、`3c65d21`、`a42eefc` |
 | AI 可选与统一入口：首启可跳过、右栏配置引导、统一告警、后端 `AI_NOT_CONFIGURED`、保存 Key 后激活 | `a25059e` |
 | 节点配置同步：手动与定时拉取最新凭据、同值跳过、凭据串行锁、跨账号守卫 | `ac38a47` |
+| 工具描述按会话语言（41 条英文 + `LocalizedTool`）、界面错误只回稳定码（`errorText` 映射） | `7ce7b29` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 
@@ -32,12 +33,12 @@
 | 3 | 入口的用户提示词 | 设置页已收敛为单一「咨询 AI」：先读 `product.md` 的设置部分，再问用户想咨询哪个模块；行内三个「问 AI」删除。其余入口的用户提示词未逐个讨论 | 逐个过 #1、#2、#4–#10 | 用户 + PM |
 | 4 | 文档版本管理（D3/D4） | 未定：随客户端发布还是可独立更新；版本标识与变更记录形式 | 讨论 | 架构师 |
 | 5 | 入口上下文放置（D6） | 未定：放用户消息还是系统提示词 | 随入口讨论一起定 | PM |
-| 6 | 语言切换批次 2–5 | 批次 1 与界面文案字典已上线（`5a7d8bc`、`9f39d35`）；剩余思考语言、错误码映射与回归 | 按 `i18n.md` §7 收尾：思考语言 → 错误码映射 → 回归 | Sage |
+| 6 | 语言切换批次 B / B3 / D | 批次 1–3、A（错误码映射）、C（工具描述）已上线（`5a7d8bc`、`9f39d35`、`7ce7b29`）；剩余事件/状态文本（B）、工具卡 facts（B3）、回归手册（D）；`events.md` 2.23.0 的 `text_key` 契约已先行 | 按 `i18n.md` §7 收尾：B → B3 → D | Sage |
 | 7 | Windows 语言读取真机核对 | 代码已按 `PreferredUILanguages` 改，macOS 无法验 | 在 Windows 上设「区域格式 en-US + 显示语言中文」，看「跟随系统」解析成哪种语言 | 用户 |
 | 8 | 首启开场真机验收 | 只有 jsdom 测试 | 构建后完成首启配置，确认 AI 用开场词主动开口、且在已有配置时不再发 | 用户 |
-| 9 | 推送 | 本地领先 `origin/main` 8 个提交（含 `a25059e` 与节点自救批次）；上次 10:47 推送成功后连接又超时 | 线路可用时 `git push` | 用户 |
+| 9 | 推送 | 本地领先 `origin/main` 3 个提交（`2809ca0`、`2889d02`、`7ce7b29`） | 线路可用时 `git push` | 用户 |
 | 10 | 1.0.0 发布 | 此前公证失败（`HTTPClientError.connectTimeout`） | 重试公证与发布；网站下载链接目前仍 404 | 用户 |
-| 11 | 契约自检 3 项失败 | `mobile_export_*` 命令未写进契约、几处版本号不一致、`rules_update` 未实现 | 归移动端导出批次 | be-lead |
+| 11 | 契约自检 | 已归零：89 项通过、0 失败（`mobile_export_*` 与 `rules_update` 由移动端批次补齐，`tools.md` 三处版本字面量在 `7ce7b29` 修） | — | 已完成 |
 | 12 | 余额修复真机验证 | 跨账户与门禁修复未在真机走过 | 构建后看 `logs/` 的 `ui::wallet` 与切换账户行为 | 用户 |
 | 13 | 节点凭据签发流程讨论 | 记在 `notes/pending-topics.md` #1 | 约一次专门讨论 | 用户 + PM |
 | 14 | 移动端导出（并行进行中） | 文档已回写真机结果并提交（`fa0b73f`）；Shadowrocket / Hiddify 真机通过 | 由该批次自行收尾 | 其它会话 |
@@ -65,6 +66,17 @@
 | N12 | agent 评审修复（10 项） | 已完成并复核：79 项测试、release 构建无 warning、demo 10/10、release 拒绝 insecure 配置——MCP 任务监督、sing-box 存活检查、命令超时与先 bind 后 apply、重签后按连接重载证书、版本与 tar 路径校验、https 与 200 MiB 上限、状态损坏恢复与 409 终态、jti 落盘、脱敏双写 | 真机按最短剧本验证 | 已交付 |
 | N13 | 控制面评审修复（4 项） | 已完成并复核：258/258、typecheck 干净——`failed` 只销毁装机阶段、enroll TTL 内可重放换发、cloud-init 插值白名单与 0600、期望状态校验 | — | 已交付 |
 | N14 | agent 日志落盘 | 已完成：`/var/log/veyl-agent/agent.log`、5 MiB × 3、脱敏、启动横幅区分 cold/restored；55 项测试 | — | 已交付 |
+
+---
+
+## 已知缺口（不阻塞，已记录）
+
+- `runtime_status` / `chat_history` 仍返回字符串错误，不走六字段信封；界面已按 `errorText` 兜底。
+- `app_language_*` / `server_sync_interval_*` 的 `INTERNAL` 没有 `details.reason`，界面只能走调用点兜底。
+- 连接页探测 tooltip 仍读 `probe.error.message`，若后端把它清空会显示空 title。
+- `trial.error.fetchWith` 已无引用，待清理。
+- `tools.md` §4.13 / §4.54 仍有「全部软件 / 本机代理」旧用词，未收口。
+- `docs/design/issue-report-api.md`、`docs/design/node-diagnosis-flow.md` 是未提交的设计草案（后者主张取代现有修复动作设计），待产品确认。
 
 ---
 
