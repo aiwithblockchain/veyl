@@ -31,6 +31,14 @@ export interface OrdersEnv extends MaybeAuthEnv {
   DO_API_TOKEN?: string;
   ENROLL_BASE_URL?: string;
   ENVIRONMENT: string;
+  /** 节点 agent 的构建信息：cloud-init 用它下载并校验二进制。 */
+  AGENT_VERSION?: string;
+  AGENT_SHA256?: string;
+  AGENT_DOWNLOAD_URL?: string;
+  /** agent 拉起后要装的 sing-box 版本与下载信息。 */
+  SING_BOX_VERSION?: string;
+  SING_BOX_SHA256?: string;
+  SING_BOX_DOWNLOAD_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
   DODO_API_KEY?: string;
@@ -416,6 +424,12 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
           DO_API_TOKEN: env.DO_API_TOKEN,
           ENROLL_BASE_URL: env.ENROLL_BASE_URL,
           ENVIRONMENT: env.ENVIRONMENT,
+          AGENT_VERSION: env.AGENT_VERSION,
+          AGENT_SHA256: env.AGENT_SHA256,
+          AGENT_DOWNLOAD_URL: env.AGENT_DOWNLOAD_URL,
+          SING_BOX_VERSION: env.SING_BOX_VERSION,
+          SING_BOX_SHA256: env.SING_BOX_SHA256,
+          SING_BOX_DOWNLOAD_URL: env.SING_BOX_DOWNLOAD_URL,
         },
         {
           id: confirmedRow.server_id ?? serverId,
@@ -564,6 +578,12 @@ export async function provisionPaidOrder(
       DO_API_TOKEN: env.DO_API_TOKEN,
       ENROLL_BASE_URL: env.ENROLL_BASE_URL,
       ENVIRONMENT: env.ENVIRONMENT,
+      AGENT_VERSION: env.AGENT_VERSION,
+      AGENT_SHA256: env.AGENT_SHA256,
+      AGENT_DOWNLOAD_URL: env.AGENT_DOWNLOAD_URL,
+      SING_BOX_VERSION: env.SING_BOX_VERSION,
+      SING_BOX_SHA256: env.SING_BOX_SHA256,
+      SING_BOX_DOWNLOAD_URL: env.SING_BOX_DOWNLOAD_URL,
     },
     {
       id: server.id,

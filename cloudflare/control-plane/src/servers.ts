@@ -2,25 +2,46 @@
 // 控制面是唯一事实源；客户端拿到的凭据必须能被内置公钥验签。
 
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
-import { randomId, sealSecret, sha256B64u, signDetached, openSecret } from "./lib/crypto";
+import {
+  openSecret,
+  publicJwk,
+  randomBytes,
+  randomId,
+  sealSecret,
+  sha256B64u,
+  signAgentToken,
+  signDetached,
+} from "./lib/crypto";
 import { apiError, json } from "./lib/http";
 import {
+  AGENT_CONTROL_PORT,
   deleteDroplet,
   deleteFirewall,
   firewallName,
   getDroplet,
   listFirewalls,
+  NODE_PORT_END,
+  NODE_PORT_START,
 } from "./providers/digitalocean";
 import { recordLedgerEntry } from "./wallet";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const CREDENTIAL_TTL_MS = 5 * 60 * 1000;
+/** 节点 MCP 一次性令牌的有效期（node-agent-mcp.md §6）：60 秒。 */
+const AGENT_TOKEN_TTL_MS = 60 * 1000;
 
 export interface ServersEnv extends MaybeAuthEnv {
   DO_API_TOKEN?: string;
   CREDENTIAL_SIGNING_JWK?: string;
   CREDENTIAL_ENC_KEY?: string;
   CREDENTIAL_KEY_ID?: string;
+  /** 节点 MCP 令牌的独立签名密钥与 key_id（不与凭据签名共用）。 */
+  AGENT_TOKEN_SIGNING_JWK?: string;
+  AGENT_TOKEN_KEY_ID?: string;
+  /** 期望状态下发给 agent 的 sing-box 版本与下载信息。 */
+  SING_BOX_VERSION?: string;
+  SING_BOX_SHA256?: string;
+  SING_BOX_DOWNLOAD_URL?: string;
 }
 
 interface ServerRow {
@@ -43,6 +64,15 @@ interface ServerRow {
   enrollment_expires_at: number | null;
   firewall_id: string | null;
   singbox_version: string | null;
+  /** agent 登记信息（0010 迁移）：长期令牌只存哈希。 */
+  server_token_hash?: string | null;
+  control_port?: number | null;
+  cert_fingerprint?: string | null;
+  /** agent 自签 CA 的 PEM：桌面端优先用它建立信任。 */
+  ca_pem?: string | null;
+  last_seen_at?: number | null;
+  /** 最近一次 agent 上报的失败原文（截断 300 字）。 */
+  last_error?: string | null;
   created_at: number;
   updated_at: number;
   destroyed_at: number | null;
@@ -430,7 +460,8 @@ async function settleOrder(
         .bind(info.readyAt, row.order_id, ledgerId),
       db
         .prepare(
-          "UPDATE servers SET state = 'active', node_id = ?, singbox_version = ?, " +
+          "UPDATE servers SET state = 'active', node_id = ?, " +
+            "singbox_version = COALESCE(NULLIF(?, ''), singbox_version), " +
             "ready_at = ?, billing_state = 'active', daily_price_cents = ?, billing_anchor_at = ?, " +
             "paid_until = ?, updated_at = ? " +
             "WHERE id = ? AND destroyed_at IS NULL AND state IN ('booting', 'installing', 'verifying') " +
@@ -558,6 +589,146 @@ function failureReason(failedStage: string): string {
   if (failedStage === "installing") return "install_failed";
   if (failedStage === "verifying") return "verify_failed";
   return "service_inactive";
+}
+
+type ActivateOutcome =
+  | { ok: true; nodeId: string }
+  | { ok: false; status: number; reason: string };
+
+/**
+ * 就绪激活（legacy enroll 与 agent report 共用）：结算第 0 天（at_ready）、
+ * 订单 ready、服务器 active。`node_id` 由 agent enroll 生成并落库，这里优先沿用，
+ * 避免「两处各生成一个」导致客户端拿到的 node_id 与控制面不一致。
+ */
+async function activateServer(
+  env: ServersEnv,
+  row: ServerRow,
+  version: string,
+): Promise<ActivateOutcome> {
+  const db = env.DB!;
+  const nodeId = row.node_id ?? randomId("nd_", 12);
+  const readyAt = Date.now();
+  const orderRow = await db
+    .prepare("SELECT id, amount_cents, charge_mode FROM orders WHERE id = ?")
+    .bind(row.order_id)
+    .first<{ id: string; amount_cents: number; charge_mode: string | null }>();
+  // 存量 upfront 订单在 checkout 已扣过费，这里只做激活；
+  // at_ready 订单在就绪这一刻结算第 0 天（§4.14）。
+  let activated: number;
+  let orderReady: number;
+  if (orderRow?.charge_mode === "at_ready") {
+    const settled = await settleOrder(env, row, Number(orderRow.amount_cents ?? 0), {
+      nodeId,
+      version,
+      readyAt,
+    });
+    if (!settled.ok) {
+      // token 已消费、凭据已写：必须显式收尾，不能留一台没开通却在跑、也没人管的实例。
+      await failSettlement(env, row, "settle_insufficient");
+      return { ok: false, status: 409, reason: "settle_insufficient" };
+    }
+    activated = 1;
+    orderReady = 1;
+  } else {
+    // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
+    // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
+    const activation = await db.batch([
+      db.prepare(
+        "UPDATE servers SET state = 'active', node_id = ?, " +
+          "singbox_version = COALESCE(NULLIF(?, ''), singbox_version), ready_at = ?, updated_at = ? " +
+          "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
+      ).bind(nodeId, version, readyAt, readyAt, row.id),
+      db.prepare(
+        "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
+      ).bind(row.order_id),
+    ]);
+    activated = Number(
+      (activation[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+    );
+    orderReady = Number(
+      (activation[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+    );
+  }
+  if (activated !== 1) {
+    // 并发的两次 active 只有一次能改行；另一次 changes=0 并不代表失败。
+    // 重新读状态：行已 active/healthy 就按成功返回；已 destroyed 才走原来的收尾（真 activation_lost）。
+    const fresh = await db
+      .prepare("SELECT state, destroyed_at FROM servers WHERE id = ?")
+      .bind(row.id)
+      .first<{ state: string; destroyed_at: number | null }>();
+    if (
+      fresh &&
+      fresh.destroyed_at == null &&
+      (fresh.state === "active" || fresh.state === "healthy")
+    ) {
+      return { ok: true, nodeId };
+    }
+    // 激活被守卫拦下：本次刚插的凭据要收尾。
+    // destroyInstance 幂等：DO 删除 404 按成功；退款撞 `(server_refund, server_id)` 唯一键，
+    // 不会因为并发销毁已经退过而退第二次。
+    const cleanup = await destroyInstance(env, row, "activation_lost");
+    if (!cleanup.ok) {
+      console.warn(
+        `[servers] activation_lost_cleanup_failed server=${row.id} reason=${cleanup.reason}`,
+      );
+    }
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.activation_lost', ?)",
+      )
+      .bind(
+        Date.now(),
+        row.account_id,
+        row.id,
+        JSON.stringify({
+          node_id: nodeId,
+          changes: activated,
+          cleaned: cleanup.ok,
+        }),
+      )
+      .run()
+      .catch((error) =>
+        console.warn(
+          `[servers] audit_failed action=enroll.activation_lost server=${row.id} error=${String(error)}`,
+        ),
+      );
+    return { ok: false, status: 410, reason: "server_destroyed" };
+  }
+
+  if (orderReady !== 1) {
+    // 服务器已经 active，订单却没能置 ready：先留证，别让将来出现的半成功无声无息。
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.order_ready_lost', ?)",
+      )
+      .bind(
+        Date.now(),
+        row.account_id,
+        row.id,
+        JSON.stringify({ order_id: row.order_id, changes: orderReady }),
+      )
+      .run()
+      .catch((error) =>
+        console.warn(
+          `[servers] audit_failed action=enroll.order_ready_lost server=${row.id} error=${String(error)}`,
+        ),
+      );
+  }
+
+  await db
+    .prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.ok', ?)",
+    )
+    .bind(Date.now(), row.account_id, row.id, JSON.stringify({ version }))
+    .run()
+    // 机器已经 active、订单已经 ready：审计写不进去不能反过来把它判死。
+    .catch((error) =>
+      console.warn(
+        `[servers] audit_failed action=enroll.ok server=${row.id} error=${String(error)}`,
+      ),
+    );
+
+  return { ok: true, nodeId };
 }
 
 /** POST /v1/enroll/{token}：实例回传端口与密码。token 自身就是幂等键，只能消费一次。 */
@@ -707,119 +878,513 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
       .bind(row.id, sealed.iv, sealed.ciphertext, Date.now())
       .run();
 
-    const nodeId = randomId("nd_", 12);
-    const readyAt = Date.now();
-    const orderRow = await db
-      .prepare("SELECT id, amount_cents, charge_mode FROM orders WHERE id = ?")
-      .bind(row.order_id)
-      .first<{ id: string; amount_cents: number; charge_mode: string | null }>();
-    // 存量 upfront 订单在 checkout 已扣过费，这里只做激活；
-    // at_ready 订单在就绪这一刻结算第 0 天（§4.14）。
-    let activated: number;
-    let orderReady: number;
-    if (orderRow?.charge_mode === "at_ready") {
-      const settled = await settleOrder(env, row, Number(orderRow.amount_cents ?? 0), {
-        nodeId,
-        version,
-        readyAt,
-      });
-      if (!settled.ok) {
-        // token 已消费、凭据已写：必须显式收尾，不能留一台没开通却在跑、也没人管的实例。
-        await failSettlement(env, row, "settle_insufficient");
-        return json({ ok: false, reason: "settle_insufficient" }, 409);
-      }
-      activated = 1;
-      orderReady = 1;
-    } else {
-      // 激活必须带状态守卫：sweep / refreshBooting 可能在这段窗口里已经把机器销毁并退了钱，
-      // 晚到的激活不能把一台 DO 上已删除的机器改回 active（幽灵机器）。
-      const activation = await db.batch([
-        db.prepare(
-          "UPDATE servers SET state = 'active', node_id = ?, singbox_version = ?, ready_at = ?, updated_at = ? " +
-            "WHERE id = ? AND state IN ('booting', 'installing', 'verifying') AND destroyed_at IS NULL",
-        ).bind(nodeId, version, readyAt, readyAt, row.id),
-        db.prepare(
-          "UPDATE orders SET state = 'ready' WHERE id = ? AND state = 'provisioning'",
-        ).bind(row.order_id),
-      ]);
-      activated = Number(
-        (activation[0] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
-      );
-      orderReady = Number(
-        (activation[1] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
-      );
+    const outcome = await activateServer(env, row, version);
+    if (!outcome.ok) {
+      return json({ ok: false, reason: outcome.reason }, outcome.status);
     }
-    if (activated !== 1) {
-      // 激活被守卫拦下：本次刚插的凭据要收尾。
-      // destroyInstance 幂等：DO 删除 404 按成功；退款撞 `(server_refund, server_id)` 唯一键，
-      // 不会因为并发销毁已经退过而退第二次。
-      const cleanup = await destroyInstance(env, row, "activation_lost");
-      if (!cleanup.ok) {
-        console.warn(
-          `[servers] activation_lost_cleanup_failed server=${row.id} reason=${cleanup.reason}`,
-        );
-      }
-      await db
-        .prepare(
-          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.activation_lost', ?)",
-        )
-        .bind(
-          Date.now(),
-          row.account_id,
-          row.id,
-          JSON.stringify({
-            node_id: nodeId,
-            changes: activated,
-            cleaned: cleanup.ok,
-          }),
-        )
-        .run()
-        .catch((error) =>
-          console.warn(
-            `[servers] audit_failed action=enroll.activation_lost server=${row.id} error=${String(error)}`,
-          ),
-        );
-      return json({ ok: false, reason: "server_destroyed" }, 410);
-    }
-
-    if (orderReady !== 1) {
-      // 服务器已经 active，订单却没能置 ready：先留证，别让将来出现的半成功无声无息。
-      await db
-        .prepare(
-          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.order_ready_lost', ?)",
-        )
-        .bind(
-          Date.now(),
-          row.account_id,
-          row.id,
-          JSON.stringify({ order_id: row.order_id, changes: orderReady }),
-        )
-        .run()
-        .catch((error) =>
-          console.warn(
-            `[servers] audit_failed action=enroll.order_ready_lost server=${row.id} error=${String(error)}`,
-          ),
-        );
-    }
-
-    await db
-      .prepare(
-        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'enroll.ok', ?)",
-      )
-      .bind(Date.now(), row.account_id, row.id, JSON.stringify({ version }))
-      .run()
-      // 机器已经 active、订单已经 ready：审计写不进去不能反过来把它判死。
-      .catch((error) =>
-        console.warn(
-          `[servers] audit_failed action=enroll.ok server=${row.id} error=${String(error)}`,
-        ),
-      );
-
-    return json({ ok: true, node_id: nodeId });
+    return json({ ok: true, node_id: outcome.nodeId });
   } catch (error) {
     await destroyInstance(env, row, "activate_failed");
     return json({ ok: false, reason: "activate_failed" }, 500);
   }
+}
+
+/** 节点 agent 的期望状态（node-agent-mcp.md §5）：sing-box 的版本与下载信息来自控制面配置。 */
+function singboxDesired(env: ServersEnv): {
+  version: string;
+  sha256: string;
+  url: string;
+} | null {
+  const version = env.SING_BOX_VERSION?.trim();
+  const sha256 = env.SING_BOX_SHA256?.trim();
+  const url = env.SING_BOX_DOWNLOAD_URL?.trim();
+  if (!version || !sha256 || !url) return null;
+  return { version, sha256, url };
+}
+
+function bearerToken(request: Request): string | null {
+  const header = request.headers.get("authorization") ?? "";
+  if (!header.startsWith("Bearer ")) return null;
+  const token = header.slice(7).trim();
+  return token === "" ? null : token;
+}
+
+/** agent 接口一律不缓存：响应里有凭据与一次性令牌。 */
+function agentJson(body: unknown, status = 200): Response {
+  return json(body, status, { "cache-control": "no-store" });
+}
+
+/** 32 位十六进制密码（16 字节随机数）。 */
+function randomPassword(): string {
+  return Array.from(randomBytes(16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function serverByAgentToken(
+  db: D1Database,
+  token: string,
+): Promise<ServerRow | null> {
+  const hash = await sha256B64u(token);
+  return db
+    .prepare("SELECT * FROM servers WHERE server_token_hash = ?")
+    .bind(hash)
+    .first<ServerRow>();
+}
+
+/**
+ * POST /v1/agent/enroll：agent 用一次性 enrollment token 换长期 `server_token` 与期望状态。
+ * 凭据真源在这里：端口取 `servers.node_port`，密码由控制面生成，之后只经鉴权通道下发。
+ */
+async function agentEnroll(request: Request, env: ServersEnv): Promise<Response> {
+  if (!env.DB) return agentJson({ ok: false, reason: "unavailable" }, 503);
+  const db = env.DB;
+
+  const token = bearerToken(request);
+  if (!token) return agentJson({ ok: false, reason: "missing_token" }, 401);
+
+  const hash = await sha256B64u(token);
+  const row = await db
+    .prepare("SELECT * FROM servers WHERE enrollment_hash = ?")
+    .bind(hash)
+    .first<ServerRow>();
+  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 404);
+  if (row.destroyed_at !== null) {
+    return agentJson({ ok: false, reason: "server_destroyed" }, 409);
+  }
+  // 一次性：并发或重放只有一次能成功。
+  if (row.enrollment_used_at !== null) {
+    return agentJson({ ok: false, reason: "already_used" }, 409);
+  }
+  if (row.enrollment_expires_at !== null && row.enrollment_expires_at < Date.now()) {
+    await destroyInstance(env, row, "enrollment_expired");
+    return agentJson({ ok: false, reason: "expired" }, 410);
+  }
+
+  if (!env.CREDENTIAL_ENC_KEY) return agentJson({ ok: false, reason: "storage_unavailable" }, 503);
+  if (!env.AGENT_TOKEN_SIGNING_JWK) {
+    return agentJson({ ok: false, reason: "agent_key_missing" }, 503);
+  }
+  const singbox = singboxDesired(env);
+  if (!singbox) return agentJson({ ok: false, reason: "agent_config_missing" }, 503);
+
+  // 机器已建好，IP 通常已回填；极端情况下补查一次，别让凭据里的 host 为空。
+  let host = row.ip;
+  if (!host && env.DO_API_TOKEN && row.provider_id) {
+    const droplet = await getDroplet(env.DO_API_TOKEN, row.provider_id);
+    if (droplet.ok && droplet.value.ipv4) {
+      host = droplet.value.ipv4;
+      await db
+        .prepare("UPDATE servers SET ip = ?, updated_at = ? WHERE id = ?")
+        .bind(host, Date.now(), row.id)
+        .run();
+    }
+  }
+  if (!host) return agentJson({ ok: false, reason: "host_unavailable" }, 503);
+
+  const password = randomPassword();
+  const sealed = await sealSecret(
+    env.CREDENTIAL_ENC_KEY,
+    JSON.stringify({ host, port: row.node_port, password, method: "aes-256-gcm" }),
+  );
+  const serverToken = randomId("agt_", 32);
+  const tokenHash = await sha256B64u(serverToken);
+  const nodeId = row.node_id ?? randomId("nd_", 12);
+  const now = Date.now();
+
+  // 原子消费：token 用过一次即失效；node_id 与令牌哈希同一笔写入，避免两处不一致。
+  // 已销毁的行即使 token 没用过也不能再 enroll（避免把死机器复活）。
+  const consumed = await db
+    .prepare(
+      "UPDATE servers SET enrollment_used_at = ?, updated_at = ?, node_id = ?, server_token_hash = ? " +
+        "WHERE id = ? AND enrollment_hash = ? AND enrollment_used_at IS NULL AND destroyed_at IS NULL",
+    )
+    .bind(now, now, nodeId, tokenHash, row.id, hash)
+    .run();
+  const changed = (consumed as { meta?: { changes?: number } }).meta?.changes ?? 0;
+  if (changed === 0) return agentJson({ ok: false, reason: "already_used" }, 409);
+
+  try {
+    await db
+      .prepare(
+        "INSERT INTO credentials (server_id, key_version, iv, ciphertext, created_at) " +
+          "SELECT ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL) " +
+          "ON CONFLICT(server_id) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext, destroyed_at = NULL",
+      )
+      .bind(row.id, sealed.iv, sealed.ciphertext, now, row.id)
+      .run();
+  } catch (error) {
+    // token 已消费、凭据没写成：这台机器永远拿不到配置，直接销毁，不留计费实例。
+    console.warn(`[servers] agent_enroll_credentials_failed server=${row.id} error=${String(error)}`);
+    await destroyInstance(env, row, "agent_enroll_failed");
+    return agentJson({ ok: false, reason: "storage_failed" }, 500);
+  }
+
+  return agentJson({
+    server_id: row.id,
+    server_token: serverToken,
+    desired: {
+      port: row.node_port,
+      password,
+      control_port: AGENT_CONTROL_PORT,
+      singbox,
+    },
+    // Ed25519 公钥 JWK 字符串：agent 用它离线验桌面端的一次性令牌。
+    token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK),
+  });
+}
+
+/**
+ * POST /v1/agent/fail：cloud-init 装机失败时由 trap 调用（Bearer 一次性 enrollment token）。
+ * 只接受「token 未消费且服务器未销毁」的行：消费 token 后销毁，避免留一台计费实例。
+ */
+async function agentFail(request: Request, env: ServersEnv): Promise<Response> {
+  if (!env.DB) return agentJson({ ok: false, reason: "unavailable" }, 503);
+  const db = env.DB;
+
+  const token = bearerToken(request);
+  if (!token) return agentJson({ ok: false, reason: "missing_token" }, 401);
+  const hash = await sha256B64u(token);
+  const row = await db
+    .prepare("SELECT * FROM servers WHERE enrollment_hash = ?")
+    .bind(hash)
+    .first<ServerRow>();
+  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 404);
+  if (row.destroyed_at !== null) {
+    return agentJson({ ok: false, reason: "server_destroyed" }, 409);
+  }
+  if (row.enrollment_used_at !== null) {
+    return agentJson({ ok: false, reason: "already_used" }, 409);
+  }
+
+  const now = Date.now();
+  const consumed = await db
+    .prepare(
+      "UPDATE servers SET enrollment_used_at = ?, updated_at = ? " +
+        "WHERE id = ? AND enrollment_hash = ? AND enrollment_used_at IS NULL AND destroyed_at IS NULL",
+    )
+    .bind(now, now, row.id, hash)
+    .run();
+  const changed = (consumed as { meta?: { changes?: number } }).meta?.changes ?? 0;
+  if (changed === 0) return agentJson({ ok: false, reason: "already_used" }, 409);
+
+  const outcome = await destroyInstance(env, row, "agent_install_failed");
+  if (!outcome.ok) {
+    console.warn(`[servers] agent_install_failed_cleanup server=${row.id} reason=${outcome.reason}`);
+    return agentJson(
+      { ok: false, reason: outcome.reason },
+      outcome.retryable ? 502 : 500,
+    );
+  }
+  await db
+    .prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.install_failed', ?)",
+    )
+    .bind(now, row.account_id, row.id, JSON.stringify({ reason: "agent_install_failed" }))
+    .run()
+    .catch(() => {});
+  return agentJson({ ok: true });
+}
+
+/**
+ * POST /v1/agent/report：agent 上报阶段与登记信息（Bearer `server_token`）。
+ * 三阶段语义沿用旧 enroll：installing / verifying 只前进，active 走激活，failed 销毁。
+ */
+async function agentReport(request: Request, env: ServersEnv): Promise<Response> {
+  if (!env.DB) return agentJson({ ok: false, reason: "unavailable" }, 503);
+  const db = env.DB;
+
+  const token = bearerToken(request);
+  if (!token) return agentJson({ ok: false, reason: "missing_token" }, 401);
+  const row = await serverByAgentToken(db, token);
+  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 401);
+
+  let body: {
+    stage?: unknown;
+    port?: unknown;
+    password?: unknown;
+    error?: unknown;
+    agent_version?: unknown;
+    singbox_version?: unknown;
+    control_port?: unknown;
+    cert_fingerprint?: unknown;
+    ca_pem?: unknown;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return agentJson({ ok: false, reason: "invalid_json" }, 400);
+  }
+
+  const stage = typeof body.stage === "string" ? body.stage.trim() : "";
+  if (!["installing", "verifying", "active", "failed", "rotated"].includes(stage)) {
+    return agentJson({ ok: false, reason: "invalid_stage" }, 400);
+  }
+
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() !== "" ? value.trim().slice(0, 200) : null;
+  const controlPort =
+    typeof body.control_port === "number" && Number.isInteger(body.control_port)
+      ? body.control_port
+      : null;
+  const agentVersion = text(body.agent_version);
+  const singboxVersion = text(body.singbox_version);
+  const certFingerprint = text(body.cert_fingerprint);
+  // 自签 CA 的 PEM：桌面端优先用它建立信任（指纹作兜底）。
+  const caPem =
+    typeof body.ca_pem === "string" && body.ca_pem.trim() !== ""
+      ? body.ca_pem.trim().slice(0, 8000)
+      : null;
+
+  // 每次上报都刷新登记信息：COALESCE 让缺失字段保留上一次的值。
+  // 成功上报清空上一次的失败原文；failed 分支随后会把它重新写上。
+  await db
+    .prepare(
+      "UPDATE servers SET last_seen_at = ?, last_error = NULL, agent_version = COALESCE(?, agent_version), " +
+        "singbox_version = COALESCE(?, singbox_version), control_port = COALESCE(?, control_port), " +
+        "cert_fingerprint = COALESCE(?, cert_fingerprint), ca_pem = COALESCE(?, ca_pem) WHERE id = ?",
+    )
+    .bind(
+      Date.now(),
+      agentVersion,
+      singboxVersion,
+      controlPort,
+      certFingerprint,
+      caPem,
+      row.id,
+    )
+    .run();
+
+  if (stage === "installing" || stage === "verifying") {
+    return advanceStage(env, row, stage);
+  }
+
+  if (stage === "failed") {
+    const failedStage = ["booting", "installing", "verifying", "active"].includes(row.state)
+      ? row.state
+      : "active";
+    // 失败原文截断 300 字：排查要靠它，但不能让一条上报把审计表撑爆。
+    const errorText =
+      typeof body.error === "string" && body.error.trim() !== ""
+        ? body.error.trim().slice(0, 300)
+        : null;
+    await db
+      .prepare("UPDATE servers SET last_error = ? WHERE id = ?")
+      .bind(errorText, row.id)
+      .run()
+      .catch(() => {});
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.report.failed', ?)",
+      )
+      .bind(
+        Date.now(),
+        row.account_id,
+        row.id,
+        JSON.stringify({ failed_stage: failedStage, error: errorText }),
+      )
+      .run()
+      .catch(() => {});
+    const reason = failureReason(failedStage);
+    await destroyInstance(env, row, reason, { failureStage: failedStage });
+    return agentJson(
+      { ok: false, reason, failed_stage: failedStage, error: errorText ?? undefined },
+      409,
+    );
+  }
+
+  if (stage === "rotated") {
+    // 轮换：agent 已经在机器上换好端口与密码，这里只同步控制面。**任何校验失败都不销毁**，
+    // 让 agent 回滚到旧配置；销毁只发生在 failed / 超时路径。
+    const port = body.port;
+    if (
+      typeof port !== "number" ||
+      !Number.isInteger(port) ||
+      port < NODE_PORT_START ||
+      port > NODE_PORT_END
+    ) {
+      return agentJson({ ok: false, reason: "port_out_of_band" }, 409);
+    }
+    const password = typeof body.password === "string" ? body.password : "";
+    if (password.length < 16) {
+      return agentJson({ ok: false, reason: "password_too_short" }, 409);
+    }
+    if (!env.CREDENTIAL_ENC_KEY) return agentJson({ ok: false, reason: "storage_unavailable" }, 503);
+    if (!row.ip) return agentJson({ ok: false, reason: "host_unavailable" }, 409);
+
+    const sealed = await sealSecret(
+      env.CREDENTIAL_ENC_KEY,
+      JSON.stringify({ host: row.ip, port, password, method: "aes-256-gcm" }),
+    );
+    const now = Date.now();
+    // 先改端口：changes = 0 说明行已销毁（并发销毁），此时绝不能再写凭据把它复活。
+    let updated: { meta?: { changes?: number } };
+    try {
+      updated = (await db
+        .prepare(
+          "UPDATE servers SET node_port = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL",
+        )
+        .bind(port, now, row.id)
+        .run()) as { meta?: { changes?: number } };
+    } catch (error) {
+      // 唯一索引兜底：同账户其它活着的服务器占着这个端口。
+      const message = String((error as Error)?.message ?? error).toLowerCase();
+      if (message.includes("unique constraint") && message.includes("node_port")) {
+        return agentJson({ ok: false, reason: "port_taken" }, 409);
+      }
+      console.warn(`[servers] rotation_failed server=${row.id} error=${String(error)}`);
+      return agentJson({ ok: false, reason: "rotation_failed" }, 500);
+    }
+    if (Number(updated.meta?.changes ?? 0) !== 1) {
+      return agentJson({ ok: false, reason: "server_destroyed" }, 409);
+    }
+
+    try {
+      await db
+        .prepare(
+          "INSERT INTO credentials (server_id, key_version, iv, ciphertext, created_at) " +
+            "SELECT ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL) " +
+            "ON CONFLICT(server_id) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext, destroyed_at = NULL",
+        )
+        .bind(row.id, sealed.iv, sealed.ciphertext, now, row.id)
+        .run();
+    } catch (error) {
+      console.warn(`[servers] rotation_credentials_failed server=${row.id} error=${String(error)}`);
+      return agentJson({ ok: false, reason: "rotation_failed" }, 500);
+    }
+
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.rotated', ?)",
+      )
+      .bind(now, row.account_id, row.id, JSON.stringify({ port }))
+      .run()
+      .catch((error) =>
+        console.warn(
+          `[servers] audit_failed action=server.rotated server=${row.id} error=${String(error)}`,
+        ),
+      );
+    return agentJson({ ok: true, port });
+  }
+
+  // active：进度阶段端口必须与期望值一致，否则是配置漂移；但**已经 active 的机器**
+  // 端口不一致只可能是轮换后的旧报文竞态——忽略即可，绝不能因此销毁健康机器。
+  if (typeof body.port === "number" && body.port !== row.node_port) {
+    if (row.state === "active" || row.state === "healthy") {
+      console.warn(
+        `[servers] active_report_stale_port server=${row.id} reported=${body.port} current=${row.node_port}`,
+      );
+      return agentJson({ ok: true, ignored: true });
+    }
+    await destroyInstance(env, row, "port_mismatch", { failureStage: "active" });
+    return agentJson({ ok: false, reason: "port_mismatch" }, 409);
+  }
+
+  // active 幂等：第一次已经落库、响应丢包后 agent 会补报。已 active 的机器直接确认，
+  // 不能再走激活守卫（那会把 healthy 当成「没激活成功」并销毁）。
+  if (
+    row.destroyed_at === null &&
+    (row.state === "active" || row.state === "healthy")
+  ) {
+    return agentJson({ ok: true, already_active: true });
+  }
+
+  const outcome = await activateServer(env, row, singboxVersion ?? row.singbox_version ?? "");
+  if (!outcome.ok) {
+    return agentJson({ ok: false, reason: outcome.reason }, outcome.status);
+  }
+  return agentJson({ ok: true });
+}
+
+/** GET /v1/agent/desired-state：轮换与升级都从这里拉最新期望值（Bearer `server_token`）。 */
+async function agentDesiredState(request: Request, env: ServersEnv): Promise<Response> {
+  if (!env.DB) return agentJson({ ok: false, reason: "unavailable" }, 503);
+  if (!env.CREDENTIAL_ENC_KEY) return agentJson({ ok: false, reason: "storage_unavailable" }, 503);
+  const token = bearerToken(request);
+  if (!token) return agentJson({ ok: false, reason: "missing_token" }, 401);
+  const row = await serverByAgentToken(env.DB, token);
+  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 401);
+  if (row.destroyed_at !== null) {
+    return agentJson({ ok: false, reason: "server_destroyed" }, 409);
+  }
+
+  const singbox = singboxDesired(env);
+  if (!singbox) return agentJson({ ok: false, reason: "agent_config_missing" }, 503);
+
+  const sealed = await env.DB.prepare(
+    "SELECT iv, ciphertext FROM credentials WHERE server_id = ? AND destroyed_at IS NULL",
+  )
+    .bind(row.id)
+    .first<{ iv: string; ciphertext: string }>();
+  if (!sealed) return agentJson({ ok: false, reason: "no_credentials" }, 409);
+  const opened = await openSecret(env.CREDENTIAL_ENC_KEY, sealed);
+  if (!opened) return agentJson({ ok: false, reason: "credential_corrupt" }, 500);
+  const secret = JSON.parse(opened) as { port: number; password: string };
+
+  return agentJson({
+    server_id: row.id,
+    desired: {
+      port: secret.port,
+      password: secret.password,
+      control_port: row.control_port ?? AGENT_CONTROL_PORT,
+      singbox,
+    },
+  });
+}
+
+/**
+ * POST /v1/servers/{id}/agent-token：桌面端取这台节点的 agent 端点与一次性令牌。
+ * 令牌用独立密钥签名，60 秒过期；jti 是一次性标识，由 agent 侧记账。
+ */
+async function agentToken(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
+  const identity = await authenticate(request, env);
+  if (isResponse(identity)) return identity;
+  if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+  if (!env.AGENT_TOKEN_SIGNING_JWK || !env.AGENT_TOKEN_KEY_ID) {
+    return apiError("INTERNAL", "agent 令牌签名密钥未配置", { reason: "agent_key_missing" });
+  }
+
+  const row = await loadServer(env.DB, identity.accountId, serverId);
+  if (!row) return apiError("NOT_FOUND", "没有这台服务器");
+  if (row.state !== "active" && row.state !== "healthy") {
+    return apiError("PRECONDITION_FAILED", "这台服务器还没准备好", { reason: "not_ready" });
+  }
+  if (!row.ip || !row.cert_fingerprint) {
+    // agent 还没登记过证书：桌面端拿不到可信任的指纹，不能发令牌。
+    return apiError("PRECONDITION_FAILED", "这台服务器的 agent 还没登记", {
+      reason: "agent_not_registered",
+    });
+  }
+
+  const jti = randomId("jti_", 12);
+  const exp = Math.floor((Date.now() + AGENT_TOKEN_TTL_MS) / 1000);
+  const token = await signAgentToken(env.AGENT_TOKEN_SIGNING_JWK, {
+    server_id: row.id,
+    jti,
+    exp,
+  });
+  await env.DB.prepare(
+    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.token_issued', ?)",
+  )
+    .bind(Date.now(), row.account_id, row.id, JSON.stringify({ jti, exp }))
+    .run()
+    .catch((error) =>
+      console.warn(
+        `[servers] audit_failed action=agent.token_issued server=${row.id} error=${String(error)}`,
+      ),
+    );
+
+  return json(
+    {
+      // 完整 URL：agent 的 MCP 挂在 /mcp，客户端直接用，不要自行拼接路径。
+      endpoint: `https://${row.ip}:${row.control_port ?? AGENT_CONTROL_PORT}/mcp`,
+      cert_fingerprint: row.cert_fingerprint,
+      // 桌面端优先用 CA 建立信任；没有 CA 时才退回指纹 pin。
+      ca_pem: row.ca_pem ?? null,
+      token,
+      key_id: env.AGENT_TOKEN_KEY_ID,
+    },
+    200,
+    { "cache-control": "no-store" },
+  );
 }
 
 /**
@@ -1225,6 +1790,15 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
   if (parts[0] === "v1" && parts[1] === "enroll" && parts.length === 3 && post) {
     return enroll(request, env, parts[2]);
   }
+  if (parts[0] === "v1" && parts[1] === "agent" && parts.length === 3) {
+    if (parts[2] === "enroll" && post) return agentEnroll(request, env);
+    if (parts[2] === "fail" && post) return agentFail(request, env);
+    if (parts[2] === "report" && post) return agentReport(request, env);
+    if (parts[2] === "desired-state" && request.method === "GET") {
+      return agentDesiredState(request, env);
+    }
+    return null;
+  }
   if (parts[0] !== "v1" || parts[1] !== "servers") return null;
 
   if (parts.length === 2 && request.method === "GET") return listServers(request, env);
@@ -1234,6 +1808,7 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
     if (parts[3] === "destroy") return destroy(request, env, parts[2]);
     if (parts[3] === "dismiss") return dismiss(request, env, parts[2]);
     if (parts[3] === "credentials") return credentials(request, env, parts[2]);
+    if (parts[3] === "agent-token") return agentToken(request, env, parts[2]);
     if (parts[3] === "rebuild") {
       return apiError("PRECONDITION_FAILED", "重建还没接入", {
         reason: "rebuild_not_supported",

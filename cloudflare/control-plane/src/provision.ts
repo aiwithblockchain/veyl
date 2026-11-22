@@ -17,6 +17,23 @@ export interface ProvisionEnv {
   DO_API_TOKEN?: string;
   ENROLL_BASE_URL?: string;
   ENVIRONMENT: string;
+  /** agent 二进制：版本 / sha256 / 下载地址（控制面配置，cloud-init 只认这三个值）。 */
+  AGENT_VERSION?: string;
+  AGENT_SHA256?: string;
+  AGENT_DOWNLOAD_URL?: string;
+  /** agent 拉起后要装的 sing-box：版本 / sha256 / 下载地址。 */
+  SING_BOX_VERSION?: string;
+  SING_BOX_SHA256?: string;
+  SING_BOX_DOWNLOAD_URL?: string;
+}
+
+/** 构建信息必须是「能真的下载并校验」的形状：占位符/手滑都让订单在建机前失败。 */
+function usableBuild(input: { version: string; sha256: string; url: string }): boolean {
+  return (
+    input.version !== "" &&
+    /^[0-9a-f]{64}$/i.test(input.sha256) &&
+    input.url.startsWith("https://")
+  );
 }
 
 export interface ServerToProvision {
@@ -202,8 +219,28 @@ export async function provisionServer(
 
   const enrollToken = randomId("enr_", 32);
   const enrollHash = await sha256B64u(enrollToken);
-  const enrollUrl = `${env.ENROLL_BASE_URL.replace(/\/$/, "")}/v1/enroll/${enrollToken}`;
-  const userData = buildCloudInit({ port: server.node_port, enrollUrl });
+  const baseUrl = env.ENROLL_BASE_URL.replace(/\/$/, "");
+  const agent = {
+    version: env.AGENT_VERSION?.trim() ?? "",
+    sha256: env.AGENT_SHA256?.trim() ?? "",
+    url: env.AGENT_DOWNLOAD_URL?.trim() ?? "",
+  };
+  const singbox = {
+    version: env.SING_BOX_VERSION?.trim() ?? "",
+    sha256: env.SING_BOX_SHA256?.trim() ?? "",
+    url: env.SING_BOX_DOWNLOAD_URL?.trim() ?? "",
+  };
+  // 缺任何一个都装不出 agent：宁可整单失败，也不建一台连不上控制面的机器。
+  if (!usableBuild(agent) || !usableBuild(singbox)) {
+    return fail(env, server, "agent_unconfigured", { retryable: false });
+  }
+  const userData = buildCloudInit({
+    enrollToken,
+    enrollUrl: `${baseUrl}/v1/agent/enroll`,
+    failUrl: `${baseUrl}/v1/agent/fail`,
+    controlUrl: baseUrl,
+    agent,
+  });
 
   // 防火墙先于 Droplet：ensure 失败就整单失败，绝不建出一台没有防火墙的机器（§3.4）。
   // Droplet 建机时就带 `veyl:node`，建好即受全局规则保护，没有先建机器后挂规则的裸奔窗口。

@@ -101,6 +101,34 @@ export async function signDetached(jwkJson: string, data: string): Promise<strin
   return b64u(new Uint8Array(signature));
 }
 
+/** 把签名私钥 JWK 压成只含公钥参数的 JWK 字符串，交给 agent 做离线验签。 */
+export function publicJwk(jwkJson: string): string {
+  const jwk = JSON.parse(jwkJson) as JsonWebKey;
+  return JSON.stringify({ kty: jwk.kty, crv: jwk.crv, x: jwk.x });
+}
+
+export interface AgentTokenClaims {
+  /** 令牌绑定的服务器；agent 必须确认是自己的 id。 */
+  server_id: string;
+  /** 一次性令牌的标识；agent 侧记录已用过的 jti。 */
+  jti: string;
+  /** 过期时间（Unix 秒）。 */
+  exp: number;
+}
+
+/** 节点 MCP 的一次性令牌：与凭据签名用不同的密钥，便于独立轮换（§6）。 */
+export async function signAgentToken(
+  jwkJson: string,
+  claims: AgentTokenClaims,
+): Promise<string> {
+  const header = jsonPart({ alg: "EdDSA", typ: "JWT" });
+  const payload = jsonPart(claims);
+  const data = encoder.encode(`${header}.${payload}`);
+  const key = await ed25519Key(jwkJson, "sign");
+  const signature = await crypto.subtle.sign({ name: "Ed25519" }, key, data);
+  return `${header}.${payload}.${b64u(new Uint8Array(signature))}`;
+}
+
 export interface SealedSecret {
   iv: string;
   ciphertext: string;

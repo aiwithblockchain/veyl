@@ -690,6 +690,13 @@ export class FakeD1 {
     if (sql.startsWith("select * from servers where enrollment_hash")) {
       return this.tables.servers.find((s) => s.enrollment_hash === a[0]) ?? null;
     }
+    if (sql.startsWith("select * from servers where server_token_hash")) {
+      return this.tables.servers.find((s) => s.server_token_hash === a[0]) ?? null;
+    }
+    if (sql.startsWith("select state, destroyed_at from servers")) {
+      const row = this.tables.servers.find((s) => s.id === a[0]);
+      return row ? { state: row.state, destroyed_at: row.destroyed_at ?? null } : null;
+    }
     if (sql.startsWith("select id, account_id, order_id, region, plan, node_port from servers")) {
       const row = this.tables.servers.find((s) => s.order_id === a[0]);
       return row
@@ -901,6 +908,23 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set enrollment_used_at") && sql.includes("server_token_hash")) {
+      // agent enroll：消费 token 的同时写 node_id 与长期令牌哈希。
+      const [usedAt, updatedAt, nodeId, tokenHash, id, hash] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (
+        server &&
+        server.enrollment_hash === hash &&
+        server.enrollment_used_at == null &&
+        server.destroyed_at == null
+      ) {
+        server.enrollment_used_at = usedAt;
+        server.updated_at = updatedAt;
+        server.node_id = nodeId;
+        server.server_token_hash = tokenHash;
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set enrollment_used_at")) {
       // 原子消费：只有哈希对得上、还没用过的那一次能成功。
       const server = this.tables.servers.find((s) => s.id === a[2]);
@@ -910,15 +934,58 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set last_seen_at")) {
+      // agent 上报的登记信息：缺失字段保持原值（SQL 侧是 COALESCE）。
+      const [lastSeen, agentVersion, singboxVersion, controlPort, fingerprint, caPem, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server) {
+        server.last_seen_at = lastSeen;
+        server.last_error = null;
+        if (agentVersion != null) server.agent_version = agentVersion;
+        if (singboxVersion != null) server.singbox_version = singboxVersion;
+        if (controlPort != null) server.control_port = controlPort;
+        if (fingerprint != null) server.cert_fingerprint = fingerprint;
+        if (caPem != null) server.ca_pem = caPem;
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set last_error")) {
+      const [error, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server) server.last_error = error;
+      return null;
+    }
+    if (sql.startsWith("update servers set node_port")) {
+      // 轮换：同账户活着的服务器不能共用端口（唯一索引兜底）；已销毁的行不再改。
+      const [port, updatedAt, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server && server.destroyed_at == null) {
+        const taken = this.tables.servers.some(
+          (s) =>
+            s.id !== id &&
+            s.account_id === server.account_id &&
+            s.node_port === port &&
+            s.destroyed_at == null,
+        );
+        if (taken) {
+          throw new Error("UNIQUE constraint failed: servers.account_id, servers.node_port");
+        }
+        server.node_port = port;
+        server.updated_at = updatedAt;
+      }
+      return null;
+    }
     if (sql.startsWith("insert into credentials")) {
       const serverId = a[0];
+      // 两种写法：key_version 硬编码为 1（values 或 select 形态）或走占位符。
+      const literalKeyVersion = sql.includes(", 1, ?, ?, ?");
       const existing = this.tables.credentials.find((c) => c.server_id === serverId);
       const record = {
         server_id: serverId,
-        key_version: a[1],
-        iv: a[2],
-        ciphertext: a[3],
-        created_at: a[4],
+        key_version: literalKeyVersion ? 1 : a[1],
+        iv: a[literalKeyVersion ? 1 : 2],
+        ciphertext: a[literalKeyVersion ? 2 : 3],
+        created_at: a[literalKeyVersion ? 3 : 4],
         destroyed_at: null,
       };
       if (existing) Object.assign(existing, record);
@@ -1737,6 +1804,19 @@ export class FakeStatement {
       const row = this.db.rows("orders").find((order) => order.id === id);
       const allowed = ["pending_payment", "awaiting_payment", "payment_failed", "expired", "cancelled"];
       changes = row && allowed.includes(String(row.state)) ? 1 : 0;
+    } else if (sql.startsWith("update servers set enrollment_used_at") && sql.includes("server_token_hash")) {
+      const id = this.statement.args[4];
+      const hash = this.statement.args[5];
+      const row = this.db.rows("servers").find((s) => s.id === id);
+      changes =
+        row && row.enrollment_hash === hash && row.enrollment_used_at == null &&
+        row.destroyed_at == null
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update servers set node_port")) {
+      const id = this.statement.args[2];
+      const row = this.db.rows("servers").find((s) => s.id === id);
+      changes = row && row.destroyed_at == null ? 1 : 0;
     } else if (sql.startsWith("update servers set enrollment_used_at")) {
       const row = this.db
         .rows("servers")

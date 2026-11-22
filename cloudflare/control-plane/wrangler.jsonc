@@ -48,12 +48,26 @@
 		"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2WjoaqgohcfZ9r254A\",\"2000\":\"pdt_0Ns2Wjd7xrFjmLr2oZvnL\",\"5000\":\"pdt_0Ns2Wj265kTDA5UA0JmkG\",\"10000\":\"pdt_0Ns2WicUqf6BC786Vv0xG\"}",
 		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
-		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/"
+		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/",
+		// 节点 agent（node-agent-mcp.md §4）：cloud-init 只下载、校验、安装。
+		// 发布 agent 时把版本、sha256、下载地址换成当次 release 的真实值。
+		// sha256 必须是 64 位十六进制：占位符对不上时建机请求直接失败（agent_unconfigured），
+		// 不会先建出一台注定起不来的机器。
+		"AGENT_VERSION": "0.1.0",
+		"AGENT_SHA256": "REPLACE_WITH_AGENT_SHA256",
+		"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.0/veyl-agent-linux-amd64",
+		// 期望状态下发给 agent 的 sing-box 版本与下载地址。
+		"SING_BOX_VERSION": "1.14.4",
+		"SING_BOX_SHA256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
+		"SING_BOX_DOWNLOAD_URL": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",
+		// 节点 MCP 一次性令牌的 key_id（与凭据签名的 CREDENTIAL_KEY_ID 分开）。
+		"AGENT_TOKEN_KEY_ID": "agent-2026-11"
 	},
 	// Secrets（通过 wrangler secret put 设置，不写在此文件）：
 	// - DO_API_TOKEN（DigitalOcean；缺省时 /v1/catalog 返回 503）
 	// - TOKEN_SIGNING_JWK（访问令牌签名）
 	// - CREDENTIAL_SIGNING_JWK / CREDENTIAL_ENC_KEY（节点凭据签名与加密）
+	// - AGENT_TOKEN_SIGNING_JWK（节点 MCP 一次性令牌；独立密钥，不与凭据签名共用）
 	// - MOBILE_TOKEN_ENC_KEY（手机导出令牌加密）
 	// - DODO_API_KEY / DODO_WEBHOOK_SECRET（dev、prod 各一套，test 与 live 不混用）
 	// - RESEND_API_KEY / RESEND_FROM_EMAIL（邮箱验证码）
@@ -75,7 +89,15 @@
 				"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2VqGyVh6DSR7wkyWJo\",\"2000\":\"pdt_0Ns2WKHrFEQIAnDX6lews\",\"5000\":\"pdt_0Ns2WRb8m4NSiW4EqhDIP\",\"10000\":\"pdt_0Ns2WXZbLtBhh0YytV5ud\"}",
 				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
-				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return"
+				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return",
+				// 同生产：发布 agent 时换成当次 release 的真实值（dev 可以先指向 pre-release）。
+				"AGENT_VERSION": "0.1.0",
+				"AGENT_SHA256": "REPLACE_WITH_AGENT_SHA256",
+				"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.0/veyl-agent-linux-amd64",
+				"SING_BOX_VERSION": "1.14.4",
+				"SING_BOX_SHA256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
+				"SING_BOX_DOWNLOAD_URL": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",
+				"AGENT_TOKEN_KEY_ID": "agent-2026-11"
 			},
 			// 代码里统一用 env.DB；生产环境后面单独建库再加一条顶层配置。
 			"d1_databases": [

@@ -31,6 +31,12 @@ async function envWith(db: FakeD1, jwk: string) {
     DO_API_TOKEN: "do-token",
     ENROLL_BASE_URL: "https://control.example.com",
     ENVIRONMENT: "test",
+    AGENT_VERSION: "0.1.0",
+    AGENT_SHA256: "a".repeat(64),
+    AGENT_DOWNLOAD_URL: "https://control.example.com/veyl-agent",
+    SING_BOX_VERSION: "1.14.4",
+    SING_BOX_SHA256: "b".repeat(64),
+    SING_BOX_DOWNLOAD_URL: "https://control.example.com/sing-box.tar.gz",
     PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-512mb-10gb": 20, "s-1vcpu-1gb": 30, "s-1vcpu-2gb": 60 }),
     token,
   };
@@ -543,6 +549,34 @@ describe("orders", () => {
     // at_ready 没扣过钱，也就没有退款。
     expect(db.rows("accounts")[0].balance_cents).toBe(2000);
     expect(db.rows("wallet_ledger")).toHaveLength(0);
+  });
+
+  it("agent 构建信息是占位符：整单失败，不建 Droplet", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    // 真实配置里 sha256 必须是 64 位十六进制；占位符不允许悄悄建机。
+    env.AGENT_SHA256 = "REPLACE_WITH_AGENT_SHA256";
+    stubCatalog();
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-agent-config"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-agent-config" },
+      }),
+      env as never,
+    );
+
+    expect(checkout?.status).toBe(502);
+    const body = (await checkout!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("agent_unconfigured");
+    expect(db.rows("servers")[0].state).toBe("error");
+    // 没建出 Droplet：provider_id 一直是空的。
+    expect(db.rows("servers")[0].provider_id).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
   });
 
   it("目录里这个地区没有该规格时拒绝下单，details 带 region / plan", async () => {

@@ -20,6 +20,17 @@ export interface Env {
   /** 手机导出令牌的 AES-256-GCM 密钥（base64 32 字节），与 CREDENTIAL_ENC_KEY 分开。 */
   MOBILE_TOKEN_ENC_KEY?: string;
   ENROLL_BASE_URL?: string;
+  /** 节点 agent：cloud-init 下载 / 校验用的构建信息。 */
+  AGENT_VERSION?: string;
+  AGENT_SHA256?: string;
+  AGENT_DOWNLOAD_URL?: string;
+  /** 期望状态下发给 agent 的 sing-box 版本与下载信息。 */
+  SING_BOX_VERSION?: string;
+  SING_BOX_SHA256?: string;
+  SING_BOX_DOWNLOAD_URL?: string;
+  /** 节点 MCP 一次性令牌的独立签名密钥与 key_id。 */
+  AGENT_TOKEN_SIGNING_JWK?: string;
+  AGENT_TOKEN_KEY_ID?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
   DODO_API_KEY?: string;

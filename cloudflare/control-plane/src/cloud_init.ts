@@ -1,170 +1,86 @@
-// cloud-init：在服务器上自己装 sing-box（不依赖外部安装脚本）。
-// 端口由控制面选定并写死；密码只在这台机器上生成，只经 enrollment 回传。
-// 上限 64 KiB（DigitalOcean user_data 的限制），当前约 4 KB。
-//
-// 两条硬约束：
-// 1. 不用 `... | head -c N` 生成密码：head 提前退出会让上游命令收到 SIGPIPE，
-//    配合 `set -o pipefail` + `set -e` 会直接杀掉整个脚本（实测每台机器都死在这里）。
-// 2. 任何一步失败都必须回传（active=false + error），否则控制面看不到、
-//    机器却在计费。
+// cloud-init：只负责把节点 agent 装上并启动（node-agent-mcp.md §4）。
+// sing-box 的安装、配置与三阶段上报全部交给 agent；这里不再生成任何凭据。
+// 上限 64 KiB（DigitalOcean user_data 的限制），当前约 1.5 KB。
 
-export const SING_BOX_VERSION = "1.14.4";
-export const SING_BOX_SHA256 = "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968";
+export interface AgentInstallInput {
+  /** 一次性 enrollment token；agent 用它换长期 server_token 与期望状态。 */
+  enrollToken: string;
+  /** `POST /v1/agent/enroll` 的完整地址。 */
+  enrollUrl: string;
+  /** `POST /v1/agent/fail` 的完整地址：装机失败时由 trap 回传，控制面据此销毁。 */
+  failUrl: string;
+  /** 控制面根地址：agent 后续拉期望状态、上报都基于它。 */
+  controlUrl: string;
+  /** agent 二进制的下载地址、sha256 与版本（控制面配置下发）。 */
+  agent: { version: string; sha256: string; url: string };
+}
 
-export function buildCloudInit(input: { port: number; enrollUrl: string }): string {
+export function buildCloudInit(input: AgentInstallInput): string {
+  // JSON.stringify 负责转义；单引号 heredoc 阻止 shell 展开，token/URL 里的 `$` 不会被吃掉。
+  const config = JSON.stringify({
+    control_url: input.controlUrl,
+    enroll_url: input.enrollUrl,
+    enroll_token: input.enrollToken,
+  });
+
   return `#!/bin/bash
 set -euo pipefail
 
-PORT=${input.port}
-ENROLL_URL="${input.enrollUrl}"
-SING_BOX_VERSION="${SING_BOX_VERSION}"
-SING_BOX_SHA256="${SING_BOX_SHA256}"
-ARCH="amd64"
-PASSWORD=""
-ACTIVE=0
-FAILURE=""
-# 当前阶段：失败时原样回传，控制面据此写 failure_stage。
-CURRENT_STAGE="booting"
+ENROLL_TOKEN="${input.enrollToken}"
+FAIL_URL="${input.failUrl}"
+AGENT_URL="${input.agent.url}"
+AGENT_SHA256="${input.agent.sha256}"
 
-# 阶段进度：不消费 token，失败只重试两次——进度丢了不影响最终 active 上报。
-report_progress() {
-  local stage="\${1}"
-  local body="{\\"stage\\":\\"\${stage}\\"}"
-  local attempt
-  for attempt in 1 2; do
-    if curl -fsS -m 20 -X POST "\${ENROLL_URL}" -H 'content-type: application/json' --data "\${body}" >/dev/null; then
-      return 0
-    fi
-    sleep $((attempt * 5))
-  done
-  return 1
-}
-
-# 最终上报：成功是 active，失败是 failed + failed_stage；token 只在这一步被消费。
-report_final() {
-  local body safe active_json stage_json failed_json
-  # error 进 JSON 前先去掉引号和反斜杠，否则回传体本身就坏了。
-  safe=$(printf '%s' "\${FAILURE}" | tr -d '"\\\\')
-  if [ "\${ACTIVE}" = "1" ]; then
-    # active 必须是 JSON 布尔值：发数字 1 会被控制面判成「不是 true」。
-    active_json=true; stage_json='"active"'; failed_json='null'
-  else
-    active_json=false; stage_json='"failed"'; failed_json="\\"\${CURRENT_STAGE}\\""
-  fi
-  body="{\\"stage\\":\${stage_json},\\"failed_stage\\":\${failed_json},\\"port\\":\${PORT},\\"password\\":\\"\${PASSWORD}\\",\\"version\\":\\"\${SING_BOX_VERSION}\\",\\"active\\":\${active_json},\\"error\\":\\"\${safe}\\"}"
-  local attempt
-  for attempt in 1 2 3 4 5 6 7 8; do
-    if curl -fsS -m 30 -X POST "\${ENROLL_URL}" -H 'content-type: application/json' --data "\${body}" >/dev/null; then
-      return 0
-    fi
-    sleep $((attempt * 10))
-  done
-  return 1
-}
-
-# 失败也要回传，让控制面销毁这台（不留计费实例），而不是静默卡住。
+# 任何一步失败都立即回传：控制面据此销毁这台机器，不留「在计费但没装好」的实例。
 on_error() {
-  FAILURE="script_failed_line_\${1}"
-  ACTIVE=0
-  report_final || true
+  curl -fsS -m 20 -X POST "\${FAIL_URL}" \\
+    -H "authorization: Bearer \${ENROLL_TOKEN}" >/dev/null 2>&1 || true
   exit 1
 }
 trap 'on_error \${LINENO}' ERR
 
-# 0. 立即上报 installing：开机、apt、下载这段时间不再被算成「等待开机」。
-#    刚起来网络未必就绪，失败不致命——下载前还会再报一次兜底（控制面幂等）。
-CURRENT_STAGE="installing"
-report_progress installing || true
-
-# 1. 先关掉 SSH：我们永远不登录服务器，也没有 root 密码通道。
-systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || true
-systemctl disable ssh 2>/dev/null || systemctl disable sshd 2>/dev/null || true
-
-# 2. 基础工具
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq || true
-apt-get install -y -qq curl ca-certificates tar >/dev/null 2>&1
-
-# 3. 下载并校验 sing-box
-# 从这里开始任何失败都算「安装阶段失败」：下载、sha 校验、解包都包括在内。
-CURRENT_STAGE="installing"
-# 下载前的兜底上报：刚开机那次可能因网络未就绪而失败（控制面幂等）。
-report_progress installing || true
-cd /tmp
-curl -fsSL --retry 5 --retry-delay 5 -o sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v\${SING_BOX_VERSION}/sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}.tar.gz"
-echo "\${SING_BOX_SHA256}  sb.tar.gz" | sha256sum -c -
-tar -xzf sb.tar.gz
-install -m 0755 "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}/sing-box" /usr/local/bin/sing-box
-rm -rf sb.tar.gz "sing-box-\${SING_BOX_VERSION}-linux-\${ARCH}"
-
-# 4. 密码在这台机器上生成：od 只读 16 字节，下游 tr/cut 读满全部输入，不会 SIGPIPE。
-PASSWORD=$(od -An -tx1 -N 16 /dev/urandom | tr -d ' \\n' | cut -c1-16)
-
-# 5. 配置（加密方式固定 aes-256-gcm）
-mkdir -p /usr/local/etc/sing-box
-cat > /usr/local/etc/sing-box/config.json <<EOF
-{
-  "log": { "level": "info" },
-  "inbounds": [
-    {
-      "type": "shadowsocks",
-      "listen": "0.0.0.0",
-      "listen_port": \${PORT},
-      "method": "aes-256-gcm",
-      "password": "\${PASSWORD}"
-    }
-  ],
-  "outbounds": [{ "type": "direct" }]
-}
-EOF
-chmod 600 /usr/local/etc/sing-box/config.json
-
-# 配置先自检：不合法就带着报错原文回传，而不是等 systemd 起不来再猜。
-CURRENT_STAGE="verifying"
-if ! sing-box check -c /usr/local/etc/sing-box/config.json >/tmp/sb-check.log 2>&1; then
-  FAILURE="config_invalid:$(tr '\\n' ' ' </tmp/sb-check.log | cut -c1-180)"
-  exit 1
+# 1. 下载并校验 agent（版本 ${input.agent.version}）
+# 极简镜像可能没有 curl / CA 证书：只补这一层，其它一律交给 agent。
+if ! command -v curl >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq curl ca-certificates
 fi
-# 自检通过：verifying 阶段成立。
-report_progress verifying || true
+curl -fsSL --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}"
+echo "\${AGENT_SHA256}  /tmp/veyl-agent" | sha256sum -c -
+install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent
+rm -f /tmp/veyl-agent
 
-# 6. systemd
-cat > /etc/systemd/system/sing-box.service <<EOF
+# 2. 写 agent 配置（控制面地址、enroll URL、一次性 token）
+mkdir -p /etc
+cat > /etc/veyl-agent.json <<'VEYL_AGENT_CONFIG'
+${config}
+VEYL_AGENT_CONFIG
+chmod 600 /etc/veyl-agent.json
+
+# 3. systemd unit：root 运行、开机自启、失败重启
+cat > /etc/systemd/system/veyl-agent.service <<'VEYL_AGENT_UNIT'
 [Unit]
-Description=sing-box service
-After=network.target nss-lookup.target network-online.target
+Description=Veyl node agent
+After=network-online.target nss-lookup.target
+Wants=network-online.target
 
 [Service]
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-ExecStart=/usr/local/bin/sing-box run -c /usr/local/etc/sing-box/config.json
+ExecStart=/usr/local/bin/veyl-agent --config /etc/veyl-agent.json
 Restart=on-failure
 RestartSec=10s
-LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
-EOF
+VEYL_AGENT_UNIT
 
+# 4. 关掉 SSH：我们永远不登录服务器，console 是唯一的带外入口。
+systemctl stop ssh 2>/dev/null || systemctl stop sshd 2>/dev/null || true
+systemctl disable ssh 2>/dev/null || systemctl disable sshd 2>/dev/null || true
+
+# 5. 启动
 systemctl daemon-reload
-systemctl enable sing-box >/dev/null 2>&1
-systemctl restart sing-box
-
-# 7. 等它自己起来（起不来也照常回传，active=false）
-CURRENT_STAGE="active"
-for _ in $(seq 1 15); do
-  if systemctl is-active --quiet sing-box; then break; fi
-  sleep 2
-done
-if systemctl is-active --quiet sing-box; then
-  ACTIVE=1
-else
-  ACTIVE=0
-  # 没起来就把最后两行日志带上，否则回传里只有一个 false，什么也查不出。
-  FAILURE="service_inactive:$(journalctl -u sing-box -n 2 --no-pager -o cat 2>/dev/null | tr '\\n' ' ' | cut -c1-160)"
-fi
-
-# 8. 上报（token 只在这里被消费）
-report_final || true
+systemctl enable veyl-agent >/dev/null 2>&1
+systemctl restart veyl-agent
 `;
 }

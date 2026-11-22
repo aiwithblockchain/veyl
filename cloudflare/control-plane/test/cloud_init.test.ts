@@ -7,76 +7,75 @@ import { describe, expect, it } from "vitest";
 
 import { buildCloudInit } from "../src/cloud_init";
 
-const script = () =>
-  buildCloudInit({ port: 20443, enrollUrl: "https://cp-dev.example.com/v1/enroll/tok_test" });
+const INPUT = {
+  enrollToken: "enr_tok_test",
+  enrollUrl: "https://cp-dev.example.com/v1/agent/enroll",
+  failUrl: "https://cp-dev.example.com/v1/agent/fail",
+  controlUrl: "https://cp-dev.example.com",
+  agent: {
+    version: "0.1.0",
+    sha256: "abc123def456",
+    url: "https://cp-dev.example.com/veyl-agent-v0.1.0-linux-amd64",
+  },
+};
 
-describe("cloud-init", () => {
+const script = () => buildCloudInit(INPUT);
+
+describe("cloud-init（只装 agent）", () => {
   it("是合法 bash", () => {
     expect(() => execFileSync("bash", ["-n"], { input: script() })).not.toThrow();
   });
 
-  it("生成密码不用会触发 SIGPIPE 的 head -c（pipefail 会直接杀掉脚本）", () => {
-    expect(script()).not.toMatch(/head -c/);
-    expect(script()).toContain("od -An -tx1");
+  it("下载 agent 并按配置的 sha256 校验后安装", () => {
+    const body = script();
+    expect(body).toContain('AGENT_URL="https://cp-dev.example.com/veyl-agent-v0.1.0-linux-amd64"');
+    expect(body).toContain('AGENT_SHA256="abc123def456"');
+    expect(body).toContain('echo "${AGENT_SHA256}  /tmp/veyl-agent" | sha256sum -c -');
+    expect(body).toContain("install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent");
   });
 
-  it("任何一步失败都会回传，而不是静默退出", () => {
+  it("写 agent 配置：控制面地址、enroll URL、一次性 token", () => {
     const body = script();
+    const configLine = body
+      .split("\n")
+      .find((line) => line.includes('"control_url"'));
+    expect(configLine).toBeTruthy();
+    const config = JSON.parse(configLine!);
+    expect(config).toEqual({
+      control_url: "https://cp-dev.example.com",
+      enroll_url: "https://cp-dev.example.com/v1/agent/enroll",
+      enroll_token: "enr_tok_test",
+    });
+    expect(body).toContain("chmod 600 /etc/veyl-agent.json");
+  });
+
+  it("装 systemd unit：root 运行、开机自启、失败重启", () => {
+    const body = script();
+    expect(body).toContain("ExecStart=/usr/local/bin/veyl-agent --config /etc/veyl-agent.json");
+    expect(body).toContain("Restart=on-failure");
+    expect(body).toContain("WantedBy=multi-user.target");
+    expect(body).toContain("systemctl enable veyl-agent");
+    expect(body).toContain("systemctl restart veyl-agent");
+  });
+
+  it("不再装 sing-box、不再生成密码、不再回传阶段（这些归 agent）", () => {
+    const body = script();
+    expect(body).not.toContain("sing-box");
+    expect(body).not.toContain("od -An -tx1");
+    expect(body).not.toContain("report_progress");
+    expect(body).not.toContain("/v1/enroll/");
+  });
+
+  it("任何一步失败都调用 /v1/agent/fail 回传", () => {
+    const body = script();
+    expect(body).toContain('FAIL_URL="https://cp-dev.example.com/v1/agent/fail"');
     expect(body).toContain("trap 'on_error ${LINENO}' ERR");
-    expect(body).toContain("${ACTIVE}");
-    expect(body).toContain("${FAILURE}");
+    expect(body).toContain('authorization: Bearer ${ENROLL_TOKEN}');
   });
 
-  it("起服务前先做配置自检，失败带原文回传", () => {
+  it("关掉 SSH：agent 不需要它，console 才是带外入口", () => {
     const body = script();
-    expect(body).toContain("sing-box check -c /usr/local/etc/sing-box/config.json");
-    expect(body).toContain("config_invalid:");
-    expect(body).toContain("service_inactive:");
-  });
-
-  it("回传的 active 是 JSON 布尔，不是数字", () => {
-    const body = script();
-    expect(body).toContain("active_json=true");
-    expect(body).toContain("active_json=false");
-    expect(body).not.toContain('\\"active\\":${ACTIVE}');
-  });
-
-  it("installing 在下载之前就置位：下载/sha 失败算安装阶段失败", () => {
-    const body = script();
-    const installing = body.indexOf('CURRENT_STAGE="installing"');
-    const download = body.indexOf("releases/download");
-    expect(installing).toBeGreaterThan(-1);
-    expect(download).toBeGreaterThan(-1);
-    expect(installing).toBeLessThan(download);
-  });
-
-  it("installing 在关 SSH 之前就上报：开机与 apt 不再被算成等待开机", () => {
-    const body = script();
-    const firstReport = body.indexOf("report_progress installing");
-    const stopSsh = body.indexOf("systemctl stop ssh");
-    const download = body.indexOf("releases/download");
-    expect(firstReport).toBeGreaterThan(-1);
-    expect(stopSsh).toBeGreaterThan(-1);
-    expect(firstReport).toBeLessThan(stopSsh);
-    expect(firstReport).toBeLessThan(download);
-    // 下载前那次兜底仍保留，且真的在下载之前（不是写完配置才报）。
-    const secondReport = body.lastIndexOf("report_progress installing");
-    expect(secondReport).toBeGreaterThan(firstReport);
-    expect(secondReport).toBeLessThan(download);
-  });
-
-  it("三段上报：installing / verifying / active，失败带 failed_stage", () => {
-    const body = script();
-    expect(body).toContain("report_progress installing");
-    expect(body).toContain("report_progress verifying");
-    expect(body).toContain("report_final || true");
-    expect(body).toContain("CURRENT_STAGE");
-    expect(body).toContain("failed_stage");
-  });
-
-  it("端口与回传地址按参数写入", () => {
-    const body = script();
-    expect(body).toContain("PORT=20443");
-    expect(body).toContain('ENROLL_URL="https://cp-dev.example.com/v1/enroll/tok_test"');
+    expect(body).toContain("systemctl stop ssh");
+    expect(body).toContain("systemctl disable ssh");
   });
 });
