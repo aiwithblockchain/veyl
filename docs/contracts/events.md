@@ -1,6 +1,6 @@
 # 契约：事件（Host → UI）
 
-> 契约版本：`2.23.0`
+> 契约版本：`2.24.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-03）
 > 上游：`docs/center-panel.md` §2.5.1、`docs/configs-and-nav.md` §9、`docs/issue-management.md` §4、`docs/config-execution.md` §10
 > 反向通道：`docs/contracts/commands.md`（UI → Host 的 invoke，版本以该文件头为准）
@@ -22,7 +22,7 @@
 - **落库实体字段的时间戳**（`created_at` / `first_seen` / `last_seen` / `checked_at` 等）：**Unix 毫秒整数**，与 `data-model.md` 的列类型一致。见 §2.3。
 - 错误码 **大写下划线**。
 - 所有 payload 带 `contract_version`。
-- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.23.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
+- **本文件里所有 `contract_version` 的字面量恒等于本文件版本**（当前 `2.24.0`），升版时全文替换。实现侧只允许有一个常量对应本文件（`EVENT_CONTRACT_VERSION`），不得按事件分别发不同版本号。字段是哪一版加的，记在 §10 变更记录里，不写进字面量。
 
 > **命名决策**：事件名沿用 TweetPilot 的真实名称（`message-chunk`、`thinking-chunk`、`tool-call-start`、`tool-call-end`、`ai-status`、`ai-compact`、`ai-request-end`），**不**加 `ai-` 前缀。`docs/phase-1-technical-design.md` §4.2 写的 `agent://delta` / `agent://tool` 是笔误，以本契约为准。
 
@@ -114,7 +114,7 @@ Tauri 不保证跨 `emit` 调用的顺序，因此约定：
 
 ```ts
 type MessageChunkPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;            // 增量文本，非全量
@@ -136,7 +136,7 @@ UI 处理：
 
 ```ts
 type ThinkingChunkPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   chunk: string;
@@ -154,7 +154,7 @@ UI 处理：追加到折叠的思考区；若模型没有思考能力（DeepSeek
 
 ```ts
 type ToolCallStartPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -195,9 +195,14 @@ UI 处理：插入工具卡，状态 `running`，开始计时。
 ### 3.4 `tool-call-end`
 
 ```ts
+/// 2.24.0：一行事实只给 key + 语言无关的参数，句子由 UI 查表组装。
+type ToolFact = {
+  key: FactKey;                              // 闭集，见 §3.4.1
+  params?: Record<string, string | number>;  // 只放标量；枚举参数也走闭集
+};
+
 type ToolDisplay = {
-  text: string;                              // 2.23.0 起 UI 不渲染；下一版删除
-  facts?: string[];                          // 可选：≤4 行，只放用户看得懂的名称与数值
+  facts?: ToolFact[];                        // 可选：≤4 行
   changed: "none" | "restored" | "unknown";  // 这次调用有没有改动用户的设置
   actions?: DisplayAction[];                 // 2.11.0：可直接点击的动作，≤2 个
 };
@@ -208,7 +213,7 @@ type DisplayAction =
   | { kind: "compose_report_mail"; report_id: string };
 
 type ToolCallEndPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   tool_call_id: string;
@@ -231,16 +236,82 @@ type ToolCallEndPayload = {
 `display` 规则（2.7.0）：
 
 - **这是给用户看的唯一工具文案。** `result` 是给模型的，UI 不得直接渲染；缺 `display` 时用前端映射表（`tools.md` §2.4）的通用文案兜底，不报错、不丢事件。
-- **2.23.0：UI 一律用前端映射表渲染完成/失败那句话，不渲染 `display.text`。** Host 仍随事件下发 `text` 一版（原中文），给旧前端降级用；下一版删除该字段。`facts` 仍由 Host 投影（结构化改造另批）。
-- `text` ≤24 字，不含工具名、`cfg_…` / `nod_…` 等 id、路径、错误码、英文或原始 JSON。（2.23.0 起 UI 不渲染，约束保留给降级版本。）
-- `facts` 可选，≤4 行；只放用户关心的名称与数值（配置名、节点名、出口 IP、延迟）。没有就省略，不要填空串。
+- **2.24.0：`display` 里没有自由文本。** 完成/失败那句话一律用前端映射表（`tools.md` §2.4）；`facts` 只给 `key` + `params`，由 UI 按界面语言组装。
+- `facts` 可选，≤4 行；`key` 必须属于 §3.4.1 闭集。**未知 key 或未知枚举参数由 UI 丢弃该行**：不回落成字符串、不显示 `{param}` 参数串、不报错。
+- `params` 只放标量（字符串 / 数字）；不放整段错误原文、URL、凭据；`report.location` 的 `path` 是唯一允许的路径。
+- 没有 `facts` 时省略字段，不要发空数组。
 - `changed` 必填（不是可选）：
   - 只读工具固定 `"none"`；
   - `VpnConnect` / `NetRepair` / `CoreUpgrade` / `ConfigDelete` 四个会改系统设置的工具**必须显式声明**；
   - `"none"` = **没有改动任何设置**；`"restored"` = **已经恢复原样**；`"unknown"` = **不确定，诊断日志里有记录**。
   - 这三句由界面统一渲染，面向全部工具，**不得出现「网络」二字**：`ConfigCreate` 校验失败、`ConfigDelete` 失败时根本不碰网络设置，写「网络设置」对它们是错的。
 - `AskUserQuestion` **不产生展示行**（提问由 `ask-user-question` 的问答浮层承担），其 `tool-call-end` 省略 `display`；UI 不为它渲染工具行。
-- 不得把 `display.text` 塞进 `result`：`result` 要留给模型，两者不能是同一根字符串。
+- 不得把 `display` 的文案塞进 `result`：`result` 要留给模型。
+
+#### 3.4.1 `FactKey` 闭集（2.24.0）
+
+文案在界面字典里（`tool.fact.*`），契约只认 key 与参数。枚举参数给**机器值**，由 UI 映射成人话；未知值丢弃该行。
+
+| key | `params` |
+|---|---|
+| `core.active_version` / `core.latest_version` / `core.current_version` | `{ version }` |
+| `core.no_active` | — |
+| `core.installed_count` | `{ count }` |
+| `runtime.connected` / `runtime.disconnected` | — |
+| `runtime.version` | `{ version }` |
+| `runtime.exit_ip` | `{ ip }` |
+| `runtime.logs_empty` | — |
+| `runtime.logs_recent` | `{ count }` |
+| `job.state` | `{ state: "queued"\|"running"\|"succeeded"\|"failed"\|"cancelled"\|"unknown" }` |
+| `job.progress` | `{ percent }` |
+| `net.service_count` | `{ count }` |
+| `net.default_interface` | `{ name }` |
+| `net.free_node_count` | `{ count }` |
+| `net.free_cache_missing` | — |
+| `config.name` / `config.current_node` | `{ name }` |
+| `config.node_count` | `{ count }` |
+| `catalog.node_count` | `{ count }` |
+| `catalog.region_count` / `catalog.plan_count` | `{ count }` |
+| `node.name` | `{ name }` |
+| `node.new_port` | `{ port }` |
+| `node.credential_refresh_failed` | — |
+| `probe.latency_ms` | `{ ms }` |
+| `probe.unreachable` / `probe.untested` | — |
+| `import.added` / `import.skipped` | `{ count }` |
+| `mode.current` | `{ mode: "tun"\|"proxy" }` |
+| `connection.state` | `{ state: "restored"\|"disconnected"\|"unchanged"\|"intact" }` |
+| `effect.next_connect` / `scope.no_http3` | — |
+| `servers.empty` | — |
+| `server.row` | `{ name, region, state: "creating"\|"booting"\|"installing"\|"verifying"\|"healthy"\|"active"\|"error"\|"destroying"\|"gone"\|"destroyed"\|"unknown", ip?, destroyed?: "billing_unpaid"\|"user" }` |
+| `server.stage` | `{ stage: "creating"\|"booting"\|"installing"\|"verifying"\|"error"\|"unknown" }` |
+| `server.retryable` | `{ value: "yes"\|"no" }` |
+| `server.record_incomplete` / `server.advice_rebuild` / `server.no_record` | — |
+| `server.failure_code` | `{ code }`（已知码走 `error.failure.*`，未知落通用句） |
+| `diag.result` | `{ failed, skipped }`（两个数字；UI 按是否为 0 选四句之一） |
+| `routing.category_count` / `routing.service_count` | `{ count }` |
+| `routing.mode` | `{ mode: "direct"\|"proxy_all"\|"proxy_selected" }` |
+| `rules.status` | `{ state: "stale"\|"current"\|"empty" }` |
+| `routing.ownership` | `{ state: "unconfirmed"\|"unknown" }` |
+| `routing.reconnect_failed` | — |
+| `rules.version` | `{ version }` |
+| `deepseek.verify` | `{ result: "ok"\|"invalid"\|"unknown" }` |
+| `core.version_change` | `{ from, to }` |
+| `effect.reconnect` | — |
+| `region.code` | `{ code, label }`（UI 先按 `code` 查本地地区表，查不到用 `label`） |
+| `report.location` | `{ path }` |
+| `report.log_count` / `report.category_count` | `{ count }` |
+| `http.status_code` | `{ code }` |
+| `http.elapsed_ms` | `{ ms }` |
+| `http.redirects` | `{ count }` |
+| `http.server` | `{ name }` |
+| `http.captcha_required` | — |
+| `http.error` | `{ reason: "timeout"\|"headers_too_large"\|"network"\|"other" }` |
+| `region.name` | `{ name }` |
+| `plan.label` | `{ label }` |
+
+- `server.retryable` 的 `value` 是布尔语义的枚举，不是文案。
+- `http.error` 的 reason 由 Host 在构造失败展示时判定（超时 / 响应头异常大 / 网络失败），**不解析错误文本**。
+
 
 **`display.actions` 规则（2.11.0）**：
 
@@ -272,13 +343,12 @@ type AiStatusPhase =
   | "completed";
 
 type AiStatusPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
   text_key: AiStatusTextKey;    // 2.23.0：界面唯一文案来源
   params?: Record<string, string | number>;  // 2.23.0：text_key 的插值
-  text: string;                 // 保留一版；UI 不再渲染（2.24.0 删除）
   emitted_at: string;
 };
 
@@ -339,7 +409,7 @@ type AiStatusTextKey =
 
 UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限卡。
 
-**本地化（2.23.0）**：界面文案只由 `text_key` + `params` 决定，按界面语言查表；**UI 不渲染 `text`**，也不再显示上游状态文本（claurst 的英文 spinner 文本过去会原样漏进中文界面）。`text` 是**降级字段**：内容是上游/旧版的原文（可能英文），UI 不渲染，2.24.0 删除。新增 `text_key` 必须同时补齐中英字典，否则按 `phase` 的通用文案兜底并记 `i18n missing key`。
+**本地化（2.23.0）**：界面文案只由 `text_key` + `params` 决定，按界面语言查表；**2.24.0 起事件不再携带 `text`**，上游状态文本（claurst 的英文 spinner）也不再进入界面。新增 `text_key` 必须同时补齐中英字典，否则按 `phase` 的通用文案兜底并记 `i18n missing key`。
 
 映射边界：含 `prepar` 的状态（包括上游的 `Preparing request`）都落 `preparing_tool`；**未列出的上游状态一律落 `thinking`**。
 
@@ -349,12 +419,11 @@ UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限�
 
 ```ts
 type AiCompactPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
   text_key: "ai.compact.done";  // 2.23.0：界面唯一文案来源
-  text: string;                 // 保留一版；UI 不再渲染（2.24.0 删除）
   tokens_before: number | null;
   tokens_after: number | null;
   emitted_at: string;
@@ -378,7 +447,7 @@ type TokenUsage = {
 };
 
 type AiRequestEndPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   request_id: string;
   assistant_message_id: string;
   result: "success" | "error" | "cancelled";
@@ -390,7 +459,7 @@ type AiRequestEndPayload = {
 };
 ```
 
-`error` 是 `AivpnError`（形状见 `runtime.md` §2.6；`tools.md` §1.4 引用同一形状，不另写一份）。**`ai-request-end` 里的 `error.contract_version` 取本事件契约的版本（2.23.0）**；同一个形状出现在工具结果里时取 `tools.md` 的版本。前端不比较两者，按 `code` + `details.reason` 用。
+`error` 是 `AivpnError`（形状见 `runtime.md` §2.6；`tools.md` §1.4 引用同一形状，不另写一份）。**`ai-request-end` 里的 `error.contract_version` 取本事件契约的版本（2.24.0）**；同一个形状出现在工具结果里时取 `tools.md` 的版本。前端不比较两者，按 `code` + `details.reason` 用。
 
 来源：
 
@@ -417,7 +486,7 @@ UI 处理：
 
 ```ts
 type RuntimeStateChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   from: RuntimeState;
   to: RuntimeState;
   event: "start_req" | "process_ready" | "health_ok" | "health_fail"
@@ -441,7 +510,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.23.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.24.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -452,7 +521,7 @@ UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断�
 
 ```ts
 type RuntimeHealthChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   health: HealthSnapshot;
   // 2.2 新增：本次运行累计流量与速率。
   // 未连接（idle/failed）或还没采到时为 null——**不是 0**，
@@ -488,7 +557,7 @@ UI 处理：更新延迟/出口 IP/健康灯/流量/连接数；面板上给用�
 
 ```ts
 type JobProgressPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag" | "rules_update";
   origin: "ui" | "agent";       // 必填；第一帧也带，旧记录按 "ui"
@@ -522,7 +591,7 @@ UI 处理：进度条；`state = "failed"` 时显示错误与重试按钮。
 type AppLifecycleState = "foreground" | "background";
 
 type AppLifecycleChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   state: AppLifecycleState;
   previous: AppLifecycleState | null;   // 首次发出时为 null
   emitted_at: string;
@@ -539,7 +608,7 @@ type AppLifecycleChangedPayload = {
 
 ```ts
 type DefaultProfileUpdatedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   seed_id: "veyl_seed";
   content_sha256: string;           // 2.0：变化判定依据
   version: string | null;           // 文件里的 version，仅展示
@@ -611,7 +680,7 @@ UI 用自身的连接状态选择弹窗文案（`docs/design/quit-dialog.md` §6
 
 ```ts
 type QuitRequestedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   emitted_at: string;
 };
 ```
@@ -631,7 +700,7 @@ UI 收到后弹确认框，用户选择后调用 `quit_decision { action }`（`c
 
 ```ts
 type QuitDismissedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   emitted_at: string;
 };
 ```
@@ -652,7 +721,7 @@ type QuitDismissedPayload = {
 
 ```ts
 type AskUserQuestionPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   session_id: string;
   request_id: string;
   question_id: string;      // Host 生成，形如 q_<毫秒>_<8位十六进制>
@@ -743,7 +812,7 @@ tool-call-end    (同一 request_id)
 
 ```ts
 type ConfigChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   change: "created" | "updated" | "deleted" | "activated";
   config_id: string;
   config: ConfigSummary | null;      // deleted 时为 null；类型见 commands.md §3.0
@@ -781,7 +850,7 @@ type NodeListChangedReason =
   | "node_synced";            // my_server_sync 拉到新端口或新密码（2.22.0）
 
 type NodeListChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   reason: NodeListChangedReason;
   config_id: string | null;        // 只有 bindings_changed 时非空
   node_count_total: number;        // 节点池总数
@@ -803,7 +872,7 @@ type NodeListChangedPayload = {
 
 ```ts
 type NodeSwitchedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   config_id: string;
   from_node_id: string | null;
   to_node_id: string;
@@ -831,7 +900,7 @@ type NodeSwitchedPayload = {
 
 ```ts
 type IssueChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   change: "created" | "updated" | "handed_off" | "resolved" | "ignored" | "reopened";
   issue: IssueSummary;                  // 变更后的状态
   blocking_issue_id: string | null;     // 当前应插卡的那一条；null = 中间不插卡
@@ -869,7 +938,7 @@ type IssueChangedPayload = {
 
 ```ts
 type LayoutUpdatedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   config_id: string;
   revision: number;            // 每配置单调递增，从 1 开始
   layout: Layout;              // 见 commands.md §3.0
@@ -923,7 +992,7 @@ type LayoutUpdatedPayload = {
 
 ```ts
 type RoutingChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   config_id: string;
   routing_mode: "direct" | "proxy_all" | "proxy_selected";
   applied_mode: "direct" | "proxy_all" | "proxy_selected" | null;
@@ -949,7 +1018,7 @@ type RoutingChangedPayload = {
 
 ```ts
 type RulesChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   active_version: string;
   previous_version: string | null;
   geosite_tag: string | null;
@@ -982,7 +1051,7 @@ Tauri 不保证跨 `emit` 的顺序，因此对 2.0 新增事件规定：
 
 ```ts
 type CoreUpgradeProgressPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   job_id: string;
   origin: "ui" | "agent";         // 必填
   phase: "downloading" | "verifying" | "unpacking" | "installing" | "activating";
@@ -1005,7 +1074,7 @@ type CoreUpgradeProgressPayload = {
 
 ```ts
 type CoreUpgradeFinishedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   job_id: string;
   origin: "ui" | "agent";   // 必填
   ok: boolean;
@@ -1027,7 +1096,7 @@ type CoreUpgradeFinishedPayload = {
 
 ```ts
 type NodeProbeProgressPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   run_id: string;
   config_id: string;
   phase: "preparing" | "probing";
@@ -1056,7 +1125,7 @@ type NodeProbeProgressPayload = {
 
 ```ts
 type NodeProbeFinishedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   run_id: string;
   config_id: string;
   total: number;
@@ -1097,7 +1166,7 @@ type NodeProbeFinishedPayload = {
 
 ```ts
 type RegionChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   region: string | null;          // 生效地区的小写 ISO 3166-1 alpha-2；判不出为 null
   source: "system" | "ai";        // 当前生效值的来源
   emitted_at: string;
@@ -1123,7 +1192,7 @@ type RegionChangedPayload = {
 
 ```ts
 type MyServerChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   server_id: string;
   state: string;                   // MyServerState，见 commands.md §10.1
   failure?: {
@@ -1150,7 +1219,7 @@ type MyServerChangedPayload = {
 
 ```ts
 type MyServerOrderChangedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   order_id: string;
   state: string;                   // MyServerOrderState，见 commands.md §10.1
   failure?: {
@@ -1175,7 +1244,7 @@ type MyServerOrderChangedPayload = {
 
 ```ts
 type TrialExpiredPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   ended_at: string;              // 试用结束时刻（ISO 8601 UTC），与 trial_state.ended_at 同值
   removed_node_count: number;    // 全库去重后移除的种子节点数；可能为 0（池里本来就没有）
   disconnected: boolean;         // 本次是否真的断开了连接
@@ -1197,7 +1266,7 @@ AI 指路：打开设置并高亮某一段的某一行。由只读工具 `OpenSe
 
 ```ts
 type SettingsPointPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   section: "ai" | "connection" | "account" | "advanced";
   row: string | null;            // 行 id；只定位到段时为 null
   emitted_at: string;
@@ -1218,7 +1287,7 @@ AI 把地区 / 规格选进「新建节点」舞台。由工具 `StageSelect` �
 
 ```ts
 type StageSelectPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   screen: "new_node";
   region: string | null;         // 目录里的地区 id；本次没请求就是 null
   plan: string | null;           // 目录里的套餐 id；同上
@@ -1245,7 +1314,7 @@ type StageSelectPayload = {
 
 ```ts
 type MyServerAccountClearedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   reason: "device_revoked" | "account_blocked" | "token_invalid" | "auth_required" | "server_rejected";
   emitted_at: string;
 };
@@ -1266,7 +1335,7 @@ type MyServerAccountClearedPayload = {
 
 ```ts
 type MyServerRenamedPayload = {
-  contract_version: "2.23.0";
+  contract_version: "2.24.0";
   server_id: string;
   name: string;          // 服务端 trim 后落库的名字
   local_node_id: string | null;  // 本地节点行 id；本地还没有这台服务器的节点时为 null
@@ -1388,6 +1457,17 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 ---
 
 ## 10. 变更记录
+
+### 2.24.0（未发布，2026-11-22：工具卡事实结构化、删除降级 text）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | `contract_version` 升到 `2.24.0`；全文 34 处字面量同步（`routing.md` 两处副本随本文件） | 元数据 | i18n 批次 5；PM 2026-11-22 |
+| 2 | §3.4 `ToolDisplay.facts` 从 `string[]` 改为 `{ key, params? }[]`（新增 §3.4.1 闭集）；Host 不再拼中文句子，事实行由 UI 按界面语言组装 | 结构变更 | 同上 |
+| 3 | §3.4 `ToolDisplay.text`、§3.5 `AiStatusPayload.text`、§3.6 `AiCompactPayload.text` 三处降级字段**删除**；后端停发、前端类型与解析同步删除 | 字段删除 | 同上 |
+| 4 | 三处诊断原文不再进界面：MyServer 失败原因转 `server.failure_code`（未知落通用句）、探测未测成保留 `probe.untested` 并提示稍后再试、HttpCheck 失败原因在 `display.facts` 里用闭集 `http.error{reason}`（不改工具结果形状） | 语义 | 同上 |
+| 5 | 未知 `FactKey` / 未知枚举值由 UI 丢弃该行，不回落成字符串、不显示参数串 | 前向兼容 | 同上 |
+| 6 | 迁移中发现 15 处用户可见事实没有对应 key，按「删掉后看不到等价信息就转 key」补入 §3.4.1：`catalog.node_count`、`catalog.region_count`、`catalog.plan_count`、`diag.result`、`routing.category_count`、`routing.service_count`、`routing.ownership`、`routing.reconnect_failed`、`routing.mode`、`rules.version`、`rules.status`、`deepseek.verify`、`core.version_change`、`effect.reconnect`、`region.code`（SetUserRegion 用机器码，UI 查本地表，查不到用 label） | 补词表 | 同上 |
 
 ### 2.23.0（未发布，2026-11-22：状态与工具卡文案按界面语言）
 

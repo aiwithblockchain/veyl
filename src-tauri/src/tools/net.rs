@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -78,8 +78,8 @@ impl Tool for NetConfigGetTool {
                     data,
                 )
                 .with_facts(vec![
-                    format!("网络服务：{services} 个"),
-                    format!("默认接口：{interface}"),
+                    Fact::with_params(FactKey::NetServiceCount, json!({ "count": services })),
+                    Fact::with_params(FactKey::NetDefaultInterface, json!({ "name": interface })),
                 ])
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
@@ -142,14 +142,6 @@ impl Tool for NetRepairTool {
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok());
 
-        let action_label = match action {
-            "restore_direct" => "已恢复直连",
-            "flush_dns" => "已刷新域名缓存",
-            "set_proxy" => "已设置代理",
-            "clear_proxy" => "已清除代理",
-            _ => "已修复",
-        };
-
         let outcome = match self.services.net_repair(action, port).await {
             Ok(data) => {
                 let detail = data
@@ -159,8 +151,7 @@ impl Tool for NetRepairTool {
                     .to_string();
                 let verified = data.get("verified").and_then(Value::as_bool).unwrap_or(false);
                 if verified {
-                    ToolOutcome::ok(detail, data)
-                        .with_display(action_label, vec![], Changed::None)
+                    ToolOutcome::ok(detail, data).with_display(Vec::new(), Changed::None)
                 } else {
                     ToolOutcome::fail(
                         AivpnError::new("PRECONDITION_FAILED", detail).with_details(json!({
@@ -168,11 +159,12 @@ impl Tool for NetRepairTool {
                             "action": action,
                         })),
                     )
-                    .with_display("修复未通过检查", vec![], Changed::Unknown)
+                    .with_display(Vec::new(), Changed::Unknown)
                 }
             }
-            Err(error) => ToolOutcome::fail(tool_error(error))
-                .with_display("没能完成修复", vec![], Changed::Unknown),
+            Err(error) => {
+                ToolOutcome::fail(tool_error(error)).with_display(Vec::new(), Changed::Unknown)
+            }
         };
         envelope::finish(ctx, "NetRepair", outcome)
     }
@@ -220,17 +212,15 @@ impl Tool for CatalogRefreshTool {
                     .get("node_count")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                let changed = data.get("changed").and_then(Value::as_bool).unwrap_or(false);
-                let source = data.get("source").and_then(Value::as_str).unwrap_or("");
-                let (text, changed) = if changed {
-                    ("Veyl 免费节点已更新", Changed::None)
-                } else if source == "cache" {
-                    ("使用的是本地缓存", Changed::None)
-                } else {
-                    ("Veyl 免费节点已是最新", Changed::None)
-                };
+                // 闭集里只有节点数：是不是刚更新、用的是不是缓存，留给模型正文说。
                 ToolOutcome::ok(format!("Veyl 免费节点已检查（{node_count} 个）"), data)
-                    .with_display(text, vec![format!("节点数：{node_count}")], changed)
+                    .with_display(
+                        vec![Fact::with_params(
+                            FactKey::NetFreeNodeCount,
+                            json!({ "count": node_count }),
+                        )],
+                        Changed::None,
+                    )
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -287,22 +277,18 @@ impl Tool for DefaultProfileStatusTool {
                     "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。".to_string()
                 };
                 let facts = if available {
-                    vec![format!(
-                        "节点数：{}",
-                        data.get("node_count").and_then(Value::as_i64).unwrap_or(0)
+                    let count = data
+                        .get("node_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    vec![Fact::with_params(
+                        FactKey::NetFreeNodeCount,
+                        json!({ "count": count }),
                     )]
                 } else {
-                    vec!["缓存：还没有".to_string()]
+                    vec![Fact::new(FactKey::NetFreeCacheMissing)]
                 };
-                ToolOutcome::ok(summary, data).with_display(
-                    if available {
-                        "已读取 Veyl 免费节点状态"
-                    } else {
-                        "还没有 Veyl 免费节点"
-                    },
-                    facts,
-                    Changed::None,
-                )
+                ToolOutcome::ok(summary, data).with_display(facts, Changed::None)
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };

@@ -177,7 +177,7 @@ check("RuntimeStatus / RuntimeSnapshot 快照不含 clash_addr", () => {
 check("mock LLM 剧本的工具名都在 docs/contracts/tools.md 的工具总表里", () => {
   const md = read("docs/contracts/tools.md");
   const known = new Set();
-  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|/gm)) known.add(m[1]);
+  for (const m of md.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|/gm)) known.add(m[1]);
   if (known.size === 0) throw new Error("未能从 docs/contracts/tools.md §3 解析出工具名");
 
   const dir = join(ROOT, "tests", "fixtures", "llm-scenarios");
@@ -1006,7 +1006,7 @@ function contractTools() {
   const end = md.indexOf("### 3.1", start);
   const section = md.slice(start, end < 0 ? undefined : end);
   const rows = new Map();
-  for (const m of section.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z]+)`\s*\|([^\n]*)$/gm)) {
+  for (const m of section.matchAll(/^\|\s*\d+\s*\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|([^\n]*)$/gm)) {
     rows.set(m[1], m[2]);
   }
   if (rows.size === 0) throw new Error("未能从 tools.md §3 解析出任何工具名");
@@ -1041,8 +1041,11 @@ check("tools.md §3 工具总表与 §3.1 注册清单逐名一致（契约）",
     problems.push("§3.1 注册清单一个工具名都没解析出来");
     return problems;
   }
-  const missing = [...table.keys()].filter((n) => !names.includes(n));
-  const extra = names.filter((n) => !table.has(n));
+  // 模型可见名可能是 snake_case（3.25.0 的问题墙两个工具），Rust 类型仍是 PascalCase：
+  // 两边都归一到 PascalCase 再比。
+  const declared = new Set([...table.keys()].map(pascalCase));
+  const missing = [...declared].filter((n) => !names.includes(n));
+  const extra = names.filter((n) => !declared.has(n));
   if (missing.length) problems.push(`§3.1 缺少（总表有、清单没有）：${missing.join(", ")}`);
   if (extra.length) problems.push(`§3.1 多出（清单有、总表没有）：${extra.join(", ")}`);
   return problems;
@@ -1366,15 +1369,23 @@ check("tool-call-end 的 display 形状完备（契约）", () => {
     return problems;
   }
   const body = m[1];
-  for (const f of ["text", "facts", "changed"]) {
+  for (const f of ["facts", "changed"]) {
     if (!new RegExp(`^\\s*${f}\\??\\s*:`, "m").test(body)) problems.push(`ToolDisplay 缺少 ${f}`);
   }
-  if (!/^\s*facts\?\s*:/m.test(body)) problems.push("ToolDisplay.facts 必须是可选字段");
+  if (/^\s*text\??\s*:/m.test(body)) {
+    problems.push("ToolDisplay 仍带 text：2.24.0 起已删除，界面对话全部走 key + params");
+  }
+  if (!/^\s*facts\?\s*:\s*ToolFact\[\]/.test(body)) {
+    problems.push("ToolDisplay.facts 必须是可选的 ToolFact[]");
+  }
   if (!/changed\s*:\s*"none"\s*\|\s*"restored"\s*\|\s*"unknown"/.test(body)) {
     problems.push('ToolDisplay.changed 必须是 "none" | "restored" | "unknown"');
   }
+  if (!/### 3\.4\.1/.test(md) || !/`FactKey`/.test(md)) {
+    problems.push("events.md 缺少 §3.4.1 FactKey 闭集");
+  }
 
-  for (const phrase of ["≤24 字", "≤4 行", "只读工具固定", "不产生展示行"]) {
+  for (const phrase of ["≤4 行", "只读工具固定", "不产生展示行", "未知 key"]) {
     if (!md.includes(phrase)) problems.push(`events.md 的 display 说明缺少「${phrase}」`);
   }
   for (const tool of ["VpnConnect", "NetRepair", "CoreUpgrade", "ConfigDelete"]) {
@@ -1418,12 +1429,12 @@ function frontendToolDisplayNames() {
   const ts = read(TOOL_DISPLAY_FILE);
   const arr = ts.match(/TOOL_DISPLAY_NAMES\s*(?::[^=]+)?=\s*\[([\s\S]*?)\]/);
   if (arr) {
-    return new Set([...arr[1].matchAll(/"([A-Za-z][A-Za-z0-9]*)"/g)].map((x) => x[1]));
+    return new Set([...arr[1].matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g)].map((x) => x[1]));
   }
   // 实现名 `TOOL_COPY`，设计文档里写作 `TOOL_DISPLAY`；两个都认，断的是键集合。
   const obj = ts.match(/export const (?:TOOL_COPY|TOOL_DISPLAY)\s*(?::[^=]+)?=\s*\{([\s\S]*?)\n\};/);
   if (obj) {
-    return new Set([...obj[1].matchAll(/^\s*([A-Z][A-Za-z0-9]*)\s*:/gm)].map((x) => x[1]));
+    return new Set([...obj[1].matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/gm)].map((x) => x[1]));
   }
   return new Set();
 }
@@ -1575,7 +1586,7 @@ function rustDescriptions() {
     const rel = `src-tauri/src/tools/${e.name}`;
     const src = read(rel);
     const re =
-      /fn name\(&self\) -> &str \{\s*"([A-Za-z]+)"\s*\}[\s\S]*?fn description\(&self\) -> &str \{\s*"((?:[^"\\]|\\[\s\S])*)"/g;
+      /fn name\(&self\) -> &str \{\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\}[\s\S]*?fn description\(&self\) -> &str \{\s*"((?:[^"\\]|\\[\s\S])*)"/g;
     for (const m of src.matchAll(re)) {
       out.set(m[1], { body: rustStringBody(m[2]), file: rel });
     }

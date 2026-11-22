@@ -327,6 +327,35 @@ pub trait VpnToolServices: Send + Sync {
         not_wired("问题报告")
     }
 
+    /// 问题墙：上报。`payload` 已由工具按契约组装好，`idempotency_key` 由工具按
+    /// `(会话, diagnosis.session_id)` 派生，Host 只负责发出。
+    async fn submit_issue_to_public_wall(
+        &self,
+        _payload: Value,
+        _idempotency_key: &str,
+    ) -> anyhow::Result<Value> {
+        not_wired("问题墙上报")
+    }
+
+    /// 问题墙：公开读取。不需要登录，默认实现也不应该要求身份。
+    async fn read_public_issue_wall(
+        &self,
+        _query: crate::control_plane::issues::IssueQuery,
+    ) -> anyhow::Result<Value> {
+        not_wired("问题墙读取")
+    }
+
+    /// 确认卡与请求体共用的客户端信息（应用版本 / 构建 / 平台 / 系统 / 架构 / 语言）。
+    /// 模型不能指定这些值。
+    fn issue_wall_client_info(&self) -> Value {
+        crate::control_plane::issues::ClientInfo::current("zh").to_json()
+    }
+
+    /// 只有邮箱账户能上报；读取问题墙不需要登录。
+    fn issue_wall_logged_in(&self) -> bool {
+        crate::control_plane::auth::account_state().logged_in
+    }
+
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value>;
     async fn job_get(&self, job_id: &str) -> anyhow::Result<Value>;
 }
@@ -656,6 +685,29 @@ fn svc_error_with_details(
         message: message.to_string(),
         retryable: false,
         details: Some(details),
+    })
+}
+
+/// 控制面错误 → 服务层错误：保留 code / message / details / retryable。
+/// 唯一改写：登录缺失 / 过期的错误统一成 `PRECONDITION_FAILED / not_logged_in`，
+/// 与工具的未登录口径一致（`design/issue-report-api.md` §2.1）。
+fn svc_from_cp(mut error: crate::control_plane::error::CpError) -> anyhow::Error {
+    // 关闭上报是暂时的服务端状态，不是内部故障：客户端按「上游不可用」处理。
+    if error.reason() == Some("issues_closed") {
+        error.code = "UPSTREAM_ERROR".into();
+        error.retryable = true;
+    }
+    let blocked_login =
+        error.code == "PERMISSION_DENIED" && error.reason() == Some("not_logged_in");
+    if error.code == "UNAUTHENTICATED" || blocked_login {
+        error.code = "PRECONDITION_FAILED".into();
+        error.details = json!({ "reason": "not_logged_in" });
+    }
+    anyhow::Error::new(ServiceError {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        details: Some(error.details),
     })
 }
 
@@ -2253,10 +2305,7 @@ fn process_alive_check(connection: DiagConnection, alive: bool) -> Value {
 /// `app.config_valid`：运行中的进程是不是带着一套已知配置。
 /// TUN 快照不填配置摘要（`RuntimeStatus::tun`），用启动时记下的配置作证；
 /// 没有摘要也没有记录时如实报 `skipped`，不说「缺配置」。
-fn config_valid_check(
-    connection: DiagConnection,
-    status: &crate::runtime::RuntimeStatus,
-) -> Value {
+fn config_valid_check(connection: DiagConnection, status: &crate::runtime::RuntimeStatus) -> Value {
     match connection {
         DiagConnection::Idle => diag_check(
             "app.config_valid",
@@ -2299,14 +2348,7 @@ fn config_valid_check(
             )
         }
         DiagConnection::Proxy => match status.config_hash.clone() {
-            Some(hash) => diag_check(
-                "app.config_valid",
-                "app",
-                CheckStatus::Ok,
-                hash,
-                None,
-                None,
-            ),
+            Some(hash) => diag_check("app.config_valid", "app", CheckStatus::Ok, hash, None, None),
             None => diag_check(
                 "app.config_valid",
                 "app",
@@ -2588,7 +2630,10 @@ mod diag_coverage_tests {
         assert_eq!(check["ok"], false, "{check}");
         assert_eq!(check["action"]["kind"], "switch_mode", "{check}");
         assert_eq!(check["action"]["to"], "tun", "{check}");
-        assert!(check["detail"].as_str().unwrap().contains("HTTP/3"), "{check}");
+        assert!(
+            check["detail"].as_str().unwrap().contains("HTTP/3"),
+            "{check}"
+        );
     }
 
     #[test]
@@ -2597,7 +2642,10 @@ mod diag_coverage_tests {
         assert_eq!(check["status"], "ok", "{check}");
         assert_eq!(check["ok"], true, "{check}");
         assert!(check["action"].is_null(), "{check}");
-        assert!(check["detail"].as_str().unwrap().contains("QUIC"), "{check}");
+        assert!(
+            check["detail"].as_str().unwrap().contains("QUIC"),
+            "{check}"
+        );
     }
 
     #[test]
@@ -2606,7 +2654,10 @@ mod diag_coverage_tests {
         // 契约 §4.13 的覆盖表：未连接仍是 ok（「先连接」不是故障）。
         assert_eq!(check["status"], "ok", "{check}");
         assert_eq!(check["ok"], true, "{check}");
-        assert!(check["detail"].as_str().unwrap().contains("先连接"), "{check}");
+        assert!(
+            check["detail"].as_str().unwrap().contains("先连接"),
+            "{check}"
+        );
     }
 }
 
@@ -2758,21 +2809,13 @@ mod diag_connection_tests {
     #[test]
     fn proxy_mode_requires_every_service_to_point_at_our_port() {
         let ours = vec!["127.0.0.1:7890".to_string()];
-        let check = proxy_services_check(
-            DiagConnection::Proxy,
-            &ours,
-            Some("127.0.0.1:7890"),
-            false,
-        );
+        let check =
+            proxy_services_check(DiagConnection::Proxy, &ours, Some("127.0.0.1:7890"), false);
         assert_eq!(check["status"], "ok", "{check}");
 
         let wrong = vec!["127.0.0.1:1080".to_string()];
-        let check = proxy_services_check(
-            DiagConnection::Proxy,
-            &wrong,
-            Some("127.0.0.1:7890"),
-            false,
-        );
+        let check =
+            proxy_services_check(DiagConnection::Proxy, &wrong, Some("127.0.0.1:7890"), false);
         assert_eq!(check["status"], "failed", "{check}");
         assert_eq!(check["action"]["kind"], "restore_network", "{check}");
     }
@@ -2855,6 +2898,39 @@ fn probe_untested_message(reason: &str) -> &'static str {
         "clash_unavailable" => "已连接，但读不到测速接口，重新连接一次再试",
         _ => "暂时测不了，稍后再试",
     }
+}
+
+/// 单节点测速一条：只记状态、reason 短码与本地节点 id，不记地址、端口或凭据。
+fn log_node_probe_outcome(node_id: &str, result: &anyhow::Result<Value>) {
+    let Ok(value) = result else {
+        let (code, reason) = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<ServiceError>())
+            .map(|service| {
+                let reason = service
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("-");
+                (service.code.as_str(), reason)
+            })
+            .unwrap_or(("INTERNAL", "internal"));
+        log::info!("[node_probe] status=failed code={code} reason={reason} node={node_id}");
+        return;
+    };
+
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let reason = value
+        .pointer("/error/reason")
+        .and_then(Value::as_str)
+        .or_else(|| (status == "unreachable").then_some("clash_delay_failed"))
+        .unwrap_or("-");
+    log::info!("[node_probe] status={status} reason={reason} node={node_id}");
 }
 
 async fn clash_put_selector(
@@ -3507,7 +3583,8 @@ impl WiredServices {
         snapshot: crate::runtime::RuntimeStatus,
     ) {
         log::debug!("TUN 状态变化 {from:?} → {to:?} event={event:?}");
-        self.manager.publish_state(from, to, event, reason, snapshot);
+        self.manager
+            .publish_state(from, to, event, reason, snapshot);
         *self.tun_event_state.lock().unwrap() = to;
     }
 
@@ -4004,12 +4081,8 @@ impl WiredServices {
             nodes
                 .into_iter()
                 .filter(|node| {
-                    let key = crate::nodes::source_key(
-                        &node.name,
-                        &node.server,
-                        node.port,
-                        &node.method,
-                    );
+                    let key =
+                        crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
                     !exclusions.contains(&key)
                 })
                 .map(|node| crate::nodes::ParsedNode {
@@ -4059,8 +4132,8 @@ impl WiredServices {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|error| svc_error("INTERNAL", error))?;
-            let (global, _) = configs::ensure_global(&tx)
-                .map_err(|error| svc_error(error.code(), error))?;
+            let (global, _) =
+                configs::ensure_global(&tx).map_err(|error| svc_error(error.code(), error))?;
             for node in parsed {
                 let key =
                     crate::nodes::source_key(&node.name, &node.server, node.port, &node.method);
@@ -4080,8 +4153,8 @@ impl WiredServices {
                 )
                 .map_err(|error| svc_error(error.code(), error))?;
             }
-            let exclusions = configs::seed_exclusions(&tx)
-                .map_err(|error| svc_error(error.code(), error))?;
+            let exclusions =
+                configs::seed_exclusions(&tx).map_err(|error| svc_error(error.code(), error))?;
             let ids = configs::list_nodes_by_source(&tx, configs::SOURCE_SEED)
                 .map_err(|error| svc_error(error.code(), error))?
                 .into_iter()
@@ -4118,7 +4191,9 @@ impl WiredServices {
 
     /// 把种子缓存里的节点落到当前配置。种子只给节点，分流由配置自己决定。
     fn materialize_seed_nodes(&self, config_id: &str) -> anyhow::Result<usize> {
-        let parsed = self.seed_parsed_nodes()?.ok_or_else(Self::seed_unavailable)?;
+        let parsed = self
+            .seed_parsed_nodes()?
+            .ok_or_else(Self::seed_unavailable)?;
         let (added, _) =
             self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false, false)?;
         Ok(added.len())
@@ -4497,12 +4572,7 @@ impl WiredServices {
     /// 取运行期操作锁；排太久如实报 TIMEOUT，不让界面一直等。
     /// 排队超时不是操作失败：标成可重试，界面给「再试一次」。
     async fn lock_runtime_ops(&self) -> anyhow::Result<tokio::sync::MutexGuard<'_, ()>> {
-        match tokio::time::timeout(
-            RUNTIME_OP_LOCK_TIMEOUT,
-            self.runtime_ops.lock(),
-        )
-        .await
-        {
+        match tokio::time::timeout(RUNTIME_OP_LOCK_TIMEOUT, self.runtime_ops.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => Err(runtime_busy_error()),
         }
@@ -4513,12 +4583,7 @@ impl WiredServices {
         &self,
         what: &str,
     ) -> Result<tokio::sync::MutexGuard<'_, ()>, Value> {
-        match tokio::time::timeout(
-            RUNTIME_REBUILD_LOCK_TIMEOUT,
-            self.runtime_ops.lock(),
-        )
-        .await
-        {
+        match tokio::time::timeout(RUNTIME_REBUILD_LOCK_TIMEOUT, self.runtime_ops.lock()).await {
             Ok(guard) => Ok(guard),
             Err(_) => {
                 log::warn!("{what}：等运行期操作锁超时，跳过本次");
@@ -4557,10 +4622,7 @@ impl WiredServices {
         Err(cancelled_connection_error())
     }
 
-    async fn runtime_start_inner(
-        &self,
-        config_id: Option<String>,
-    ) -> anyhow::Result<Value> {
+    async fn runtime_start_inner(&self, config_id: Option<String>) -> anyhow::Result<Value> {
         // 用户开始连接：正在跑的测速批次让路，finished.reason = "connected"。
         // 探针运行时先停掉，不做进程移交；正常连接随后自己起。
         self.probes.cancel_for_connection();
@@ -4786,12 +4848,7 @@ impl WiredServices {
     }
 
     /// 经当前连接的 Clash API 测一个节点：唯一算「测得」的口径。
-    async fn probe_through_clash(
-        &self,
-        node: &configs::Node,
-        addr: &str,
-        secret: &str,
-    ) -> Value {
+    async fn probe_through_clash(&self, node: &configs::Node, addr: &str, secret: &str) -> Value {
         match clash_delay(addr, secret, &format!("node-{}", node.id)).await {
             Ok(latency) => probe_ok(&node.id, latency),
             Err(message) => probe_unreachable(&node.id, &message),
@@ -4799,10 +4856,7 @@ impl WiredServices {
     }
 
     /// 空闲时用哪套配置起临时探针：优先当前配置，其次任一包含该节点的配置。
-    fn probe_config_for_node(
-        &self,
-        candidates: &[String],
-    ) -> anyhow::Result<configs::Config> {
+    fn probe_config_for_node(&self, candidates: &[String]) -> anyhow::Result<configs::Config> {
         let active = self.active_config_id();
         let config_id = active
             .filter(|id| candidates.iter().any(|candidate| candidate == id))
@@ -4867,9 +4921,9 @@ impl WiredServices {
             }
         };
 
-        let result =
-            self.probe_through_clash(node, &target.addr, &target.secret)
-                .await;
+        let result = self
+            .probe_through_clash(node, &target.addr, &target.secret)
+            .await;
         // 探测期间用户可能已经开始连接：那时报「没测成」比报「连不通」准确。
         if result.get("status").and_then(Value::as_str) == Some("unreachable") {
             let connection = self.connection_state().await;
@@ -4950,7 +5004,6 @@ impl VpnToolServices for WiredServices {
         result
     }
 
-
     async fn trial_status(&self) -> anyhow::Result<Value> {
         let conn = self.store.conn();
         crate::trial::status_json(&conn).map_err(|error| svc_error(error.code(), error))
@@ -4973,7 +5026,6 @@ impl VpnToolServices for WiredServices {
         let _ops = self.lock_runtime_ops().await?;
         self.runtime_stop_inner(force).await
     }
-
 
     async fn runtime_restart(&self, _reason: Option<String>) -> anyhow::Result<Value> {
         let _ops = self.lock_runtime_ops().await?;
@@ -6048,7 +6100,10 @@ impl VpnToolServices for WiredServices {
 
         // 种子先确认拿得到：拿不到就不该顺手建出一套空配置。
         let seed_nodes = if source.is_some() {
-            Some(self.seed_parsed_nodes()?.ok_or_else(Self::seed_unavailable)?)
+            Some(
+                self.seed_parsed_nodes()?
+                    .ok_or_else(Self::seed_unavailable)?,
+            )
         } else {
             None
         };
@@ -6077,13 +6132,15 @@ impl VpnToolServices for WiredServices {
             configs::global(&conn).map_err(|error| svc_error(error.code(), error))?
         };
         let held = match &existing_global {
-            Some(existing) => Some(self.mode_switches.try_begin(&existing.id).ok_or_else(|| {
-                svc_error_retryable(
-                    "CONFLICT",
-                    "这套配置正在切换接管方式，等它结束再试",
-                    json!({ "reason": "switch_in_progress" }),
-                )
-            })?),
+            Some(existing) => {
+                Some(self.mode_switches.try_begin(&existing.id).ok_or_else(|| {
+                    svc_error_retryable(
+                        "CONFLICT",
+                        "这套配置正在切换接管方式，等它结束再试",
+                        json!({ "reason": "switch_in_progress" }),
+                    )
+                })?)
+            }
             None => None,
         };
 
@@ -6114,8 +6171,8 @@ impl VpnToolServices for WiredServices {
         let candidates: Vec<String> = if let Some(parsed) = seed_nodes {
             self.add_parsed_nodes(None, &parsed, configs::SOURCE_SEED, false, false)?;
             let conn = self.store.conn();
-            let exclusions = configs::seed_exclusions(&conn)
-                .map_err(|error| svc_error(error.code(), error))?;
+            let exclusions =
+                configs::seed_exclusions(&conn).map_err(|error| svc_error(error.code(), error))?;
             configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
                 .map_err(|error| svc_error(error.code(), error))?
                 .into_iter()
@@ -6453,72 +6510,77 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn node_probe(&self, node_id: &str) -> anyhow::Result<Value> {
-        let node = {
-            let conn = self.store.conn();
-            configs::get_node(&conn, node_id)
-                .map_err(|error| svc_error(error.code(), error))?
-                .ok_or_else(|| {
-                    svc_error_with_details(
-                        "NOT_FOUND",
-                        "节点不存在",
-                        json!({ "reason": "node_not_found" }),
-                    )
-                })?
-        };
-
-        let candidates = {
-            let conn = self.store.conn();
-            configs::config_ids_for_node(&conn, node_id)
-                .map_err(|error| svc_error(error.code(), error))?
-        };
-        let connection = self.connection_state().await;
-        let runtime_state = self.manager.status().await.state;
-
-        // 连接启动 / 切换在途：运行时槽位随时可能被接管，这时的延迟数字不可信。
-        if connection.launching
-            || matches!(
-                runtime_state,
-                crate::runtime::RuntimeState::Starting
-                    | crate::runtime::RuntimeState::Restarting
-                    | crate::runtime::RuntimeState::Stopping
-            )
-        {
-            return Ok(probe_untested(node_id, "connection_busy"));
-        }
-
-        // 运行时在跑：只测属于当前连接配置的节点（不要求是选中节点）。
-        if connection.connected {
-            let in_connected_config = connection
-                .config_id
-                .as_ref()
-                .map(|id| candidates.iter().any(|candidate| candidate == id))
-                .unwrap_or(false);
-            // TUN 起不了第二个运行时；proxy 模式也一律不起，避免双进程与端口/路由耦合。
-            if !in_connected_config {
-                return Ok(probe_untested(node_id, "other_config"));
-            }
-            let Some((addr, secret)) = self.clash_endpoint(connection.tun).await else {
-                return Ok(probe_untested(node_id, "clash_unavailable"));
+        let result = async {
+            let node = {
+                let conn = self.store.conn();
+                configs::get_node(&conn, node_id)
+                    .map_err(|error| svc_error(error.code(), error))?
+                    .ok_or_else(|| {
+                        svc_error_with_details(
+                            "NOT_FOUND",
+                            "节点不存在",
+                            json!({ "reason": "node_not_found" }),
+                        )
+                    })?
             };
-            return Ok(self.probe_through_clash(&node, &addr, &secret).await);
-        }
 
-        // 没连接也没在启动：只有运行时完全空闲才值得临时起一个。
-        if !matches!(
-            runtime_state,
-            crate::runtime::RuntimeState::Idle | crate::runtime::RuntimeState::Failed
-        ) {
-            return Ok(probe_untested(node_id, "connection_busy"));
+            let candidates = {
+                let conn = self.store.conn();
+                configs::config_ids_for_node(&conn, node_id)
+                    .map_err(|error| svc_error(error.code(), error))?
+            };
+            let connection = self.connection_state().await;
+            let runtime_state = self.manager.status().await.state;
+
+            // 连接启动 / 切换在途：运行时槽位随时可能被接管，这时的延迟数字不可信。
+            if connection.launching
+                || matches!(
+                    runtime_state,
+                    crate::runtime::RuntimeState::Starting
+                        | crate::runtime::RuntimeState::Restarting
+                        | crate::runtime::RuntimeState::Stopping
+                )
+            {
+                return Ok(probe_untested(node_id, "connection_busy"));
+            }
+
+            // 运行时在跑：只测属于当前连接配置的节点（不要求是选中节点）。
+            if connection.connected {
+                let in_connected_config = connection
+                    .config_id
+                    .as_ref()
+                    .map(|id| candidates.iter().any(|candidate| candidate == id))
+                    .unwrap_or(false);
+                // TUN 起不了第二个运行时；proxy 模式也一律不起，避免双进程与端口/路由耦合。
+                if !in_connected_config {
+                    return Ok(probe_untested(node_id, "other_config"));
+                }
+                let Some((addr, secret)) = self.clash_endpoint(connection.tun).await else {
+                    return Ok(probe_untested(node_id, "clash_unavailable"));
+                };
+                return Ok(self.probe_through_clash(&node, &addr, &secret).await);
+            }
+
+            // 没连接也没在启动：只有运行时完全空闲才值得临时起一个。
+            if !matches!(
+                runtime_state,
+                crate::runtime::RuntimeState::Idle | crate::runtime::RuntimeState::Failed
+            ) {
+                return Ok(probe_untested(node_id, "connection_busy"));
+            }
+            let has_credentials = crate::secrets::get_secret(&node.password_ref)
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_credentials {
+                return Ok(probe_untested(node_id, "no_credentials"));
+            }
+            let config = self.probe_config_for_node(&candidates)?;
+            Ok(self.probe_with_idle_runtime(&node, &config).await)
         }
-        let has_credentials = crate::secrets::get_secret(&node.password_ref)
-            .ok()
-            .flatten()
-            .is_some();
-        if !has_credentials {
-            return Ok(probe_untested(node_id, "no_credentials"));
-        }
-        let config = self.probe_config_for_node(&candidates)?;
-        Ok(self.probe_with_idle_runtime(&node, &config).await)
+        .await;
+        log_node_probe_outcome(node_id, &result);
+        result
     }
 
     async fn node_probe_all(
@@ -6567,10 +6629,9 @@ impl VpnToolServices for WiredServices {
         } else if connection.connected {
             if connection.config_id.as_deref() == Some(config.id.as_str()) {
                 match self.clash_endpoint(connection.tun).await {
-                    Some((addr, secret)) => BatchRoute::Clash(probe_batch::ClashTarget {
-                        addr,
-                        secret,
-                    }),
+                    Some((addr, secret)) => {
+                        BatchRoute::Clash(probe_batch::ClashTarget { addr, secret })
+                    }
                     None => BatchRoute::Untested("clash_unavailable"),
                 }
             } else {
@@ -6657,8 +6718,7 @@ impl VpnToolServices for WiredServices {
                                 let target = target.clone();
                                 async move { probe_batch::probe_node(&node, &target).await }
                             };
-                            let _ =
-                                probe_batch::run_batch_probing(state, meta, nodes, probe).await;
+                            let _ = probe_batch::run_batch_probing(state, meta, nodes, probe).await;
                         }
                         Err(failure) => {
                             // 起不来就整批标成未测：同一句原因写进每个节点结果。
@@ -6668,8 +6728,7 @@ impl VpnToolServices for WiredServices {
                                 let id = node.id.clone();
                                 async move { probe_untested(&id, reason) }
                             };
-                            let _ =
-                                probe_batch::run_batch_probing(state, meta, nodes, probe).await;
+                            let _ = probe_batch::run_batch_probing(state, meta, nodes, probe).await;
                         }
                     }
                     manager.stop_probe().await;
@@ -7312,36 +7371,35 @@ impl VpnToolServices for WiredServices {
             Err(first) => {
                 // 回滚：写回旧值，再用旧模式重启。错误码始终用首次失败那个。
                 match self.update_connection_mode(&config.id, &previous_mode) {
-                    Ok(restored_config) => match self
-                        .runtime_start(Some(restored_config.id.clone()))
-                        .await
-                    {
-                        Ok(_) => Err(with_mode_context(
-                            first,
-                            json!({
-                                "config_id": config.id.clone(),
-                                "mode": mode,
-                                "previous_mode": previous_mode,
-                                "target_mode": mode,
-                                "changed": false,
-                                "connected": true,
-                                "restored": true,
-                            }),
-                        )),
-                        Err(second) => Err(with_mode_context(
-                            first,
-                            json!({
-                                "config_id": config.id.clone(),
-                                "mode": mode,
-                                "previous_mode": previous_mode,
-                                "target_mode": mode,
-                                "changed": false,
-                                "connected": false,
-                                "restored": false,
-                                "rollback_reason": service_reason(&second),
-                            }),
-                        )),
-                    },
+                    Ok(restored_config) => {
+                        match self.runtime_start(Some(restored_config.id.clone())).await {
+                            Ok(_) => Err(with_mode_context(
+                                first,
+                                json!({
+                                    "config_id": config.id.clone(),
+                                    "mode": mode,
+                                    "previous_mode": previous_mode,
+                                    "target_mode": mode,
+                                    "changed": false,
+                                    "connected": true,
+                                    "restored": true,
+                                }),
+                            )),
+                            Err(second) => Err(with_mode_context(
+                                first,
+                                json!({
+                                    "config_id": config.id.clone(),
+                                    "mode": mode,
+                                    "previous_mode": previous_mode,
+                                    "target_mode": mode,
+                                    "changed": false,
+                                    "connected": false,
+                                    "restored": false,
+                                    "rollback_reason": service_reason(&second),
+                                }),
+                            )),
+                        }
+                    }
                     Err(rollback_error) => {
                         // 库里已是新方式、连接停在断开态：界面必须能看见这个事实。
                         if let Ok(current) = self.require_config(&config.id) {
@@ -7912,6 +7970,33 @@ impl VpnToolServices for WiredServices {
         })
     }
 
+    async fn submit_issue_to_public_wall(
+        &self,
+        payload: Value,
+        idempotency_key: &str,
+    ) -> anyhow::Result<Value> {
+        crate::control_plane::issues::submit(&payload, idempotency_key)
+            .await
+            .map_err(svc_from_cp)
+    }
+
+    async fn read_public_issue_wall(
+        &self,
+        query: crate::control_plane::issues::IssueQuery,
+    ) -> anyhow::Result<Value> {
+        crate::control_plane::issues::read(&query)
+            .await
+            .map_err(svc_from_cp)
+    }
+
+    fn issue_wall_client_info(&self) -> Value {
+        let selected = {
+            let conn = self.store.conn();
+            crate::store::settings::app_language(&conn)
+        };
+        crate::control_plane::issues::ClientInfo::current(crate::i18n::resolve(selected)).to_json()
+    }
+
     async fn save_deepseek_key(&self, key: &str) -> anyhow::Result<Value> {
         let outcome = crate::secrets::save_deepseek_key(key)
             .await
@@ -8077,11 +8162,7 @@ impl WiredServices {
     ///
     /// **不递增代数**：这是本次启动自己的收尾，不是新的意图。在这里递增会让
     /// 并发另一次启动的「记代」提前过期，导致它误判被取代并收掉自己的新连接。
-    async fn rollback_proxy_after_enable_failure(
-        &self,
-        ours: Option<u32>,
-        context: StartContext,
-    ) {
+    async fn rollback_proxy_after_enable_failure(&self, ours: Option<u32>, context: StartContext) {
         if let Err(error) = self.proxy.disable() {
             log::warn!("回滚系统代理失败：{error}");
         }
@@ -8245,10 +8326,7 @@ impl WiredServices {
             let _ops = self.lock_runtime_ops().await?;
             match self.decide_connection(config).await? {
                 ConnectionDecision::Idempotent(value) => return Ok(value),
-                ConnectionDecision::Start {
-                    epoch,
-                    old_stopped,
-                } => (epoch, old_stopped),
+                ConnectionDecision::Start { epoch, old_stopped } => (epoch, old_stopped),
             }
         };
 
@@ -8257,7 +8335,8 @@ impl WiredServices {
             lock_held: false,
         };
         let result = self.connect_body(config, &[], context).await;
-        self.finish_connection_start(epoch, old_stopped, result).await
+        self.finish_connection_start(epoch, old_stopped, result)
+            .await
     }
 
     /// 决策段：只在持锁时调用。幂等判断 → 停旧 → 记代数，三件事必须在同一临界区，
@@ -8315,10 +8394,7 @@ impl WiredServices {
         // 这一次启动本身也是一次会改运行时的意图：记在停旧之后，
         // 并发启动按取锁顺序各记一代，后者的收尾据此判断前者是否已过期。
         let epoch = self.bump_runtime_epoch();
-        Ok(ConnectionDecision::Start {
-            epoch,
-            old_stopped,
-        })
+        Ok(ConnectionDecision::Start { epoch, old_stopped })
     }
 
     /// 拉起返回后的收尾：仍在锁内比对代数，被取代时只停本次拉起的实例。
@@ -8391,9 +8467,10 @@ impl WiredServices {
         if snapshot.get("mode").and_then(Value::as_str) == Some("tun") {
             // `stop_for_failed_launch` 本来就按「无登记 + Running pid 是本次」判身份，
             // 有更新的启动登记时不会动手。
-            return self.tun.stop_for_failed_launch(ours).map_err(|error| {
-                svc_error("INTERNAL", format!("停 TUN 失败：{}", error.message))
-            });
+            return self
+                .tun
+                .stop_for_failed_launch(ours)
+                .map_err(|error| svc_error("INTERNAL", format!("停 TUN 失败：{}", error.message)));
         }
         // 比较与停在同一把 manager 内部锁内完成：不在外面读一次 pid 再进去停。
         self.manager
@@ -8413,11 +8490,7 @@ impl WiredServices {
     ///
     /// 返回给 `node_attach` / `node_create` 的 `runtime_rebuild` 字段；
     /// 失败不影响「节点已经进池」这件事。
-    async fn rebuild_running_config(
-        &self,
-        config: &configs::Config,
-        added: &[String],
-    ) -> Value {
+    async fn rebuild_running_config(&self, config: &configs::Config, added: &[String]) -> Value {
         if added.is_empty() {
             return json!({ "status": "skipped", "reason": "no_new_nodes" });
         }
@@ -8616,7 +8689,11 @@ impl WiredServices {
                         AfterStart::Replaced => return rebuild_replaced_by_new_connection(),
                         AfterStart::Unknown => return rebuild_unknown(),
                     }
-                } else if rolled.as_ref().err().is_some_and(|error| is_cancelled_error(error)) {
+                } else if rolled
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| is_cancelled_error(error))
+                {
                     // 回滚拉起被取消 ≠ 用户断开：可能是重启或另一次启动打断了它。
                     // 与回滚守卫同型——重读实际状态再下结论。
                     match self.actual_connection_state(&latest.id).await {
@@ -9480,8 +9557,7 @@ impl WiredServices {
             }
             let _ = self.manager.stop().await;
             crate::config::remove_all_profile_configs(&self.config_dir());
-            verified
-                && self.manager.status().await.state == crate::runtime::RuntimeState::Idle
+            verified && self.manager.status().await.state == crate::runtime::RuntimeState::Idle
         };
 
         let exit_ip =
@@ -10439,7 +10515,10 @@ mod config_service_tests {
             .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["layout"], serde_json::json!(null));
         assert_eq!(detail["layout_revision"], serde_json::json!(null));
 
@@ -10454,7 +10533,10 @@ mod config_service_tests {
         };
         assert_eq!(revision, 1);
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["layout_revision"], serde_json::json!(1));
         assert_eq!(
             detail["layout"]["blocks"][0]["type"],
@@ -10510,7 +10592,10 @@ mod config_service_tests {
             configs::attach_node(&conn, &config_id, "nd_owned").unwrap();
         }
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
         let owned = nodes
@@ -10544,7 +10629,10 @@ mod config_service_tests {
             )
             .unwrap();
         }
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         let owned = detail["nodes"]
             .as_array()
             .unwrap()
@@ -10661,7 +10749,10 @@ mod config_service_tests {
         let text = list.to_string();
         assert!(!text.contains("pw-secret"), "{text}");
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["nodes"][0]["server"], "203.0.113.10");
         assert_eq!(detail["nodes"][0]["protocol"], "shadowsocks");
         // 导入不写当前节点：由用户点选或「连接」时再 `node_switch`。
@@ -10671,7 +10762,10 @@ mod config_service_tests {
 
         let node_id = detail["nodes"][0]["node_id"].as_str().unwrap().to_string();
         services.node_switch(&config_id, &node_id).await.unwrap();
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], node_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -10771,7 +10865,9 @@ mod config_service_tests {
 
         let node_id = {
             let conn = services.store.conn();
-            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
+            configs::list_nodes(&conn, &config_id).unwrap()[0]
+                .id
+                .clone()
         };
         let server_id = "srv_keep_node";
         {
@@ -10801,7 +10897,10 @@ mod config_service_tests {
             let server = crate::store::servers::get(&conn, server_id)
                 .unwrap()
                 .expect("删节点不能删服务器镜像行");
-            assert_eq!(server.node_id, None, "外键 ON DELETE SET NULL 应把 node_id 置空");
+            assert_eq!(
+                server.node_id, None,
+                "外键 ON DELETE SET NULL 应把 node_id 置空"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -10848,7 +10947,10 @@ mod config_service_tests {
         assert_eq!(data["restored"], true);
         assert_eq!(data["confirmation"], "not_needed");
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["connect_mode"], configs::CONNECTION_TUN);
         assert!(detail["listen_port"].is_null(), "全部软件不能留代理端口");
 
@@ -10862,7 +10964,10 @@ mod config_service_tests {
         assert_eq!(again["connected"], false);
         assert_eq!(again["confirmation"], "not_needed");
         assert_eq!(
-            services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"],
+            services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["updated_at"],
             before
         );
 
@@ -10870,7 +10975,10 @@ mod config_service_tests {
             .config_set_mode(Some(config_id), "vpn", false)
             .await
             .unwrap_err();
-        assert_eq!(error.downcast_ref::<ServiceError>().unwrap().code, "INVALID_ARGUMENT");
+        assert_eq!(
+            error.downcast_ref::<ServiceError>().unwrap().code,
+            "INVALID_ARGUMENT"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10896,7 +11004,10 @@ mod config_service_tests {
             "switch_in_progress"
         );
         assert_eq!(
-            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "被拒绝的请求不能写库"
         );
@@ -10909,7 +11020,10 @@ mod config_service_tests {
     async fn config_set_mode_reports_config_unknown_for_a_legacy_connection() {
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services.config_create(create_input("老 TUN")).await.unwrap();
+        let created = services
+            .config_create(create_input("老 TUN"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         services.tun.force_running_for_test(4343, None);
 
@@ -10924,7 +11038,10 @@ mod config_service_tests {
             "config_unknown"
         );
         assert_eq!(
-            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY
         );
 
@@ -10936,7 +11053,10 @@ mod config_service_tests {
     async fn config_set_mode_requires_confirmation_while_the_connection_is_launching() {
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services.config_create(create_input("启动窗口")).await.unwrap();
+        let created = services
+            .config_create(create_input("启动窗口"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         services.tun.force_launching_for_test(&config_id);
 
@@ -10951,7 +11071,10 @@ mod config_service_tests {
         assert_eq!(details["will_disconnect"], true);
         assert_eq!(details["config_id"], config_id);
         assert_eq!(
-            services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "未确认不能写库"
         );
@@ -10975,7 +11098,10 @@ mod config_service_tests {
         assert_eq!(routed["reconnect"], "not_running");
         assert_eq!(routed["effective"], "next_connection");
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["routing_mode"], configs::ROUTING_DIRECT);
 
         let route = services.route_get(Some(config_id)).await.unwrap();
@@ -11053,10 +11179,7 @@ mod config_service_tests {
     async fn config_activate_is_idempotent_for_the_global_config() {
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services
-            .config_create(create_input("全局"))
-            .await
-            .unwrap();
+        let created = services.config_create(create_input("全局")).await.unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
         services.tun.force_running_for_test(4242, Some(&config_id));
@@ -11106,7 +11229,10 @@ mod config_service_tests {
                 .unwrap();
         }
         // 导入不写当前节点，先自己选一个，再在启动窗口里试切到另一个。
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         let ids = detail["nodes"]
             .as_array()
             .unwrap()
@@ -11127,7 +11253,10 @@ mod config_service_tests {
         );
 
         // 库里的选择没被改：界面不能宣布「已切换到 X」。
-        let after = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let after = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(after["current_node_id"], current);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -11138,10 +11267,7 @@ mod config_service_tests {
     async fn a_second_config_create_is_rejected() {
         let dir = temp_dir();
         let services = services(&dir);
-        let a = services
-            .config_create(create_input("全局"))
-            .await
-            .unwrap();
+        let a = services.config_create(create_input("全局")).await.unwrap();
         let a_id = a["config_id"].as_str().unwrap().to_string();
         assert_eq!(a["is_active"], true);
 
@@ -11169,7 +11295,6 @@ mod config_service_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     /// 启动窗口里按断开：取消在途启动并停掉后端，不能让迟到的 start 继续。
     #[tokio::test]
@@ -11337,7 +11462,10 @@ mod config_service_tests {
             .unwrap();
         assert_eq!(data["imported"], 2);
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
         assert_eq!(nodes[0]["name"], "A");
@@ -11371,7 +11499,10 @@ mod config_service_tests {
         assert_eq!(data["imported"], 1, "一行坏的不作废整批");
         assert_eq!(data["skipped"][0]["reason"], "unsupported_scheme");
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["node_count"], 1, "追加到指定配置后节点数增加");
         assert_eq!(detail["nodes"][0]["name"], "F");
         assert_eq!(detail["nodes"][0]["source"], "manual");
@@ -11606,7 +11737,10 @@ mod config_service_tests {
         assert_eq!(switched["connected"], false);
         assert!(switched["runtime"].is_null());
 
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], node_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -11649,7 +11783,10 @@ mod config_service_tests {
         crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services.config_create(create_input("连接后新增")).await.unwrap();
+        let created = services
+            .config_create(create_input("连接后新增"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
 
         // 连接时池里只有旧节点；新节点是连上之后才加进来的。
@@ -11683,10 +11820,7 @@ mod config_service_tests {
             .to_string();
         services.node_switch(&config_id, &old_id).await.unwrap();
 
-        let addr = spawn_selector_api(
-            vec![format!("node-{old_id}")],
-            format!("node-{old_id}"),
-        );
+        let addr = spawn_selector_api(vec![format!("node-{old_id}")], format!("node-{old_id}"));
         services.tun.force_running_with_clash_for_test(
             4242,
             &config_id,
@@ -11712,7 +11846,10 @@ mod config_service_tests {
         );
 
         // 失败不写库：不能留下「库里切了、实际没切」的分叉。
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], old_id);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -11725,10 +11862,7 @@ mod config_service_tests {
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "TIMEOUT");
         assert!(service.retryable, "排队超时不是失败，要允许重试");
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "runtime_busy"
-        );
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "runtime_busy");
     }
 
     /// 排队上限是真的经锁生效的：用户侧 20s 到点前一直排队，到点才 TIMEOUT / runtime_busy；
@@ -11771,10 +11905,7 @@ mod config_service_tests {
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "TIMEOUT");
         assert!(service.retryable, "排队超时不是失败，要允许重试");
-        assert_eq!(
-            service.details.as_ref().unwrap()["reason"],
-            "runtime_busy"
-        );
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "runtime_busy");
 
         let reason = {
             let mut rebuild = std::pin::pin!(services.lock_runtime_ops_skipped("测试"));
@@ -11903,7 +12034,10 @@ mod config_service_tests {
         crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services.config_create(create_input("已连接")).await.unwrap();
+        let created = services
+            .config_create(create_input("已连接"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         let node = services
             .node_create(NodeCreateInput {
@@ -11944,7 +12078,10 @@ mod config_service_tests {
         crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
-        let created = services.config_create(create_input("批量未测")).await.unwrap();
+        let created = services
+            .config_create(create_input("批量未测"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         for (name, server) in [("甲", "203.0.113.11"), ("乙", "203.0.113.12")] {
             services
@@ -12191,17 +12328,11 @@ mod config_service_tests {
         // 不管 TUN 是不是正用着这套、读不读得到配置 id，删除都只回 only_config。
         services.tun.force_running_for_test(4242, Some(&config_id));
         let error = services.config_delete(&config_id).await.unwrap_err();
-        assert!(
-            error.to_string().contains("全局配置不能删除"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("全局配置不能删除"), "{error}");
 
         services.tun.force_running_for_test(4343, None);
         let error = services.config_delete(&config_id).await.unwrap_err();
-        assert!(
-            error.to_string().contains("全局配置不能删除"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("全局配置不能删除"), "{error}");
     }
 
     /// TUN 下流量与连接数采不到：字段必须在、值必须是 null，
@@ -12457,7 +12588,10 @@ mod config_service_tests {
         }
 
         services.merge_seed_into_global().unwrap();
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["node_count"], 2, "种子节点要进池");
         assert_eq!(detail["current_node_id"], owned_id, "不能改当前节点");
 
@@ -12624,7 +12758,11 @@ mod config_service_tests {
             .node_attach(Some("seed".into()), None, None)
             .await
             .unwrap_err();
-        assert_eq!(reason(error), "seed_unavailable", "没有种子缓存时不建空配置");
+        assert_eq!(
+            reason(error),
+            "seed_unavailable",
+            "没有种子缓存时不建空配置"
+        );
 
         // 全局配置还不存在：先建一套，再验证「不存在节点」与「非全局 id」。
         let created = services.config_create(create_input("全局")).await.unwrap();
@@ -12636,7 +12774,11 @@ mod config_service_tests {
         assert_eq!(reason(error), "node_not_found");
 
         let error = services
-            .node_attach(None, Some(vec!["node_missing".into()]), Some("cfg_other".into()))
+            .node_attach(
+                None,
+                Some(vec!["node_missing".into()]),
+                Some("cfg_other".into()),
+            )
             .await
             .unwrap_err();
         assert_eq!(reason(error), "not_global_config");
@@ -12770,7 +12912,10 @@ mod config_service_tests {
         assert!(configs[0]["current_node_id"].is_null());
 
         let config_id = configs[0]["config_id"].as_str().unwrap().to_string();
-        let detail = services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["nodes"][0]["source"], "manual");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -12969,9 +13114,7 @@ mod main_flow_tests {
     ///
     /// 返回停止标志；用例结束时置 false。守护线程本身退出即可，已起的监听线程
     /// 随测试进程结束，与上面的单次监听器一致。
-    fn spawn_reusable_port_watcher(
-        data_dir: PathBuf,
-    ) -> Arc<std::sync::atomic::AtomicBool> {
+    fn spawn_reusable_port_watcher(data_dir: PathBuf) -> Arc<std::sync::atomic::AtomicBool> {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let flag = Arc::clone(&stop);
         std::thread::spawn(move || {
@@ -13170,10 +13313,7 @@ mod main_flow_tests {
         let node_id = node["node_id"].as_str().unwrap().to_string();
 
         // 导入 / 新建节点只进池子；用户点选或连接时才写当前节点。
-        h.services
-            .node_switch(&config_id, &node_id)
-            .await
-            .unwrap();
+        h.services.node_switch(&config_id, &node_id).await.unwrap();
 
         let list = h.services.config_list().await.unwrap();
         let configs = list["configs"].as_array().unwrap();
@@ -13365,7 +13505,11 @@ mod main_flow_tests {
         );
 
         // 详情必须能正常返回：空当前节点不是错误，节点集照实给出。
-        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert!(detail["current_node_id"].is_null());
         assert_eq!(detail["node_count"], 2);
         let nodes = detail["nodes"].as_array().unwrap();
@@ -13373,11 +13517,7 @@ mod main_flow_tests {
         let node_id = nodes[1]["node_id"].as_str().unwrap().to_string();
 
         // 用户点「连接」前先落库当前节点：previous 为 null 也要成功。
-        let switched = h
-            .services
-            .node_switch(&config_id, &node_id)
-            .await
-            .unwrap();
+        let switched = h.services.node_switch(&config_id, &node_id).await.unwrap();
         assert!(switched["previous_node_id"].is_null());
         assert_eq!(switched["node_id"], node_id.as_str());
 
@@ -13390,7 +13530,8 @@ mod main_flow_tests {
 
         let status = serde_json::to_value(h.services.manager.status().await).unwrap();
         assert_eq!(
-            status["node_id"], node_id.as_str(),
+            status["node_id"],
+            node_id.as_str(),
             "连接的必须是切过去的那台"
         );
 
@@ -13580,8 +13721,7 @@ mod main_flow_tests {
         }
 
         fn stop(&self) -> Result<(), crate::tun::backend::TunError> {
-            self.stops
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fail_stop {
                 return Err(crate::tun::backend::TunError::new(
                     crate::tun::backend::TunErrorCode::TunStartFailed,
@@ -13625,14 +13765,16 @@ mod main_flow_tests {
         // 全局单配置下不会有第二套；这里用一个不在库里的旧配置 id 模拟升级后接手。
         let old_id = "cfg_old_runtime".to_string();
         // 新配置没有节点：连到「取节点」这一步就会失败，正好证明旧的已经先停了。
-        let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
+        let new = h
+            .services
+            .config_create(auto_port_input("新代理"))
+            .await
+            .unwrap();
         let new_id = new["config_id"].as_str().unwrap().to_string();
 
         let backend = Arc::new(SilentTun::default());
         inject_silent_tun(&mut h.services, Arc::clone(&backend));
-        h.services
-            .tun
-            .force_running_for_test(4242, Some(&old_id));
+        h.services.tun.force_running_for_test(4242, Some(&old_id));
 
         let error = h
             .services
@@ -13661,14 +13803,16 @@ mod main_flow_tests {
         let mut h = harness();
         // 用一个不在库里的旧配置 id 模拟升级后接手的连接。
         let old_id = "cfg_old_runtime".to_string();
-        let new = h.services.config_create(auto_port_input("新代理")).await.unwrap();
+        let new = h
+            .services
+            .config_create(auto_port_input("新代理"))
+            .await
+            .unwrap();
         let new_id = new["config_id"].as_str().unwrap().to_string();
 
         let backend = Arc::new(SilentTun::failing());
         inject_silent_tun(&mut h.services, Arc::clone(&backend));
-        h.services
-            .tun
-            .force_running_for_test(4242, Some(&old_id));
+        h.services.tun.force_running_for_test(4242, Some(&old_id));
 
         let mut events = h.services.manager.subscribe();
         let error = h.services.runtime_start(Some(new_id)).await.unwrap_err();
@@ -13923,11 +14067,7 @@ mod main_flow_tests {
             .force_running_for_test(4242, Some(&config_id));
 
         h.services.runtime_stop(false).await.unwrap();
-        assert_eq!(
-            epoch(&h.services).await,
-            3,
-            "停掉在跑的连接再推进一代"
-        );
+        assert_eq!(epoch(&h.services).await, 3, "停掉在跑的连接再推进一代");
         h.services.runtime_stop(false).await.unwrap();
         assert_eq!(
             epoch(&h.services).await,
@@ -14016,12 +14156,25 @@ mod main_flow_tests {
         let h = harness();
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "本机代理", "pw-same").await;
-        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
-        let before = h.services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"].clone();
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+        let before = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap()["updated_at"]
+            .clone();
 
         let data = h
             .services
-            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_SYSTEM_PROXY, false)
+            .config_set_mode(
+                Some(config_id.clone()),
+                configs::CONNECTION_SYSTEM_PROXY,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(data["changed"], false);
@@ -14032,9 +14185,15 @@ mod main_flow_tests {
             0,
             "同值不能断开连接"
         );
-        assert_eq!(h.services.manager.status().await.state, RuntimeState::Running);
         assert_eq!(
-            h.services.config_detail(Some(config_id.clone())).await.unwrap()["updated_at"],
+            h.services.manager.status().await.state,
+            RuntimeState::Running
+        );
+        assert_eq!(
+            h.services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["updated_at"],
             before
         );
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -14059,7 +14218,11 @@ mod main_flow_tests {
 
         let data = h
             .services
-            .config_set_mode(Some(config_id.clone()), configs::CONNECTION_SYSTEM_PROXY, true)
+            .config_set_mode(
+                Some(config_id.clone()),
+                configs::CONNECTION_SYSTEM_PROXY,
+                true,
+            )
             .await
             .unwrap();
         assert_eq!(data["mode"], configs::CONNECTION_SYSTEM_PROXY);
@@ -14084,7 +14247,11 @@ mod main_flow_tests {
         let h = harness();
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "需要确认", "pw-confirm").await;
-        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
 
         let error = h
             .services
@@ -14102,7 +14269,10 @@ mod main_flow_tests {
             "未确认不能停掉连接"
         );
         assert_eq!(
-            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            h.services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "未确认不能写库"
         );
@@ -14115,7 +14285,11 @@ mod main_flow_tests {
         let mut h = harness();
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "停不掉", "pw-stop-fail").await;
-        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
         inject_silent_tun(&mut h.services, Arc::new(SilentTun::failing()));
 
         let error = h
@@ -14131,7 +14305,10 @@ mod main_flow_tests {
             "必须告诉 UI 连接还在不在：{details}"
         );
         assert_eq!(
-            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            h.services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY
         );
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -14145,7 +14322,11 @@ mod main_flow_tests {
         inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "回滚成功", "pw-rollback").await;
-        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
 
         let error = h
             .services
@@ -14162,7 +14343,10 @@ mod main_flow_tests {
         assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
 
         assert_eq!(
-            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            h.services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_SYSTEM_PROXY,
             "库必须写回旧方式"
         );
@@ -14181,7 +14365,11 @@ mod main_flow_tests {
         inject_silent_tun(&mut h.services, Arc::new(SilentTun::default()));
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
         let config_id = create_config_with_node(&h.services, "回滚失败", "pw-stuck").await;
-        let _ = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let _ = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
         {
             let conn = h.services.store.conn();
             conn.execute_batch(
@@ -14207,7 +14395,10 @@ mod main_flow_tests {
         assert_eq!(details["previous_mode"], configs::CONNECTION_SYSTEM_PROXY);
 
         assert_eq!(
-            h.services.config_detail(Some(config_id.clone())).await.unwrap()["connect_mode"],
+            h.services
+                .config_detail(Some(config_id.clone()))
+                .await
+                .unwrap()["connect_mode"],
             configs::CONNECTION_TUN
         );
         assert_eq!(
@@ -14217,7 +14408,8 @@ mod main_flow_tests {
         );
         {
             let conn = h.services.store.conn();
-            conn.execute_batch("DROP TRIGGER block_mode_rollback").unwrap();
+            conn.execute_batch("DROP TRIGGER block_mode_rollback")
+                .unwrap();
         }
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -14227,9 +14419,14 @@ mod main_flow_tests {
     async fn a_seed_connection_starts_the_trial_only_once() {
         let h = harness();
         let watcher = spawn_reusable_port_watcher(h.dir.clone());
-        let (config_id, _) = create_config_with_seed_node(&h.services, "试用起算", "pw-trial").await;
+        let (config_id, _) =
+            create_config_with_seed_node(&h.services, "试用起算", "pw-trial").await;
 
-        let connected = h.services.runtime_start(Some(config_id.clone())).await.unwrap();
+        let connected = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(connected["state"], "running", "{connected}");
         let first = {
             let conn = h.services.store.conn();
@@ -14329,9 +14526,11 @@ mod main_flow_tests {
                 .unwrap();
             assert_eq!(seed_links, 0, "数据库必须已经清理，不能因断连失败回滚");
             // 第二次检查不再返回清理结果：事件只发一次。
-            assert!(crate::trial::expire_if_needed(&conn, crate::store::now_ms())
-                .unwrap()
-                .is_none());
+            assert!(
+                crate::trial::expire_if_needed(&conn, crate::store::now_ms())
+                    .unwrap()
+                    .is_none()
+            );
         }
         assert!(
             matches!(
@@ -14349,7 +14548,9 @@ mod main_flow_tests {
         let config_id = create_config_with_node(&h.services, "自建在线", "pw-manual-expire").await;
         let manual_node_id = {
             let conn = h.services.store.conn();
-            configs::list_nodes(&conn, &config_id).unwrap()[0].id.clone()
+            configs::list_nodes(&conn, &config_id).unwrap()[0]
+                .id
+                .clone()
         };
         h.services
             .node_switch(&config_id, &manual_node_id)
@@ -14497,7 +14698,10 @@ mod main_flow_tests {
             .expect_err("不存在的服务器必须报错");
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "NOT_FOUND");
-        assert_eq!(service.details.as_ref().unwrap()["reason"], "server_not_found");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "server_not_found"
+        );
     }
     /// 两条重建用例都要起假运行时抢端口：互相串行，避免并行时端口/进程互相踩。
     static REBUILD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -14597,7 +14801,11 @@ mod main_flow_tests {
         );
         assert_eq!(attached["runtime_rebuild"]["new_nodes"][0], b_id.as_str());
         assert_eq!(attached["node_count"], 2);
-        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], a_id, "重建不能改当前节点");
 
         let profile = rendered_profiles(&h.dir);
@@ -14859,7 +15067,8 @@ mod main_flow_tests {
             "回滚被新启动打断不是用户断开：{rebuild}"
         );
         assert_eq!(
-            rebuild["message"], "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。",
+            rebuild["message"],
+            "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。",
             "必须是「被接管」那条文案，不能是「无法确认」：{rebuild}"
         );
         assert_eq!(rebuild["status"], "failed", "{rebuild}");
@@ -14907,12 +15116,17 @@ mod main_flow_tests {
         assert_eq!(check["ok"], true, "{check}");
         let detail = check["detail"].as_str().unwrap();
         assert!(detail.contains("全部流量"), "TUN 连接必须是全接管：{check}");
-        assert!(detail.contains("TCP") && detail.contains("UDP") && detail.contains("QUIC"),
-            "全接管要说清覆盖哪些流量：{check}");
+        assert!(
+            detail.contains("TCP") && detail.contains("UDP") && detail.contains("QUIC"),
+            "全接管要说清覆盖哪些流量：{check}"
+        );
         assert!(check["action"].is_null(), "{check}");
         // 与主状态不矛盾：同一份夹具下 connection_state 也必须是「连着且 TUN」。
         let connection = h.services.connection_state().await;
-        assert!(connection.connected && connection.tun, "夹具本身要是 TUN 连接");
+        assert!(
+            connection.connected && connection.tun,
+            "夹具本身要是 TUN 连接"
+        );
     }
 
     /// 诊断的取源必须是统一快照：TUN 连接时不能再按「未连接」报。
@@ -14981,7 +15195,11 @@ mod main_flow_tests {
         let rebuild = &attached["runtime_rebuild"];
         assert_eq!(rebuild["status"], "failed", "{rebuild}");
         assert_eq!(rebuild["restored"], true);
-        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], a_id, "库里和实际都还是原节点");
         let profile = rendered_profiles(&h.dir);
         assert!(!profile.contains(&format!("node-{spare}")));
@@ -15016,7 +15234,11 @@ mod main_flow_tests {
         let attached = attached.unwrap();
         assert_eq!(attached["runtime_rebuild"]["status"], "failed");
         assert_eq!(attached["runtime_rebuild"]["restored"], true);
-        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], a_id, "选择没被改");
         let profile = rendered_profiles(&h.dir);
         assert!(!profile.contains(&format!("node-{spare}")));
@@ -15073,7 +15295,11 @@ mod main_flow_tests {
             .unwrap();
         let c_id = created["node_id"].as_str().unwrap().to_string();
         assert_eq!(created["runtime_rebuild"]["status"], "applied");
-        let detail = h.services.config_detail(Some(config_id.clone())).await.unwrap();
+        let detail = h
+            .services
+            .config_detail(Some(config_id.clone()))
+            .await
+            .unwrap();
         assert_eq!(detail["current_node_id"], a_id);
         let profile = rendered_profiles(&h.dir);
         assert!(profile.contains(&format!("node-{c_id}")));
@@ -15155,10 +15381,7 @@ mod main_flow_tests {
         // 先占住运行期锁，让重建在「取锁」这一步挂起。
         let hold = h.services.runtime_ops.lock().await;
         let spare_ids = [spare];
-        let mut rebuild = std::pin::pin!(h.services.rebuild_running_config(
-            &config,
-            &spare_ids
-        ));
+        let mut rebuild = std::pin::pin!(h.services.rebuild_running_config(&config, &spare_ids));
         // 轮询一次：老实现会在这里跑完前置判断（都通过），然后阻塞在锁上。
         {
             struct NoopWaker;
@@ -15209,7 +15432,11 @@ mod main_flow_tests {
     #[tokio::test]
     async fn applied_nodes_exclude_ones_without_credentials() {
         let h = harness();
-        let created = h.services.config_create(auto_port_input("过滤")).await.unwrap();
+        let created = h
+            .services
+            .config_create(auto_port_input("过滤"))
+            .await
+            .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
         let with_secret = write_unattached_node(&h.services, "有密码", "198.51.100.80");
         // 只有节点行、没有密码：真正的连接会跳过它。
@@ -15253,11 +15480,8 @@ mod main_flow_tests {
         let h = harness();
         {
             let conn = h.services.store.conn();
-            crate::store::settings::set_proxy_port(
-                &conn,
-                crate::config::any_free_port().unwrap(),
-            )
-            .unwrap();
+            crate::store::settings::set_proxy_port(&conn, crate::config::any_free_port().unwrap())
+                .unwrap();
         }
         let created = h
             .services
@@ -15300,7 +15524,6 @@ mod main_flow_tests {
         drop(watcher);
         h.services.manager.stop_probe().await;
     }
-
 }
 
 #[cfg(test)]

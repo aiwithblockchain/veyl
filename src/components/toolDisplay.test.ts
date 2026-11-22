@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import toolsDoc from "../../docs/contracts/tools.md?raw";
+import { setLanguage } from "../i18n";
+import { en } from "../i18n/en";
+import { zh } from "../i18n/zh";
 import {
   FALLBACK_COPY,
   TOOL_COPY,
@@ -56,26 +59,190 @@ describe("工具名映射集合", () => {
 });
 
 describe("readToolDisplay", () => {
-  it("读取后端扁平字段", () => {
+  it("按 key + params 组装事实行", () => {
     expect(
       readToolDisplay({
-        text: "已连接",
-        facts: ["出口 203.0.113.7", { label: "延迟", value: "42 毫秒" }],
+        facts: [
+          { key: "runtime.exit_ip", params: { ip: "203.0.113.7" } },
+          { key: "probe.latency_ms", params: { ms: 42 } },
+        ],
         changed: "none",
       }),
     ).toEqual({
-      text: "已连接",
       facts: [
-        { label: "", value: "出口 203.0.113.7" },
-        { label: "延迟", value: "42 毫秒" },
+        { label: "", value: "出口：203.0.113.7" },
+        { label: "", value: "延迟：42 ms", mono: true },
       ],
       changed: "none",
       actions: [],
-    });  });
+    });
+  });
+
+  it("未知 key、未知枚举值、缺参数都丢行，不露占位符", () => {
+    const display = readToolDisplay({
+      facts: [
+        { key: "unknown.fact" },
+        { key: "job.state", params: { state: "bogus" } },
+        { key: "probe.latency_ms" },
+        { key: "server.stage", params: { stage: "installing" } },
+      ],
+      changed: "none",
+    });
+
+    expect(display?.facts).toEqual([{ label: "", value: "阶段：装环境" }]);
+    expect(JSON.stringify(display)).not.toMatch(/\{\w+\}/);
+  });
+
+  it("server.row 拼 state / ip / destroyed", () => {
+    const display = readToolDisplay({
+      facts: [
+        {
+          key: "server.row",
+          params: {
+            name: "新加坡 1",
+            region: "新加坡",
+            state: "destroyed",
+            destroyed: "billing_unpaid",
+            ip: "1.2.3.4",
+          },
+        },
+      ],
+    });
+
+    expect(display?.facts).toEqual([
+      {
+        label: "",
+        value: "新加坡 1 · 新加坡 · 已停机删除 · 1.2.3.4 · 因余额不足停机删除",
+      },
+    ]);
+  });
+
+  it("server.failure_code 已知码给原因，未知码给通用句", () => {
+    const known = readToolDisplay({
+      facts: [{ key: "server.failure_code", params: { code: "billing_unpaid" } }],
+    });
+    expect(known?.facts[0].value).toBe("原因：余额不足，服务器已停机删除。");
+
+    const unknown = readToolDisplay({
+      facts: [{ key: "server.failure_code", params: { code: "whatever" } }],
+    });
+    expect(unknown?.facts[0].value).toBe("这次建机没有完成");
+  });
+
+  it("mode.current 先翻枚举再套模板", () => {
+    const display = readToolDisplay({
+      facts: [{ key: "mode.current", params: { mode: "tun" } }],
+    });
+    expect(display?.facts[0].value).toBe("方式：Tun 模式");
+  });
+
+  it("diag.result 按 failed/skipped 选四句", () => {
+    const value = (failed: number, skipped: number) =>
+      readToolDisplay({ facts: [{ key: "diag.result", params: { failed, skipped } }] })
+        ?.facts[0].value;
+
+    expect(value(0, 0)).toBe("结果：全部检查正常");
+    expect(value(2, 0)).toBe("结果：2 项异常");
+    expect(value(0, 1)).toBe("结果：1 项这次没检查");
+    expect(value(2, 1)).toBe("结果：2 项异常，1 项没检查");
+  });
+
+  it("deepseek.verify 未知值丢行", () => {
+    expect(
+      readToolDisplay({ facts: [{ key: "deepseek.verify", params: { result: "weird" } }] }),
+    ).toBeNull();
+    expect(
+      readToolDisplay({ facts: [{ key: "deepseek.verify", params: { result: "invalid" } }] })
+        ?.facts[0].value,
+    ).toBe("验证：失败");
+  });
+
+  it("region.code 优先查地区表，查不到用 label", () => {
+    expect(
+      readToolDisplay({ facts: [{ key: "region.code", params: { code: "jp", label: "日本" } }] })
+        ?.facts[0].value,
+    ).toBe("地区 日本");
+    expect(
+      readToolDisplay({ facts: [{ key: "region.code", params: { code: "zz", label: "火星" } }] })
+        ?.facts[0].value,
+    ).toBe("地区 火星");
+    expect(
+      readToolDisplay({ facts: [{ key: "region.code", params: {} }] }),
+    ).toBeNull();
+  });
+
+  it("region.code 与 region.name 并存时不串", () => {
+    const display = readToolDisplay({
+      facts: [
+        { key: "region.code", params: { code: "jp" } },
+        { key: "region.name", params: { name: "新加坡" } },
+      ],
+    });
+    expect(display?.facts.map((fact) => fact.value)).toEqual(["地区 日本", "地区 新加坡"]);
+  });
+
+  it("routing.mode 三值映射，未知值丢行", () => {
+    const value = (mode: string) =>
+      readToolDisplay({ facts: [{ key: "routing.mode", params: { mode } }] })?.facts[0]
+        .value;
+
+    expect(value("direct")).toBe("当前：直连");
+    expect(value("proxy_all")).toBe("当前：全部走 VPN");
+    expect(value("proxy_selected")).toBe("当前：指定服务走 VPN");
+    expect(value("weird")).toBeUndefined();
+  });
+
+  it("rules.status 三值映射，未知值丢行", () => {
+    const value = (status: string) =>
+      readToolDisplay({ facts: [{ key: "rules.status", params: { status } }] })?.facts[0]
+        .value;
+
+    expect(value("stale")).toBe("状态：可能已过期");
+    expect(value("current")).toBe("状态：已是最新");
+    expect(value("empty")).toBe("状态：还没有数据");
+    expect(value("weird")).toBeUndefined();
+  });
+
+  it("数字类事实标 mono，文本不标", () => {
+    const display = readToolDisplay({
+      facts: [
+        { key: "catalog.node_count", params: { count: 3 } },
+        { key: "catalog.region_count", params: { count: 2 } },
+        { key: "http.status_code", params: { code: 200 } },
+        { key: "config.name", params: { name: "公司" } },
+      ],
+    });
+    expect(display?.facts.map((fact) => fact.mono ?? false)).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    expect(display?.facts[0].value).toBe("节点数：3");
+    expect(display?.facts[1].value).toBe("地区 2 个");
+  });
+
+  it("英文界面事实行不含中文与占位符", () => {
+    setLanguage("en");
+    try {
+      const display = readToolDisplay({
+        facts: [
+          { key: "config.name", params: { name: "Office" } },
+          { key: "job.state", params: { state: "running" } },
+          { key: "server.failure_code", params: { code: "install_failed" } },
+          { key: "server.row", params: { name: "Tokyo", region: "JP", state: "active" } },
+        ],
+      });
+      const text = JSON.stringify(display);
+      expect(text).not.toMatch(/[一-龥]/);
+      expect(text).not.toMatch(/\{\w+\}/);
+    } finally {
+      setLanguage("zh");
+    }
+  });
 
   it("只认两个报告动作，未知 kind 与空 id 丢弃，最多两个", () => {
     const display = readToolDisplay({
-      text: "报告已生成",
       changed: "none",
       actions: [
         { kind: "reveal_report_dir", report_id: "rpt-1" },
@@ -103,7 +270,7 @@ describe("readToolDisplay", () => {
     expect(readToolDisplay(null)).toBeNull();
     expect(readToolDisplay("已连接")).toBeNull();
     expect(readToolDisplay({})).toBeNull();
-    expect(readToolDisplay({ text: "  ", facts: [], changed: "???" })).toBeNull();
+    expect(readToolDisplay({ facts: [], changed: "???" })).toBeNull();
   });
 
   it("changed 兼容布尔值与后端枚举", () => {
@@ -116,9 +283,23 @@ describe("readToolDisplay", () => {
 
   it("facts 最多保留四行", () => {
     const display = readToolDisplay({
-      facts: ["一", "二", "三", "四", "五"],
+      facts: Array.from({ length: 5 }, () => ({ key: "runtime.connected" })),
     });
     expect(display?.facts).toHaveLength(4);
+  });
+});
+
+describe("tool.fact 字典", () => {
+  it("每个 tool.fact.* key 在 zh 与 en 都存在", () => {
+    const isFact = (key: string) => key.startsWith("tool.fact.");
+    const zhKeys = Object.keys(zh).filter(isFact);
+    const enKeys = Object.keys(en).filter(isFact);
+    expect(zhKeys.length).toBeGreaterThan(0);
+    expect(new Set(enKeys)).toEqual(new Set(zhKeys));
+    for (const key of zhKeys) {
+      expect(typeof (zh as Record<string, string>)[key], key).toBe("string");
+      expect(typeof (en as Record<string, string>)[key], key).toBe("string");
+    }
   });
 });
 

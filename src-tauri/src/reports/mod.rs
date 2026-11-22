@@ -635,7 +635,7 @@ fn scene_json(
     })
 }
 
-fn os_version() -> String {
+pub(crate) fn os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         if let Ok(output) = std::process::Command::new("/usr/bin/sw_vers")

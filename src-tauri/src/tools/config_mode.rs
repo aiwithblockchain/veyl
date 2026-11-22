@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult, UserQuestionEvent};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
 use super::services::{ServiceError, VpnToolServices};
 use crate::agent::questions;
@@ -122,10 +122,10 @@ impl Tool for ConfigSetModeTool {
         let outcome = match self.run(input, ctx).await {
             Ok(outcome) => outcome,
             Err(error) => {
-                let (text, changed) = error_display(&error);
+                let changed = error_changed(&error);
                 let facts = error_facts(&error);
                 let next = relink_action(&error);
-                let mut outcome = ToolOutcome::fail(error).with_display(text, facts, changed);
+                let mut outcome = ToolOutcome::fail(error).with_display(facts, changed);
                 if let Some(action) = next {
                     outcome = outcome.with_next(action);
                 }
@@ -235,16 +235,12 @@ impl ConfigSetModeTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
+        let mode_fact = mode_fact(mode);
         if !changed {
-            return ToolOutcome::ok(
-                format!("已经是「{label}」，没有改动。"),
-                data.clone(),
-            )
-            .with_display(
-                format!("已经是「{label}」，没有改动。"),
-                vec![format!("当前：{label}")],
-                Changed::None,
-            );
+            let mut facts = Vec::new();
+            facts.extend(mode_fact);
+            return ToolOutcome::ok(format!("已经是「{label}」，没有改动。"), data.clone())
+                .with_display(facts, Changed::None);
         }
 
         // 切换会重新生成 plan，顺带应用这套配置其它待生效的改动；文案不能承诺「只改了接管方式」。
@@ -255,57 +251,40 @@ impl ConfigSetModeTool {
         } else {
             format!("已换成「{label}」，下次连接生效。")
         };
-        let text = if connected {
-            format!("已切换到「{label}」，连接已恢复。")
-        } else {
-            format!("已换成「{label}」，下次连接生效。")
-        };
-        let mut facts = vec![format!("方式：{label}")];
+        let mut facts = mode_fact;
         if connected {
-            facts.push("连接：已恢复".to_string());
+            facts.push(Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "restored" }),
+            ));
         } else {
-            facts.push("连接：未连接".to_string());
-            facts.push("生效：下次连接".to_string());
+            facts.push(Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "unchanged" }),
+            ));
+            facts.push(Fact::new(FactKey::EffectNextConnect));
         }
-        ToolOutcome::ok(summary, data.clone()).with_display(text, facts, Changed::None)
+        ToolOutcome::ok(summary, data.clone()).with_display(facts, Changed::None)
     }
 }
 
-fn error_display(error: &AivpnError) -> (String, Changed) {
+fn error_changed(error: &AivpnError) -> Changed {
     if error.code == "CANCELLED" {
-        return ("已取消，没有改动。".to_string(), Changed::None);
+        return Changed::None;
     }
-    let details = error.details.as_ref();
-    let restored = details
+    let restored = error
+        .details
+        .as_ref()
         .and_then(|details| details.get("restored"))
         .and_then(Value::as_bool);
-    let mode = details
-        .and_then(|details| details.get("mode"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let previous = details
-        .and_then(|details| details.get("previous_mode"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
     match restored {
-        Some(true) => (
-            format!(
-                "没能切到「{}」，已回到原来的「{}」。",
-                mode_label(mode),
-                mode_label(previous)
-            ),
-            Changed::Restored,
-        ),
-        Some(false) => (
-            "没能切换，也没能恢复原来的方式".to_string(),
-            Changed::Unknown,
-        ),
-        None => ("没能切换接管方式".to_string(), Changed::Unknown),
+        Some(true) => Changed::Restored,
+        _ => Changed::Unknown,
     }
 }
 
-/// 失败后界面上的两句事实：最终方式与连接状态（回滚失败时尤其不能只说「失败」）。
-fn error_facts(error: &AivpnError) -> Vec<String> {
+/// 失败后界面上的事实：最终方式与连接状态（回滚失败时尤其不能只说「失败」）。
+fn error_facts(error: &AivpnError) -> Vec<Fact> {
     let Some(details) = error.details.as_ref() else {
         return Vec::new();
     };
@@ -316,15 +295,38 @@ fn error_facts(error: &AivpnError) -> Vec<String> {
         .and_then(Value::as_str)
         .unwrap_or("");
     match restored {
-        Some(true) => vec![
-            format!("方式：{}", mode_label(previous)),
-            "连接：已恢复".to_string(),
-        ],
-        Some(false) => vec![
-            format!("方式：{}", mode_label(mode)),
-            "连接：未连接".to_string(),
-        ],
+        Some(true) => {
+            let mut facts = mode_fact(previous);
+            facts.push(Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "restored" }),
+            ));
+            facts
+        }
+        Some(false) => {
+            let mut facts = mode_fact(mode);
+            facts.push(Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "disconnected" }),
+            ));
+            facts
+        }
         None => Vec::new(),
+    }
+}
+
+/// `mode.current` 的枚举参数（契约值是 `tun` / `proxy`）。
+fn mode_fact(mode: &str) -> Vec<Fact> {
+    match mode {
+        "tun" => vec![Fact::with_params(
+            FactKey::ModeCurrent,
+            json!({ "mode": "tun" }),
+        )],
+        "system_proxy" => vec![Fact::with_params(
+            FactKey::ModeCurrent,
+            json!({ "mode": "proxy" }),
+        )],
+        _ => Vec::new(),
     }
 }
 
@@ -418,7 +420,7 @@ mod tests {
     #[test]
     fn a_cancelled_switch_reports_no_change() {
         let error = AivpnError::new("CANCELLED", "取消");
-        assert_eq!(error_display(&error), ("已取消，没有改动。".to_string(), Changed::None));
+        assert_eq!(error_changed(&error), Changed::None);
     }
 
     #[test]
@@ -428,15 +430,22 @@ mod tests {
             "previous_mode": "system_proxy",
             "restored": false,
         }));
-        let (text, changed) = error_display(&error);
-        assert!(text.contains("没能恢复"), "{text}");
-        assert_eq!(changed, Changed::Unknown);
+        assert_eq!(error_changed(&error), Changed::Unknown);
         assert_eq!(relink_action(&error).unwrap().tool, "VpnConnect");
         let facts = error_facts(&error);
         assert!(
-            facts.iter().any(|fact| fact == "方式：Tun 模式"),
+            facts.contains(&Fact::with_params(
+                FactKey::ModeCurrent,
+                json!({ "mode": "tun" })
+            )),
             "{facts:?}"
         );
-        assert!(facts.iter().any(|fact| fact == "连接：未连接"), "{facts:?}");
+        assert!(
+            facts.contains(&Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "disconnected" })
+            )),
+            "{facts:?}"
+        );
     }
 }

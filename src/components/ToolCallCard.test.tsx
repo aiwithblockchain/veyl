@@ -27,15 +27,14 @@ function renderCard(overrides: Partial<ToolCall> = {}) {
 }
 
 describe("ToolCallCard：默认一行", () => {
-  it("只显示用户文案，不显示工具名、action 与后端 display.text", () => {
+  it("只显示用户文案，不显示工具名、action 与 JSON", () => {
     renderCard({
-      display: { text: "后端原始文案不该出现", facts: [], changed: "none" },
+      display: { facts: [], changed: "none" },
       result: "已连接到 东京 01，出口 IP 203.0.113.7。",
       argsPreview: { node_id: "seed-jp-01" },
     });
 
     expect(screen.getByText("已连接")).toBeTruthy();
-    expect(screen.queryByText("后端原始文案不该出现")).toBeNull();
     expect(screen.queryByText("VpnConnect")).toBeNull();
     expect(screen.queryByText("连接 seed-jp-01")).toBeNull();
     expect(screen.queryByText(/seed-jp-01/)).toBeNull();
@@ -89,7 +88,6 @@ describe("ToolCallCard：展开详情", () => {
       source: "ui",
       durationMs: 800,
       display: {
-        text: "已连接",
         facts: [
           { label: "配置", value: "公司" },
           { label: "节点", value: "东京 01" },
@@ -111,14 +109,14 @@ describe("ToolCallCard：展开详情", () => {
   });
 
   it("对话发起时不显示来源", () => {
-    renderCard({ source: "agent", display: { text: "已连接", facts: [], changed: null } });
+    renderCard({ source: "agent", display: { facts: [], changed: null } });
     fireEvent.click(screen.getByRole("button", { name: /已连接/ }));
     expect(screen.queryByText("从设置页发起")).toBeNull();
   });
 
   it("技术细节隐藏原始工具名与参数，点开后才出现", () => {
     renderCard({
-      display: { text: "已连接", facts: [], changed: null },
+      display: { facts: [], changed: null },
       argsPreview: { node_name: "东京 01" },
       result: "已连接到 东京 01。",
       errorCode: null,
@@ -140,7 +138,7 @@ describe("ToolCallCard：展开详情", () => {
       result: undefined,
       argsPreview: undefined,
       errorCode: null,
-      display: { text: "已连接", facts: [], changed: null },
+      display: { facts: [], changed: null },
     });
     fireEvent.click(screen.getByRole("button", { name: /已连接/ }));
     expect(screen.queryByRole("button", { name: "技术细节" })).toBeNull();
@@ -149,7 +147,7 @@ describe("ToolCallCard：展开详情", () => {
   it("next_actions 只在展开后出现，点击交给调用方", () => {
     const { onNextAction } = renderCard({
       state: "error",
-      display: { text: "节点没有响应，没能连上", facts: [], changed: "none" },
+      display: { facts: [], changed: "none" },
       nextActions: [{ label: "换一个节点", tool: "CatalogSearch", args: { region: "jp" } }],
     });
 
@@ -169,12 +167,11 @@ describe("ToolCallCard：失败", () => {
       state: "error",
       errorCode: "NODE_UNREACHABLE",
       result: "节点 东京 01 连接超时。",
-      display: { text: "节点没有响应，没能连上", facts: [], changed: "none" },
+      display: { facts: [], changed: "none" },
       nextActions: [{ label: "换一个节点", tool: "CatalogSearch", args: {} }],
     });
 
     expect(screen.getAllByText("没能连上").length).toBeGreaterThan(0);
-    expect(screen.queryByText(/节点没有响应/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /没能连上/ }));
 
     expect(screen.getByText("发生了什么")).toBeTruthy();
@@ -192,7 +189,7 @@ describe("ToolCallCard：失败", () => {
     renderCard({
       tool: "NetRepair",
       state: "error",
-      display: { text: "没能恢复网络", facts: [], changed: "restored" },
+      display: { facts: [], changed: "restored" },
     });
     fireEvent.click(screen.getByRole("button", { name: /没能恢复网络/ }));
     expect(screen.getByText("已经恢复原样")).toBeTruthy();
@@ -202,7 +199,7 @@ describe("ToolCallCard：失败", () => {
     renderCard({
       tool: "RuntimeStatus",
       state: "error",
-      display: { text: "读不到连接状态", facts: [], changed: null },
+      display: { facts: [], changed: null },
     });
     fireEvent.click(screen.getByRole("button", { name: /读不到连接状态/ }));
     expect(screen.getByText("没有改动任何设置")).toBeTruthy();
@@ -215,12 +212,11 @@ describe("ToolCallCard：失败", () => {
       errorCode: "INTERNAL",
       result: "写入失败",
       argsPreview: { config_name: "公司" },
-      display: { text: "没能保存配置", facts: [], changed: null },
+      display: { facts: [], changed: null },
     });
 
     fireEvent.click(screen.getByRole("button", { name: /没能连上/ }));
     expect(screen.getByText("不确定，诊断日志里有记录")).toBeTruthy();
-    expect(screen.queryByText("没能保存配置")).toBeNull();
     expect(screen.queryByRole("button", { name: "复制诊断信息" })).toBeNull();
   });
 });
@@ -230,7 +226,6 @@ describe("ToolCallCard：display.actions", () => {
     call({
       tool: "IssueReport",
       display: {
-        text: "报告已生成",
         facts: [],
         changed: "none",
         actions: [
@@ -332,7 +327,6 @@ describe("ToolCallCard：诊断卡的接管范围", () => {
       tool: "DiagRun",
       state: "ok",
       display: {
-        text: "诊断完成，发现 1 个问题",
         facts: [{ label: "接管范围", value: "不覆盖浏览器 HTTP/3" }],
         changed: "none",
       },
@@ -375,7 +369,6 @@ describe("ToolCallCard：诊断卡的接管范围", () => {
     renderCard(
       diagCall({
         display: {
-          text: "诊断完成，没发现问题",
           facts: [{ label: "接管范围", value: "接管全部流量" }],
           changed: "none",
         },

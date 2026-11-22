@@ -840,13 +840,18 @@ fn parse_sync_interval(minutes: Option<&str>) -> u16 {
 #[tauri::command]
 pub async fn server_sync_interval_get() -> Result<Value, Value> {
     let Some(store) = crate::store::global() else {
+        log::warn!("[server_sync_interval] code=INTERNAL reason=store_unavailable");
         return Err(command_error("INTERNAL", "", Value::Null));
     };
     let raw = {
         let conn = store.conn();
-        crate::store::settings::get(&conn, SERVER_SYNC_INTERVAL_KEY)
-            .ok()
-            .flatten()
+        match crate::store::settings::get(&conn, SERVER_SYNC_INTERVAL_KEY) {
+            Ok(value) => value,
+            Err(_) => {
+                log::warn!("[server_sync_interval] code=INTERNAL reason=store_error");
+                None
+            }
+        }
     };
     Ok(json!({ "minutes": parse_sync_interval(raw.as_deref()) }))
 }
@@ -859,6 +864,7 @@ pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
         .and_then(|value| u16::try_from(value).ok())
         .filter(|value| SERVER_SYNC_INTERVALS.contains(value));
     let Some(minutes) = minutes else {
+        log::warn!("[server_sync_interval] code=INVALID_ARGUMENT reason=invalid_interval");
         return Err(command_error(
             "INVALID_ARGUMENT",
             "",
@@ -866,6 +872,7 @@ pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
         ));
     };
     let Some(store) = crate::store::global() else {
+        log::warn!("[server_sync_interval] code=INTERNAL reason=store_unavailable");
         return Err(command_error("INTERNAL", "", Value::Null));
     };
     let saved = {
@@ -873,6 +880,7 @@ pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
         crate::store::settings::set(&conn, SERVER_SYNC_INTERVAL_KEY, &minutes.to_string())
     };
     if saved.is_err() {
+        log::warn!("[server_sync_interval] code=INTERNAL reason=store_error");
         return Err(command_error("INTERNAL", "", Value::Null));
     }
     Ok(json!({ "minutes": minutes }))
@@ -887,17 +895,14 @@ pub async fn server_sync_interval_set(minutes: Value) -> Result<Value, Value> {
 pub async fn node_rotate_credentials(server_id: Option<Value>) -> Result<Value, Value> {
     match crate::tools::node_rotate::rotate_from_ui(server_id).await {
         Ok(value) => Ok(value),
-        Err(error) => {
-            log::warn!("[node_rotate] {}: {}", error.code, error.message);
-            Err(json!({
-                "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
-                "code": error.code,
-                "message": "",
-                "retryable": error.retryable,
-                "details": error.details,
-                "request_id": "",
-            }))
-        }
+        Err(error) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": error.code,
+            "message": "",
+            "retryable": error.retryable,
+            "details": error.details,
+            "request_id": "",
+        })),
     }
 }
 

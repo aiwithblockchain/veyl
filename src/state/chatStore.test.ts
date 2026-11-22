@@ -618,8 +618,10 @@ describe("chatReducer", () => {
           duration_ms: 3200,
           next_actions: [],
           display: {
-            text: "已连接",
-            facts: ["出口 203.0.113.7", "延迟 42 毫秒"],
+            facts: [
+              { key: "runtime.exit_ip", params: { ip: "203.0.113.7" } },
+              { key: "probe.latency_ms", params: { ms: 42 } },
+            ],
             changed: "none",
           },
           emitted_at: "2026-11-06T00:00:05Z",
@@ -630,10 +632,9 @@ describe("chatReducer", () => {
     const call = activeSession(state)!.toolCalls.call_display;
     expect(call.state).toBe("ok");
     expect(call.display).toEqual({
-      text: "已连接",
       facts: [
-        { label: "", value: "出口 203.0.113.7" },
-        { label: "", value: "延迟 42 毫秒" },
+        { label: "", value: "出口：203.0.113.7" },
+        { label: "", value: "延迟：42 ms", mono: true },
       ],
       changed: "none",
       actions: [],
@@ -724,7 +725,6 @@ describe("chatReducer", () => {
           request_id: "req_running",
           assistant_message_id: "asst_running",
           phase: "running_tool",
-          text: "RuntimeStatus 正在运行",
           emitted_at: "2026-11-06T00:00:01Z",
         },
       },
@@ -776,7 +776,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
     request_id: "req_key",
     assistant_message_id: "asst_key",
     phase: "thinking",
-    text: "",
     emitted_at: "2026-11-06T00:00:01Z",
   };
 
@@ -793,7 +792,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
   }
 
   function compactEvent(over: {
-    text?: string;
     text_key?: string;
   } = {}): AgentEvent {
     return {
@@ -804,7 +802,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
         assistant_message_id: "asst_key",
         phase: "completed",
         text_key: "ai.compact.done",
-        text: "",
         tokens_before: 100,
         tokens_after: 20,
         emitted_at: "2026-11-06T00:00:02Z",
@@ -829,27 +826,24 @@ describe("ai-status / ai-compact 的 text_key", () => {
     });
   }
 
-  it("text_key 决定文案，后端 text 不渲染", () => {
+  it("text_key 决定文案", () => {
     let state = withRequest();
     state = chatReducer(state, {
       type: "agent_event",
       event: statusEvent({
         phase: "streaming_answer",
-        text: "上游英文 spinner 文本",
         text_key: "ai.status.streaming",
       }),
     });
 
-    const status = activeSession(state)!.status!;
-    expect(status.text).toBe("正在回复");
-    expect(status.text).not.toContain("spinner");
+    expect(activeSession(state)!.status!.text).toBe("正在回复");
   });
 
   it("缺 text_key 的旧事件按 phase 兜底", () => {
     let state = withRequest();
     state = chatReducer(state, {
       type: "agent_event",
-      event: statusEvent({ phase: "compacting", text: "后端压缩中文" }),
+      event: statusEvent({ phase: "compacting" }),
     });
 
     expect(activeSession(state)!.status?.text).toBe("正在压缩上下文…");
@@ -920,7 +914,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
         type: "agent_event",
         event: statusEvent({
           phase: "thinking",
-          text: "正在检查连接状态",
           text_key: "ai.status.thinking",
         }),
       });
@@ -941,7 +934,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
         type: "agent_event",
         event: statusEvent({
           phase: "preparing_tool",
-          text: "正在准备工具",
           text_key: "ai.status.something_unknown",
         }),
       });
@@ -955,11 +947,11 @@ describe("ai-status / ai-compact 的 text_key", () => {
     }
   });
 
-  it("ai-compact 只渲染本地文案，不读后端 text", () => {
+  it("ai-compact 固定本地文案", () => {
     let state = withRequest();
     state = chatReducer(state, {
       type: "agent_event",
-      event: compactEvent({ text: "后端压缩文案" }),
+      event: compactEvent(),
     });
 
     const session = activeSession(state)!;
@@ -969,7 +961,6 @@ describe("ai-status / ai-compact 的 text_key", () => {
       expect(assistant.items).toContainEqual(
         expect.objectContaining({ kind: "notice", text: "上下文已压缩" }),
       );
-      expect(JSON.stringify(assistant.items)).not.toContain("后端压缩文案");
     }
   });
 
@@ -977,7 +968,7 @@ describe("ai-status / ai-compact 的 text_key", () => {
     let state = withRequest();
     state = chatReducer(state, {
       type: "agent_event",
-      event: compactEvent({ text: "旧后端文案", text_key: undefined }),
+      event: compactEvent({ text_key: undefined }),
     });
 
     const assistant = activeSession(state)!.messages.find(

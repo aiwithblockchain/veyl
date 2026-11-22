@@ -195,6 +195,8 @@ export interface PendingQuestion {
   upgradeConfirm?: CoreUpgradeConfirmData | null;
   /** kind = "config_set_mode_confirm" 时的接管方式明细。 */
   configSetModeConfirm?: ConfigSetModeConfirmData | null;
+  /** kind = "issue_submit_confirm" 时的问题墙上报明细。 */
+  issueSubmitConfirm?: IssueSubmitConfirmData | null;
   /** Host 给的默认焦点下标（0 起）；缺失时确认卡默认落在「取消」。 */
   defaultIndex?: number | null;
 }
@@ -215,12 +217,32 @@ export interface ConfigSetModeConfirmData {
   willDisconnect: boolean;
 }
 
+/** kind = "issue_submit_confirm" 时的上报明细（不含邮箱与原始 JSON）。 */
+export interface IssueSubmitStepData {
+  step: string | null;
+  ok: boolean;
+  durationMs: number | null;
+  reason: string | null;
+}
+
+export interface IssueSubmitConfirmData {
+  title: string | null;
+  summary: string | null;
+  expected: string | null;
+  actual: string | null;
+  repro: string | null;
+  platform: string | null;
+  appVersion: string | null;
+  steps: IssueSubmitStepData[];
+}
+
 /** 阻塞确认卡的 kind：这几种走 AskQuestionDialog，其余提问走消息流内联。 */
 export function isConfirmQuestionKind(kind: string | null | undefined): boolean {
   return (
     kind === "core_upgrade_confirm" ||
     kind === "config_set_mode_confirm" ||
-    kind === "node_rotate_confirm"
+    kind === "node_rotate_confirm" ||
+    kind === "issue_submit_confirm"
   );
 }
 
@@ -244,6 +266,15 @@ function readSize(...values: unknown[]): number | null {
   return null;
 }
 
+function readNonNegative(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
 /**
  * 从提问载荷里读结构化信息。明细可能在 `upgrade` / `confirm` / `data`
  * 下，也可能与 `kind` 同级；两种形状都认，避免前后端字段位置不同直接丢卡。
@@ -253,6 +284,7 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
   defaultIndex: number | null;
   upgradeConfirm: CoreUpgradeConfirmData | null;
   configSetModeConfirm: ConfigSetModeConfirmData | null;
+  issueSubmitConfirm: IssueSubmitConfirmData | null;
 } {
   const kind = readString(raw.kind);
   const defaultIndex = readIndex(raw.default_index, raw.defaultIndex);
@@ -275,6 +307,7 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
           merged.restart_required === true || merged.restartRequired === true,
       },
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     };
   }
 
@@ -299,10 +332,58 @@ export function readQuestionDetail(raw: Record<string, unknown>): {
         willDisconnect:
           merged.will_disconnect === true || merged.willDisconnect === true,
       },
+      issueSubmitConfirm: null,
     };
   }
 
-  return { kind, defaultIndex, upgradeConfirm: null, configSetModeConfirm: null };
+  if (kind === "issue_submit_confirm") {
+    const merged = {
+      ...(asRecord(raw.confirm) ?? {}),
+      ...(asRecord(raw.data) ?? {}),
+      ...(asRecord(raw.details) ?? {}),
+      ...raw,
+    };
+    const steps = Array.isArray(merged.steps)
+      ? merged.steps.flatMap((item) => {
+          const record = asRecord(item);
+          if (!record) return [];
+          const step = readString(record.step);
+          if (!step) return [];
+          return [
+            {
+              step,
+              ok: record.ok === true,
+              durationMs: readNonNegative(record.duration_ms, record.durationMs),
+              reason: readString(record.reason),
+            },
+          ];
+        })
+      : [];
+    return {
+      kind,
+      defaultIndex,
+      upgradeConfirm: null,
+      configSetModeConfirm: null,
+      issueSubmitConfirm: {
+        title: readString(merged.title),
+        summary: readString(merged.summary),
+        expected: readString(merged.expected),
+        actual: readString(merged.actual),
+        repro: readString(merged.repro),
+        platform: readString(merged.platform),
+        appVersion: readString(merged.app_version, merged.appVersion),
+        steps,
+      },
+    };
+  }
+
+  return {
+    kind,
+    defaultIndex,
+    upgradeConfirm: null,
+    configSetModeConfirm: null,
+    issueSubmitConfirm: null,
+  };
 }
 
 /** 默认焦点下标：只认 0 起的整数，其它形状当作没给。 */

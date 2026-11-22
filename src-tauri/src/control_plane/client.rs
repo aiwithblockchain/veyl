@@ -173,7 +173,7 @@ impl ControlPlane {
         log::debug!("控制面请求开始 method={method_label} path={}", log_path(path));
         let token = auth::ensure_access(&self.base_url, &self.http, None).await?;
         let (status, text) = self
-            .send(method.clone(), path, body, idempotency_key, &token, timeout)
+            .send(method.clone(), path, body, idempotency_key, Some(token.as_str()), timeout)
             .await?;
         if status != 401 {
             return decode_logged(&method_label, path, status, &text);
@@ -186,13 +186,26 @@ impl ControlPlane {
         );
         let refreshed = auth::ensure_access(&self.base_url, &self.http, Some(&token)).await?;
         let (status, text) = self
-            .send(method, path, body, idempotency_key, &refreshed, timeout)
+            .send(method, path, body, idempotency_key, Some(refreshed.as_str()), timeout)
             .await?;
         decode_logged(&method_label, path, status, &text)
     }
 
     pub async fn get(&self, path: &str) -> Result<Value, CpError> {
         self.request(Method::GET, path, None, None).await
+    }
+
+    /// 公开读取：不带令牌，也不触发设备注册。
+    ///
+    /// 问题墙的读取对所有用户开放（`design/issue-report-api.md` §2.2）。用
+    /// `get` 会先 `ensure_access`，未登录用户会被注册成匿名设备——读一条公开
+    /// 帖子不该产生这个副作用。
+    pub async fn get_public(&self, path: &str) -> Result<Value, CpError> {
+        log::debug!("控制面公开请求 method=GET path={}", log_path(path));
+        let (status, text) = self
+            .send(Method::GET, path, None, None, None, None)
+            .await?;
+        decode_logged("GET", path, status, &text)
     }
 
     pub async fn post(
@@ -226,17 +239,17 @@ impl ControlPlane {
         path: &str,
         body: Option<&Value>,
         idempotency_key: Option<&str>,
-        token: &str,
+        token: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<(u16, String), CpError> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let method_label = method.as_str().to_string();
         let started = Instant::now();
-        let mut request = self
-            .http
-            .request(method, url)
-            .bearer_auth(token)
-            .header(reqwest::header::ACCEPT, "application/json");
+        let mut request = self.http.request(method, url);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request = request.header(reqwest::header::ACCEPT, "application/json");
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }

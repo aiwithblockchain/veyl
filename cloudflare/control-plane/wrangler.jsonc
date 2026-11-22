@@ -40,6 +40,8 @@
 	// 默认环境 = 生产。部署：npm run deploy
 	"vars": {
 		"ENVIRONMENT": "production",
+		// 官网站点：问题墙帖子链接与允许的跨域来源。
+		"PUBLIC_SITE_URL": "https://veyl.dessage.xyz",
 		// 写进 cloud-init 的回传地址；必须与部署后的实际地址一致。
 		"ENROLL_BASE_URL": "https://veyl.dessage.xyz",
 		// 生产使用独立的凭据签名密钥（dev 是 cp-2026-11），公钥内置在客户端。
@@ -83,6 +85,7 @@
 			// 这是有意保留的——不然 dev 没法测计费。
 			"vars": {
 				"ENVIRONMENT": "dev",
+				"PUBLIC_SITE_URL": "https://veyl-edge-dev.pages.dev",
 				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
 				// Dodo Test Mode 充值产品（Veyl 自己建，不沿用 TweetPilot）；键是美分面额，prod 等验收后再填 Live 产品。

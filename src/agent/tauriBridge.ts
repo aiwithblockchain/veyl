@@ -1986,6 +1986,7 @@ export class TauriAgentBridge implements AgentBridge {
           defaultIndex: detail.defaultIndex,
           upgradeConfirm: detail.upgradeConfirm,
           configSetModeConfirm: detail.configSetModeConfirm,
+          issueSubmitConfirm: detail.issueSubmitConfirm,
         };
       })
       .filter((item) => item.questionId.length > 0);

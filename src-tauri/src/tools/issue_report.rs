@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::{Changed, DisplayAction};
+use super::display::{Changed, DisplayAction, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{ServiceError, VpnToolServices};
 
@@ -12,12 +12,11 @@ use super::services::{ServiceError, VpnToolServices};
 fn display_location(dir: &str) -> Option<String> {
     // `data.report_dir` 已经是折叠后的形式（`~/…` 或目录名），不要再折一次：
     // 对 `~/…` 再调 `fold_home` 既匹配不上绝对 home，也可能切在多字节字符中间。
-    let shown = if dir.starts_with('~') || (!dir.contains('/') && !dir.contains('\\')) {
-        dir.to_string()
+    if dir.starts_with('~') || (!dir.contains('/') && !dir.contains('\\')) {
+        Some(dir.to_string())
     } else {
-        crate::reports::fold_home(dir)?
-    };
-    Some(format!("保存位置：{shown}"))
+        crate::reports::fold_home(dir)
+    }
 }
 
 pub struct IssueReportTool {
@@ -130,17 +129,18 @@ impl Tool for IssueReportTool {
                     data,
                 )
                 .with_display(
-                    if written {
-                        "问题报告已生成"
-                    } else {
-                        "现场材料已收集"
-                    },
                     {
                         let mut facts = Vec::new();
-                        if let Some(location) = display_location(&dir) {
-                            facts.push(location);
+                        if let Some(path) = display_location(&dir) {
+                            facts.push(Fact::with_params(
+                                FactKey::ReportLocation,
+                                json!({ "path": path }),
+                            ));
                         }
-                        facts.push(format!("包含 {log_count} 份日志"));
+                        facts.push(Fact::with_params(
+                            FactKey::ReportLogCount,
+                            json!({ "count": log_count }),
+                        ));
                         facts
                     },
                     Changed::None,
@@ -169,11 +169,11 @@ mod tests {
     fn display_location_accepts_folded_and_bare_names() {
         assert_eq!(
             display_location("~/Desktop/Veyl 问题报告/2026-11-12-1530").as_deref(),
-            Some("保存位置：~/Desktop/Veyl 问题报告/2026-11-12-1530")
+            Some("~/Desktop/Veyl 问题报告/2026-11-12-1530")
         );
         assert_eq!(
             display_location("2026-11-12-1530").as_deref(),
-            Some("保存位置：2026-11-12-1530")
+            Some("2026-11-12-1530")
         );
         // 不在主目录下的绝对路径：折叠不了就不显示，绝不再暴露绝对路径。
         assert!(display_location("/definitely/not/home/x").is_none());

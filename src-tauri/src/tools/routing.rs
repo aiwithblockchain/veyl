@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -22,15 +22,6 @@ fn failure(error: anyhow::Error) -> AivpnError {
             AivpnError::new(code, message)
         }
         _ => AivpnError::new("INTERNAL", text),
-    }
-}
-
-fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "direct" => "直连",
-        "proxy_all" => "全部走 VPN",
-        "proxy_selected" => "指定服务走 VPN",
-        _ => "未识别",
     }
 }
 
@@ -113,40 +104,52 @@ fn summarise_route_change(data: &Value) -> String {
     }
 }
 
-fn route_change_facts(data: &Value) -> Vec<String> {
-    let mode = data
-        .get("routing_mode")
-        .and_then(Value::as_str)
-        .map(mode_label)
-        .unwrap_or("未识别");
-    let mut facts = vec![format!("当前：{mode}")];
-
-    let state = data.get("runtime_state").and_then(Value::as_str);
-    if state == Some("tun_unconfirmed") {
-        facts.push("接管：未确认".to_string());
-    } else if state == Some("tun_unknown") {
-        facts.push("接管：无法确认".to_string());
-    } else if data
-        .get("hot_switched")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        facts.push("连接：未中断".to_string());
-    } else {
-        match data.get("reconnect").and_then(Value::as_str) {
-            Some("reconnected") => facts.push("连接：已重新连接".to_string()),
-            Some("reconnect_failed") => facts.push("结果：自动重连失败".to_string()),
-            _ => facts.push("生效：下次连接".to_string()),
+/// 分流模式本身没有闭集 key；这里表达接管状态、连接影响与服务数。
+fn route_change_facts(data: &Value) -> Vec<Fact> {
+    let mut facts = Vec::new();
+    match data.get("runtime_state").and_then(Value::as_str) {
+        Some("tun_unconfirmed") => facts.push(Fact::with_params(
+            FactKey::RoutingOwnership,
+            json!({ "state": "unconfirmed" }),
+        )),
+        Some("tun_unknown") => facts.push(Fact::with_params(
+            FactKey::RoutingOwnership,
+            json!({ "state": "unknown" }),
+        )),
+        _ => {
+            if data
+                .get("hot_switched")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                facts.push(Fact::with_params(
+                    FactKey::ConnectionState,
+                    json!({ "state": "intact" }),
+                ));
+            } else {
+                match data.get("reconnect").and_then(Value::as_str) {
+                    Some("reconnected") => facts.push(Fact::with_params(
+                        FactKey::ConnectionState,
+                        json!({ "state": "restored" }),
+                    )),
+                    Some("reconnect_failed") => {
+                        facts.push(Fact::new(FactKey::RoutingReconnectFailed))
+                    }
+                    _ => facts.push(Fact::new(FactKey::EffectNextConnect)),
+                }
+            }
         }
     }
-
     if let Some(count) = data
         .get("targets")
         .and_then(Value::as_array)
-        .map(|items| items.len())
+        .map(Vec::len)
         .filter(|count| *count > 0)
     {
-        facts.push(format!("服务数：{count}"));
+        facts.push(Fact::with_params(
+            FactKey::RoutingServiceCount,
+            json!({ "count": count }),
+        ));
     }
     facts
 }
@@ -165,11 +168,6 @@ fn route_set_mode_outcome(data: Value) -> ToolOutcome {
             Some("none") => Changed::None,
             _ => Changed::Unknown,
         };
-        let text = if tun_unconfirmed {
-            "没能切换走法，接管未确认"
-        } else {
-            "没能切换走法，重连失败"
-        };
         let reason = if tun_unconfirmed {
             "tun_unconfirmed"
         } else {
@@ -183,7 +181,7 @@ fn route_set_mode_outcome(data: Value) -> ToolOutcome {
                 }),
             ),
         )
-        .with_display(text, route_change_facts(&data), changed)
+        .with_display(route_change_facts(&data), changed)
         .with_next(NextAction {
             label: "诊断一下".to_string(),
             tool: "DiagRun".to_string(),
@@ -191,18 +189,8 @@ fn route_set_mode_outcome(data: Value) -> ToolOutcome {
         });
     }
 
-    let text = if state == Some("tun_unknown") {
-        "走法已切换，接管未确认"
-    } else if data.get("hot_switched").and_then(Value::as_bool).unwrap_or(false) {
-        "走法已切换，连接未中断"
-    } else if data.get("reconnect").and_then(Value::as_str) == Some("reconnected") {
-        "走法已切换，已重新连接"
-    } else {
-        "走法已切换"
-    };
     let facts = route_change_facts(&data);
-    ToolOutcome::ok(summarise_route_change(&data), data)
-        .with_display(text, facts, Changed::None)
+    ToolOutcome::ok(summarise_route_change(&data), data).with_display(facts, Changed::None)
 }
 
 fn summarise_route(data: &Value) -> String {
@@ -278,17 +266,33 @@ impl Tool for RouteGetTool {
         };
         let outcome = match self.services.route_get(config_id).await {
             Ok(data) => {
+                // 分流模式用机器值，界面按 mode 查本地表。
+                let mut facts = Vec::new();
                 let mode = data
                     .get("routing_mode")
                     .and_then(Value::as_str)
-                    .map(mode_label)
-                    .unwrap_or("未识别");
-                let effective = match data.get("effective").and_then(Value::as_str) {
-                    Some("current_connection") => "已生效",
-                    _ => "下次连接生效",
-                };
-                ToolOutcome::ok(summarise_route(&data), data)
-                    .with_facts(vec![format!("当前：{mode}"), format!("生效：{effective}")])
+                    .unwrap_or("");
+                if matches!(mode, "direct" | "proxy_all" | "proxy_selected") {
+                    facts.push(Fact::with_params(
+                        FactKey::RoutingMode,
+                        json!({ "mode": mode }),
+                    ));
+                }
+                if let Some(count) = data
+                    .get("targets")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .filter(|count| *count > 0)
+                {
+                    facts.push(Fact::with_params(
+                        FactKey::RoutingCategoryCount,
+                        json!({ "count": count }),
+                    ));
+                }
+                if data.get("effective").and_then(Value::as_str) != Some("current_connection") {
+                    facts.push(Fact::new(FactKey::EffectNextConnect));
+                }
+                ToolOutcome::ok(summarise_route(&data), data).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -432,8 +436,10 @@ impl Tool for RouteTargetsSetTool {
             .route_targets_set(config_id, categories)
             .await
         {
-            Ok(data) => ToolOutcome::ok("指定服务已更新，下一次连接生效。", data)
-                .with_facts(vec![format!("服务数：{count}"), "生效：下次连接".to_string()]),
+            Ok(data) => ToolOutcome::ok("指定服务已更新，下一次连接生效。", data).with_facts(vec![
+                Fact::with_params(FactKey::RoutingServiceCount, json!({ "count": count })),
+                Fact::new(FactKey::EffectNextConnect),
+            ]),
             // 校验在写入前完成；写入失败会整笔回滚，没有留下改动。
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::None),
         };
@@ -494,8 +500,9 @@ impl Tool for CategoryListTool {
                     .and_then(Value::as_array)
                     .map(|items| items.len())
                     .unwrap_or(0);
-                ToolOutcome::ok(format!("找到 {count} 个分类。"), data)
-                    .with_facts(vec![format!("分类数：{count}")])
+                ToolOutcome::ok(format!("找到 {count} 个分类。"), data).with_facts(vec![
+                    Fact::with_params(FactKey::RoutingCategoryCount, json!({ "count": count })),
+                ])
             }
             Err(error) => ToolOutcome::fail(failure(error)),
         };
@@ -539,14 +546,25 @@ impl Tool for RulesStatusTool {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let stale = data.get("stale").and_then(Value::as_bool).unwrap_or(true);
-                let facts = if version.is_empty() {
-                    vec!["状态：还没有数据".to_string()]
-                } else {
-                    vec![
-                        format!("版本：{version}"),
-                        format!("状态：{}", if stale { "可能已过期" } else { "已是最新" }),
-                    ]
-                };
+                let mut facts = Vec::new();
+                if !version.is_empty() {
+                    facts.push(Fact::with_params(
+                        FactKey::RulesVersion,
+                        json!({ "version": version }),
+                    ));
+                }
+                facts.push(Fact::with_params(
+                    FactKey::RulesStatus,
+                    json!({
+                        "state": if version.is_empty() {
+                            "empty"
+                        } else if stale {
+                            "stale"
+                        } else {
+                            "current"
+                        }
+                    }),
+                ));
                 ToolOutcome::ok(
                     if version.is_empty() {
                         "规则数据尚未就绪。".to_string()
@@ -684,7 +702,13 @@ mod tests {
         }));
         assert!(!outcome.ok);
         assert_eq!(outcome.display.changed, Changed::Restored);
-        assert!(outcome.display.text.contains("重连失败"), "{}", outcome.display.text);
+        assert_eq!(
+            outcome.display.facts,
+            vec![
+                Fact::new(FactKey::RoutingReconnectFailed),
+                Fact::with_params(FactKey::RoutingServiceCount, json!({ "count": 1 })),
+            ]
+        );
         assert_eq!(outcome.next_actions[0].tool, "DiagRun");
     }
 
@@ -700,16 +724,12 @@ mod tests {
         }));
         assert!(!outcome.ok);
         assert_eq!(outcome.display.changed, Changed::Unknown);
-        assert!(outcome.display.text.contains("接管未确认"));
-        assert!(
-            outcome.display.facts.iter().any(|fact| fact == "接管：未确认"),
-            "{:?}",
-            outcome.display.facts
-        );
-        assert!(
-            !outcome.display.facts.iter().any(|fact| fact.contains("重连失败")),
-            "接管未确认不能复用重连失败的详情：{:?}",
-            outcome.display.facts
+        assert_eq!(
+            outcome.display.facts,
+            vec![Fact::with_params(
+                FactKey::RoutingOwnership,
+                json!({ "state": "unconfirmed" })
+            )]
         );
     }
 
@@ -723,7 +743,13 @@ mod tests {
         }));
         assert!(outcome.ok);
         assert_eq!(outcome.display.changed, Changed::None);
-        assert!(outcome.display.text.contains("连接未中断"));
+        assert_eq!(
+            outcome.display.facts,
+            vec![Fact::with_params(
+                FactKey::ConnectionState,
+                json!({ "state": "intact" })
+            )]
+        );
         assert!(outcome.next_actions.is_empty());
     }
 
@@ -739,6 +765,13 @@ mod tests {
         }));
         assert!(outcome.ok);
         assert_eq!(outcome.display.changed, Changed::None);
-        assert!(outcome.display.text.contains("接管未确认"));
+        // 采集不到接管状态时给 ownership.unknown，不能假装「连接未中断」。
+        assert_eq!(
+            outcome.display.facts,
+            vec![Fact::with_params(
+                FactKey::RoutingOwnership,
+                json!({ "state": "unknown" })
+            )]
+        );
     }
 }

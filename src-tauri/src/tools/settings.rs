@@ -150,11 +150,7 @@ impl Tool for OpenSettingsTool {
                         AivpnError::new("PRECONDITION_FAILED", "这一轮已经打开过设置了")
                             .with_details(json!({ "reason": "already_opened" })),
                     )
-                    .with_display(
-                        "这一轮已经打开过设置了",
-                        Vec::new(),
-                        Changed::None,
-                    )
+                    .with_display(Vec::new(), Changed::None)
                 } else {
                     let row_matched = request.row.is_some();
                     (self.emit)(json!({
@@ -178,16 +174,10 @@ impl Tool for OpenSettingsTool {
                             "row_matched": row_matched,
                         }),
                     )
-                    .with_display(
-                        format!("已打开设置 · {label}"),
-                        Vec::new(),
-                        Changed::None,
-                    )
+                    .with_display(Vec::new(), Changed::None)
                 }
             }
-            Err(error) => {
-                ToolOutcome::fail(error).with_display("没能打开设置", Vec::new(), Changed::None)
-            }
+            Err(error) => ToolOutcome::fail(error).with_display(Vec::new(), Changed::None),
         };
         envelope::finish(ctx, "OpenSettings", outcome)
     }

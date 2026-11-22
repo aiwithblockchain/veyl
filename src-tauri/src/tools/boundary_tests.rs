@@ -541,7 +541,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.24.0",
+                env["contract_version"], "3.25.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -786,6 +786,8 @@ fn optional_string_params(schema: &Value) -> Vec<String> {
 fn base_input(name: &str) -> Option<Value> {
     let value = match name {
         "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
+        // 问题墙的检索参数全部可选，最小输入是空对象。
+        "read_public_issue_wall" => json!({}),
         "IssueReport" => json!({}),
         "CoreUpgrade" => json!({}),
         "ConfigSetMode" => json!({ "mode": "tun" }),
@@ -1055,8 +1057,13 @@ async fn set_user_region_is_a_write_tool_with_the_contract_shape() {    let (svc
 
     let outcome = crate::tools::envelope::take_outcome(SESSION, "SetUserRegion")
         .expect("工具结果应当已登记");
-    assert_eq!(outcome.display.text, "地区已记下");
-    assert_eq!(outcome.display.facts, vec!["日本"]);
+    assert_eq!(
+        outcome.display.facts,
+        vec![crate::tools::Fact::with_params(
+            crate::tools::FactKey::RegionCode,
+            json!({ "code": "jp", "label": "Japan" })
+        )]
+    );
     assert_eq!(outcome.display.changed, crate::tools::Changed::None);
 }
 
@@ -1356,18 +1363,25 @@ async fn my_server_failure_returns_failure_facts_without_logs() {
 
     let outcome = crate::tools::envelope::take_outcome(SESSION, "MyServerFailure")
         .expect("工具结果必须登记到进程内注册表");
-    assert_eq!(outcome.display.text, "读到了这次失败的记录");
-    assert!(outcome.display.facts.iter().any(|fact| fact == "阶段：装环境"));
+    assert!(outcome
+        .display
+        .facts
+        .contains(&crate::tools::Fact::with_params(
+            crate::tools::FactKey::ServerStage,
+            json!({ "stage": "installing" })
+        )));
     assert!(outcome
         .display
         .facts
         .iter()
-        .any(|fact| fact == "原因：装环境失败"));
+        .any(|fact| fact.key == crate::tools::FactKey::ServerFailureCode));
     assert!(outcome
         .display
         .facts
-        .iter()
-        .any(|fact| fact == "能不能重试：可以重试"));
+        .contains(&crate::tools::Fact::with_params(
+            crate::tools::FactKey::ServerRetryable,
+            json!({ "value": "yes" })
+        )));
 }
 
 /// 健康服务器没有失败记录：`failure`/`order` 为 null 也是合法成功。
@@ -1463,8 +1477,13 @@ async fn node_switch_to_the_current_node_reads_as_unchanged() {
     // display 不在给模型的信封里：从进程内结果登记表取（用本用例专属会话 id）。
     let outcome = crate::tools::envelope::take_outcome(SESSION, "NodeSwitch")
         .expect("工具结果应当已登记");
-    assert_eq!(outcome.display.text, "当前已是该节点");
-    assert_eq!(outcome.display.facts, vec!["连接：未改变"]);
+    assert_eq!(
+        outcome.display.facts,
+        vec![crate::tools::Fact::with_params(
+            crate::tools::FactKey::ConnectionState,
+            json!({ "state": "unchanged" })
+        )]
+    );
     assert_eq!(rec.take(), vec!["node_switch(cfg_1,nod_1)"]);
 
     // 真切换（节点不同）保持原文案不变。
@@ -1486,6 +1505,10 @@ async fn node_switch_to_the_current_node_reads_as_unchanged() {
     assert_eq!(env["summary"], "已切换当前节点（未连接，未启动 VPN）。");
     let outcome = crate::tools::envelope::take_outcome(SESSION2, "NodeSwitch")
         .expect("工具结果应当已登记");
-    assert_eq!(outcome.display.text, "已选择节点");
-    assert_eq!(outcome.display.facts, vec!["生效：下次连接"]);
+    assert_eq!(
+        outcome.display.facts,
+        vec![crate::tools::Fact::new(
+            crate::tools::FactKey::EffectNextConnect
+        )]
+    );
 }

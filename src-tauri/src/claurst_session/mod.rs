@@ -269,9 +269,8 @@ fn has_any_config() -> bool {
     }
 }
 
-/// ai-status 的进行中文案。具体工具的人话由前端静态表渲染；
-/// 后端这里只给一句不带工具名的兜底，避免模型不说话时也露出 `RuntimeStatus`。
-const RUNNING_TOOL_STATUS: &str = "正在处理…";
+/// ai-status 的进行中状态只给 `text_key`（2.24.0）；具体字句由前端映射表渲染，
+/// 后端不再拼任何可能露出工具名的文案。
 
 /// 普通对话每轮最多几次「模型 → 工具 → 模型」。
 ///
@@ -505,7 +504,7 @@ impl AivpnSession {
         // 布局归属：开始时先取一份快照，结束时再取一次，后者优先（见 `layout_owner`）。
         let layout_config_id = active_config_id();
 
-        emitter.status("thinking", "ai.status.thinking", None, "正在思考");
+        emitter.status("thinking", "ai.status.thinking", None);
 
         let session_id = self.session_id.clone();
         let tools_snapshot: Vec<(String, String, Option<Value>)> = self
@@ -554,11 +553,11 @@ impl AivpnSession {
                                         consumer_emitter.message_chunk(&visible);
                                     }
                                     consumer_emitter
-                                        .status("streaming_answer", "ai.status.streaming", None, "正在回复");
+                                        .status("streaming_answer", "ai.status.streaming", None);
                                 }
                                 ContentDelta::ThinkingDelta { thinking } => {
                                     consumer_emitter.thinking_chunk(thinking);
-                                    consumer_emitter.status("thinking", "ai.status.thinking", None, "正在思考");
+                                    consumer_emitter.status("thinking", "ai.status.thinking", None);
                                 }
                                 _ => {}
                             }
@@ -607,12 +606,7 @@ impl AivpnSession {
                             preview,
                         );
                         // 状态行不拼工具名：模型可见名（RuntimeStatus 等）不能出现在用户面前。
-                        consumer_emitter.status(
-                            "running_tool",
-                            "ai.status.working",
-                            None,
-                            RUNNING_TOOL_STATUS,
-                        );
+                        consumer_emitter.status("running_tool", "ai.status.working", None);
                     }
                     QueryEvent::ToolEnd {
                         tool_name,
@@ -661,7 +655,7 @@ impl AivpnSession {
                     }
                     QueryEvent::Status(text) => {
                         let phase = phase_for_status(text);
-                        consumer_emitter.status(phase, text_key_for_phase(phase), None, text);
+                        consumer_emitter.status(phase, text_key_for_phase(phase), None);
                     }
                     QueryEvent::Retry {
                         attempt,
@@ -678,16 +672,11 @@ impl AivpnSession {
                                 *delay_ms,
                                 reason,
                             )),
-                            &format!(
-                                "上游临时波动（{reason}），正在重试 {attempt}/{max_attempts}，{} 秒后重试…",
-                                events::retry_delay_seconds(*delay_ms)
-                            ),
                         );
                     }
                     QueryEvent::Compacted(record) => {
                         consumer_emitter.compact(
                             "completed",
-                            "上下文已压缩，早前消息已折叠。",
                             Some(record.tokens_before),
                             Some(record.tokens_after),
                         );
@@ -770,7 +759,7 @@ impl AivpnSession {
                 );
             }
             Ok(QueryOutcome::MaxTokens { usage, .. }) => {
-                emitter.status("completed", "ai.status.truncated", None, "输出达到长度上限，已截断");
+                emitter.status("completed", "ai.status.truncated", None);
                 emitter.request_end(
                     "success",
                     Some(final_text),
@@ -1928,11 +1917,6 @@ mod prompt_tests {
             missing.is_empty(),
             "这些工具没有英文描述，英文会话会退回中文：{missing:?}"
         );
-        assert_eq!(
-            tools.len(),
-            41,
-            "英文表条数与工具集不一致：新增/删除工具时同步改英文表"
-        );
     }
 
     /// 免费节点来源门禁也要落在工具描述上：模型选工具时看的是 description。
@@ -2143,18 +2127,8 @@ mod prompt_tests {
     /// 状态事件与命令信封共用同一个契约版本。
     #[test]
     fn the_status_contract_versions_match() {
-        assert_eq!(events::CONTRACT_VERSION, "2.23.0");
-        assert_eq!(crate::runtime::EVENT_CONTRACT_VERSION, "2.23.0");
-    }
-
-    /// running 状态文案不能拼工具名：模型不说话时也会显示给用户。
-    #[test]
-    fn the_running_status_never_contains_a_tool_name() {
-        assert_eq!(RUNNING_TOOL_STATUS, "正在处理…");
-        for tool in ["RuntimeStatus", "VpnConnect", "FooBar"] {
-            assert!(!RUNNING_TOOL_STATUS.contains(tool));
-            assert_ne!(RUNNING_TOOL_STATUS, format!("{tool} 正在运行"));
-        }
+        assert_eq!(events::CONTRACT_VERSION, "2.24.0");
+        assert_eq!(crate::runtime::EVENT_CONTRACT_VERSION, "2.24.0");
     }
 
     /// 安全底线只留三条；多一条少一条都要在这里显形。

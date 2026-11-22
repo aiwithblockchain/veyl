@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Veyl · 节点诊断（智能分析）</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --paper: #FAFAF8;
+    --card: #FFFFFF;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --hair-strong: rgba(20, 22, 28, 0.18);
+    --accent: #F6537B;
+    --focus: #E03A66;
+    --green: #1B7A4E;
+    --amber: #946200;
+    --red: #A8382D;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 14px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    background: #EDEBE7;
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button { font-family: inherit; }
+
+  /* ---------- 页面外壳：左侧场景切换 ---------- */
+  .page {
+    display: grid;
+    grid-template-columns: 236px 1fr;
+    min-height: 100vh;
+  }
+
+  .side {
+    padding: 24px 16px;
+    border-right: 1px solid var(--hair);
+    background: var(--paper);
+  }
+
+  .side h1 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .side p {
+    margin: 0 0 20px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-3);
+  }
+
+  .scenes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .scene {
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+    font-size: 13px;
+    color: var(--ink-2);
+    cursor: pointer;
+    line-height: 1.4;
+  }
+
+  .scene:hover { background: rgba(20, 22, 28, 0.04); }
+  .scene.is-active {
+    background: var(--card);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--focus);
+  }
+
+  .stage {
+    position: relative;
+    padding: 40px;
+    overflow: auto;
+  }
+
+  /* ---------- 连接页失败行的两种样子 ---------- */
+  .row-demo {
+    max-width: 640px;
+    margin: 0 auto 28px;
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-md);
+    padding: 8px;
+  }
+
+  .row-demo__label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    color: var(--ink-3);
+    margin: 4px 8px 8px;
+  }
+
+  .stage-node {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 12px;
+    border-radius: var(--r-sm);
+  }
+
+  .stage-node + .stage-node { border-top: 1px solid var(--hair); }
+
+  .stage-node__name {
+    font-size: 14px;
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .stage-node__sub {
+    margin-left: 8px;
+    font-size: 11px;
+    color: var(--ink-3);
+    font-weight: 400;
+  }
+
+  .stage-node__actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .stage-node__ms {
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  .linkbtn {
+    border: 0;
+    background: transparent;
+    padding: 2px 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: #C2185B;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* ---------- 诊断面板 ---------- */
+  .backdrop {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 48px 16px;
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(20, 22, 28, 0.06), transparent 60%),
+      #EFEDE9;
+    border-radius: var(--r-lg);
+  }
+
+  .dialog {
+    width: 420px;
+    max-width: calc(100vw - 48px);
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-lg);
+    box-shadow: 0 18px 48px rgba(20, 22, 28, 0.16);
+    padding: 20px 22px 18px;
+  }
+
+  .dialog__head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .dialog__title {
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.35;
+    font-weight: 600;
+  }
+
+  .dialog__close {
+    border: 0;
+    background: transparent;
+    color: var(--ink-3);
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px;
+    margin: -4px -4px 0 0;
+    cursor: pointer;
+    border-radius: var(--r-sm);
+  }
+
+  .dialog__close:hover { background: rgba(20, 22, 28, 0.05); }
+
+  .intro {
+    margin: 16px 0 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin: 16px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    column-gap: 8px;
+    align-items: start;
+  }
+
+  .step__status {
+    width: 16px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .step__status--passed { color: var(--green); }
+  .step__status--failed { color: var(--red); }
+  .step__status--running { color: var(--ink-3); }
+
+  .step__title {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+
+  .step__conclusion {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .main-action {
+    display: flex;
+    margin: 12px 0 0;
+  }
+
+  .btn {
+    appearance: none;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--hair-strong);
+    background: transparent;
+    color: var(--ink);
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+
+  .btn--primary {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--canvas);
+    font-weight: 500;
+  }
+
+  .btn--ghost { color: var(--ink-2); }
+
+  .btn--danger-ghost {
+    border-color: rgba(168, 56, 45, 0.5);
+    color: var(--red);
+  }
+
+  .confirm {
+    margin: 14px 0 0 24px;
+    padding: 12px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-sm);
+    background: var(--paper);
+  }
+
+  .confirm__text {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+
+  .confirm__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .dialog__footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--hair);
+  }
+
+  .hint {
+    max-width: 420px;
+    margin: 16px auto 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-3);
+    text-align: left;
+  }
+
+  .hint strong { color: var(--ink-2); font-weight: 600; }
+
+  /* 服务器详情入口 */
+  .detail {
+    max-width: 640px;
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--hair);
+    border-radius: var(--r-md);
+    padding: 24px;
+  }
+
+  .detail h2 { margin: 0; font-size: 22px; font-weight: 600; }
+  .detail__state { float: right; font-size: 12px; color: var(--green); }
+  .detail__facts { margin-top: 24px; display: grid; gap: 14px; }
+  .fact { display: grid; grid-template-columns: 72px 1fr; font-size: 13px; }
+  .fact dt { color: var(--ink-3); }
+  .fact dd { margin: 0; }
+  .detail__footer {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--hair);
+    display: flex;
+    gap: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <aside class="side">
+    <h1>节点诊断 · 智能分析</h1>
+    <p>静态设计稿，不运行 App。点左侧切换场景，按钮不会真的执行动作。</p>
+    <div class="scenes" id="scenes"></div>
+  </aside>
+
+  <main class="stage" id="stage"></main>
+</div>
+
+<script>
+const scenes = [
+  { id: "row", name: "① 连接页失败行" },
+  { id: "idle", name: "② 面板初始" },
+  { id: "ok", name: "③ 连通性通过" },
+  { id: "unreachable", name: "④ 整机不可达" },
+  { id: "service", name: "⑤ 机器在线，服务不可用" },
+  { id: "config-failed", name: "⑥ 更新配置后仍不通" },
+  { id: "confirm", name: "⑦ 重置二次确认" },
+  { id: "reset-failed", name: "⑧ 重置后仍不通" },
+  { id: "recovered", name: "⑨ 已恢复" },
+  { id: "detail", name: "⑩ 服务器详情入口" },
+];
+
+const status = (s) =>
+  s === "passed" ? '<span class="step__status step__status--passed">✓</span>'
+  : s === "failed" ? '<span class="step__status step__status--failed">✕</span>'
+  : '<span class="step__status step__status--running">…</span>';
+
+function step(title, s, conclusion, action) {
+  return `
+    <li class="step">
+      ${status(s)}
+      <div>
+        <p class="step__title">${title}</p>
+        <p class="step__conclusion">${conclusion}</p>
+        ${action ? `<div class="main-action">${action}</div>` : ""}
+      </div>
+    </li>`;
+}
+
+const btn = (label, kind = "primary") =>
+  `<button class="btn btn--${kind}">${label}</button>`;
+
+function dialog({ steps = "", intro = "", confirm = false }) {
+  return `
+    <div class="backdrop">
+      <div class="dialog" role="dialog" aria-modal="true">
+        <header class="dialog__head">
+          <h2 class="dialog__title">诊断：东京 01</h2>
+          <button class="dialog__close" aria-label="关闭">✕</button>
+        </header>
+        ${intro ? `<p class="intro">${intro}</p>` : ""}
+        ${steps ? `<ol class="steps">${steps}</ol>` : ""}
+        ${confirm ? `
+          <div class="confirm">
+            <p class="confirm__text">会断开当前连接，端口和密码都会变；其它设备需要更新配置后才能继续用。</p>
+            <div class="confirm__actions">
+              <button class="btn btn--ghost">取消</button>
+              <button class="btn btn--danger-ghost">确认重置</button>
+            </div>
+          </div>` : ""}
+        <div class="dialog__footer">
+          <button class="btn btn--ghost">关闭</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+const stageRows = `
+  <div class="row-demo">
+    <div class="row-demo__label">连接页 · 节点行（自有节点测不通）</div>
+    <div class="stage-node">
+      <span class="stage-node__name">东京 01<span class="stage-node__sub">自建</span></span>
+      <span class="stage-node__actions">
+        <span class="stage-node__ms">测不通</span>
+        <button class="linkbtn">智能分析</button>
+      </span>
+    </div>
+    <div class="stage-node">
+      <span class="stage-node__name">香港（免费）<span class="stage-node__sub">免费节点</span></span>
+      <span class="stage-node__actions">
+        <span class="stage-node__ms">测不通</span>
+        <button class="linkbtn">问 AI</button>
+      </span>
+    </div>
+  </div>
+  <p class="hint">
+    <strong>自有节点</strong>只留一个「智能分析」；<strong>非自有节点</strong>（免费 / 手动导入）保留「问 AI」——
+    它们没有 agent，重置端口这条链路不成立。失败行的自动同步、三态提示和「重新连接并测试」都已拆除。
+  </p>`;
+
+const views = {
+  row: stageRows,
+
+  idle: dialog({
+    intro: "逐步确认问题出在哪；每一步都要你点按钮。",
+    steps: '<div class="main-action">' + btn("开始分析") + "</div>",
+  }),
+
+  ok: dialog({
+    steps:
+      step("连通性", "passed", 'ICMP 通 · <span class="num">32</span> ms',
+        btn("更新配置")),
+  }),
+
+  unreachable: dialog({
+    steps: [
+      step("连通性", "failed", "这台机器整机不可达", btn("去销毁并重建", "danger-ghost")),
+    ].join(""),
+  }),
+
+  service: dialog({
+    steps: [
+      step("连通性", "failed", "机器在线，控制服务不可用", btn("去问 AI")),
+    ].join(""),
+  }),
+
+  "config-failed": dialog({
+    steps: [
+      step("连通性", "passed", 'ICMP 通 · <span class="num">32</span> ms'),
+      step("更新配置", "failed", "配置没有变化，仍然不通", btn("重置端口与密码", "danger-ghost")),
+    ].join(""),
+  }),
+
+  confirm: dialog({
+    steps: [
+      step("连通性", "passed", 'ICMP 通 · <span class="num">32</span> ms'),
+      step("更新配置", "failed", "配置没有变化，仍然不通"),
+    ].join(""),
+    confirm: true,
+  }),
+
+  "reset-failed": dialog({
+    steps: [
+      step("连通性", "passed", 'ICMP 通 · <span class="num">32</span> ms'),
+      step("更新配置", "failed", "配置没有变化，仍然不通"),
+      step("重置端口与密码", "failed", "端口与密码已重置，但仍然不通", btn("去问 AI")),
+    ].join(""),
+  }),
+
+  recovered: dialog({
+    steps: [
+      step("连通性", "passed", 'ICMP 通 · <span class="num">32</span> ms'),
+      step("更新配置", "passed", "配置已更新，连接已恢复"),
+    ].join(""),
+  }),
+
+  detail: `
+    <div class="detail">
+      <div class="detail__state">● 已开通</div>
+      <h2>纽约</h2>
+      <div class="detail__facts">
+        <div class="fact"><dt>地区</dt><dd>纽约 1</dd></div>
+        <div class="fact"><dt>IP</dt><dd class="num">68.183.140.144</dd></div>
+        <div class="fact"><dt>节点</dt><dd>已就绪</dd></div>
+        <div class="fact"><dt>费用</dt><dd class="num">每天 $0.20</dd></div>
+        <div class="fact"><dt>流量</dt><dd>每月 500 GB 出站</dd></div>
+      </div>
+      <div class="detail__footer">
+        <button class="btn btn--danger-ghost">销毁</button>
+        <button class="btn btn--ghost">智能分析</button>
+      </div>
+    </div>
+    <p class="hint">
+      原来这里是「智能修复」，现在换成「智能分析」；只在最近一次探测确实不可达、且服务器仍在正常开通状态时出现。
+      到期的服务器不出现这个入口；费用行也不再显示「本期有效至」。
+    </p>`,
+};
+
+const sceneBox = document.getElementById("scenes");
+const stage = document.getElementById("stage");
+
+function show(id) {
+  stage.innerHTML = views[id];
+  [...sceneBox.children].forEach((el) =>
+    el.classList.toggle("is-active", el.dataset.id === id),
+  );
+}
+
+scenes.forEach((s) => {
+  const b = document.createElement("button");
+  b.className = "scene";
+  b.dataset.id = s.id;
+  b.textContent = s.name;
+  b.onclick = () => show(s.id);
+  sceneBox.appendChild(b);
+});
+
+show("row");
+</script>
+</body>
+</html>

@@ -201,8 +201,12 @@ pub fn consume_upgrade_consent(
         ))
 }
 
-/// 升级确认与接管方式确认的卡片类型：只认 options 里的原文，不接受自由文本。
-const CONFIRM_CARD_KINDS: [&str; 2] = ["core_upgrade_confirm", "config_set_mode_confirm"];
+/// 确认卡的卡片类型：只认 options 里的原文，不接受自由文本。
+const CONFIRM_CARD_KINDS: [&str; 3] = [
+    "core_upgrade_confirm",
+    "config_set_mode_confirm",
+    "issue_submit_confirm",
+];
 const SWITCH_OPTION: &str = "切换";
 
 /// 接管方式确认的一次性同意：`(session_id, request_id, config_id, mode)`。
@@ -389,7 +393,7 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     let Some((options, request_id, kind, target_version, artifact_sha256)) = matched else {
         return Err(not_pending());
     };
-    // 装包授权 / 断线切换不能靠打字确认：卡片上的选项才是唯一的「同意」。
+    // 装包授权 / 断线切换 / 公开上报不能靠打字确认：卡片上的选项才是唯一的「同意」。
     let confirm_card = kind
         .as_deref()
         .is_some_and(|kind| CONFIRM_CARD_KINDS.contains(&kind));
@@ -397,7 +401,7 @@ pub fn reply(session_id: &str, question_id: &str, answer: &str) -> Result<(), (S
     if confirm_card && !skipping && !options.iter().any(|option| option == answer) {
         return Err((
             "answer_not_in_options".into(),
-            "升级确认只能逐字选择给定选项".into(),
+            "确认卡只能逐字选择给定选项".into(),
         ));
     }
     let answer = if skipping {

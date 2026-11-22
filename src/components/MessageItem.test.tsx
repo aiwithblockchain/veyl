@@ -9,7 +9,6 @@ afterEach(cleanup);
 function makeCall(
   id: string,
   state: ToolCall["state"],
-  text: string,
   tool = "RuntimeStatus",
 ): ToolCall {
   return {
@@ -21,7 +20,6 @@ function makeCall(
     state,
     nextActions: [],
     startedAt: 1,
-    display: { text, facts: [], changed: null },
   };
 }
 
@@ -46,9 +44,9 @@ function renderMessage(calls: ToolCall[]) {
 describe("MessageItem：工具行合并", () => {
   it("连续 3 条成功合并成完成 3 步，展开后才逐条出现", () => {
     renderMessage([
-      makeCall("a", "ok", "第一步"),
-      makeCall("b", "ok", "第二步", "DiagRun"),
-      makeCall("c", "ok", "第三步", "VpnConnect"),
+      makeCall("a", "ok"),
+      makeCall("b", "ok", "DiagRun"),
+      makeCall("c", "ok", "VpnConnect"),
     ]);
 
     expect(screen.getByText("完成 3 步")).toBeTruthy();
@@ -63,8 +61,8 @@ describe("MessageItem：工具行合并", () => {
 
   it("1–2 条成功不合并", () => {
     renderMessage([
-      makeCall("a", "ok", "第一步"),
-      makeCall("b", "ok", "第二步", "DiagRun"),
+      makeCall("a", "ok"),
+      makeCall("b", "ok", "DiagRun"),
     ]);
 
     expect(screen.getByText("已查看连接状态")).toBeTruthy();
@@ -74,11 +72,11 @@ describe("MessageItem：工具行合并", () => {
 
   it("失败断开合并，也不会被后续成功吞掉", () => {
     renderMessage([
-      makeCall("a", "ok", "准备完成"),
-      makeCall("b", "error", "没能连上", "VpnConnect"),
-      makeCall("c", "ok", "第一步"),
-      makeCall("d", "ok", "第二步"),
-      makeCall("e", "ok", "第三步"),
+      makeCall("a", "ok"),
+      makeCall("b", "error", "VpnConnect"),
+      makeCall("c", "ok"),
+      makeCall("d", "ok"),
+      makeCall("e", "ok"),
     ]);
 
     expect(screen.getByText("已查看连接状态")).toBeTruthy();
@@ -89,11 +87,11 @@ describe("MessageItem：工具行合并", () => {
 
   it("进行中会断开合并，并单独成行", () => {
     renderMessage([
-      makeCall("a", "ok", "第一步"),
-      makeCall("b", "running", "正在连接"),
-      makeCall("c", "ok", "第二步"),
+      makeCall("a", "ok"),
+      makeCall("b", "running"),
+      makeCall("c", "ok"),
       makeCall("d", "ok", "第三步"),
-      makeCall("e", "ok", "第四步"),
+      makeCall("e", "ok"),
     ]);
 
     expect(screen.getByText("已查看连接状态")).toBeTruthy();
@@ -103,13 +101,13 @@ describe("MessageItem：工具行合并", () => {
 
   it("AskUserQuestion 不渲染工具行，并断开合并", () => {
     renderMessage([
-      makeCall("a", "ok", "第一步", "AskUserQuestion"),
-      makeCall("b", "ok", "第二步"),
-      makeCall("c", "ok", "第三步", "DiagRun"),
-      makeCall("d", "error", "没能继续"),
-      makeCall("e", "ok", "第四步", "VpnConnect"),
-      makeCall("f", "ok", "第五步", "VpnConnect"),
-      makeCall("g", "ok", "第六步", "VpnConnect"),
+      makeCall("a", "ok", "AskUserQuestion"),
+      makeCall("b", "ok"),
+      makeCall("c", "ok", "DiagRun"),
+      makeCall("d", "error"),
+      makeCall("e", "ok", "VpnConnect"),
+      makeCall("f", "ok", "VpnConnect"),
+      makeCall("g", "ok", "VpnConnect"),
     ]);
 
     // AskUserQuestion 整行不渲染，也不参与合并。

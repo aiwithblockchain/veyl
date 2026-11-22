@@ -322,6 +322,49 @@ describe("AskQuestionCard", () => {
     fireEvent.click(option);
     expect(onAnswer).not.toHaveBeenCalled();
   });
+
+  it("问题墙确认卡只展示要公开的字段，不出现原始 JSON", () => {
+    render(
+      <AskQuestionCard
+        question={question({
+          kind: "issue_submit_confirm",
+          options: ["上报", "取消"],
+          issueSubmitConfirm: {
+            title: "重置端口超时",
+            summary: "连通正常，重置时没有返回。",
+            expected: "自动重连并恢复",
+            actual: "停在正在重置",
+            repro: "连续两次触发",
+            platform: "macos",
+            appVersion: "1.0.0",
+            steps: [
+              {
+                step: "rotate",
+                ok: false,
+                durationMs: 90000,
+                reason: "agent_timeout",
+              },
+            ],
+          },
+        })}
+        onAnswer={vi.fn(async () => {})}
+        onExpire={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("重置端口超时")).toBeTruthy();
+    expect(screen.getByText("连通正常，重置时没有返回。")).toBeTruthy();
+    expect(screen.getByText("自动重连并恢复")).toBeTruthy();
+    expect(screen.getByText("停在正在重置")).toBeTruthy();
+    expect(screen.getByText("连续两次触发")).toBeTruthy();
+    expect(screen.getByText(/macOS · 1\.0\.0/)).toBeTruthy();
+    expect(screen.getByText(/重置端口 · 未通过 · 90\.0 秒/)).toBeTruthy();
+    expect(screen.getByText(/会上报版本、平台、诊断步骤/)).toBeTruthy();
+    expect(screen.queryByText(/"steps"/)).toBeNull();
+    // 内部错误码不上界面：只显示「未通过」，不把 agent_timeout 这类码念给用户。
+    expect(document.body.textContent).not.toContain("agent_timeout");
+    expect(screen.queryByRole("button", { name: "解释这个设置的含义" })).toBeNull();
+  });
 });
 
 describe("离屏折叠行", () => {

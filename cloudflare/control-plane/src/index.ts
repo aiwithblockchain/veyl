@@ -6,6 +6,7 @@ import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
 import { handleServers } from "./servers";
 import { handleMobile } from "./mobile";
+import { handleIssues } from "./issues";
 import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
 import { handleDodoWebhook } from "./webhooks/dodo";
@@ -42,6 +43,10 @@ export interface Env {
   /** 充值面额（美分）→ 一次性产品 ID。 */
   DODO_TOPUP_PRODUCT_IDS?: string;
   APP_PAYMENT_RETURN_URL?: string;
+  /** 官网站点地址：问题墙帖子链接与允许的跨域来源。 */
+  PUBLIC_SITE_URL?: string;
+  /** 问题墙提交开关：normal | closed（close 只影响提交，公开读取不受影响）。 */
+  ISSUE_SUBMIT_MODE?: string;
 }
 
 const SERVICE = "veyl-control-plane";const VERSION = "0.0.0";
@@ -400,6 +405,10 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
   // 手机端导出：账户级令牌（Bearer）与远程配置（Basic）。
   const mobileResponse = await handleMobile(request, env);
   if (mobileResponse) return mobileResponse;
+
+  // 问题墙：用户上报（账户令牌）与公开读取（无鉴权）。
+  const issueResponse = await handleIssues(request, env);
+  if (issueResponse) return issueResponse;
 
   // 公开只读目录：不校验登录。目录与年龄判断都存在 D1 里，所有边缘共享同一份数据；
   // `?fresh=1`：打开新建向导时绕过年龄判断直接回源（10 秒内重复打开不重复回源）。

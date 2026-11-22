@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::{Changed, Fact, FactKey};
 use super::{envelope, AivpnError, ToolOutcome};
 
 const MAX_REDIRECTS: usize = 5;
@@ -442,6 +443,7 @@ fn next_target(current: &Target, location: &str) -> Result<Target, AivpnError> {
 }
 
 /// 网络 / TLS 失败：按契约仍是工具成功返回，只是 `status: null` + `HTTP_CHECK_FAILED`。
+/// `reason` 是给展示层判读的机器值（`timeout` / `headers_too_large` / `network`）。
 fn failure_result(
     raw_url: &str,
     via: &str,
@@ -465,6 +467,26 @@ fn failure_result(
 /// 整体超时：按契约仍是工具成功返回，只是 `status: null` + `HTTP_CHECK_FAILED`。
 fn timeout_result(raw_url: &str, via: &str, started: Instant, redirects: usize) -> Value {
     failure_result(raw_url, via, started, redirects, "等响应超时")
+}
+
+/// 失败类别只用于挑展示用的 key，**不写进模型可见的 `data`**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpFailure {
+    None,
+    Timeout,
+    HeadersTooLarge,
+    Network,
+}
+
+impl HttpFailure {
+    /// `http.error` 的枚举值（`events.md` §3.4.1）。
+    fn reason(self) -> &'static str {
+        match self {
+            HttpFailure::Timeout => "timeout",
+            HttpFailure::HeadersTooLarge => "headers_too_large",
+            _ => "network",
+        }
+    }
 }
 
 pub struct HttpCheckTool {
@@ -493,7 +515,7 @@ impl HttpCheckTool {
         route_from_status(&status)
     }
 
-    async fn check(&self, raw_url: &str, timeout: Duration) -> Result<Value, AivpnError> {
+    async fn check(&self, raw_url: &str, timeout: Duration) -> Result<(Value, HttpFailure), AivpnError> {
         let target = parse_https_url(raw_url)?;
         // `started` 在选路之前：选路要读 `runtime_status()`，TUN 下可能带一次探测，
         // 那段时间也算进 `timeout_ms`，否则总耗时能超出用户给的上限。
@@ -512,7 +534,7 @@ impl HttpCheckTool {
         started: Instant,
         route: Route,
         via: &'static str,
-    ) -> Result<Value, AivpnError> {
+    ) -> Result<(Value, HttpFailure), AivpnError> {
         let mut redirects = 0usize;
 
         loop {
@@ -521,8 +543,9 @@ impl HttpCheckTool {
                 Ok(addresses) => addresses,
                 // 解析不了是网络问题，不是「你给的地址不合法」。
                 Err(message) => {
-                    return Ok(failure_result(
-                        raw_url, via, started, redirects, &message,
+                    return Ok((
+                        failure_result(raw_url, via, started, redirects, &message),
+                        HttpFailure::Network,
                     ))
                 }
             };
@@ -535,7 +558,10 @@ impl HttpCheckTool {
                 .checked_sub(started.elapsed())
                 .filter(|left| !left.is_zero());
             let Some(remaining) = remaining else {
-                return Ok(timeout_result(raw_url, via, started, redirects));
+                return Ok((
+                    timeout_result(raw_url, via, started, redirects),
+                    HttpFailure::Timeout,
+                ));
             };
 
             let response = match self
@@ -545,27 +571,31 @@ impl HttpCheckTool {
             {
                 Ok(response) => response,
                 Err(message) => {
-                    return Ok(failure_result(
-                        raw_url, via, started, redirects, &message,
+                    return Ok((
+                        failure_result(raw_url, via, started, redirects, &message),
+                        HttpFailure::Network,
                     ))
                 }
             };
 
             if response.header_bytes > MAX_HEADER_BYTES {
-                return Ok(json!({
-                    "url": raw_url,
-                    "via": via,
-                    "status": response.status,
-                    "elapsed_ms": started.elapsed().as_millis() as u64,
-                    "redirects": redirects,
-                    "server": response.server,
-                    "cf_mitigated": response.cf_mitigated,
-                    "tls_ok": true,
-                    "error": {
-                        "code": "HTTP_CHECK_FAILED",
-                        "message": "响应头异常大，没有按完整响应判断"
-                    },
-                }));
+                return Ok((
+                    json!({
+                        "url": raw_url,
+                        "via": via,
+                        "status": response.status,
+                        "elapsed_ms": started.elapsed().as_millis() as u64,
+                        "redirects": redirects,
+                        "server": response.server,
+                        "cf_mitigated": response.cf_mitigated,
+                        "tls_ok": true,
+                        "error": {
+                            "code": "HTTP_CHECK_FAILED",
+                            "message": "响应头异常大，没有按完整响应判断"
+                        },
+                    }),
+                    HttpFailure::HeadersTooLarge,
+                ));
             }
 
             if (300..400).contains(&response.status) {
@@ -579,17 +609,20 @@ impl HttpCheckTool {
                 }
             }
 
-            return Ok(json!({
-                "url": raw_url,
-                "via": via,
-                "status": response.status,
-                "elapsed_ms": started.elapsed().as_millis() as u64,
-                "redirects": redirects,
-                "server": response.server,
-                "cf_mitigated": response.cf_mitigated,
-                "tls_ok": true,
-                "error": Value::Null,
-            }));
+            return Ok((
+                json!({
+                    "url": raw_url,
+                    "via": via,
+                    "status": response.status,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "redirects": redirects,
+                    "server": response.server,
+                    "cf_mitigated": response.cf_mitigated,
+                    "tls_ok": true,
+                    "error": Value::Null,
+                }),
+                HttpFailure::None,
+            ));
         }
     }
 }
@@ -629,33 +662,39 @@ impl Tool for HttpCheckTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match parse_input(&input) {
             Ok(request) => match self.check(&request.url, request.timeout).await {
-                Ok(data) => {
-                    let failed = data.get("error").map(|error| !error.is_null()).unwrap_or(false);
-                    if failed {
-                        let message = data["error"]["message"]
-                            .as_str()
-                            .unwrap_or("没能访问这个地址")
-                            .to_string();
-                        ToolOutcome::ok("没访问成功", data).with_facts(vec![message])
+                Ok((data, failure)) => {
+                    if failure != HttpFailure::None {
+                        ToolOutcome::ok("没访问成功", data).with_facts(vec![Fact::with_params(
+                            FactKey::HttpError,
+                            json!({ "reason": failure.reason() }),
+                        )])
                     } else {
                         let status = data["status"].as_u64().unwrap_or(0);
                         let mut facts = vec![
-                            format!("状态码：{status}"),
-                            format!("耗时：{} ms", data["elapsed_ms"].as_u64().unwrap_or(0)),
-                            format!("跳转：{} 次", data["redirects"].as_u64().unwrap_or(0)),
+                            Fact::with_params(FactKey::HttpStatusCode, json!({ "code": status })),
+                            Fact::with_params(
+                                FactKey::HttpElapsedMs,
+                                json!({ "ms": data["elapsed_ms"].as_u64().unwrap_or(0) }),
+                            ),
+                            Fact::with_params(
+                                FactKey::HttpRedirects,
+                                json!({ "count": data["redirects"].as_u64().unwrap_or(0) }),
+                            ),
                         ];
                         if let Some(server) = data.get("server").and_then(Value::as_str) {
-                            facts.push(format!("站点服务：{server}"));
+                            facts.push(Fact::with_params(
+                                FactKey::HttpServer,
+                                json!({ "name": server }),
+                            ));
                         }
                         if data.get("cf_mitigated").and_then(Value::as_str).is_some() {
-                            facts.push("站点要求人机验证".to_string());
+                            facts.push(Fact::new(FactKey::HttpCaptchaRequired));
                         }
                         // 挑战只转述：不得据此判断 VPN 有没有生效。
                         ToolOutcome::ok(format!("网页返回 {status}"), data).with_facts(facts)
                     }
                 }
-                Err(error) => ToolOutcome::fail(error)
-                    .with_display("没访问成功", Vec::new(), super::display::Changed::None),
+                Err(error) => ToolOutcome::fail(error).with_changed(Changed::None),
             },
             Err(error) => ToolOutcome::fail(error),
         };
@@ -698,6 +737,14 @@ mod tests {
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::Mutex;
+
+    /// `http.error` 的 reason 由 Host 的失败类别决定，不解析错误文案、不进 `data`。
+    #[test]
+    fn failure_reasons_are_machine_readable() {
+        assert_eq!(HttpFailure::Timeout.reason(), "timeout");
+        assert_eq!(HttpFailure::HeadersTooLarge.reason(), "headers_too_large");
+        assert_eq!(HttpFailure::Network.reason(), "network");
+    }
 
     /// 假探测口：解析表与响应表都由用例预先写好，绝不联网。
     /// 没登记的主机会让解析失败——「漏写 with_host」必须表现为测试失败，而不是静默通过。
@@ -790,7 +837,7 @@ mod tests {
     async fn check_error(probe: Arc<FakeProbe>, url: &str) -> (String, String) {
         let tool = tool_with(probe);
         match tool.check(url, Duration::from_millis(DEFAULT_TIMEOUT_MS)).await {
-            Ok(value) => panic!("应当被拒：{value}"),
+            Ok(_) => panic!("应当被拒"),
             Err(error) => (
                 error.code,
                 error
@@ -923,7 +970,8 @@ mod tests {
                 Duration::from_millis(DEFAULT_TIMEOUT_MS),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(value["status"], 203, "{value}");
         assert_eq!(value["redirects"], 1, "{value}");
         assert_eq!(value["cf_mitigated"], "challenge", "{value}");
@@ -944,7 +992,8 @@ mod tests {
                 Duration::from_millis(DEFAULT_TIMEOUT_MS),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(value["status"].is_null(), "{value}");
         assert_eq!(value["tls_ok"], false, "{value}");
         assert_eq!(value["error"]["code"], "HTTP_CHECK_FAILED", "{value}");
@@ -977,7 +1026,8 @@ mod tests {
                 Duration::from_millis(DEFAULT_TIMEOUT_MS),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
 
         let seen = probe.seen();
         assert_eq!(seen.len(), 1, "只该发一跳");

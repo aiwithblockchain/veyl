@@ -204,6 +204,13 @@ function main() {
     process.exit(0);
   }
 
+  // 开发启动默认让本 crate 的 DEBUG 也写进 logs/app-*.log：排查问题时
+  // 「关键链路」日志都在，不用先改代码再复现。外部显式设置的 RUST_LOG 优先。
+  const rustLogSource = process.env.RUST_LOG ? "外部设置" : "默认";
+  if (!process.env.RUST_LOG) {
+    process.env.RUST_LOG = "veyl=debug,tauri=info";
+  }
+
   const runId = timestamp(new Date());
   // 必须先存在：下面要读 .run-id，也要把 terminal.log 写在里面。
   mkdirSync(LOGS_DIR, { recursive: true });
@@ -226,6 +233,7 @@ function main() {
 
   const terminalLog = join(LOGS_DIR, "terminal.log");
   console.log(`[logs] 本次运行：${runId}`);
+  console.log(`[logs] RUST_LOG：${rustLogSource}（veyl DEBUG 会写入应用日志）`);
   if (archivePath) {
     console.log(`[logs] 归档上一次运行（${previousId}）的 ${moved.length} 个文件到：${archivePath}`);
   } else if (previousId) {

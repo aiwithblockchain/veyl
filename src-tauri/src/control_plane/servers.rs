@@ -1038,10 +1038,11 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
 
 pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
     let linked_before = local_server(server_id).and_then(|server| server.node_id);
+    let port_before = local_node_snapshot(server_id).map(|(_, port, _)| port);
 
     // 锁只包「取回 → 验签 → 落库」：控制面慢时轮换与同步会排队，这是有意的代价，
     // 换来的是同一台不会被两路并发覆盖。发事件等后续逻辑放在锁外。
-    let node = super::credentials::with_credential_lock(async {
+    let node = match super::credentials::with_credential_lock(async {
         let client = ControlPlane::new()?;
         let raw = client
             .post(&format!("/v1/servers/{server_id}/credentials"), None, None)
@@ -1054,7 +1055,18 @@ pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
             response.key_id,
         )
     })
-    .await?;
+    .await
+    {
+        Ok(node) => node,
+        Err(error) => {
+            log::warn!(
+                "[my_server_credentials] server_id={server_id} status=failed code={} reason={}",
+                error.code,
+                error.reason().unwrap_or("unknown")
+            );
+            return Err(error);
+        }
+    };
 
     // 本地关联真的变了才发事件；重复取凭据不制造无意义的状态事件。
     let linked_after = local_server(server_id);
@@ -1067,6 +1079,19 @@ pub async fn credentials(server_id: &str) -> Result<Value, CpError> {
             super::events::emit_server_changed(&server);
         }
     }
+
+    // 只比较端口，不打印端口值；第一次落库没有旧值时为 unknown。
+    let port_changed = match (
+        port_before,
+        local_node_snapshot(server_id).map(|(_, port, _)| port),
+    ) {
+        (Some(before), Some(after)) => (before != after).to_string(),
+        _ => "unknown".to_string(),
+    };
+    log::info!(
+        "[my_server_credentials] server_id={server_id} status=ok port_changed={port_changed}"
+    );
+
     // 只回本地节点：密码留在 `secrets.enc`，不再把含密码的 payload 交给界面。
     Ok(json!(node))
 }

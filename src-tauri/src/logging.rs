@@ -301,26 +301,48 @@ pub fn level_from_env() -> LevelFilter {
     }
 }
 
+/// 只装了一个全局 logger，没有按 target 分流的能力：取「作用于本 crate 的
+/// 最详细级别」，而不是最后一段。`veyl=debug,tauri=info` 的意图是 veyl 要
+/// DEBUG，不能被后面的 `tauri=info` 覆盖；只写了别的 target 时不打开本 crate。
+///
+/// target 以 `veyl` 开头即命中：lib 名是 `veyl_lib`，模块 target 形如
+/// `veyl_lib::tools::issue_wall`。
 pub fn parse_level(raw: &str) -> Option<LevelFilter> {
-    let mut result = None;
+    let mut global: Option<LevelFilter> = None;
+    let mut ours: Option<LevelFilter> = None;
     for part in raw.split(',') {
-        let candidate = part
-            .split('=')
-            .next_back()
-            .unwrap_or(part)
-            .trim()
-            .to_ascii_lowercase();
-        result = match candidate.as_str() {
-            "off" => Some(LevelFilter::Off),
-            "error" => Some(LevelFilter::Error),
-            "warn" | "warning" => Some(LevelFilter::Warn),
-            "info" => Some(LevelFilter::Info),
-            "debug" => Some(LevelFilter::Debug),
-            "trace" => Some(LevelFilter::Trace),
-            _ => result,
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (target, name) = match part.split_once('=') {
+            Some((target, name)) => (Some(target.trim()), name.trim()),
+            None => (None, part),
         };
+        let Some(level) = level_from_name(name) else {
+            continue;
+        };
+        let slot = match target {
+            None => &mut global,
+            Some(target) if target.starts_with("veyl") => &mut ours,
+            Some(_) => continue,
+        };
+        let current = *slot;
+        *slot = Some(current.map_or(level, |current| current.max(level)));
     }
-    result
+    ours.or(global)
+}
+
+fn level_from_name(name: &str) -> Option<LevelFilter> {
+    match name.to_ascii_lowercase().as_str() {
+        "off" => Some(LevelFilter::Off),
+        "error" => Some(LevelFilter::Error),
+        "warn" | "warning" => Some(LevelFilter::Warn),
+        "info" => Some(LevelFilter::Info),
+        "debug" => Some(LevelFilter::Debug),
+        "trace" => Some(LevelFilter::Trace),
+        _ => None,
+    }
 }
 
 /// 敏感字段：命中就把整个值换成 `***`，不看内容。
@@ -492,8 +514,33 @@ mod tests {
     fn parses_the_common_rust_log_forms() {
         assert_eq!(parse_level("debug"), Some(LevelFilter::Debug));
         assert_eq!(parse_level("veyl=warn"), Some(LevelFilter::Warn));
-        assert_eq!(parse_level("veyl=debug,tauri=info"), Some(LevelFilter::Info));
+        // dev 启动脚本的默认值：veyl 要 DEBUG，不能被后面的 `tauri=info` 覆盖。
+        assert_eq!(
+            parse_level("veyl=debug,tauri=info"),
+            Some(LevelFilter::Debug)
+        );
+        // lib 名是 veyl_lib，模块 target 以它开头。
+        assert_eq!(
+            parse_level("veyl_lib=debug,tauri=info"),
+            Some(LevelFilter::Debug)
+        );
+        // 只写别的 target 时不打开本 crate 的日志。
+        assert_eq!(parse_level("tauri=debug"), None);
         assert_eq!(parse_level("nonsense"), None);
+    }
+
+    #[test]
+    fn the_most_verbose_directive_for_our_crate_wins() {
+        assert_eq!(
+            parse_level("veyl=info,veyl=debug"),
+            Some(LevelFilter::Debug)
+        );
+        // 没有 target 的全局级别是兜底，但仍优先作用于本 crate 的指令。
+        assert_eq!(
+            parse_level("trace,veyl=warn"),
+            Some(LevelFilter::Warn)
+        );
+        assert_eq!(parse_level("trace"), Some(LevelFilter::Trace));
     }
 
     #[test]
@@ -590,7 +637,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 写之前判断大小：超阈值先轮转，当前文件重新开始。
+    /// dev 启动脚本的默认值：`veyl=debug,tauri=info` 时 DEBUG 必须进文件。
+    /// 这条把 `parse_level` → `file_level` → `write_file` 串起来验证。
+    #[test]
+    fn the_dev_default_writes_debug_records_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("veyl-dev-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        let file_level = parse_level("veyl=debug,tauri=info").expect("dev 默认值应解析出级别");
+        let logger = test_logger(&dir, file_level, LevelFilter::Off);
+
+        logger.log(&record(Level::Debug));
+        let path = log_path(&dir.join("logs"));
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(content.contains("probe"), "DEBUG 应该进文件：{content:?}");
+        assert!(content.contains("DEBUG"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn the_file_rotates_before_it_exceeds_the_cap() {
         let dir = std::env::temp_dir().join(format!("veyl-rot-{:016x}", rand::random::<u64>()));

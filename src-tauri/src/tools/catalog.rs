@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{CatalogQuery, VpnToolServices};
 
@@ -74,18 +74,16 @@ impl Tool for CatalogSearchTool {
                 let count = data
                     .get("nodes")
                     .and_then(Value::as_array)
-                    .map(|items| items.len())
+                    .map(Vec::len)
                     .unwrap_or(0);
-                if count == 0 {
-                    ToolOutcome::ok(summarise_nodes(&data), data).with_display(
-                        "没有找到匹配节点",
-                        vec![],
-                        Changed::None,
-                    )
-                } else {
-                    ToolOutcome::ok(summarise_nodes(&data), data)
-                        .with_display("已找到节点", vec![format!("节点数：{count}")], Changed::None)
+                let mut facts = Vec::new();
+                if count > 0 {
+                    facts.push(Fact::with_params(
+                        FactKey::CatalogNodeCount,
+                        json!({ "count": count }),
+                    ));
                 }
+                ToolOutcome::ok(summarise_nodes(&data), data).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(AivpnError::new("CATALOG_UNAVAILABLE", error.to_string())),
         };

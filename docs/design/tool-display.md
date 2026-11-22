@@ -413,6 +413,10 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 40 | `StageSelect` | 正在选地区和规格 | 已选好地区和规格 | 没能选好地区和规格 | `none` |
 | 41 | `SetUserRegion` | 正在记下地区 | 地区已记下 | 没能记下地区 | `none` |
 | 42 | `CatalogOptions` | 正在读可选地区与规格 | 读到了可选地区与规格 | 可选地区读不到 | `none` |
+| 42 | `submit_issue_to_public_wall` | 正在准备发到问题墙 | 已发到问题墙 | 没能发到问题墙 | `none` |
+| 43 | `read_public_issue_wall` | 正在查问题墙 | 已查看问题墙 | 问题墙读不到 | `none` |
+
+> 42 / 43 是问题墙的两个工具，编号以 `docs/contracts/tools.md` §3 为准；按 `issue-report-api.md` §2 使用 snake_case 长名，是 PascalCase 约定的例外。
 
 > `changed` 列给的是**失败路径的典型值**；同一工具可能因失败阶段不同取不同值（例如 `VpnConnect`
 > 在校验阶段失败是 `none`，改过系统设置后又撤回是 `restored`）。工具必须按实际执行到哪一步声明。

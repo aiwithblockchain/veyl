@@ -1446,34 +1446,6 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-/* 单段说明的确认弹窗（连接页智能修复）：380 宽。 */
-.quit-dialog--repair {
-  width: min(380px, calc(100vw - 48px));
-}
-
-.quit-dialog__text {
-  margin: 16px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--ink-2);
-}
-
-.quit-dialog__text--hint {
-  margin-top: 10px;
-}
-
-/* 「先更新配置」是正文里的文字链，不占按钮位。 */
-.quit-dialog__link {
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: inherit;
-  color: var(--link);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
 .quit-dialog__value {
   margin: 0;
   color: var(--ink-2);
@@ -5946,29 +5918,6 @@ details[open] > .settings-fold__summary::before {
   inset: -14px -8px;
 }
 
-.stage-node__repair[aria-disabled="true"],
-.stage-node__ask[aria-disabled="true"] {
-  color: var(--ink-3);
-  cursor: default;
-}
-
-.stage-node__repair[aria-disabled="true"]::after,
-.stage-node__ask[aria-disabled="true"]::after {
-  content: none;
-}
-
-.stage-node__sep {
-  flex: 0 0 auto;
-  font-size: 13px;
-  line-height: 1.35;
-  color: var(--ink-3);
-}
-
-.stage-node__ms.is-done {
-  font-size: 12px;
-  color: var(--link);
-}
-
 /* 窄容器：动作整体换到行内第二行（只发生在坏 + 自有的行）。 */
 .stage-card__nodes {
   container-type: inline-size;
@@ -5987,18 +5936,6 @@ details[open] > .settings-fold__summary::before {
     flex-basis: 100%;
     justify-content: flex-end;
   }
-}
-
-/* 底部一行失败原因里的「去我的服务器」：只导航，不做危险操作。 */
-.stage-card__repair-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: inherit;
-  color: var(--link);
-  text-decoration: underline;
-  cursor: pointer;
 }
 
 .stage-primary {

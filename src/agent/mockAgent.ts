@@ -55,6 +55,7 @@ import { AGENT_EVENTS, CONTRACT_VERSION } from "./protocol";
 import type {
   AgentEvent,
   AiStatusPhase,
+  AiStatusTextKey,
   Category,
   ConfigDetail,
   ConfigRouteMode,
@@ -100,6 +101,18 @@ const HELPER_STATES: TunHelperState[] = [
 
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
+
+/** mock 事件按契约 2.24.0 只带 text_key；相位到 key 的映射与 Host 一致。 */
+const MOCK_STATUS_KEYS: Record<AiStatusPhase, AiStatusTextKey> = {
+  thinking: "ai.status.thinking",
+  streaming_answer: "ai.status.streaming",
+  preparing_tool: "ai.status.preparing",
+  running_tool: "ai.status.working",
+  waiting_permission: "ai.status.waiting_permission",
+  retrying: "ai.status.retrying",
+  compacting: "ai.status.compacting",
+  completed: "ai.status.completed",
+};
 const MOCK_SYNC_INTERVAL_KEY = "veyl.mock.serverSyncInterval";
 const SYNC_INTERVALS = new Set<number>([0, 30, 60, 240, 480, 1440]);
 
@@ -733,7 +746,7 @@ export class MockAgentBridge implements AgentBridge {
         this.syncIntervalMinutes = stored as SyncIntervalMinutes;
       }
     } catch {
-      // 读不到就用默认 30。
+      // 读不到就用默认 240。
     }
     return { minutes: this.syncIntervalMinutes };
   }
@@ -1422,11 +1435,16 @@ export class MockAgentBridge implements AgentBridge {
     return true;
   }
 
-  private status(requestId: string, assistantId: string, text: string, phase: AiStatusPhase) {
+  private status(requestId: string, assistantId: string, _text: string, phase: AiStatusPhase) {
     if (this.cancelled.has(requestId)) return false;
     this.emit({
       name: AGENT_EVENTS.status,
-      payload: { ...this.base(requestId, assistantId), phase, text, emitted_at: now() },
+      payload: {
+        ...this.base(requestId, assistantId),
+        phase,
+        text_key: MOCK_STATUS_KEYS[phase],
+        emitted_at: now(),
+      },
     });
     return true;
   }
@@ -1609,8 +1627,8 @@ export class MockAgentBridge implements AgentBridge {
         "随包 1.14.4（active）",
         {
           display: {
-            text: "运行库 1.14.4（随包）",
             changed: "none",
+            facts: [{ key: "core.active_version", params: { version: "1.14.4" } }],
           },
         },
       ))
@@ -1629,9 +1647,8 @@ export class MockAgentBridge implements AgentBridge {
         {
           argsPreview: { region: "jp", limit: 10 },
           display: {
-            text: "找到 1 个可用节点",
             changed: "none",
-            facts: ["地区 日本"],
+            facts: [{ key: "region.name", params: { name: "日本" } }],
           },
         },
       ))
@@ -1652,9 +1669,12 @@ export class MockAgentBridge implements AgentBridge {
           argsPreview: { node_name: "东京 01", strategy: "latency" },
           nextActions: [{ label: "断开连接", tool: "VpnDisconnect", args: {} }],
           display: {
-            text: "已连接",
             changed: "none",
-            facts: ["「东京 01」", `出口 ${MOCK_EXIT_IP}`, "延迟 42 毫秒"],
+            facts: [
+              { key: "node.name", params: { name: "东京 01" } },
+              { key: "runtime.exit_ip", params: { ip: MOCK_EXIT_IP } },
+              { key: "probe.latency_ms", params: { ms: 42 } },
+            ],
           },
         },
       ))
@@ -1715,9 +1735,8 @@ export class MockAgentBridge implements AgentBridge {
           permissionLevel: "write",
           argsPreview: { log_lines: 200 },
           display: {
-            text: "已收集现场材料",
             changed: "none",
-            facts: ["日志 2 份", "已脱敏"],
+            facts: [{ key: "report.log_count", params: { count: 2 } }],
           },
         },
       ))
@@ -1737,7 +1756,6 @@ export class MockAgentBridge implements AgentBridge {
         {
           permissionLevel: "write",
           display: {
-            text: "报告已生成",
             changed: "none",
             actions: [
               { kind: "reveal_report_dir", report_id: MOCK_REPORT_ID },
@@ -1767,7 +1785,7 @@ export class MockAgentBridge implements AgentBridge {
         "保存到本机",
         520,
         "Key 已保存到本机，并验证可用。",
-        { permissionLevel: "write", argsPreview: undefined, display: { text: "密钥已保存（只在本机）", changed: "none" } },
+        { permissionLevel: "write", argsPreview: undefined, display: { changed: "none" } },
       ))
     ) {
       return this.finish(requestId, assistantId, "cancelled", null);
@@ -1786,8 +1804,8 @@ export class MockAgentBridge implements AgentBridge {
     if (
       !(await this.tool(requestId, assistantId, "RuntimeStatus", "查询状态", 380, summary, {
         display: {
-          text: running ? "已经连上" : "还没连接",
           changed: "none",
+          facts: [{ key: running ? "runtime.connected" : "runtime.disconnected" }],
         },
       }))
     ) {
@@ -1816,9 +1834,8 @@ export class MockAgentBridge implements AgentBridge {
           errorCode: "NODE_UNREACHABLE",
           argsPreview: { node_name: "东京 01" },
           display: {
-            text: "节点没有响应，没能连上",
             changed: "none",
-            facts: ["「东京 01」"],
+            facts: [{ key: "node.name", params: { name: "东京 01" } }],
           },
           nextActions: [
             { label: "换一个节点", tool: "CatalogSearch", args: { region: "jp" } },
@@ -1850,8 +1867,8 @@ export class MockAgentBridge implements AgentBridge {
         "随包 1.14.4（active）",
         {
           display: {
-            text: "运行库 1.14.4（随包）",
             changed: "none",
+            facts: [{ key: "core.active_version", params: { version: "1.14.4" } }],
           },
         },
       ))
@@ -1882,8 +1899,10 @@ export class MockAgentBridge implements AgentBridge {
         `随包 ${this.coreBundledVersion}（active）`,
         {
           display: {
-            text: `运行库 ${this.coreBundledVersion}（随包）`,
             changed: "none",
+            facts: [
+              { key: "core.active_version", params: { version: this.coreBundledVersion } },
+            ],
           },
         },
       ))
@@ -1937,7 +1956,7 @@ export class MockAgentBridge implements AgentBridge {
         "已断开，系统代理已恢复。",
         {
           permissionLevel: "write",
-          display: { text: "已断开，已恢复直连", changed: "none" },
+          display: { changed: "none" },
         },
       ))
     ) {

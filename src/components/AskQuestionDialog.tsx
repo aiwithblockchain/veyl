@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ConfigSetModeConfirmData,
   CoreUpgradeConfirmData,
+  IssueSubmitConfirmData,
   PendingQuestion,
 } from "../agent/bridge";
 import { isConfirmQuestionKind } from "../agent/bridge";
@@ -11,6 +12,7 @@ import { formatByteSize, upgradeEffectText } from "../format";
 import { useFocusTrap } from "../ui/focus";
 import { t as translate, useT } from "../i18n";
 import { IconClose } from "./icons";
+import { IssueSubmitDetails } from "./AskQuestionCard";
 
 const UNKNOWN_CONFIRM: CoreUpgradeConfirmData = {
   currentVersion: null,
@@ -24,6 +26,17 @@ const UNKNOWN_SET_MODE: ConfigSetModeConfirmData = {
   mode: null,
   previousMode: null,
   willDisconnect: false,
+};
+
+const UNKNOWN_ISSUE_SUBMIT: IssueSubmitConfirmData = {
+  title: null,
+  summary: null,
+  expected: null,
+  actual: null,
+  repro: null,
+  platform: null,
+  appVersion: null,
+  steps: [],
 };
 
 function connectModeLabel(mode: ConfigConnectMode | null): string {
@@ -60,13 +73,17 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
   const isUpgrade = question?.kind === "core_upgrade_confirm";
   const isSetMode = question?.kind === "config_set_mode_confirm";
   const isRotate = question?.kind === "node_rotate_confirm";
-  const blocking = isUpgrade || isSetMode || isRotate;
+  const isIssueSubmit = question?.kind === "issue_submit_confirm";
+  const blocking = isUpgrade || isSetMode || isRotate || isIssueSubmit;
 
   const confirm = isUpgrade
     ? question?.upgradeConfirm ?? UNKNOWN_CONFIRM
     : null;
   const setMode = isSetMode
     ? question?.configSetModeConfirm ?? UNKNOWN_SET_MODE
+    : null;
+  const issueSubmit = isIssueSubmit
+    ? question?.issueSubmitConfirm ?? UNKNOWN_ISSUE_SUBMIT
     : null;
   const options = question?.options ?? [];
   // 界面文案固定；回传值仍用 Host 给的选项原文，避免后端按字面量匹配失败。
@@ -104,8 +121,10 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     setSubmitting(false);
     setError(null);
     // Host 的 default_index 决定默认焦点；没给或指到取消时就落在「取消」。
+    // 问题墙上报会公开内容，无论 Host 怎么给，默认焦点都固定在「取消」。
     const cancelIndex = options.indexOf(cancelAnswer);
     const focusCancel =
+      question.kind === "issue_submit_confirm" ||
       question.defaultIndex === null ||
       question.defaultIndex === undefined ||
       question.defaultIndex === cancelIndex;
@@ -165,7 +184,9 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
               ? t("dialog.upgrade.title")
               : isSetMode
                 ? t("dialog.setMode.title")
-                : t("dialog.nodeRotate.title")}
+                : isIssueSubmit
+                  ? t("dialog.issueSubmit.title")
+                  : t("dialog.nodeRotate.title")}
           </h2>
           <button
             type="button"
@@ -213,6 +234,8 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
               <dd>{t("dialog.impactText")}</dd>
             </div>
           </dl>
+        ) : isIssueSubmit ? (
+          <IssueSubmitDetails details={issueSubmit ?? UNKNOWN_ISSUE_SUBMIT} />
         ) : (
           <p className="ask-question__body">{t("dialog.nodeRotate.body")}</p>
         )}
@@ -233,7 +256,9 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
               ? t("dialog.upgrade")
               : isSetMode
                 ? t("dialog.switch")
-                : t("dialog.nodeRotate.confirm")}
+                : isIssueSubmit
+                  ? t("dialog.issueSubmit.submit")
+                  : t("dialog.nodeRotate.confirm")}
           </button>
           <button
             ref={cancelRef}

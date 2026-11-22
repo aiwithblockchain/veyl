@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PendingQuestion } from "../agent/bridge";
+import type { IssueSubmitConfirmData, PendingQuestion } from "../agent/bridge";
 import { errorText } from "../i18n/errorText";
 import { isExplainAnswer } from "../ui/askQuestion";
 import { useT } from "../i18n";
@@ -26,6 +26,93 @@ function formatCountdown(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+const PLATFORM_LABELS: Record<string, string> = {
+  macos: "macOS",
+  windows: "Windows",
+  linux: "Linux",
+};
+
+function platformLabel(value: string | null): string {
+  if (!value) return "";
+  return PLATFORM_LABELS[value] ?? value;
+}
+
+/**
+ * 问题墙上报的确认明细：只列要公开的字段，不读也不显示原始 JSON。
+ * 对话框与内联卡片共用同一份。
+ */
+export function IssueSubmitDetails({ details }: { details: IssueSubmitConfirmData }) {
+  const t = useT();
+  const unknown = t("dialog.issueSubmit.empty");
+  const stepLabel = (step: string | null): string => {
+    switch (step) {
+      case "connectivity":
+        return t("dialog.issueSubmit.step.connectivity");
+      case "config_update":
+        return t("dialog.issueSubmit.step.config_update");
+      case "rotate":
+        return t("dialog.issueSubmit.step.rotate");
+      default:
+        return step ?? unknown;
+    }
+  };
+  const rows = [
+    ["dialog.issueSubmit.titleField", details.title],
+    ["dialog.issueSubmit.summary", details.summary],
+    ["dialog.issueSubmit.expected", details.expected],
+    ["dialog.issueSubmit.actual", details.actual],
+    ["dialog.issueSubmit.repro", details.repro],
+  ] as const;
+  return (
+    <div className="issue-submit-detail">
+      <dl className="core-confirm">
+        {rows.map(([key, value]) => (
+          <div className="core-confirm__row" key={key}>
+            <dt>{t(key)}</dt>
+            <dd>{value ?? unknown}</dd>
+          </div>
+        ))}
+        <div className="core-confirm__row">
+          <dt>{t("dialog.issueSubmit.environment")}</dt>
+          <dd>
+            {platformLabel(details.platform)}
+            {details.platform ? " · " : ""}
+            {details.appVersion ?? unknown}
+          </dd>
+        </div>
+        {details.steps.length > 0 ? (
+          <div className="core-confirm__row">
+            <dt>{t("dialog.issueSubmit.steps")}</dt>
+            <dd>
+              <ul className="issue-submit-detail__steps">
+                {details.steps.map((step, index) => (
+                  <li key={`${step.step ?? "step"}-${index}`}>
+                    {stepLabel(step.step)}
+                    {" · "}
+                    {step.ok
+                      ? t("dialog.issueSubmit.stepOk")
+                      : t("dialog.issueSubmit.stepFailed")}
+                    {step.durationMs === null
+                      ? null
+                      : ` · ${
+                          step.durationMs < 1000
+                            ? t("tool.time.ms", { value: Math.round(step.durationMs) })
+                            : t("tool.time.seconds", {
+                                value: (step.durationMs / 1000).toFixed(1),
+                              })
+                        }`}
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="ask-question__body">{t("dialog.issueSubmit.disclosure")}</p>
+    </div>
+  );
 }
 
 /** 普通提问的内联卡片：挂在消息流末尾，不挡输入框，也不加焦点陷阱。 */
@@ -91,6 +178,8 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
   // 墙钟到点先按下状态渲染，等 Host 把 expired 传回来时两者一致。
   const isExpired = expired || remaining <= 0;
   const showExplain = hasOptions && !isConfirmCard(options) && !isExpired;
+  const issueSubmit =
+    question.kind === "issue_submit_confirm" ? question.issueSubmitConfirm ?? null : null;
 
   return (
     <section className="ask-card" aria-label={t("ask.cardAria")}>
@@ -105,6 +194,8 @@ export function AskQuestionCard({ question, onAnswer, onExpire, expired = false 
           </span>
         )}
       </div>
+
+      {issueSubmit ? <IssueSubmitDetails details={issueSubmit} /> : null}
 
       {hasOptions ? (
         <div className="ask-card__options">

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -124,14 +124,17 @@ impl Tool for DeepseekSaveKeyTool {
                     "invalid" => "Key 已保存，但验证失败：这个 Key 无效，请检查后重发。",
                     _ => "Key 已保存，但当前无法联网验证，稍后可以再试。",
                 };
-                let (text, fact) = match validation {
-                    "ok" => ("密钥已保存", "验证：可用"),
-                    "invalid" => ("密钥已保存但无效", "验证：失败"),
-                    _ => ("密钥已保存，未验证", "验证：暂时无法完成"),
+                // 验证结果给机器值；界面按 result 选「可用 / 失败 / 暂时无法完成」。
+                let result = match validation {
+                    "ok" => "ok",
+                    "invalid" => "invalid",
+                    _ => "unknown",
                 };
                 ToolOutcome::ok(summary, data).with_display(
-                    text,
-                    vec![fact.to_string()],
+                    vec![Fact::with_params(
+                        FactKey::DeepseekVerify,
+                        json!({ "result": result }),
+                    )],
                     Changed::None,
                 )
             }

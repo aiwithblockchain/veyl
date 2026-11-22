@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::ServerCatalogSource;
 use super::turn_guard;
@@ -179,29 +179,18 @@ impl Tool for StageSelectTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match parse_input(&input) {
-            Err(error) => ToolOutcome::fail(error).with_display(
-                "没能把选择发给新建节点舞台",
-                Vec::new(),
-                Changed::None,
-            ),
+            Err(error) => ToolOutcome::fail(error).with_display(Vec::new(), Changed::None),
             Ok(request) => match self.catalog.fetch().await {
-                Err(error) => ToolOutcome::fail(catalog_failure(error)).with_display(
-                    "没能把选择发给新建节点舞台",
-                    Vec::new(),
-                    Changed::None,
-                ),
+                Err(error) => ToolOutcome::fail(catalog_failure(error))
+                    .with_display(Vec::new(), Changed::None),
                 Ok(catalog) => match resolve(&request, &catalog) {
-                    Err(error) => ToolOutcome::fail(error).with_display(
-                        "没能把选择发给新建节点舞台",
-                        Vec::new(),
-                        Changed::None,
-                    ),
+                    Err(error) => ToolOutcome::fail(error).with_display(Vec::new(), Changed::None),
                     // 校验全部通过后才占名额：模型用错 id 时还能在同一轮重试。
                     Ok(_) if !turn_guard::claim("StageSelect", ctx) => ToolOutcome::fail(
                         AivpnError::new("PRECONDITION_FAILED", "这一轮已经选过一次了")
                             .with_details(json!({ "reason": "already_called_this_turn" })),
                     )
-                    .with_display("这一轮已经选过一次了", Vec::new(), Changed::None),
+                    .with_display(Vec::new(), Changed::None),
                     Ok((region, plan)) => {
                         let region_id = region.as_ref().map(|(id, _)| id.clone());
                         let plan_id = plan.as_ref().map(|(id, _)| id.clone());
@@ -222,10 +211,16 @@ impl Tool for StageSelectTool {
                         let what = labels.join("");
                         let mut facts = Vec::new();
                         if let Some((_, name)) = &region {
-                            facts.push(format!("地区 {name}"));
+                            facts.push(Fact::with_params(
+                                FactKey::RegionName,
+                                json!({ "name": name }),
+                            ));
                         }
                         if let Some((_, label)) = &plan {
-                            facts.push(format!("规格 {label}"));
+                            facts.push(Fact::with_params(
+                                FactKey::PlanLabel,
+                                json!({ "label": label }),
+                            ));
                         }
                         ToolOutcome::ok(
                             format!("已把{what}发给新建节点舞台。"),
@@ -235,11 +230,7 @@ impl Tool for StageSelectTool {
                                 "plan": plan_id,
                             }),
                         )
-                        .with_display(
-                            format!("已把{what}发给新建节点舞台"),
-                            facts,
-                            Changed::None,
-                        )
+                        .with_display(facts, Changed::None)
                     }
                 },
             },
@@ -407,21 +398,15 @@ impl Tool for CatalogOptionsTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match input.as_object() {
             None => ToolOutcome::fail(invalid("invalid_payload", "参数必须是一个对象"))
-                .with_display("没读到可选地区，稍后再试", Vec::new(), Changed::None),
+                .with_display(Vec::new(), Changed::None),
             Some(object) if !object.is_empty() => {
                 let key = object.keys().next().cloned().unwrap_or_default();
-                ToolOutcome::fail(invalid(
-                    "invalid_payload",
-                    &format!("不支持的参数 {key}"),
-                ))
-                .with_display("没读到可选地区，稍后再试", Vec::new(), Changed::None)
+                ToolOutcome::fail(invalid("invalid_payload", &format!("不支持的参数 {key}")))
+                    .with_display(Vec::new(), Changed::None)
             }
             Some(_) => match self.catalog.fetch().await {
-                Err(error) => ToolOutcome::fail(catalog_failure(error)).with_display(
-                    "没读到可选地区，稍后再试",
-                    Vec::new(),
-                    Changed::None,
-                ),
+                Err(error) => ToolOutcome::fail(catalog_failure(error))
+                    .with_display(Vec::new(), Changed::None),
                 Ok(catalog) => {
                     let regions: Vec<Value> = catalog
                         .regions
@@ -451,14 +436,16 @@ impl Tool for CatalogOptionsTool {
                         catalog_summary(&catalog),
                         json!({ "regions": regions, "plans": plans }),
                     )
-                    .with_display(
-                        "读到了可选地区与规格",
-                        vec![
-                            format!("地区 {} 个", regions.len()),
-                            format!("规格 {} 个", plans.len()),
-                        ],
-                        Changed::None,
-                    )
+                    .with_facts(vec![
+                        Fact::with_params(
+                            FactKey::CatalogRegionCount,
+                            json!({ "count": regions.len() }),
+                        ),
+                        Fact::with_params(
+                            FactKey::CatalogPlanCount,
+                            json!({ "count": plans.len() }),
+                        ),
+                    ])
                 }
             },
         };

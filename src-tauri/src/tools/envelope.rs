@@ -8,9 +8,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::display::{self, Changed, Display};
+use super::display::{self, Changed, Display, Fact};
 
-pub const CONTRACT_VERSION: &str = "3.24.0";
+pub const CONTRACT_VERSION: &str = "3.25.0";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AivpnError {
@@ -91,19 +91,15 @@ impl ToolOutcome {
         self
     }
 
-    /// 显式给出给用户看的文案与 changed（VpnConnect 等关键工具用）。
-    pub fn with_display(
-        mut self,
-        text: impl Into<String>,
-        facts: Vec<String>,
-        changed: Changed,
-    ) -> Self {
-        self.display = Display::new(text, changed).with_facts(facts);
+    /// 显式给出给用户看的事实与 changed（VpnConnect 等关键工具用）。
+    /// 2.24.0：`display` 里没有自由文本，句子由前端按 `FactKey` 组装。
+    pub fn with_display(mut self, facts: Vec<Fact>, changed: Changed) -> Self {
+        self.display = Display::new(changed).with_facts(facts);
         self
     }
 
-    /// 保留自动文案，只补充结构化事实。
-    pub fn with_facts(mut self, facts: Vec<String>) -> Self {
+    /// 保留已声明的 changed，只补充结构化事实。
+    pub fn with_facts(mut self, facts: Vec<Fact>) -> Self {
         self.display.facts = facts;
         self
     }
@@ -193,18 +189,12 @@ pub fn finish(ctx: &ToolContext, tool: &str, mut outcome: ToolOutcome) -> ToolRe
     }
 }
 
-/// 补齐工具没写的 display，并压到契约上限。
+/// 补齐工具没写的 `changed`，并压到契约上限。
 fn normalize_display(tool: &str, outcome: &mut ToolOutcome) {
     let fallback = display::fallback(tool, outcome.ok);
-    if outcome.display.text.trim().is_empty() {
-        outcome.display.text = fallback.text;
-        if outcome.display.facts.is_empty() {
-            outcome.display.facts = fallback.facts;
-        }
-        // Unknown 是默认值；显式写过 `with_display` 的工具不会走到这里。
-        if outcome.display.changed == Changed::Unknown && fallback.changed != Changed::Unknown {
-            outcome.display.changed = fallback.changed;
-        }
+    // Unknown 是默认值；显式写过 `with_display` 的工具不会走到这里。
+    if outcome.display.changed == Changed::Unknown && fallback.changed != Changed::Unknown {
+        outcome.display.changed = fallback.changed;
     }
 
     // 成功时界面不显示「有没有改动」；`restored` 的参照点是调用前，不能当「已生效」用。
@@ -217,8 +207,6 @@ fn normalize_display(tool: &str, outcome: &mut ToolOutcome) {
         outcome.display.changed = Changed::None;
     }
 
-    outcome.display.text = display::clamp_text(&outcome.display.text);
-    outcome.display.facts.retain(|fact| !fact.trim().is_empty());
     outcome.display.facts.truncate(4);
 }
 
@@ -280,7 +268,12 @@ fn truncate(value: &Value) -> Value {
 #[cfg(test)]
 mod display_projection_tests {
     use super::*;
+    use crate::tools::display::FactKey;
     use serde_json::json;
+
+    fn fact(i: u64) -> Fact {
+        Fact::with_params(FactKey::CoreInstalledCount, json!({ "count": i }))
+    }
 
     fn failed(tool: &str) -> ToolOutcome {
         let mut outcome = ToolOutcome::fail(AivpnError::new(
@@ -291,54 +284,50 @@ mod display_projection_tests {
         outcome
     }
 
-    /// 失败文案只描述「没做到什么」，错误码与内部路径留在 error.details。
+    /// 卡片里没有自由文本：错误码与内部路径只留在 error.details。
     #[test]
-    fn failure_display_never_leaks_the_error_code_or_internal_paths() {
+    fn failure_display_carries_no_free_text() {
         for tool in ["VpnConnect", "ConfigSetMode", "NetRepair", "CoreUpgrade"] {
             let outcome = failed(tool);
-            let text = &outcome.display.text;
+            assert!(outcome.display.facts.is_empty(), "{tool}");
+            let serialized = serde_json::to_string(&outcome.display).unwrap();
             for needle in ["INTERNAL", "/Users", "config.json"] {
-                assert!(!text.contains(needle), "{tool} 的展示文案泄露了 {needle}：{text}");
+                assert!(
+                    !serialized.contains(needle),
+                    "{tool} 的展示数据泄露了 {needle}：{serialized}"
+                );
             }
             assert!(outcome.error.is_some(), "错误对象本身不能丢");
         }
     }
 
-    /// 工具没给 display 时按工具名兜底，成功与失败各有文案。
+    /// 工具没给 display 时只补 `changed`；完成/失败句子的兜底在前端映射表。
     #[test]
-    fn missing_display_is_filled_from_the_tool_table() {
+    fn missing_display_only_fills_the_change_flag() {
         let mut ok = ToolOutcome::ok("internal model text", json!({}));
         normalize_display("ConfigUpdate", &mut ok);
-        assert_eq!(ok.display.text, "配置已更新");
+        assert!(ok.display.facts.is_empty());
         // 成功时 changed 固定 none；restored 只用于「改过又恢复」。
         assert_eq!(ok.display.changed, Changed::None);
 
         let failed = failed("VpnConnect");
-        assert_eq!(failed.display.text, "没能连上");
+        assert!(failed.display.facts.is_empty());
         assert_eq!(failed.display.changed, Changed::Unknown);
     }
 
     /// 只读工具即使调用点漏填，也不能报「有改动」。
     #[test]
     fn read_only_tools_are_forced_to_changed_none() {
-        let mut outcome =
-            ToolOutcome::ok("x", json!({})).with_display("已读取", vec![], Changed::Restored);
+        let mut outcome = ToolOutcome::ok("x", json!({})).with_display(vec![], Changed::Restored);
         normalize_display("RuntimeStatus", &mut outcome);
         assert_eq!(outcome.display.changed, Changed::None);
     }
 
     #[test]
     fn explicit_display_is_kept_and_facts_are_capped_at_four() {
-        let mut outcome = ToolOutcome::ok("x", json!({})).with_display(
-            "已连接",
-            ["a", "b", "c", "d", "e"]
-                .iter()
-                .map(|item| item.to_string())
-                .collect(),
-            Changed::Restored,
-        );
+        let mut outcome = ToolOutcome::ok("x", json!({}))
+            .with_display((0..5).map(fact).collect(), Changed::Restored);
         normalize_display("VpnConnect", &mut outcome);
-        assert_eq!(outcome.display.text, "已连接");
         assert_eq!(outcome.display.facts.len(), 4);
         assert_eq!(outcome.display.changed, Changed::None);
     }
@@ -346,13 +335,13 @@ mod display_projection_tests {
     /// `display` 只进 `tool-call-end`，不能写进给模型的信封。
     #[test]
     fn envelope_does_not_carry_display() {
-        let mut outcome = ToolOutcome::ok("x", json!({}))
-            .with_display("已断开", vec!["网络：已恢复直连".into()], Changed::None);
+        let mut outcome =
+            ToolOutcome::ok("x", json!({})).with_display(vec![fact(1)], Changed::None);
         normalize_display("VpnDisconnect", &mut outcome);
         let envelope = outcome.to_envelope();
         assert!(envelope.get("display").is_none(), "{envelope}");
         // 事件投影仍能从同一份 outcome 读到 display。
-        assert_eq!(outcome.display.text, "已断开");
+        assert_eq!(outcome.display.facts.len(), 1);
         assert_eq!(outcome.display.changed, Changed::None);
     }
 }

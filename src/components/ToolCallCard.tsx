@@ -179,7 +179,12 @@ export function ToolCallCard({
           ) : (
             <dl className="tool-line__facts">
               {facts.map((fact, index) => (
-                <FactRow key={`${fact.label}-${index}`} label={fact.label} value={fact.value} />
+                <FactRow
+                  key={`${fact.label}-${index}`}
+                  label={fact.label}
+                  value={fact.value}
+                  mono={fact.mono}
+                />
               ))}
               {call.durationMs !== undefined ? (
                 <FactRow label={t("tool.body.duration")} value={exactDuration(call.durationMs)} />

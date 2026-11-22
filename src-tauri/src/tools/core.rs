@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::{Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -47,7 +48,7 @@ impl Tool for CoreListVersionsTool {
     }
 }
 
-fn version_facts(data: &Value) -> Vec<String> {
+fn version_facts(data: &Value) -> Vec<Fact> {
     let installed = data
         .get("installed")
         .and_then(Value::as_array)
@@ -55,12 +56,18 @@ fn version_facts(data: &Value) -> Vec<String> {
         .unwrap_or(0);
     let mut facts = Vec::new();
     if let Some(active) = data.get("active_version").and_then(Value::as_str) {
-        facts.push(format!("当前：{active}"));
+        facts.push(Fact::with_params(
+            FactKey::CoreActiveVersion,
+            json!({ "version": active }),
+        ));
     } else if installed > 0 {
         // 启动时会把随包版本记为 active；有安装记录却没有 active，就是没激活。
-        facts.push("当前：未激活".to_string());
+        facts.push(Fact::new(FactKey::CoreNoActive));
     }
-    facts.push(format!("已安装：{installed} 个"));
+    facts.push(Fact::with_params(
+        FactKey::CoreInstalledCount,
+        json!({ "count": installed }),
+    ));
     if let Some(latest) = data
         .get("available")
         .and_then(Value::as_array)
@@ -68,7 +75,10 @@ fn version_facts(data: &Value) -> Vec<String> {
         .and_then(|item| item.get("version"))
         .and_then(Value::as_str)
     {
-        facts.push(format!("最新：{latest}"));
+        facts.push(Fact::with_params(
+            FactKey::CoreLatestVersion,
+            json!({ "version": latest }),
+        ));
     }
     facts
 }
@@ -148,7 +158,10 @@ mod version_summary_tests {
             "installed": [{ "version": "1.14.4", "state": "installed" }],
             "available": []
         }));
-        assert!(facts.contains(&"当前：未激活".to_string()), "{facts:?}");
+        assert!(
+            facts.contains(&Fact::new(FactKey::CoreNoActive)),
+            "{facts:?}"
+        );
 
         // 没有任何安装记录时保持省略，不写 null / 假版本。
         let facts = version_facts(&json!({
@@ -157,7 +170,9 @@ mod version_summary_tests {
             "available": []
         }));
         assert!(
-            !facts.iter().any(|fact| fact.starts_with("当前：")),
+            !facts
+                .iter()
+                .any(|fact| matches!(fact.key, FactKey::CoreActiveVersion | FactKey::CoreNoActive)),
             "{facts:?}"
         );
     }
@@ -169,7 +184,10 @@ mod version_summary_tests {
             "installed": [{ "version": "1.14.4", "state": "active" }],
             "available": [{ "version": "1.15.0" }]
         }));
-        assert_eq!(facts[0], "当前：1.14.4");
+        assert_eq!(
+            facts[0],
+            Fact::with_params(FactKey::CoreActiveVersion, json!({ "version": "1.14.4" }))
+        );
     }
 
     #[test]

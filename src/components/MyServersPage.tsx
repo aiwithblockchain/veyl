@@ -54,14 +54,10 @@ interface Props {
   pendingServer?: boolean;
   /** 改名成功：用返回的完整对象更新列表与详情。 */
   onRenamed?: (server: MyServer) => void;
-  /** 智能修复成功：重读节点数据（服务器数据走 onChanged）。 */
-  onRotated?: () => void;
-  /** 隧道是否在跑：详情页「先更新配置」需要先 stop → start。 */
-  tunnelConnected?: boolean;
-  runningNodeId?: string | null;
-  /** 选中服务器的本地节点是否最近一次探测不可达。 */
+  /** 选中服务器的本地节点最近一次探测不可达。 */
   repairAvailable?: boolean;
-  onReconnectAndTest?: () => Promise<boolean>;
+  /** 打开节点诊断面板（App 统一构造依赖）。 */
+  onDiagnose?: (target: { serverId: string; nodeName: string }) => void;
 }
 
 /**
@@ -96,11 +92,8 @@ export function MyServersPage({
   onGoConnect,
   pendingServer = false,
   onRenamed,
-  onRotated,
-  tunnelConnected = false,
-  runningNodeId = null,
   repairAvailable = false,
-  onReconnectAndTest,
+  onDiagnose,
 }: Props) {
   const t = useT();
   const trialHint = trial
@@ -173,11 +166,8 @@ export function MyServersPage({
             onGone={onGone}
             onForget={onForget}
             onRenamed={onRenamed}
-            onRotated={onRotated}
-            tunnelConnected={tunnelConnected}
-            runningNodeId={runningNodeId}
             repairAvailable={repairAvailable}
-            onReconnectAndTest={onReconnectAndTest}
+            onDiagnose={onDiagnose}
           />
         )}
       </div>

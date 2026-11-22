@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.23.0";
+pub const CONTRACT_VERSION: &str = "2.24.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -99,50 +99,33 @@ impl SessionEmitter {
     }
 
     /// `ai-status` 的 payload。`text_key` 是界面唯一文案来源（`events.md` §3.5）；
-    /// `text` 保留一版给旧界面，2.24.0 删除。
-    fn status_payload(
-        &self,
-        phase: &str,
-        text_key: &str,
-        params: Option<Value>,
-        text: &str,
-    ) -> Value {
+    /// 2.24.0 起不再下发 `text`。
+    fn status_payload(&self, phase: &str, text_key: &str, params: Option<Value>) -> Value {
         let mut payload = self.base();
         payload["phase"] = Value::String(phase.to_string());
         payload["text_key"] = Value::String(text_key.to_string());
         if let Some(params) = params {
             payload["params"] = params;
         }
-        payload["text"] = Value::String(text.to_string());
         payload
     }
 
-    pub fn status(&self, phase: &str, text_key: &str, params: Option<Value>, text: &str) {
-        self.emit(
-            EV_STATUS,
-            self.status_payload(phase, text_key, params, text),
-        );
+    pub fn status(&self, phase: &str, text_key: &str, params: Option<Value>) {
+        self.emit(EV_STATUS, self.status_payload(phase, text_key, params));
     }
 
     /// `ai-compact` 的 payload。`text_key` 固定 `ai.compact.done`（`events.md` §3.6）。
-    fn compact_payload(
-        &self,
-        phase: &str,
-        text: &str,
-        before: Option<u64>,
-        after: Option<u64>,
-    ) -> Value {
+    fn compact_payload(&self, phase: &str, before: Option<u64>, after: Option<u64>) -> Value {
         let mut payload = self.base();
         payload["phase"] = Value::String(phase.to_string());
         payload["text_key"] = Value::String("ai.compact.done".to_string());
-        payload["text"] = Value::String(text.to_string());
         payload["tokens_before"] = json!(before);
         payload["tokens_after"] = json!(after);
         payload
     }
 
-    pub fn compact(&self, phase: &str, text: &str, before: Option<u64>, after: Option<u64>) {
-        self.emit(EV_COMPACT, self.compact_payload(phase, text, before, after));
+    pub fn compact(&self, phase: &str, before: Option<u64>, after: Option<u64>) {
+        self.emit(EV_COMPACT, self.compact_payload(phase, before, after));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -287,23 +270,26 @@ fn truncate_result(text: &str) -> (String, bool) {    if text.len() <= RESULT_LI
 mod status_payload_tests {
     use super::*;
 
-    fn status(phase: &str, key: &str, params: Option<Value>, text: &str) -> Value {
-        SessionEmitter::new("req_1", "msg_1").status_payload(phase, key, params, text)
+    fn status(phase: &str, key: &str, params: Option<Value>) -> Value {
+        SessionEmitter::new("req_1", "msg_1").status_payload(phase, key, params)
     }
 
-    /// 2.23.0：状态事件必须带 `text_key`，`text` 保留一版（`events.md` §3.5）。
+    /// 2.24.0：状态事件只带 `text_key`（+ 可选 `params`），不再下发自由文本。
     #[test]
-    fn every_status_payload_carries_the_key_and_keeps_text() {
-        let payload = status("thinking", "ai.status.thinking", None, "正在思考");
+    fn every_status_payload_carries_the_key_and_no_free_text() {
+        let payload = status("thinking", "ai.status.thinking", None);
         assert_eq!(payload["phase"], json!("thinking"));
         assert_eq!(payload["text_key"], json!("ai.status.thinking"));
-        assert_eq!(payload["text"], json!("正在思考"), "text 要保留一版");
+        assert!(
+            payload.get("text").is_none(),
+            "2.24.0 起状态事件不再带 text"
+        );
         assert!(
             payload.get("params").is_none(),
             "没有插值参数时不出现 params"
         );
         assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
-        assert_eq!(CONTRACT_VERSION, "2.23.0");
+        assert_eq!(CONTRACT_VERSION, "2.24.0");
     }
 
     /// retrying 的四个插值参数（`events.md` §3.5）；秒数取整且至少 1：
@@ -326,13 +312,13 @@ mod status_payload_tests {
         assert_eq!(retry_delay_seconds(1500), 1);
         assert_eq!(retry_delay_seconds(3_200), 3);
 
-        let payload = status("retrying", "ai.status.retrying", Some(params), "…");
+        let payload = status("retrying", "ai.status.retrying", Some(params));
         assert_eq!(payload["params"]["delay_seconds"], 1);
         assert_eq!(payload["params"]["reason"], json!("rate_limited"));
     }
 
-    /// 事件里的错误对象跟事件契约版本（2.23.0）；工具通道的
-    /// `AivpnError` 仍取 tools.md 的 3.24.0，code / details 原样保留。
+    /// 事件里的错误对象跟事件契约版本走；工具通道的
+    /// `AivpnError` 仍取 tools.md 的当前版本，code / details 原样保留。
     #[test]
     fn request_end_error_carries_the_event_contract_version() {
         let error = AivpnError::new("UPSTREAM_ERROR", "上游原文")
@@ -357,15 +343,13 @@ mod status_payload_tests {
             payload["error"]["details"]["reason"],
             json!("provider_unavailable")
         );
-        assert_eq!(crate::tools::envelope::CONTRACT_VERSION, "3.24.0");
     }
 
     /// 压缩事件有自己的 key（`events.md` §3.6），tokens 两个字段不动。
     #[test]
-    fn compact_payload_carries_its_own_key() {
+    fn compact_payload_carries_its_key_and_no_free_text() {
         let payload = SessionEmitter::new("req_1", "msg_1").compact_payload(
             "completed",
-            "上下文已压缩，早前消息已折叠。",
             Some(1200),
             Some(400),
         );
@@ -373,7 +357,10 @@ mod status_payload_tests {
         assert_eq!(payload["text_key"], json!("ai.compact.done"));
         assert_eq!(payload["tokens_before"], json!(1200));
         assert_eq!(payload["tokens_after"], json!(400));
-        assert_eq!(payload["text"], json!("上下文已压缩，早前消息已折叠。"));
+        assert!(
+            payload.get("text").is_none(),
+            "2.24.0 起压缩事件不再带 text"
+        );
         assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
     }
 }
@@ -382,6 +369,7 @@ mod status_payload_tests {
 mod display_projection_tests {
     use super::*;
     use crate::tools::{Changed, DisplayAction};
+    use crate::tools::{Fact, FactKey};
 
     fn payload(display: Option<Display>) -> Value {
         let emitter = SessionEmitter::new("req_1", "msg_1");
@@ -399,12 +387,19 @@ mod display_projection_tests {
 
     #[test]
     fn display_is_projected_into_tool_call_end() {
-        let display = Display::new("已读取配置列表", Changed::None).with_facts(vec![
-            "3 套配置".to_string(),
-        ]);
+        let display = Display::new(Changed::None).with_facts(vec![Fact::with_params(
+            FactKey::ConfigNodeCount,
+            json!({ "count": 3 }),
+        )]);
         let payload = payload(Some(display));
-        assert_eq!(payload["display"]["text"], json!("已读取配置列表"));
-        assert_eq!(payload["display"]["facts"], json!(["3 套配置"]));
+        assert!(
+            payload["display"].get("text").is_none(),
+            "2.24.0 不再下发自由文本"
+        );
+        assert_eq!(
+            payload["display"]["facts"],
+            json!([{ "key": "config.node_count", "params": { "count": 3 } }])
+        );
         assert_eq!(payload["display"]["changed"], json!("none"));
     }
 
@@ -418,7 +413,7 @@ mod display_projection_tests {
     /// `display.actions`（2.11.0）：只有两个 kind，只带不透明的 report_id，不带路径。
     #[test]
     fn report_actions_carry_only_the_report_id() {
-        let display = Display::new("问题报告已生成", Changed::None).with_actions(vec![
+        let display = Display::new(Changed::None).with_actions(vec![
             DisplayAction::RevealReportDir {
                 report_id: "rpt-20261112-153012-a1b2c3".into(),
             },
@@ -442,20 +437,17 @@ mod display_projection_tests {
     /// 没有动作时事件形状与旧版一致（不出现 actions 字段）。
     #[test]
     fn displays_without_actions_keep_the_old_shape() {
-        let display = Display::new("已读取配置列表", Changed::None);
+        let display = Display::new(Changed::None);
         let payload = payload(Some(display));
         assert!(payload["display"].get("actions").is_none());
     }
 
-    /// 卡片数据与给模型的 result 是两条线，前者不能带出指令文本。
+    /// 卡片数据与给模型的 result 是两条线：display 里没有自由文本，也不会带出指令。
     #[test]
-    fn display_text_is_independent_from_the_model_facing_result() {
-        let display = Display::new("已读取配置列表", Changed::None);
+    fn display_carries_no_free_text_from_the_result() {
+        let display = Display::new(Changed::None);
         let payload = payload(Some(display));
         assert!(payload["result"].as_str().unwrap().contains("给模型看"));
-        assert!(!payload["display"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("给模型看"));
+        assert!(payload["display"].get("text").is_none());
     }
 }

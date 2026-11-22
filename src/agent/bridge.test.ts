@@ -252,6 +252,7 @@ describe("readQuestionDetail", () => {
         restartRequired: true,
       },
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     });
   });
 
@@ -273,6 +274,7 @@ describe("readQuestionDetail", () => {
         restartRequired: false,
       },
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     });
   });
 
@@ -297,6 +299,7 @@ describe("readQuestionDetail", () => {
         previousMode: "system_proxy",
         willDisconnect: true,
       },
+      issueSubmitConfirm: null,
     });
   });
 
@@ -312,6 +315,7 @@ describe("readQuestionDetail", () => {
       defaultIndex: 1,
       upgradeConfirm: null,
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     });
     // 非法下标当作没给：确认卡回落到「取消」。
     expect(
@@ -326,12 +330,14 @@ describe("readQuestionDetail", () => {
       defaultIndex: null,
       upgradeConfirm: null,
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     });
     expect(readQuestionDetail({ question: "要升级吗？" })).toEqual({
       kind: null,
       defaultIndex: null,
       upgradeConfirm: null,
       configSetModeConfirm: null,
+      issueSubmitConfirm: null,
     });
   });
 });

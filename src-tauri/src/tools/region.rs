@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{ServiceError, VpnToolServices};
 
@@ -77,12 +77,25 @@ impl Tool for SetUserRegionTool {
 
         let outcome = match self.services.set_user_region(region).await {
             Ok(data) => {
-                let label = crate::rules::Region::from_code(region).label();
-                ToolOutcome::ok(format!("已记下地区：{label}"), data)
-                    .with_display("地区已记下", vec![label], Changed::None)
+                // `region.code` 给机器码 + 英文名；界面优先按 code 查本地表。
+                let code = data
+                    .get("region")
+                    .and_then(Value::as_str)
+                    .unwrap_or(region)
+                    .to_string();
+                let parsed = crate::rules::Region::from_code(&code);
+                let label = parsed.label_en();
+                ToolOutcome::ok(format!("已记下地区：{}", parsed.label()), data).with_display(
+                    vec![Fact::with_params(
+                        FactKey::RegionCode,
+                        json!({ "code": code, "label": label }),
+                    )],
+                    Changed::None,
+                )
             }
-            Err(error) => ToolOutcome::fail(service_error(error))
-                .with_display("没能记下地区", Vec::new(), Changed::Unknown),
+            Err(error) => {
+                ToolOutcome::fail(service_error(error)).with_display(Vec::new(), Changed::Unknown)
+            }
         };
         envelope::finish(ctx, "SetUserRegion", outcome)
     }

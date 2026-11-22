@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, NextAction, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -102,18 +102,13 @@ impl Tool for DiagRunTool {
                     check.get("name").and_then(Value::as_str) == Some("network.coverage")
                         && check.get("status").and_then(Value::as_str) == Some("failed")
                 });
-                // 前端只渲染前 4 条 facts，超出的会被静默截掉——加新行前先数一下，
-                // 不然用户看不到、模型也不会提，功能等于没做。
-                let mut facts = vec![match (failed, skipped) {
-                    (0, 0) => "结果：全部检查正常".to_string(),
-                    (0, skipped_items) => format!("结果：{skipped_items} 项这次没检查"),
-                    (failed_items, 0) => format!("结果：{failed_items} 项异常"),
-                    (failed_items, skipped_items) => {
-                        format!("结果：{failed_items} 项异常，{skipped_items} 项没检查")
-                    }
-                }];
+                // 结论计数交给界面选句子；HTTP/3 覆盖范围单独一行。
+                let mut facts = vec![Fact::with_params(
+                    FactKey::DiagResult,
+                    json!({ "failed": failed, "skipped": skipped }),
+                )];
                 if coverage_failed {
-                    facts.push("接管范围：不覆盖浏览器 HTTP/3".to_string());
+                    facts.push(Fact::new(FactKey::ScopeNoHttp3));
                 }
                 let outcome = ToolOutcome::ok(
                     match (failed, skipped) {
@@ -123,18 +118,7 @@ impl Tool for DiagRunTool {
                     },
                     data,
                 )
-                .with_display(
-                    if failed > 0 {
-                        "诊断发现问题"
-                    } else if skipped > 0 {
-                        // 没检查的项不能说「通过」：结论只覆盖实际检查过的部分。
-                        "诊断完成"
-                    } else {
-                        "诊断通过"
-                    },
-                    facts,
-                    Changed::None,
-                );
+                .with_display(facts, Changed::None);
                 if coverage_failed {
                     // 不自动切换：DiagRun 仍是 ReadOnly，交给用户点。
                     match coverage_next_action(coverage_failed) {

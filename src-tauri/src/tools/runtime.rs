@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{ServiceError, VpnToolServices};
 
@@ -73,25 +73,31 @@ impl Tool for RuntimeStatusTool {
 }
 
 /// 卡片上的短事实：连接状态、版本、出口。都是用户能看懂的值。
-fn status_facts(snapshot: &Value) -> Vec<String> {
+fn status_facts(snapshot: &Value) -> Vec<Fact> {
     let state = snapshot
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let mut facts = vec![if matches!(state, "running" | "degraded") {
-        "连接状态：已连接".to_string()
+        Fact::new(FactKey::RuntimeConnected)
     } else {
-        "连接状态：未连接".to_string()
+        Fact::new(FactKey::RuntimeDisconnected)
     }];
     if let Some(version) = snapshot.get("upstream_version").and_then(Value::as_str) {
-        facts.push(format!("版本：{version}"));
+        facts.push(Fact::with_params(
+            FactKey::RuntimeVersion,
+            json!({ "version": version }),
+        ));
     }
     if let Some(ip) = snapshot
         .get("health")
         .and_then(|health| health.get("exit_ip"))
         .and_then(Value::as_str)
     {
-        facts.push(format!("出口：{ip}"));
+        facts.push(Fact::with_params(
+            FactKey::RuntimeExitIp,
+            json!({ "ip": ip }),
+        ));
     }
     facts
 }
@@ -310,9 +316,12 @@ impl Tool for RuntimeLogsTool {
                     .map(|items| items.len())
                     .unwrap_or(0);
                 let facts = if count == 0 {
-                    vec!["记录：空".to_string()]
+                    vec![Fact::new(FactKey::RuntimeLogsEmpty)]
                 } else {
-                    vec![format!("最近：{count} 行")]
+                    vec![Fact::with_params(
+                        FactKey::RuntimeLogsRecent,
+                        json!({ "count": count }),
+                    )]
                 };
                 ToolOutcome::ok(format_logs(&data), data).with_facts(facts)
             }

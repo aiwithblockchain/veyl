@@ -8,8 +8,17 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
+
+/// 契约里的机器阶段值；不认识的一律 `unknown`。
+fn stage_param(stage: &str) -> &str {
+    match stage {
+        "creating" | "booting" | "installing" | "verifying" | "error" => stage,
+        _ => "unknown",
+    }
+}
 
 fn failure(error: anyhow::Error) -> AivpnError {
     let text = error.to_string();
@@ -85,6 +94,40 @@ fn visible_server(server: &Value) -> Value {
     Value::Object(visible)
 }
 
+/// 契约里的机器状态值；不认识的一律 `unknown`（UI 会丢弃未知枚举行）。
+fn state_param(state: &str) -> &str {
+    match state {
+        "creating" | "booting" | "installing" | "verifying" | "healthy" | "active" | "error"
+        | "destroying" | "gone" | "destroyed" => state,
+        _ => "unknown",
+    }
+}
+
+/// 列表一行：只给机器值，句子由 UI 组装（`server.row`）。
+fn server_row_fact(server: &Value) -> Fact {
+    let state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    let failure_code = server
+        .get("failure")
+        .and_then(|failure| failure.get("code"))
+        .and_then(Value::as_str);
+    let mut params = json!({
+        "name": server.get("name").and_then(Value::as_str).unwrap_or(""),
+        "region": server.get("region").and_then(Value::as_str).unwrap_or(""),
+        "state": state_param(state),
+    });
+    if let Some(ip) = server.get("ip").and_then(Value::as_str) {
+        params["ip"] = json!(ip);
+    }
+    if state == "destroyed" {
+        params["destroyed"] = json!(if failure_code == Some("billing_unpaid") {
+            "billing_unpaid"
+        } else {
+            "user"
+        });
+    }
+    Fact::with_params(FactKey::ServerRow, params)
+}
+
 pub struct MyServersTool {
     services: Arc<dyn VpnToolServices>,
 }
@@ -120,37 +163,16 @@ impl Tool for MyServersTool {
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.services.my_servers().await {
             Ok(data) => {
-                let servers: Vec<Value> = data
+                let original: Vec<Value> = data
                     .get("servers")
                     .and_then(Value::as_array)
-                    .map(|servers| servers.iter().map(visible_server).collect())
+                    .cloned()
                     .unwrap_or_default();
-                let facts = if servers.is_empty() {
-                    vec!["还没有服务器".to_string()]
+                let servers: Vec<Value> = original.iter().map(visible_server).collect();
+                let facts = if original.is_empty() {
+                    vec![Fact::new(FactKey::ServersEmpty)]
                 } else {
-                    servers
-                        .iter()
-                        .take(8)
-                        .map(|server| {
-                            let name = server
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("未命名");
-                            let region = server.get("region").and_then(Value::as_str).unwrap_or("");
-                            let state = server.get("state").and_then(Value::as_str).unwrap_or("");
-                            let address = server
-                                .get("ip")
-                                .and_then(Value::as_str)
-                                .map(|ip| format!(" · {ip}"))
-                                .unwrap_or_default();
-                            let reason = server
-                                .get("destroyed_reason")
-                                .and_then(Value::as_str)
-                                .map(|reason| format!(" · {reason}"))
-                                .unwrap_or_default();
-                            format!("{name} · {region} · {}{address}{reason}", state_label(state))
-                        })
-                        .collect()
+                    original.iter().take(8).map(server_row_fact).collect()
                 };
                 let count = servers.len();
                 let mut visible = data;
@@ -349,17 +371,11 @@ impl Tool for MyServerFailureTool {
         let outcome = match parse_failure_input(&input) {
             Ok(server_id) => match self.services.my_server_failure(&server_id).await {
                 Ok(data) => success_outcome(&data),
-                Err(error) => ToolOutcome::fail(failure(error)).with_display(
-                    "没读到失败详情，稍后再试",
-                    Vec::new(),
-                    super::display::Changed::None,
-                ),
+                Err(error) => {
+                    ToolOutcome::fail(failure(error)).with_display(Vec::new(), Changed::None)
+                }
             },
-            Err(error) => ToolOutcome::fail(error).with_display(
-                "没读到失败详情，稍后再试",
-                Vec::new(),
-                super::display::Changed::None,
-            ),
+            Err(error) => ToolOutcome::fail(error).with_display(Vec::new(), Changed::None),
         };
         envelope::finish(ctx, "MyServerFailure", outcome)
     }
@@ -394,9 +410,20 @@ fn success_outcome(data: &Value) -> ToolOutcome {
                 .get("retryable")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            facts.push(format!("阶段：{stage}"));
-            facts.push(format!("原因：{message}"));
-            facts.push(format!("能不能重试：{}", retry_label(retryable)));
+            if let Some(code) = failure.get("code").and_then(Value::as_str) {
+                facts.push(Fact::with_params(
+                    FactKey::ServerFailureCode,
+                    json!({ "code": code }),
+                ));
+            }
+            facts.push(Fact::with_params(
+                FactKey::ServerStage,
+                json!({ "stage": stage_param(failure.get("stage").and_then(Value::as_str).unwrap_or("")) }),
+            ));
+            facts.push(Fact::with_params(
+                FactKey::ServerRetryable,
+                json!({ "value": if retryable { "yes" } else { "no" } }),
+            ));
             format!(
                 "{name}（{}）这次失败在「{stage}」：{message}，{}。最近 {events} 条订单事件；没有建机原始日志。",
                 state_label(state),
@@ -405,11 +432,11 @@ fn success_outcome(data: &Value) -> ToolOutcome {
         }
         None => {
             if state == "error" {
-                facts.push("记录：不完整".to_string());
-                facts.push("建议：重建或联系支持".to_string());
+                facts.push(Fact::new(FactKey::ServerRecordIncomplete));
+                facts.push(Fact::new(FactKey::ServerAdviceRebuild));
                 format!("{name}这次失败的记录不完整，建议重建或联系支持；没有建机原始日志。")
             } else {
-                facts.push("失败：本次进程内没有记录".to_string());
+                facts.push(Fact::new(FactKey::ServerNoRecord));
                 format!(
                     "{name}（{}）本次进程内没有失败记录；这不代表从未失败，也没有建机原始日志。",
                     state_label(state)
@@ -418,9 +445,5 @@ fn success_outcome(data: &Value) -> ToolOutcome {
         }
     };
 
-    ToolOutcome::ok(summary, data.clone()).with_display(
-        "读到了这次失败的记录",
-        facts,
-        super::display::Changed::None,
-    )
+    ToolOutcome::ok(summary, data.clone()).with_display(facts, Changed::None)
 }

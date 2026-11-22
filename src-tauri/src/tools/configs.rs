@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::{ConfigUpdateInput, NodeCreateInput, ServiceError, VpnToolServices};
 
@@ -97,7 +97,10 @@ impl Tool for ConfigDetailTool {
                     .and_then(Value::as_array)
                     .map(|items| items.len())
                     .unwrap_or(0);
-                let mut facts = vec![format!("配置：{name}"), format!("节点数：{nodes}")];
+                let mut facts = vec![
+                    Fact::with_params(FactKey::ConfigName, json!({ "name": name })),
+                    Fact::with_params(FactKey::ConfigNodeCount, json!({ "count": nodes })),
+                ];
                 let current = data.get("current_node_id").and_then(Value::as_str);
                 if let Some(node_name) = data
                     .get("nodes")
@@ -111,7 +114,10 @@ impl Tool for ConfigDetailTool {
                     .and_then(|node| node.get("name"))
                     .and_then(Value::as_str)
                 {
-                    facts.push(format!("当前节点：{node_name}"));
+                    facts.push(Fact::with_params(
+                        FactKey::ConfigCurrentNode,
+                        json!({ "name": node_name }),
+                    ));
                 }
                 ToolOutcome::ok(summarise_detail(&data), data).with_facts(facts)
             }
@@ -238,8 +244,9 @@ impl Tool for ConfigUpdateTool {
                     .and_then(Value::as_str)
                     .unwrap_or("未命名")
                     .to_string();
-                ToolOutcome::ok("配置已更新，下一次连接生效。", data)
-                    .with_facts(vec![format!("配置：{name}")])
+                ToolOutcome::ok("配置已更新，下一次连接生效。", data).with_facts(vec![
+                    Fact::with_params(FactKey::ConfigName, json!({ "name": name })),
+                ])
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -307,26 +314,29 @@ impl Tool for NodeSwitchTool {
                 let node = data.get("node_id").and_then(Value::as_str);
                 let unchanged = node.is_some()
                     && node == data.get("previous_node_id").and_then(Value::as_str);
-                let (summary, text, facts) = if unchanged {
+                let (summary, facts) = if unchanged {
                     (
                         "当前节点没有变化。",
-                        "当前已是该节点",
-                        vec!["连接：未改变".to_string()],
+                        vec![Fact::with_params(
+                            FactKey::ConnectionState,
+                            json!({ "state": "unchanged" }),
+                        )],
                     )
                 } else if connected {
                     (
                         "已切换节点（热切，连接未中断）。",
-                        "已切换节点",
-                        vec!["连接：未中断".to_string()],
+                        vec![Fact::with_params(
+                            FactKey::ConnectionState,
+                            json!({ "state": "intact" }),
+                        )],
                     )
                 } else {
                     (
                         "已切换当前节点（未连接，未启动 VPN）。",
-                        "已选择节点",
-                        vec!["生效：下次连接".to_string()],
+                        vec![Fact::new(FactKey::EffectNextConnect)],
                     )
                 };
-                ToolOutcome::ok(summary, data).with_display(text, facts, Changed::None)
+                ToolOutcome::ok(summary, data).with_display(facts, Changed::None)
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -400,34 +410,28 @@ impl Tool for NodeProbeTool {
                     .get("error")
                     .and_then(|error| error.get("message"))
                     .and_then(Value::as_str);
-                let (summary, text, facts) = match status {
+                let (summary, facts) = match status {
                     "ok" => {
-                        let latency = data
-                            .get("latency_ms")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
+                        let latency = data.get("latency_ms").and_then(Value::as_u64).unwrap_or(0);
                         (
                             format!("节点可达，延迟 {latency} ms。"),
-                            "能连上",
-                            vec![format!("延迟：{latency} ms")],
+                            vec![Fact::with_params(
+                                FactKey::ProbeLatencyMs,
+                                json!({ "ms": latency }),
+                            )],
                         )
                     }
                     "unreachable" => (
                         message.unwrap_or("节点不可达。").to_string(),
-                        "连不上",
-                        vec!["结果：不可达".to_string()],
+                        vec![Fact::new(FactKey::ProbeUnreachable)],
                     ),
                     // 没测成不是「连不通」：ok 仍为 true，只说原因。
                     _ => (
                         message.unwrap_or("暂时测不了，稍后再试。").to_string(),
-                        "没测成",
-                        vec![
-                            "结果：没测成".to_string(),
-                            message.unwrap_or("暂时测不了").to_string(),
-                        ],
+                        vec![Fact::new(FactKey::ProbeUntested)],
                     ),
                 };
-                ToolOutcome::ok(summary, data).with_display(text, facts, Changed::None)
+                ToolOutcome::ok(summary, data).with_display(facts, Changed::None)
             }
             Ok(Err(error)) => ToolOutcome::fail(failure(error)),
             Err(_) => ToolOutcome::fail(
@@ -520,24 +524,22 @@ impl Tool for NodeImportUrlTool {
                     .unwrap_or(0);
                 let mut facts = Vec::new();
                 if imported > 0 {
-                    facts.push(format!("新增：{imported} 个"));
+                    facts.push(Fact::with_params(
+                        FactKey::ImportAdded,
+                        json!({ "count": imported }),
+                    ));
                 }
                 if skipped > 0 {
-                    facts.push(format!("跳过：{skipped} 个"));
+                    facts.push(Fact::with_params(
+                        FactKey::ImportSkipped,
+                        json!({ "count": skipped }),
+                    ));
                 }
                 ToolOutcome::ok(
                     format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
                     data,
                 )
-                .with_display(
-                    if imported > 0 {
-                        "节点已导入"
-                    } else {
-                        "没有新增节点"
-                    },
-                    facts,
-                    Changed::None,
-                )
+                .with_display(facts, Changed::None)
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -614,24 +616,22 @@ impl Tool for NodeImportTextTool {
                     .unwrap_or(0);
                 let mut facts = Vec::new();
                 if imported > 0 {
-                    facts.push(format!("新增：{imported} 个"));
+                    facts.push(Fact::with_params(
+                        FactKey::ImportAdded,
+                        json!({ "count": imported }),
+                    ));
                 }
                 if skipped > 0 {
-                    facts.push(format!("跳过：{skipped} 个"));
+                    facts.push(Fact::with_params(
+                        FactKey::ImportSkipped,
+                        json!({ "count": skipped }),
+                    ));
                 }
                 ToolOutcome::ok(
                     format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
                     data,
                 )
-                .with_display(
-                    if imported > 0 {
-                        "节点已导入"
-                    } else {
-                        "没有新增节点"
-                    },
-                    facts,
-                    Changed::None,
-                )
+                .with_display(facts, Changed::None)
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -735,8 +735,9 @@ impl Tool for NodeCreateTool {
                     .and_then(Value::as_str)
                     .unwrap_or("-")
                     .to_string();
-                ToolOutcome::ok(format!("节点「{name}」已创建。"), data)
-                    .with_facts(vec![format!("节点：{name}")])
+                ToolOutcome::ok(format!("节点「{name}」已创建。"), data).with_facts(vec![
+                    Fact::with_params(FactKey::NodeName, json!({ "name": name })),
+                ])
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };

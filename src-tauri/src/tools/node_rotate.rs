@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use super::display::Changed;
+use super::display::{Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use crate::agent::questions;
 use crate::control_plane::client::ControlPlane;
@@ -67,6 +67,27 @@ enum AgentFailure {
 }
 
 impl AgentFailure {
+    /// 失败原因的稳定短码（契约 `commands.md` §7.27 的七类）。
+    fn reason_code(&self) -> &str {
+        match self {
+            Self::ControlPlane(error) => error.reason().unwrap_or("agent_token_unavailable"),
+            Self::BadResponse(_) => "agent_bad_response",
+            Self::TlsUntrusted(_) => "agent_tls_untrusted",
+            Self::TokenRejected => "agent_token_rejected",
+            Self::Timeout => "agent_timeout",
+            Self::Transport(_) => "agent_unreachable",
+            Self::ToolFailed { .. } => "agent_tool_failed",
+        }
+    }
+
+    /// 控制面失败额外带上它的稳定码；其它失败没有第二个码。
+    fn control_plane_code(&self) -> Option<&str> {
+        match self {
+            Self::ControlPlane(error) => Some(error.code.as_str()),
+            _ => None,
+        }
+    }
+
     fn into_aivpn(self) -> AivpnError {
         match self {
             Self::ControlPlane(error) => {
@@ -196,7 +217,7 @@ impl RotateBackend for LiveBackend {
                 // CA 链校验失败（证书链不完整、CA 换过）时，用同一张票的指纹再试一次：
                 // 令牌是一次性的，重新开票换不来第二次机会。
                 Err(AgentFailure::TlsUntrusted(_)) if first_trust == TrustMode::Ca => {
-                    log::warn!("节点 CA 校验失败，改用同一张票的指纹 pin 重试");
+                    log::info!("[node_rotate] trust=ca_failed fallback=fingerprint");
                     self.runner.rotate(&ticket, TrustMode::Fingerprint).await
                 }
                 other => other,
@@ -632,14 +653,7 @@ impl Tool for NodeRotateCredentialsTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let outcome = match self.run(input, ctx).await {
             Ok(outcome) => outcome,
-            Err(error) => {
-                let text = if error.code == "CANCELLED" {
-                    "已取消重置"
-                } else {
-                    "这次没能重置节点端口"
-                };
-                ToolOutcome::fail(error).with_display(text, Vec::new(), Changed::None)
-            }
+            Err(error) => ToolOutcome::fail(error).with_display(Vec::new(), Changed::None),
         };
         envelope::finish(ctx, TOOL_NAME, outcome)
     }
@@ -655,13 +669,35 @@ impl NodeRotateCredentialsTool {
 
     /// 确认之后的动作：先轮换，再主动把新凭据取回本地。
     async fn execute_rotation(&self, server_id: &str) -> Result<(RotateReport, bool), AivpnError> {
-        let report = self
-            .backend
-            .rotate(server_id)
-            .await
-            .map_err(AgentFailure::into_aivpn)?;
+        let started = std::time::Instant::now();
+        log::info!("[node_rotate] start server_id={server_id}");
+        let report = match self.backend.rotate(server_id).await {
+            Ok(report) => report,
+            Err(failure) => {
+                let reason = failure.reason_code().to_string();
+                let code = failure.control_plane_code().map(str::to_string);
+                let elapsed = started.elapsed().as_millis();
+                match code {
+                    Some(code) => log::info!(
+                        "[node_rotate] status=failed code={code} reason={reason} elapsed_ms={elapsed}"
+                    ),
+                    None => log::info!(
+                        "[node_rotate] status=failed reason={reason} elapsed_ms={elapsed}"
+                    ),
+                }
+                return Err(failure.into_aivpn());
+            }
+        };
         // 节点池不会为已存在的本地行再取凭据，所以这里主动刷一次。
         let refreshed = self.refresher.refresh(server_id).await;
+        let elapsed = started.elapsed().as_millis();
+        if refreshed {
+            log::info!("[node_rotate] status=ok refreshed=true elapsed_ms={elapsed}");
+        } else {
+            log::info!(
+                "[node_rotate] status=ok refreshed=false reason=credential_refresh_failed elapsed_ms={elapsed}"
+            );
+        }
         Ok((report, refreshed))
     }
 
@@ -672,15 +708,18 @@ impl NodeRotateCredentialsTool {
         } else {
             format!("{base}本机凭据刷新失败，请手动刷新服务器数据。")
         };
-        let mut facts = vec![format!("新端口：{}", report.port)];
+        let mut facts = vec![Fact::with_params(
+            FactKey::NodeNewPort,
+            json!({ "port": report.port }),
+        )];
         if !refreshed {
-            facts.push("本机凭据刷新失败，请手动刷新服务器数据".to_string());
+            facts.push(Fact::new(FactKey::NodeCredentialRefreshFailed));
         }
         ToolOutcome::ok(
             summary,
             json!({ "ok": true, "port": report.port, "refreshed": refreshed }),
         )
-        .with_display("节点端口与密码已重置", facts, Changed::Unknown)
+        .with_display(facts, Changed::Unknown)
     }
 
     /// 确认卡：默认焦点是「取消」，Esc / 关闭 / 超时都按取消处理。
@@ -710,6 +749,7 @@ impl NodeRotateCredentialsTool {
         if answer == CONFIRM_OPTION {
             Ok(())
         } else {
+            log::warn!("[node_rotate] reason=cancelled");
             Err(AivpnError::new("CANCELLED", "用户取消了节点重置"))
         }
     }
@@ -739,6 +779,7 @@ fn parse_server_id(input: &Value) -> Result<String, AivpnError> {
     if valid_server_id(server_id) {
         Ok(server_id.to_string())
     } else {
+        log::warn!("[node_rotate] code=INVALID_ARGUMENT reason=invalid_server_id");
         Err(
             AivpnError::new("INVALID_ARGUMENT", "server_id 不合法，这次没有重置")
                 .with_details(json!({ "reason": "invalid_server_id" })),
@@ -1227,8 +1268,7 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
         assert!(outcome
             .display
             .facts
-            .iter()
-            .any(|fact| fact.contains("本机凭据刷新失败")));
+            .contains(&Fact::new(FactKey::NodeCredentialRefreshFailed)));
     }
 
     #[derive(Default)]
