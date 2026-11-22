@@ -396,7 +396,8 @@ export interface NodeProbeData {
   probe_method: "clash_delay" | "none";
   /** Unix 毫秒。 */
   checked_at: number;
-  error: { code: string; message: string } | null;
+  /** 失败短码；untested 时 reason 说明为什么没测成。 */
+  error: { code: string; message: string; reason?: string | null } | null;
 }
 
 /** 批量测速的阶段：preparing 时临时运行时尚未就绪，没有任何结果。 */

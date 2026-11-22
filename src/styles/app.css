@@ -6937,6 +6937,11 @@ details[open] > .settings-fold__summary::before {
   color: var(--red);
 }
 
+/* 没测成 / 可能仍在进行：不是确定性失败，不用红。 */
+.diagnosis__status--unknown {
+  color: var(--ink-3);
+}
+
 .diagnosis__status--running {
   color: var(--ink-3);
 }

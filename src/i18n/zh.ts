@@ -1628,6 +1628,10 @@ export const zh = {
   "diagnosis.status.running": "进行中",
   "diagnosis.status.passed": "通过",
   "diagnosis.status.failed": "失败",
+  "diagnosis.status.unknown": "未完成",
+  "diagnosis.untested.connectionBusy": "连接正在忙",
+  "diagnosis.untested.otherConfig": "当前跑的是别的配置",
+  "diagnosis.untested.clashUnavailable": "本地测速组件不可用",
   "diagnosis.connectivity.pending": "正在检查连通性…",
   "diagnosis.connectivity.icmpOk": "ICMP 通",
   "diagnosis.connectivity.tcpOk": "ICMP 未通，TCP 连通",
@@ -1640,6 +1644,7 @@ export const zh = {
     "更新配置还没返回结果，可能仍在进行；稍后再看连接是否恢复。",
   "diagnosis.config.untested":
     "这次没能重测：探针没有跑起来，不能当成不通。",
+  "diagnosis.config.untestedReason": "这次没能重测：{reason}。",
   "diagnosis.config.reconnectFailed": "配置已更新，但没能重连。",
   "diagnosis.config.recovered": "配置已更新，连接已恢复",
   "diagnosis.config.recoveredNoChange": "配置没有变化，连接已恢复",
@@ -1654,6 +1659,8 @@ export const zh = {
   "diagnosis.rotate.timeout":
     "重置还没返回结果，可能仍在进行；稍后再看端口是否变化。",
   "diagnosis.rotate.untested": "端口与密码已重置，但这次没能重测。",
+  "diagnosis.rotate.untestedReason":
+    "端口与密码已重置，但这次没能测：{reason}。",
   "diagnosis.rotate.appliedIdle": "已重置，重新连接后生效",
   "diagnosis.rotate.failed": "重置失败：{reason}",
   "diagnosis.rotate.failedNoReason": "重置失败",

@@ -245,7 +245,11 @@ describe("节点诊断面板", () => {
 
     expect(openAi).toHaveBeenCalledTimes(1);
     const context = openAi.mock.calls[0][0] as Record<string, unknown>;
-    expect(context.rotate).toEqual({ ok: false, reason: "agent_unreachable" });
+    expect(context.rotate).toEqual({
+      ok: false,
+      reason: "agent_unreachable",
+      timed_out: false,
+    });
     expect(JSON.stringify(context)).not.toContain("password");
   });
 
@@ -489,6 +493,22 @@ describe("节点诊断面板", () => {
     expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
   });
 
+  it("重测没跑成时带 Host 原因：显示人话，状态是未完成", async () => {
+    const deps = makeDeps({
+      probeUntestedReason: () => "other_config",
+      reprobe: vi.fn(async () => null),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(
+      await screen.findByText("这次没能重测：当前跑的是别的配置。"),
+    ).toBeTruthy();
+    expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "失败" })).toBeNull();
+  });
+
   it("重置后重测没跑成：结论是没能重测，绝不再给重置", async () => {
     const reprobe = vi
       .fn<() => Promise<boolean | null>>(async () => false)
@@ -558,8 +578,10 @@ describe("节点诊断面板", () => {
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   });
 
-  it("同步超时：说还没返回结果，不按控制面不可达处理", async () => {
+  it("同步超时：说还没返回结果，状态是中性的未完成", async () => {
+    const openAi = vi.fn();
     const deps = makeDeps({
+      openAi,
       syncConfig: vi.fn(async () => {
         throw {
           code: "TIMEOUT",
@@ -574,24 +596,34 @@ describe("节点诊断面板", () => {
     await startAndUpdate();
 
     expect(await screen.findByText(/更新配置还没返回结果/)).toBeTruthy();
+    expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
     expect(document.body.textContent).not.toContain("控制面暂时不可达");
     expect(
       screen.queryByRole("button", { name: "重置端口与密码" }),
     ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
+    const context = openAi.mock.calls[0][0] as {
+      config_update: { timed_out: boolean };
+    };
+    expect(context.config_update.timed_out).toBe(true);
   });
 
-  it("重置超时：说还没返回结果，不说失败", async () => {
-    const deps = makeDeps({
-      rotateCredentials: vi.fn(async () => {
-        throw {
-          code: "TIMEOUT",
-          message: "",
-          retryable: true,
-          details: { reason: "agent_timeout" },
-        };
+  it("重置超时：说还没返回结果，状态中性，收尾日志写 timed_out", async () => {
+    const openAi = vi.fn();
+    const view = open(
+      makeDeps({
+        openAi,
+        rotateCredentials: vi.fn(async () => {
+          throw {
+            code: "TIMEOUT",
+            message: "",
+            retryable: true,
+            details: { reason: "agent_timeout" },
+          };
+        }),
       }),
-    });
-    open(deps);
+    );
 
     await startAndUpdate();
     fireEvent.click(
@@ -600,10 +632,21 @@ describe("节点诊断面板", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
 
     expect(await screen.findByText(/重置还没返回结果/)).toBeTruthy();
+    expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
     expect(document.body.textContent).not.toContain("重置失败");
     expect(
       screen.queryByRole("button", { name: "重置端口与密码" }),
     ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
+    const context = openAi.mock.calls[0][0] as {
+      rotate: { timed_out: boolean };
+    };
+    expect(context.rotate.timed_out).toBe(true);
+
+    view.unmount();
+    const line = logLines().find((item) => item.includes("rotate=timed_out"));
+    expect(line).toBeTruthy();
   });
 
   it("告警盖在上面时暂停焦点陷阱，Esc 不先关面板", async () => {

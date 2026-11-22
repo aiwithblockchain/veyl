@@ -106,10 +106,14 @@ export interface DiagnosisContext {
     reconnect: boolean | null;
     /** 同步请求本身失败时的短码；成功为 null。 */
     control_plane_error: string | null;
+    /** 同步命令超时：可能仍在跑或已经成功。 */
+    timed_out: boolean;
   };
   rotate: {
     ok: boolean | null;
     reason: string | null;
+    /** 重置命令超时：可能仍在跑或已经成功。 */
+    timed_out: boolean;
   };
   client: {
     app_version: string;
@@ -131,6 +135,8 @@ export interface DiagnosisDeps {
   syncConfig: () => Promise<SyncOutcome>;
   /** 只重测一次，不重启隧道；null = 没测成（untested）。 */
   reprobe: () => Promise<ProbeOutcome>;
+  /** 最近一次 untested 的 Host 原因（connection_busy / other_config / clash_unavailable）；没有为 null。 */
+  probeUntestedReason?: () => string | null;
   /** stop → start → 重测；重连失败与重连后测不通要分开。 */
   reconnectAndProbe: () => Promise<ReconnectOutcome>;
   /** 重置这台节点的端口与密码（`node_rotate_credentials`）。 */
@@ -162,8 +168,8 @@ export type DiagnosisConclusion =
   | { kind: "config-control-plane" }
   /** 同步命令超时：可能仍在跑或已经成功，不按失败处理。 */
   | { kind: "config-timeout" }
-  /** 重测没跑成（untested）：不能当成不通。 */
-  | { kind: "config-untested" }
+  /** 重测没跑成（untested）：reason 是 Host 给的原因，不能当成不通。 */
+  | { kind: "config-untested"; reason: string | null }
   /** 配置已更新，但 stop → start 本身失败。 */
   | { kind: "config-reconnect-failed" }
   | { kind: "config-recovered"; changed: boolean }
@@ -177,8 +183,8 @@ export type DiagnosisConclusion =
   | { kind: "rotate-reconnect-failed" }
   /** 重置命令超时：可能仍在跑或已经成功，不按失败处理。 */
   | { kind: "rotate-timeout" }
-  /** 重置成功，但重测没跑成（untested）：不能当成不通。 */
-  | { kind: "rotate-untested" }
+  /** 重置成功，但重测没跑成（untested）：reason 是 Host 给的原因。 */
+  | { kind: "rotate-untested"; reason: string | null }
   /** 重置成功，但跑的是别的节点、只重测仍不通。 */
   | { kind: "rotate-still-failed" }
   /** 重置成功，但隧道没在跑：不探测、不自动连接。 */
@@ -188,7 +194,8 @@ export type DiagnosisConclusion =
 
 export interface DiagnosisStep {
   id: DiagnosisStepId;
-  status: "running" | "passed" | "failed";
+  /** unknown = 没测成 / 可能仍在进行：不是确定性失败，界面不画 ✕。 */
+  status: "running" | "passed" | "failed" | "unknown";
   conclusion: DiagnosisConclusion;
 }
 
@@ -227,12 +234,14 @@ interface Collected {
   probeError: string | null;
   syncChanged: boolean | null;
   syncPortAfter: number | null;
+  syncTimedOut: boolean;
   controlPlaneError: string | null;
   reprobe: boolean | null;
   reconnect: boolean | null;
   rotateOk: boolean | null;
   rotateReason: string | null;
   rotatePort: number | null;
+  rotateTimedOut: boolean;
 }
 
 function emptyCollected(): Collected {
@@ -242,12 +251,14 @@ function emptyCollected(): Collected {
     probeError: null,
     syncChanged: null,
     syncPortAfter: null,
+    syncTimedOut: false,
     controlPlaneError: null,
     reprobe: null,
     reconnect: null,
     rotateOk: null,
     rotateReason: null,
     rotatePort: null,
+    rotateTimedOut: false,
   };
 }
 
@@ -338,10 +349,12 @@ function buildContext(
       reprobe: collected.reprobe,
       reconnect: collected.reconnect,
       control_plane_error: collected.controlPlaneError,
+      timed_out: collected.syncTimedOut,
     },
     rotate: {
       ok: collected.rotateOk,
       reason: collected.rotateReason,
+      timed_out: collected.rotateTimedOut,
     },
     client: {
       app_version: facts.appVersion,
@@ -412,8 +425,9 @@ function logClosed(
 ): void {
   if (steps.length === 0) return;
   const codes = steps.map((step) => `${step.id}:${step.status}`).join(",");
-  const rotate =
-    collected.rotateOk === null
+  const rotate = collected.rotateTimedOut
+    ? "timed_out"
+    : collected.rotateOk === null
       ? "none"
       : collected.rotateOk
         ? "ok"
@@ -481,6 +495,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       : depsRef.current.isRuntimeRunning()
         ? "other"
         : "idle";
+
+  const untestedReason = (): string | null =>
+    depsRef.current.probeUntestedReason?.() ?? null;
 
   const startConnectivity = async () => {
     busyRef.current = true;
@@ -573,6 +590,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   };
 
   const runConfig = async () => {
+    const startedAt = Date.now();
     busyRef.current = true;
     configAttemptsRef.current += 1;
     updatePhase("running");
@@ -603,12 +621,13 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     // 超时不是失败：命令可能仍在跑或已经成功，别让用户照着「失败」去重置。
     if (timedOut) {
-      log("warn", "config result=timeout");
+      collectedRef.current.syncTimedOut = true;
+      log("warn", `config result=timeout elapsed_ms=${Date.now() - startedAt}`);
       busyRef.current = false;
       if (!mountedRef.current) return;
       replaceLast({
         id: "config",
-        status: "failed",
+        status: "unknown",
         conclusion: { kind: "config-timeout" },
       });
       updatePhase("awaiting");
@@ -620,7 +639,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.controlPlaneError = synced.controlPlaneError;
       log(
         "warn",
-        `config control-plane error=${synced.controlPlaneError} changed=${synced.changed}`,
+        `config control-plane error=${synced.controlPlaneError} changed=${synced.changed} elapsed_ms=${Date.now() - startedAt}`,
       );
       busyRef.current = false;
       if (mountedRef.current) {
@@ -643,7 +662,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (!depsRef.current.isRuntimeRunning()) {
       log(
         "info",
-        `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=idle result=${synced.changed ? "applied" : "unchanged"}`,
+        `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=idle result=${synced.changed ? "applied" : "unchanged"} elapsed_ms=${Date.now() - startedAt}`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -679,7 +698,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
       log(
         "info",
-        `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=${runtimeLabel()} via=reconnect result=${result}`,
+        `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=${runtimeLabel()} via=reconnect result=${result} elapsed_ms=${Date.now() - startedAt}`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -701,8 +720,8 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       } else if (result === "probe-untested") {
         replaceLast({
           id: "config",
-          status: "failed",
-          conclusion: { kind: "config-untested" },
+          status: "unknown",
+          conclusion: { kind: "config-untested", reason: untestedReason() },
         });
         updatePhase("awaiting");
       } else {
@@ -727,7 +746,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     log(
       "info",
-      `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=${runtimeLabel()} via=reprobe result=${ok === null ? "untested" : ok ? "ok" : "fail"}`,
+      `config changed=${synced.changed} port=${synced.port ?? "none"} runtime=${runtimeLabel()} via=reprobe result=${ok === null ? "untested" : ok ? "ok" : "fail"} elapsed_ms=${Date.now() - startedAt}`,
     );
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -736,8 +755,8 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       // 没测成不是不通：给「更新配置」再测一次，不给重置。
       replaceLast({
         id: "config",
-        status: "failed",
-        conclusion: { kind: "config-untested" },
+        status: "unknown",
+        conclusion: { kind: "config-untested", reason: untestedReason() },
       });
       updatePhase("awaiting");
     } else if (ok) {
@@ -759,6 +778,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
   const runReset = async () => {
     if (phaseRef.current !== "confirming" || busyRef.current) return;
+    const startedAt = Date.now();
     busyRef.current = true;
     updatePhase("running");
     setSteps((prev) => [
@@ -783,15 +803,16 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       const timedOut = reason === "agent_timeout";
       log(
         "warn",
-        `rotate ok=false reason=${reason ?? "none"}${timedOut ? " result=timeout" : ""} runtime=${runtimeLabel()}`,
+        `rotate ok=false reason=${reason ?? "none"}${timedOut ? " result=timeout" : ""} runtime=${runtimeLabel()} elapsed_ms=${Date.now() - startedAt}`,
       );
       collectedRef.current.rotateOk = false;
       collectedRef.current.rotateReason = reason;
+      collectedRef.current.rotateTimedOut = timedOut;
       busyRef.current = false;
       if (mountedRef.current) {
         replaceLast({
           id: "rotate",
-          status: "failed",
+          status: timedOut ? "unknown" : "failed",
           conclusion: timedOut
             ? { kind: "rotate-timeout" }
             : { kind: "rotate-failed", reason },
@@ -808,7 +829,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (!depsRef.current.isRuntimeRunning()) {
       log(
         "info",
-        `rotate ok=true port=${outcome.port} runtime=idle result=applied`,
+        `rotate ok=true port=${outcome.port} runtime=idle result=applied elapsed_ms=${Date.now() - startedAt}`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -835,7 +856,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
       log(
         "info",
-        `rotate ok=true port=${outcome.port} runtime=this via=reconnect result=${result}`,
+        `rotate ok=true port=${outcome.port} runtime=this via=reconnect result=${result} elapsed_ms=${Date.now() - startedAt}`,
       );
       busyRef.current = false;
       if (!mountedRef.current) return;
@@ -858,8 +879,8 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       } else if (result === "probe-untested") {
         replaceLast({
           id: "rotate",
-          status: "failed",
-          conclusion: { kind: "rotate-untested" },
+          status: "unknown",
+          conclusion: { kind: "rotate-untested", reason: untestedReason() },
         });
         updatePhase("awaiting");
       } else {
@@ -883,7 +904,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     log(
       "info",
-      `rotate ok=true port=${outcome.port} runtime=other via=reprobe result=${ok === null ? "untested" : ok ? "ok" : "fail"}`,
+      `rotate ok=true port=${outcome.port} runtime=other via=reprobe result=${ok === null ? "untested" : ok ? "ok" : "fail"} elapsed_ms=${Date.now() - startedAt}`,
     );
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -891,8 +912,8 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (ok === null) {
       replaceLast({
         id: "rotate",
-        status: "failed",
-        conclusion: { kind: "rotate-untested" },
+        status: "unknown",
+        conclusion: { kind: "rotate-untested", reason: untestedReason() },
       });
       updatePhase("awaiting");
     } else if (ok) {
@@ -914,6 +935,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
   /** 重置后的重测：只 reprobe，不再 rotate；同一轮最多 2 次。 */
   const runPostRotateRetest = async () => {
+    const startedAt = Date.now();
     busyRef.current = true;
     postRotateRetestsRef.current += 1;
     updatePhase("running");
@@ -934,7 +956,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     log(
       "info",
-      `rotate retest n=${postRotateRetestsRef.current} result=${ok === null ? "untested" : ok ? "ok" : "fail"}`,
+      `rotate retest n=${postRotateRetestsRef.current} result=${ok === null ? "untested" : ok ? "ok" : "fail"} elapsed_ms=${Date.now() - startedAt}`,
     );
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -942,8 +964,8 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (ok === null) {
       replaceLast({
         id: "rotate",
-        status: "failed",
-        conclusion: { kind: "rotate-untested" },
+        status: "unknown",
+        conclusion: { kind: "rotate-untested", reason: untestedReason() },
       });
       updatePhase("awaiting");
     } else if (ok) {

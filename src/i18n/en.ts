@@ -1697,6 +1697,11 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.status.running": "In progress",
   "diagnosis.status.passed": "Passed",
   "diagnosis.status.failed": "Failed",
+  "diagnosis.status.unknown": "Unfinished",
+  "diagnosis.untested.connectionBusy": "a connection or switch is in progress",
+  "diagnosis.untested.otherConfig": "another config is connected",
+  "diagnosis.untested.clashUnavailable":
+    "the local probe service is unavailable",
   "diagnosis.connectivity.pending": "Checking connectivity…",
   "diagnosis.connectivity.icmpOk": "ICMP reachable",
   "diagnosis.connectivity.tcpOk": "ICMP blocked, TCP reachable",
@@ -1709,6 +1714,7 @@ export const en: Record<MessageKey, string> = {
     "Updating the config hasn't returned yet; it may still be running. Check the connection again later.",
   "diagnosis.config.untested":
     "Couldn't re-test this time: the probe didn't run, so this isn't a failure.",
+  "diagnosis.config.untestedReason": "Couldn't re-test this time: {reason}.",
   "diagnosis.config.reconnectFailed": "Config updated, but reconnecting failed.",
   "diagnosis.config.recovered": "Config updated; connection restored",
   "diagnosis.config.recoveredNoChange": "Config unchanged; connection restored",
@@ -1726,6 +1732,8 @@ export const en: Record<MessageKey, string> = {
     "Resetting hasn't returned yet; it may still be running. Check the port again later.",
   "diagnosis.rotate.untested":
     "Port and password reset, but couldn't re-test this time.",
+  "diagnosis.rotate.untestedReason":
+    "Port and password reset, but couldn't test this time: {reason}.",
   "diagnosis.rotate.appliedIdle": "Reset done; reconnect to apply",
   "diagnosis.rotate.failed": "Reset failed: {reason}",
   "diagnosis.rotate.failedNoReason": "Reset failed",

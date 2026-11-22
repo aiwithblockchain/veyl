@@ -2130,8 +2130,12 @@ export default function App() {
     };
     /** 本次诊断的关联短码，由面板在开始时回传，供探测/等待日志复用。 */
     let runCode: string | null = null;
+    /** 最近一次 untested 的 Host 原因，供面板显示人话。 */
+    let probeUntestedReason: string | null = null;
     const probeNode = async (): Promise<ProbeOutcome> => {
+      probeUntestedReason = null;
       if (!localNodeId) {
+        probeUntestedReason = "no_local_node";
         uiLog(
           "warn",
           `diagnosis run=${runCode ?? "none"} probe status=none reason=no_local_node`,
@@ -2144,9 +2148,11 @@ export default function App() {
         nodeProbes.recordResults([result]);
         if (result.status === "untested") {
           // untested = 没测成（connection_busy / other_config / clash_unavailable），不是不通。
+          probeUntestedReason =
+            result.error?.reason ?? result.error?.code ?? null;
           uiLog(
             "warn",
-            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=untested reason=${result.error?.code ?? "none"}`,
+            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=untested reason=${probeUntestedReason ?? "none"}`,
             "node-diagnosis",
           );
           return null;
@@ -2154,7 +2160,7 @@ export default function App() {
         if (result.reachable !== true) {
           uiLog(
             "warn",
-            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=${result.status} reason=${result.error?.code ?? "none"}`,
+            `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=${result.status} reason=${result.error?.reason ?? result.error?.code ?? "none"}`,
             "node-diagnosis",
           );
           return false;
@@ -2257,6 +2263,7 @@ export default function App() {
         };
       },
       reprobe: probeNode,
+      probeUntestedReason: () => probeUntestedReason,
       reconnectAndProbe: async (): Promise<ReconnectOutcome> => {
         const connected = await handleReconnectAndTest();
         if (!connected) return "reconnect-failed";
@@ -3222,7 +3229,7 @@ export default function App() {
           nodeName={diagnosis.nodeName}
           deps={diagnosis.deps}
           onClose={() => setDiagnosis(null)}
-          trapPaused={aiRequiredOpen}
+          trapPaused={aiRequiredOpen || settingsOpen || mobileExportOpen}
         />
       ) : null}
 

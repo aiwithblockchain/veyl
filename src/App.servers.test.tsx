@@ -1284,6 +1284,16 @@ describe("节点诊断入口", () => {
     await waitFor(() =>
       expect(alert.contains(document.activeElement)).toBe(true),
     );
+
+    // 点「去配置」后焦点应交给设置，诊断面板不再抢替；Esc 也不该关掉它。
+    fireEvent.click(screen.getByRole("button", { name: "去配置" }));
+    const settings = await screen.findByRole("dialog", { name: "设置" });
+    await waitFor(() => expect(settings.contains(document.activeElement)).toBe(true));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(
+      screen.getByRole("dialog", { name: "诊断：新加坡 1 · DigitalOcean" }),
+    ).toBeTruthy();
   });
 
   it("面板打开后本地端口已被同步改过：更新配置判为无变化", async () => {

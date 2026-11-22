@@ -41,6 +41,14 @@ const STATUS_LABEL: Record<DiagnosisStep["status"], MessageKey> = {
   running: "diagnosis.status.running",
   passed: "diagnosis.status.passed",
   failed: "diagnosis.status.failed",
+  unknown: "diagnosis.status.unknown",
+};
+
+/** untested 的 Host 原因：常见的三种给人话，其余走通用语。 */
+const UNTESTED_REASON_KEY: Record<string, MessageKey> = {
+  connection_busy: "diagnosis.untested.connectionBusy",
+  other_config: "diagnosis.untested.otherConfig",
+  clash_unavailable: "diagnosis.untested.clashUnavailable",
 };
 
 /** 破坏性动作才用 danger-ghost；其余只有一个主按钮。 */
@@ -143,8 +151,14 @@ export function DiagnosisPanel({
         return t("diagnosis.config.controlPlane");
       case "config-timeout":
         return t("diagnosis.config.timeout");
-      case "config-untested":
-        return t("diagnosis.config.untested");
+      case "config-untested": {
+        const key = conclusion.reason
+          ? UNTESTED_REASON_KEY[conclusion.reason]
+          : undefined;
+        return key
+          ? t("diagnosis.config.untestedReason", { reason: t(key) })
+          : t("diagnosis.config.untested");
+      }
       case "config-reconnect-failed":
         return t("diagnosis.config.reconnectFailed");
       case "config-recovered":
@@ -167,8 +181,14 @@ export function DiagnosisPanel({
         return t("diagnosis.rotate.reconnectFailed");
       case "rotate-timeout":
         return t("diagnosis.rotate.timeout");
-      case "rotate-untested":
-        return t("diagnosis.rotate.untested");
+      case "rotate-untested": {
+        const key = conclusion.reason
+          ? UNTESTED_REASON_KEY[conclusion.reason]
+          : undefined;
+        return key
+          ? t("diagnosis.rotate.untestedReason", { reason: t(key) })
+          : t("diagnosis.rotate.untested");
+      }
       case "rotate-still-failed":
         return t("diagnosis.rotate.stillFailed");
       case "rotate-applied-idle":
@@ -235,7 +255,9 @@ export function DiagnosisPanel({
                     ? "✓"
                     : step.status === "failed"
                       ? "✕"
-                      : "…"}
+                      : step.status === "unknown"
+                        ? "?"
+                        : "…"}
                 </span>
                 <div>
                   <p className="diagnosis__step-title">{t(STEP_TITLE[step.id])}</p>

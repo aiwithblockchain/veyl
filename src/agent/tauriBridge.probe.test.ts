@@ -273,6 +273,27 @@ describe("单节点与 progress 事件走同一套归一化", () => {
     });
   });
 
+  it("untested 的 Host 原因（error.reason）保留在结果里", async () => {
+    invoke.mockResolvedValueOnce({
+      node_id: "n1",
+      status: "untested",
+      reachable: null,
+      latency_ms: null,
+      probe_method: "none",
+      checked_at: 1700000000000,
+      error: {
+        code: "PROBE_UNAVAILABLE",
+        reason: "other_config",
+        message: "已连接别的配置",
+      },
+    });
+    const result = await new TauriAgentBridge().nodeProbe("n1");
+    expect(result.error).toMatchObject({
+      code: "PROBE_UNAVAILABLE",
+      reason: "other_config",
+    });
+  });
+
   it("progress 事件里的 result 同样被纠正", async () => {
     const bridge = new TauriAgentBridge();
     const seen: AgentEvent[] = [];

@@ -357,16 +357,23 @@ function normalizeProbeResult(raw: unknown): NodeProbeResult | null {
     status === "ok" ? true : status === "unreachable" ? false : null;
   const error =
     value.error && typeof value.error === "object"
-      ? {
-          code:
-            typeof (value.error as { code?: unknown }).code === "string"
-              ? ((value.error as { code: string }).code)
-              : "",
-          message:
-            typeof (value.error as { message?: unknown }).message === "string"
-              ? ((value.error as { message: string }).message)
-              : "",
-        }
+      ? (() => {
+          const reason = (value.error as { reason?: unknown }).reason;
+          return {
+            code:
+              typeof (value.error as { code?: unknown }).code === "string"
+                ? ((value.error as { code: string }).code)
+                : "",
+            message:
+              typeof (value.error as { message?: unknown }).message === "string"
+                ? ((value.error as { message: string }).message)
+                : "",
+            // 只有真的带原因时才加字段，旧结果的精确比较不受影响。
+            ...(typeof reason === "string" && reason !== ""
+              ? { reason }
+              : {}),
+          };
+        })()
       : null;
   return {
     node_id: value.node_id,
