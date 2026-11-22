@@ -28,9 +28,10 @@ export interface ProvisionEnv {
 }
 
 /** 构建信息必须是「能真的下载并校验」的形状：占位符/手滑都让订单在建机前失败。 */
-function usableBuild(input: { version: string; sha256: string; url: string }): boolean {
+export function usableBuild(input: { version: string; sha256: string; url: string }): boolean {
   return (
-    input.version !== "" &&
+    // 版本会被 agent 拼进下载目录名，只允许安全字符集。
+    /^[0-9A-Za-z._-]{1,32}$/.test(input.version) &&
     /^[0-9a-f]{64}$/i.test(input.sha256) &&
     input.url.startsWith("https://")
   );
@@ -234,13 +235,20 @@ export async function provisionServer(
   if (!usableBuild(agent) || !usableBuild(singbox)) {
     return fail(env, server, "agent_unconfigured", { retryable: false });
   }
-  const userData = buildCloudInit({
-    enrollToken,
-    enrollUrl: `${baseUrl}/v1/agent/enroll`,
-    failUrl: `${baseUrl}/v1/agent/fail`,
-    controlUrl: baseUrl,
-    agent,
-  });
+  // cloud-init 会把 token / URL / 版本拼进 shell：越权字符一律不建机（永久失败 + 退款）。
+  let userData: string;
+  try {
+    userData = buildCloudInit({
+      enrollToken,
+      enrollUrl: `${baseUrl}/v1/agent/enroll`,
+      failUrl: `${baseUrl}/v1/agent/fail`,
+      controlUrl: baseUrl,
+      agent,
+    });
+  } catch (error) {
+    console.warn(`[provision] cloud_init_invalid server=${server.id} error=${String(error)}`);
+    return fail(env, server, "cloud_init_invalid", { retryable: false });
+  }
 
   // 防火墙先于 Droplet：ensure 失败就整单失败，绝不建出一台没有防火墙的机器（§3.4）。
   // Droplet 建机时就带 `veyl:node`，建好即受全局规则保护，没有先建机器后挂规则的裸奔窗口。

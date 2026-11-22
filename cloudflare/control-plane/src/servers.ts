@@ -1,7 +1,7 @@
 // 服务器：enrollment 回传、列表、详情、销毁、凭据下发（§19.5 / §19.7 / §19.8）。
 // 控制面是唯一事实源；客户端拿到的凭据必须能被内置公钥验签。
 
-import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
+import { authenticate, bumpRateLimit, isResponse, type MaybeAuthEnv } from "./auth";
 import {
   openSecret,
   publicJwk,
@@ -24,6 +24,7 @@ import {
   NODE_PORT_START,
 } from "./providers/digitalocean";
 import { recordLedgerEntry } from "./wallet";
+import { usableBuild } from "./provision";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const CREDENTIAL_TTL_MS = 5 * 60 * 1000;
@@ -889,17 +890,23 @@ async function enroll(request: Request, env: ServersEnv, token: string): Promise
   }
 }
 
-/** 节点 agent 的期望状态（node-agent-mcp.md §5）：sing-box 的版本与下载信息来自控制面配置。 */
-function singboxDesired(env: ServersEnv): {
-  version: string;
-  sha256: string;
-  url: string;
-} | null {
-  const version = env.SING_BOX_VERSION?.trim();
-  const sha256 = env.SING_BOX_SHA256?.trim();
-  const url = env.SING_BOX_DOWNLOAD_URL?.trim();
-  if (!version || !sha256 || !url) return null;
-  return { version, sha256, url };
+/** 期望状态下发的 sing-box 构建信息：与建机共用同一套校验，脏值绝不下发。 */
+function singboxDesired(
+  env: ServersEnv,
+):
+  | { ok: true; build: { version: string; sha256: string; url: string } }
+  | { ok: false; reason: "agent_config_missing" | "agent_config_invalid" } {
+  const version = env.SING_BOX_VERSION?.trim() ?? "";
+  const sha256 = env.SING_BOX_SHA256?.trim() ?? "";
+  const url = env.SING_BOX_DOWNLOAD_URL?.trim() ?? "";
+  if (version === "" && sha256 === "" && url === "") {
+    return { ok: false, reason: "agent_config_missing" };
+  }
+  if (!usableBuild({ version, sha256, url })) {
+    console.warn("[servers] singbox_desired_invalid");
+    return { ok: false, reason: "agent_config_invalid" };
+  }
+  return { ok: true, build: { version, sha256, url } };
 }
 
 function bearerToken(request: Request): string | null {
@@ -931,6 +938,106 @@ async function serverByAgentToken(
 }
 
 /**
+ * 同一 enrollment token 在 TTL 内的重放：换发新的 server_token（旧的立即失效），
+ * 复用上一次下发的 host/port/password——重放不是重新签发，客户端拿到的配置不能变。
+ * 这是 agent 丢 state.json 或首次 enroll 响应丢失时唯一的恢复路径，所以不做「一次性」拒绝。
+ */
+async function reEnroll(
+  env: ServersEnv,
+  row: ServerRow,
+  singbox: { version: string; sha256: string; url: string },
+): Promise<Response> {
+  const db = env.DB!;
+  // 防把它当免费接口刷：同一服务器 5 分钟最多 3 次。
+  if (!(await bumpRateLimit(db, `agent-reenroll:${row.id}`, 3, 5 * 60_000))) {
+    return agentJson({ ok: false, reason: "rate_limited" }, 429);
+  }
+
+  const stored = await db
+    .prepare("SELECT iv, ciphertext FROM credentials WHERE server_id = ? AND destroyed_at IS NULL")
+    .bind(row.id)
+    .first<{ iv: string; ciphertext: string }>();
+  if (!stored) return agentJson({ ok: false, reason: "no_credentials" }, 409);
+  const opened = await openSecret(env.CREDENTIAL_ENC_KEY!, stored);
+  if (!opened) return agentJson({ ok: false, reason: "credential_corrupt" }, 500);
+  let secret: { host?: unknown; port?: unknown; password?: unknown; method?: unknown };
+  try {
+    secret = JSON.parse(opened) as typeof secret;
+  } catch {
+    return agentJson({ ok: false, reason: "credential_corrupt" }, 500);
+  }
+  if (
+    typeof secret.host !== "string" ||
+    secret.host === "" ||
+    typeof secret.password !== "string" ||
+    secret.password === "" ||
+    typeof secret.port !== "number" ||
+    !Number.isInteger(secret.port)
+  ) {
+    return agentJson({ ok: false, reason: "credential_corrupt" }, 500);
+  }
+
+  // 重封同一份明文（新 IV）；失败不动 server_token，旧令牌继续可用。
+  const resealed = await sealSecret(
+    env.CREDENTIAL_ENC_KEY!,
+    JSON.stringify({
+      host: secret.host,
+      port: secret.port,
+      password: secret.password,
+      method: typeof secret.method === "string" ? secret.method : "aes-256-gcm",
+    }),
+  );
+  try {
+    await db
+      .prepare(
+        "INSERT INTO credentials (server_id, key_version, iv, ciphertext, created_at) " +
+          "SELECT ?, 1, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL) " +
+          "ON CONFLICT(server_id) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext, destroyed_at = NULL",
+      )
+      .bind(row.id, resealed.iv, resealed.ciphertext, Date.now(), row.id)
+      .run();
+  } catch (error) {
+    console.warn(`[servers] agent_re_enroll_credentials_failed server=${row.id} error=${String(error)}`);
+    return agentJson({ ok: false, reason: "storage_failed" }, 500);
+  }
+
+  const serverToken = randomId("agt_", 32);
+  const tokenHash = await sha256B64u(serverToken);
+  const now = Date.now();
+  const updated = await db
+    .prepare("UPDATE servers SET server_token_hash = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL")
+    .bind(tokenHash, now, row.id)
+    .run();
+  if (((updated as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
+    return agentJson({ ok: false, reason: "destroyed" }, 409);
+  }
+
+  await db
+    .prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.re_enrolled', ?)",
+    )
+    .bind(now, row.account_id, row.id, JSON.stringify({ port: secret.port }))
+    .run()
+    .catch((error) =>
+      console.warn(
+        `[servers] audit_failed action=agent.re_enrolled server=${row.id} error=${String(error)}`,
+      ),
+    );
+
+  return agentJson({
+    server_id: row.id,
+    server_token: serverToken,
+    desired: {
+      port: secret.port,
+      password: secret.password,
+      control_port: row.control_port ?? AGENT_CONTROL_PORT,
+      singbox,
+    },
+    token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK!),
+  });
+}
+
+/**
  * POST /v1/agent/enroll：agent 用一次性 enrollment token 换长期 `server_token` 与期望状态。
  * 凭据真源在这里：端口取 `servers.node_port`，密码由控制面生成，之后只经鉴权通道下发。
  */
@@ -948,23 +1055,26 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     .first<ServerRow>();
   if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 404);
   if (row.destroyed_at !== null) {
-    return agentJson({ ok: false, reason: "server_destroyed" }, 409);
-  }
-  // 一次性：并发或重放只有一次能成功。
-  if (row.enrollment_used_at !== null) {
-    return agentJson({ ok: false, reason: "already_used" }, 409);
+    return agentJson({ ok: false, reason: "destroyed" }, 409);
   }
   if (row.enrollment_expires_at !== null && row.enrollment_expires_at < Date.now()) {
     await destroyInstance(env, row, "enrollment_expired");
-    return agentJson({ ok: false, reason: "expired" }, 410);
+    return agentJson({ ok: false, reason: "expired" }, 409);
   }
 
   if (!env.CREDENTIAL_ENC_KEY) return agentJson({ ok: false, reason: "storage_unavailable" }, 503);
   if (!env.AGENT_TOKEN_SIGNING_JWK) {
     return agentJson({ ok: false, reason: "agent_key_missing" }, 503);
   }
-  const singbox = singboxDesired(env);
-  if (!singbox) return agentJson({ ok: false, reason: "agent_config_missing" }, 503);
+  const desiredBuild = singboxDesired(env);
+  if (!desiredBuild.ok) return agentJson({ ok: false, reason: desiredBuild.reason }, 503);
+  const singbox = desiredBuild.build;
+
+  // TTL 内重放（agent 丢了 state.json / 首次 enroll 响应丢失）：换发新 server_token，
+  // 复用上一次下发的凭据；不做「一次性」拒绝，否则这台机器永久失管。
+  if (row.enrollment_used_at !== null) {
+    return reEnroll(env, row, singbox);
+  }
 
   // 机器已建好，IP 通常已回填；极端情况下补查一次，别让凭据里的 host 为空。
   let host = row.ip;
@@ -1161,6 +1271,9 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
     const failedStage = ["booting", "installing", "verifying", "active"].includes(row.state)
       ? row.state
       : "active";
+    // 只有还在装机的机器才销毁。已经 active/healthy 的机器仍在给用户服务：
+    // 期望状态变更（升级）失败只记录，机器继续跑并继续重试，绝不整批销毁。
+    const destroyable = ["booting", "installing", "verifying"].includes(row.state);
     // 失败原文截断 300 字：排查要靠它，但不能让一条上报把审计表撑爆。
     const errorText =
       typeof body.error === "string" && body.error.trim() !== ""
@@ -1184,6 +1297,9 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
       .run()
       .catch(() => {});
     const reason = failureReason(failedStage);
+    if (!destroyable) {
+      return agentJson({ ok: true, recorded: true });
+    }
     await destroyInstance(env, row, reason, { failureStage: failedStage });
     return agentJson(
       { ok: false, reason, failed_stage: failedStage, error: errorText ?? undefined },
@@ -1306,8 +1422,9 @@ async function agentDesiredState(request: Request, env: ServersEnv): Promise<Res
     return agentJson({ ok: false, reason: "server_destroyed" }, 409);
   }
 
-  const singbox = singboxDesired(env);
-  if (!singbox) return agentJson({ ok: false, reason: "agent_config_missing" }, 503);
+  const desiredBuild = singboxDesired(env);
+  if (!desiredBuild.ok) return agentJson({ ok: false, reason: desiredBuild.reason }, 503);
+  const singbox = desiredBuild.build;
 
   const sealed = await env.DB.prepare(
     "SELECT iv, ciphertext FROM credentials WHERE server_id = ? AND destroyed_at IS NULL",

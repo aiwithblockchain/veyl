@@ -78,4 +78,35 @@ describe("cloud-init（只装 agent）", () => {
     expect(body).toContain("systemctl stop ssh");
     expect(body).toContain("systemctl disable ssh");
   });
+
+  it("配置文件先以 600 建出来，脚本以 umask 077 起步", () => {
+    const body = script();
+    expect(body).toContain("umask 077");
+    expect(body).toContain("install -m 600 /dev/null /etc/veyl-agent.json");
+    // 先建文件再写，chmod 只作为兜底保留。
+    expect(body.indexOf("install -m 600 /dev/null")).toBeLessThan(
+      body.indexOf("cat > /etc/veyl-agent.json"),
+    );
+  });
+
+  it("下载与失败回传都锁定 https + TLS 1.2", () => {
+    const body = script();
+    expect(body).toContain("curl -fsSL --proto '=https' --tlsv1.2 --retry 5");
+    expect(body).toContain("curl -fsS --proto '=https' --tlsv1.2 -m 20");
+  });
+
+  it("插值只接受白名单字符：注入字符、非 https、换行一律拒绝", () => {
+    expect(() => buildCloudInit({ ...INPUT, enrollToken: "enr_$(id)" })).toThrow(/unsafe/);
+    expect(() => buildCloudInit({ ...INPUT, enrollToken: "enr_`id`" })).toThrow(/unsafe/);
+    expect(() => buildCloudInit({ ...INPUT, enrollUrl: "https://x/$(id)" })).toThrow(/unsafe/);
+    expect(() =>
+      buildCloudInit({ ...INPUT, agent: { ...INPUT.agent, url: 'https://x/";id;#' } }),
+    ).toThrow(/unsafe/);
+    expect(() =>
+      buildCloudInit({ ...INPUT, agent: { ...INPUT.agent, version: "1.0\nrm -rf /" } }),
+    ).toThrow(/unsafe/);
+    expect(() =>
+      buildCloudInit({ ...INPUT, controlUrl: "http://insecure.example.com" }),
+    ).toThrow(/unsafe/);
+  });
 });

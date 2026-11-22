@@ -191,10 +191,96 @@ describe("POST /v1/agent/enroll", () => {
       method: "aes-256-gcm",
     });
 
-    // 同一个 token 第二次：409，不重复下发。
+    // TTL 内重放不再 409：换发新的 server_token（旧令牌失效），凭据保持不变。
     const replay = await handleServers(enrollRequest(), env as never);
-    expect(replay?.status).toBe(409);
-    expect(((await replay!.json()) as { reason: string }).reason).toBe("already_used");
+    expect(replay?.status).toBe(200);
+    const replayBody = (await replay!.json()) as { server_token: string };
+    expect(replayBody.server_token).not.toBe(body.server_token);
+  });
+
+  it("TTL 内重放：换发 token、旧 token 失效、凭据端口与密码不变", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+
+    const first = (await (
+      await handleServers(enrollRequest(), env as never)
+    )!.json()) as { server_token: string; desired: { port: number; password: string } };
+    const sealedBefore = { ...db.rows("credentials")[0] };
+
+    const replay = await handleServers(enrollRequest(), env as never);
+    expect(replay?.status).toBe(200);
+    const second = (await replay!.json()) as {
+      server_token: string;
+      desired: { port: number; password: string };
+    };
+    expect(second.server_token).not.toBe(first.server_token);
+    expect(second.desired.port).toBe(first.desired.port);
+    expect(second.desired.password).toBe(first.desired.password);
+
+    const desiredRequest = (token: string) =>
+      new Request("https://example.com/v1/agent/desired-state", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+    expect((await handleServers(desiredRequest(second.server_token), env as never))?.status).toBe(200);
+    // 旧令牌立即失效。
+    expect((await handleServers(desiredRequest(first.server_token), env as never))?.status).toBe(401);
+
+    // 凭据重封（新 IV），明文端口与密码不变。
+    const sealed = db.rows("credentials")[0];
+    expect(sealed.iv).not.toBe(sealedBefore.iv);
+    const opened = await openSecret(ENC_KEY, {
+      iv: sealed.iv as string,
+      ciphertext: sealed.ciphertext as string,
+    });
+    expect(JSON.parse(opened!)).toMatchObject({
+      port: first.desired.port,
+      password: first.desired.password,
+    });
+    expect(db.rows("audit_log").some((row) => row.action === "agent.re_enrolled")).toBe(true);
+  });
+
+  it("重放限流：同一服务器 5 分钟内第 4 次 429", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+
+    expect((await handleServers(enrollRequest(), env as never))?.status).toBe(200);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect((await handleServers(enrollRequest(), env as never))?.status).toBe(200);
+    }
+    const limited = await handleServers(enrollRequest(), env as never);
+    expect(limited?.status).toBe(429);
+    expect(((await limited!.json()) as { reason: string }).reason).toBe("rate_limited");
+  });
+
+  it("enrollment 过期：409 expired 并销毁；期望状态构建信息不合规：503 invalid", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    db.rows("servers")[0].enrollment_expires_at = Date.now() - 1;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+
+    const expired = await handleServers(enrollRequest(), env as never);
+    expect(expired?.status).toBe(409);
+    expect(((await expired!.json()) as { reason: string }).reason).toBe("expired");
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+
+    // 构建信息校验：sha 不是 64 位 hex，拒绝下发。
+    const db2 = new FakeD1();
+    const env2 = await envWith(db2, await signingJwk());
+    seedServer(db2);
+    await seedEnrollment(db2);
+    const invalid = await handleServers(enrollRequest(), {
+      ...env2,
+      SING_BOX_SHA256: "g".repeat(64),
+    } as never);
+    expect(invalid?.status).toBe(503);
+    expect(((await invalid!.json()) as { reason: string }).reason).toBe("agent_config_invalid");
+    expect(db2.rows("credentials")).toHaveLength(0);
   });
 
   it("未知 token 404；缺 token 401", async () => {
@@ -349,6 +435,21 @@ describe("GET /v1/agent/desired-state", () => {
     );
     expect(bad?.status).toBe(401);
   });
+  it("构建信息不合规：503 agent_config_invalid，不下发脏值", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const serverToken = await seedAgentToken(db);
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/desired-state", {
+        headers: { authorization: `Bearer ${serverToken}` },
+      }),
+      { ...env, SING_BOX_VERSION: "1.14.4/../x" } as never,
+    );
+    expect(res?.status).toBe(503);
+    expect(((await res!.json()) as { reason: string }).reason).toBe("agent_config_invalid");
+  });
 });
 
 describe("POST /v1/agent/report · rotated", () => {
@@ -437,28 +538,30 @@ describe("POST /v1/agent/report · rotated", () => {
 });
 
 describe("POST /v1/agent/report · failed 与 CA", () => {
-  it("failed 带上错误原文：截断后落 last_error 与审计", async () => {
-    const db = new FakeD1();
-    const env = await envWith(db, await signingJwk());
-    seedServer(db, "active");
-    const serverToken = await seedAgentToken(db);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
-    const longError = `sing-box 起不来：${"x".repeat(400)}`;
+  it.each(["active", "healthy"])(
+    "%s 机器收到 failed：只记录不销毁，机器继续服务",
+    async (state) => {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      seedServer(db, state);
+      const serverToken = await seedAgentToken(db);
+      const longError = `sing-box 起不来：${"x".repeat(400)}`;
 
-    const res = await handleServers(
-      reportRequest(serverToken, { stage: "failed", error: longError }),
-      env as never,
-    );
-    expect(res?.status).toBe(409);
-    const body = (await res!.json()) as { error: string };
-    expect(body.error).toHaveLength(300);
+      const res = await handleServers(
+        reportRequest(serverToken, { stage: "failed", error: longError }),
+        env as never,
+      );
+      expect(res?.status).toBe(200);
+      expect(await res!.json()).toEqual({ ok: true, recorded: true });
 
-    const server = db.rows("servers")[0];
-    expect(server.last_error).toHaveLength(300);
-    expect(server.state).toBe("destroyed");
-    const audit = db.rows("audit_log").find((row) => row.action === "agent.report.failed");
-    expect(String(audit?.detail)).toContain("sing-box 起不来");
-  });
+      const server = db.rows("servers")[0];
+      expect(server.last_error).toHaveLength(300);
+      expect(server.state).toBe(state);
+      expect(server.destroyed_at).toBeNull();
+      const audit = db.rows("audit_log").find((row) => row.action === "agent.report.failed");
+      expect(String(audit?.detail)).toContain("sing-box 起不来");
+    },
+  );
 
   it("report 收 ca_pem 落库，agent-token 原样返回", async () => {
     const db = new FakeD1();
@@ -601,7 +704,7 @@ describe("已销毁的服务器", () => {
 
     const res = await handleServers(enrollRequest(), env as never);
     expect(res?.status).toBe(409);
-    expect(((await res!.json()) as { reason: string }).reason).toBe("server_destroyed");
+    expect(((await res!.json()) as { reason: string }).reason).toBe("destroyed");
     expect(db.rows("credentials")).toHaveLength(0);
   });
 

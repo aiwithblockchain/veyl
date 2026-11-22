@@ -237,6 +237,35 @@ describe("orders", () => {
     expect(body.details.reason).toBe("invalid_plan");
   });
 
+  it("cloud-init 插值不安全：整单永久失败，不建 Droplet", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+    // 控制面地址里带 $(...)：拼进 shell 会被执行，必须在建机前拒绝。
+    const evil = { ...env, ENROLL_BASE_URL: "https://control.example.com/$(id)" };
+
+    const created = (await (
+      await handleOrders(orderRequest(evil.token, "idem-key-invalid"), evil as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-invalid-1" },
+      }),
+      evil as never,
+    );
+    expect(checkout?.status).toBe(502);
+    const body = (await checkout!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("cloud_init_invalid");
+
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("error");
+    expect(server.provider_id).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("failed");
+  });
+
   it("确认下单：建服务器行并开始建机，但不扣费", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());

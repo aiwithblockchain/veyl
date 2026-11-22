@@ -15,7 +15,26 @@ export interface AgentInstallInput {
   agent: { version: string; sha256: string; url: string };
 }
 
+// 这些值会被拼进 shell 脚本：只放行白名单字符，不合法直接拒绝，绝不尝试转义。
+const URL_SAFE = /^https:\/\/[A-Za-z0-9:/._\-?=&%~]+$/;
+const TOKEN_SAFE = /^[A-Za-z0-9_-]+$/;
+const VERSION_SAFE = /^[0-9A-Za-z._-]{1,32}$/;
+
+function assertSafe(name: string, value: string, pattern: RegExp): void {
+  if (!pattern.test(value)) {
+    throw new Error(`unsafe cloud-init value: ${name}`);
+  }
+}
+
 export function buildCloudInit(input: AgentInstallInput): string {
+  assertSafe("enrollToken", input.enrollToken, TOKEN_SAFE);
+  assertSafe("enrollUrl", input.enrollUrl, URL_SAFE);
+  assertSafe("failUrl", input.failUrl, URL_SAFE);
+  assertSafe("controlUrl", input.controlUrl, URL_SAFE);
+  assertSafe("agent.sha256", input.agent.sha256, TOKEN_SAFE);
+  assertSafe("agent.version", input.agent.version, VERSION_SAFE);
+  assertSafe("agent.url", input.agent.url, URL_SAFE);
+
   // JSON.stringify 负责转义；单引号 heredoc 阻止 shell 展开，token/URL 里的 `$` 不会被吃掉。
   const config = JSON.stringify({
     control_url: input.controlUrl,
@@ -25,6 +44,8 @@ export function buildCloudInit(input: AgentInstallInput): string {
 
   return `#!/bin/bash
 set -euo pipefail
+# 配置文件里有一次性 token：从这里开始新建文件默认 600，消除 chmod 前的可读窗口。
+umask 077
 
 ENROLL_TOKEN="${input.enrollToken}"
 FAIL_URL="${input.failUrl}"
@@ -33,7 +54,7 @@ AGENT_SHA256="${input.agent.sha256}"
 
 # 任何一步失败都立即回传：控制面据此销毁这台机器，不留「在计费但没装好」的实例。
 on_error() {
-  curl -fsS -m 20 -X POST "\${FAIL_URL}" \\
+  curl -fsS --proto '=https' --tlsv1.2 -m 20 -X POST "\${FAIL_URL}" \\
     -H "authorization: Bearer \${ENROLL_TOKEN}" >/dev/null 2>&1 || true
   exit 1
 }
@@ -46,13 +67,14 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get update -qq
   apt-get install -y -qq curl ca-certificates
 fi
-curl -fsSL --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}"
+curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}"
 echo "\${AGENT_SHA256}  /tmp/veyl-agent" | sha256sum -c -
 install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent
 rm -f /tmp/veyl-agent
 
 # 2. 写 agent 配置（控制面地址、enroll URL、一次性 token）
 mkdir -p /etc
+install -m 600 /dev/null /etc/veyl-agent.json
 cat > /etc/veyl-agent.json <<'VEYL_AGENT_CONFIG'
 ${config}
 VEYL_AGENT_CONFIG

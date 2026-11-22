@@ -934,6 +934,16 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set server_token_hash")) {
+      // agent re-enroll：同一个 enrollment token 换发新的长期令牌（旧的立即失效）。
+      const [tokenHash, updatedAt, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server && server.destroyed_at == null) {
+        server.server_token_hash = tokenHash;
+        server.updated_at = updatedAt;
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set last_seen_at")) {
       // agent 上报的登记信息：缺失字段保持原值（SQL 侧是 COALESCE）。
       const [lastSeen, agentVersion, singboxVersion, controlPort, fingerprint, caPem, id] = a;
