@@ -77,6 +77,7 @@
 - `trial.error.fetchWith` 已无引用，待清理。
 - `tools.md` §4.13 / §4.54 仍有「全部软件 / 本机代理」旧用词，未收口。
 - `docs/design/issue-report-api.md`、`docs/design/node-diagnosis-flow.md` 是未提交的设计草案（后者主张取代现有修复动作设计），待产品确认。
+- 偶发：`agent::questions::memory_tests::explaining_a_setting_marks_a_pending_explanation` 在并行全量中挂过一次；事后单跑 20 次全过，判为时序 flake，尚未复现。
 
 ---
 
