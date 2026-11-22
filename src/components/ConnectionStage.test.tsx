@@ -183,6 +183,9 @@ interface StageOverrides {
   serverIdForNode?: (nodeId: string) => string | null;
   onRepairCredentials?: (serverId: string) => Promise<{ port: number }>;
   onSyncCredentials?: (serverId: string) => Promise<number | null>;
+  onReconnectAndTest?: () => Promise<boolean>;
+  staleConfigNode?: boolean;
+  onStaleConfigRetry?: () => void;
   onGoServers?: () => void;
   onRepaired?: (info: {
     nodeId: string;
@@ -222,6 +225,9 @@ function stageElement(over: StageOverrides = {}) {
       serverIdForNode={over.serverIdForNode}
       onRepairCredentials={over.onRepairCredentials}
       onSyncCredentials={over.onSyncCredentials}
+      onReconnectAndTest={over.onReconnectAndTest}
+      staleConfigNode={over.staleConfigNode}
+      onStaleConfigRetry={over.onStaleConfigRetry}
       onGoServers={over.onGoServers}
       onRepaired={over.onRepaired}
       pendingServerNodes={over.pendingServerNodes}
@@ -2954,5 +2960,303 @@ describe("静默同步的等待上限", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("同步发现变化且隧道在跑", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    ...CONFIG.nodes[1],
+    node_id: "o1",
+    name: "悉尼0.2u",
+    source: "owned",
+    port: 8388,
+  };
+  const withNodes = (nodes: ConfigDetail["nodes"]): ConfigDetail => ({
+    ...CONFIG,
+    node_count: nodes.length,
+    current_node_id: nodes[0]?.node_id ?? null,
+    nodes,
+  });
+  const running = () => runtime({ state: "running" });
+  const base = {
+    config: withNodes([OWNED]),
+    nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+    onAskAi: vi.fn(),
+    serverIdForNode: (nodeId: string) => (nodeId === "o1" ? "srv_o1" : null),
+    onRepairCredentials: async () => ({ port: 1 }),
+  };
+
+  it("变化 + 运行中：不自动重测，只给「配置已变更，请重试」与动作", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => 9000);
+    renderStage({
+      ...base,
+      runtime: running(),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      onSyncCredentials,
+      onReconnectAndTest: async () => true,
+    });
+
+    expect(await screen.findByText("配置已变更，请重试")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "重新连接并测试" }),
+    ).toBeTruthy();
+    expect(start).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeNull();
+  });
+
+  it("点「重新连接并测试」：先重连，成功后才测；通过则已恢复", async () => {
+    const order: string[] = [];
+    let release: (value: boolean) => void = () => {};
+    const reconnected = new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+    const start = vi.fn(async () => {
+      order.push("probe");
+      return { ok: true };
+    });
+    const onSyncCredentials = vi.fn(async () => 9000);
+    const view = render(
+      stageElement({
+        ...base,
+        runtime: running(),
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+        onSyncCredentials,
+        onReconnectAndTest: () => {
+          order.push("reconnect");
+          return reconnected;
+        },
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新连接并测试" }));
+    expect(await screen.findByText("正在重新连接…")).toBeTruthy();
+    expect(start).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release(true);
+    });
+    await waitFor(() => expect(start).toHaveBeenCalledWith("cfg_1", ["o1"]));
+    expect(order).toEqual(["reconnect", "probe"]);
+
+    view.rerender(
+      stageElement({
+        ...base,
+        runtime: running(),
+        nodeProbes: probes({
+          results: {
+            o1: { ...probeResult("o1", 42), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+        onSyncCredentials,
+        onReconnectAndTest: async () => true,
+      }),
+    );
+    expect(await screen.findByText("已恢复")).toBeTruthy();
+  });
+
+  it("重连失败：直接进修复态，不再测", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    renderStage({
+      ...base,
+      runtime: running(),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+      onSyncCredentials: async () => 9000,
+      onReconnectAndTest: async () => false,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新连接并测试" }));
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("重连后仍不通：进修复态且不触发第二次同步", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => 9000);
+    const view = render(
+      stageElement({
+        ...base,
+        runtime: running(),
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+        onSyncCredentials,
+        onReconnectAndTest: async () => true,
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新连接并测试" }));
+    await waitFor(() => expect(start).toHaveBeenCalled());
+
+    view.rerender(
+      stageElement({
+        ...base,
+        runtime: running(),
+        nodeProbes: probes({
+          results: {
+            o1: { ...failedProbe("o1"), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+        onSyncCredentials,
+        onReconnectAndTest: async () => true,
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+    expect(onSyncCredentials).toHaveBeenCalledTimes(1);
+  });
+
+  it("探测恢复后标志清除：下一次新的失败重新同步", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onSyncCredentials = vi.fn(async () => {
+      throw { code: "NETWORK", message: "连不上" };
+    });
+    const view = render(
+      stageElement({
+        ...base,
+        nodeProbes: probes({ results: { o1: failedProbe("o1") }, start }),
+        onSyncCredentials,
+      }),
+    );
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    ).toBeTruthy();
+
+    // 节点自己恢复：阶段清空。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: {
+            o1: { ...probeResult("o1", 30), checked_at: Date.now() + 100 },
+          },
+          start,
+        }),
+        onSyncCredentials,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+      ).toBeNull(),
+    );
+
+    // 新的失败：重新走一次同步。
+    view.rerender(
+      stageElement({
+        ...base,
+        nodeProbes: probes({
+          results: {
+            o1: { ...failedProbe("o1"), checked_at: Date.now() + 200 },
+          },
+          start,
+        }),
+        onSyncCredentials,
+      }),
+    );
+    await waitFor(() => expect(onSyncCredentials).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("周期同步发现当前节点变更（hero 提示）", () => {
+  it("已连接时在 hero 给出提示，主按钮切成「重新连接」，点击走重连再测", async () => {
+    const start = vi.fn(async () => ({ ok: true }));
+    const onStaleConfigRetry = vi.fn();
+    const onReconnectAndTest = vi.fn(async () => true);
+    renderStage({
+      runtime: runtime({ state: "running" }),
+      nodeProbes: probes({ results: { n1: probeResult("n1", 42) }, start }),
+      staleConfigNode: true,
+      onStaleConfigRetry,
+      onReconnectAndTest,
+    });
+
+    expect(screen.getByText("配置已变更，请重新连接")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+
+    await waitFor(() => expect(onReconnectAndTest).toHaveBeenCalledTimes(1));
+    expect(onStaleConfigRetry).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(start).toHaveBeenCalledWith("cfg_1", ["n1"]));
+  });
+
+  it("没标记时不出提示，主按钮保持原义", () => {
+    renderStage({
+      runtime: runtime({ state: "running" }),
+      nodeProbes: probes({ results: { n1: probeResult("n1", 42) } }),
+    });
+    expect(screen.queryByText("配置已变更，请重新连接")).toBeNull();
+    expect(screen.getByRole("button", { name: "断开连接" })).toBeTruthy();
+  });
+});
+
+describe("弹窗「先更新配置」在隧道运行时先重连", () => {
+  const OWNED: ConfigDetail["nodes"][number] = {
+    ...CONFIG.nodes[1],
+    node_id: "o1",
+    name: "悉尼0.2u",
+    source: "owned",
+    port: 8388,
+  };
+  const config = { ...CONFIG, node_count: 1, current_node_id: "o1", nodes: [OWNED] };
+  const running = runtime({ state: "running" });
+
+  it("端口没变但隧道在跑：先 stop→start，再重测；通过只说「已恢复」", async () => {
+    const order: string[] = [];
+    const start = vi.fn(async () => {
+      order.push("probe");
+      return { ok: true };
+    });
+    const onReconnectAndTest = vi.fn(async () => {
+      order.push("reconnect");
+      return true;
+    });
+    const stage = (probeResultValue: ReturnType<typeof failedProbe> | ReturnType<typeof probeResult>) =>
+      stageElement({
+        config,
+        runtime: running,
+        nodeProbes: probes({ results: { o1: probeResultValue }, start }),
+        onAskAi: vi.fn(),
+        serverIdForNode: (nodeId: string) =>
+          nodeId === "o1" ? "srv_o1" : null,
+        onRepairCredentials: async () => ({ port: 1 }),
+        onSyncCredentials: async () => 8388,
+        onReconnectAndTest,
+      });
+
+    const view = render(stage(failedProbe("o1")));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    // 用当前时间：下一次探测的 since 会晚于它，不会被旧结果误消费。
+    view.rerender(
+      stage({
+        ...failedProbe("o1"),
+        checked_at: Date.now(),
+      }),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "对悉尼0.2u执行智能修复" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "先更新配置" }));
+
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(onReconnectAndTest).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["probe", "reconnect", "probe"]);
+
+    // 探测请求发出后再给结果：beginSyncProbe 可能晚于第一次重渲染。
+    view.rerender(
+      stage({ ...probeResult("o1", 42), checked_at: Date.now() }),
+    );
+    view.rerender(
+      stage({ ...probeResult("o1", 42), checked_at: Date.now() }),
+    );
+    expect(await screen.findByText("已恢复")).toBeTruthy();
+    expect(screen.queryByText(/配置已更新/)).toBeNull();
   });
 });

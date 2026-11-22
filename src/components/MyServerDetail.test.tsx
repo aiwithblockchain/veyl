@@ -1183,4 +1183,56 @@ describe("详情页「先更新配置」", () => {
     expect(onRotated).toHaveBeenCalledTimes(1);
     expect(rotate).not.toHaveBeenCalled();
   });
+
+  it("隧道在跑：先取凭据，再 stop→start，然后重读数据", async () => {
+    const order: string[] = [];
+    const credentials = vi.fn(async () => {
+      order.push("credentials");
+      return {
+        server_id: "srv_1",
+        node_id: "nd_control_1",
+        name: "东京 01",
+        host: "45.76.20.100",
+        port: 8388,
+        method: "aes-256-gcm",
+      };
+    });
+    const onReconnectAndTest = vi.fn(async () => {
+      order.push("reconnect");
+      return true;
+    });
+    const onChanged = vi.fn();
+    render(
+      <MyServerDetail
+        bridge={
+          {
+            myServerCredentials: credentials,
+            nodeRotateCredentials: vi.fn(),
+          } as unknown as AgentBridge
+        }
+        server={server()}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        tunnelConnected
+        onReconnectAndTest={onReconnectAndTest}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "先更新配置",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(onReconnectAndTest).toHaveBeenCalledTimes(1),
+    );
+    expect(order).toEqual(["credentials", "reconnect"]);
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
 });

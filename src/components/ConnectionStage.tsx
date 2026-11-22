@@ -83,6 +83,12 @@ interface Props {
   onRepairCredentials?: (serverId: string) => Promise<{ port: number }>;
   /** 坏行先静默同步这一台的凭据，返回最新端口；失败返回 null。 */
   onSyncCredentials?: (serverId: string) => Promise<number | null>;
+  /** 「重新连接并测试」：先重连让运行时读新配置，再测；返回重连是否成功。 */
+  onReconnectAndTest?: () => Promise<boolean>;
+  /** 周期同步发现当前连接节点的配置变了：hero 区提示重新连接。 */
+  staleConfigNode?: boolean;
+  /** 用户点了 hero 的「重新连接」：调用方清掉提示。 */
+  onStaleConfigRetry?: () => void;
   /** 「去我的服务器」导航（失败去向，不做销毁入口）。 */
   onGoServers?: () => void;
   /** 修复成功且自动重测有结果：交给 App 决定是否在右栏补一条系统提示。 */
@@ -134,6 +140,9 @@ export function ConnectionStage({
   serverIdForNode,
   onRepairCredentials,
   onSyncCredentials,
+  onReconnectAndTest,
+  staleConfigNode = false,
+  onStaleConfigRetry,
   onGoServers,
   onRepaired,
   pendingServerNodes = [],
@@ -169,7 +178,12 @@ export function ConnectionStage({
   } | null>(null);
 
   /** 坏行先静默同步凭据：syncing → 端口变了就等配置重载后 checking → needs-repair。 */
-  type SyncPhase = "syncing" | "checking" | "needs-repair";
+  type SyncPhase =
+    | "syncing"
+    | "checking"
+    | "restart-needed"
+    | "restarting"
+    | "needs-repair";
   /** 单次请求 10 秒 + 全局锁排队最长 10 秒 + 余量：超过按「未完成」处理。 */
   const SYNC_WAIT_LIMIT_MS = 22_000;
   /** 端口变了之后等连接页读回新配置的时长。 */
@@ -578,6 +592,7 @@ export function ConnectionStage({
     serverId: string,
     name: string,
     localPort: number,
+    options: { force?: boolean } = {},
   ) => {
     if (!onSyncCredentials) return;
     window.clearTimeout(recoveredTimer.current);
@@ -602,6 +617,28 @@ export function ConnectionStage({
       }
       // 取回成功就重测一次：端口没变也可能只是密码变了。
       const changed = port !== localPort;
+      if (connected && (changed || options.force === true)) {
+        if (options.force !== true) {
+          // 自动流程：隧道在跑，内存里还是旧配置；等用户点「重新连接并测试」。
+          window.clearTimeout(syncDeadlineTimer.current);
+          pendingSyncRef.current = null;
+          setNodeSyncPhase(nodeId, "restart-needed");
+          return;
+        }
+        // 手动「先更新配置」：只要隧道在跑就必须先 stop → start，再测。
+        window.clearTimeout(syncDeadlineTimer.current);
+        pendingSyncRef.current = null;
+        setNodeSyncPhase(nodeId, "restarting");
+        const reconnected = onReconnectAndTest
+          ? await onReconnectAndTest()
+          : false;
+        if (!reconnected) {
+          setNodeSyncPhase(nodeId, "needs-repair");
+          return;
+        }
+        await beginSyncProbe(nodeId, changed);
+        return;
+      }
       pendingSyncRef.current = { nodeId, name, port, awaitConfig: changed };
       window.clearTimeout(syncWaitTimer.current);
       syncWaitTimer.current = window.setTimeout(() => {
@@ -613,6 +650,18 @@ export function ConnectionStage({
       uiLog("warn", `sync failed node=${nodeId}`, "node-sync");
       setNodeSyncPhase(nodeId, "needs-repair");
     }
+  };
+
+  /** 「重新连接并测试」：先重连，再测；重连失败直接进修复态。 */
+  const restartAndTest = async (nodeId: string) => {
+    if (!onReconnectAndTest) return;
+    setNodeSyncPhase(nodeId, "restarting");
+    const ok = await onReconnectAndTest();
+    if (!ok) {
+      setNodeSyncPhase(nodeId, "needs-repair");
+      return;
+    }
+    await beginSyncProbe(nodeId, true);
   };
 
   // 自有节点确实测不通：先静默同步这一台，再决定是恢复还是给修复入口。
@@ -712,8 +761,22 @@ export function ConnectionStage({
     });
   }, [nodes, nodeProbes.results]);
 
+  /** hero 的「重新连接」：先清提示，再 stop → start → 重测当前节点。 */
+  const retryStaleConfig = async () => {
+    onStaleConfigRetry?.();
+    const nodeId = config?.current_node_id ?? runtime.node_id ?? null;
+    const ok = onReconnectAndTest ? await onReconnectAndTest() : false;
+    if (!ok || !nodeId) return;
+    setNodeSyncPhase(nodeId, "checking");
+    await beginSyncProbe(nodeId, false);
+  };
+
   const onPrimary = async () => {
     if (primaryDisabled) return;
+    if (staleConfigNode && connected) {
+      void retryStaleConfig();
+      return;
+    }
     // 隧道还在跑：只要没有能连的节点，主按钮就是唯一的出口——先断开。
     if (connected && (!noTraffic || !connectTargetUsable)) {
       onStop();
@@ -879,6 +942,13 @@ export function ConnectionStage({
     // 没有任何节点行可当目标：「连接 / 重新连接」只会空转，按规则禁用。
     ((primaryKind === "connect" || primaryKind === "reconnect") &&
       connectTarget === null);
+
+  /** 周期同步发现当前连接节点的配置变了：hero 主按钮切成「重新连接」。 */
+  const showStaleConfig = staleConfigNode === true && connected;
+  const heroKind = showStaleConfig ? "reconnect" : primaryKind;
+  const heroLabel = showStaleConfig
+    ? t("console.primary.reconnect")
+    : primaryLabel;
 
   const renderNode = ({ node, index }: (typeof nodeEntries)[number]) => {
     const latency = latencies[index];
@@ -1060,6 +1130,36 @@ export function ConnectionStage({
                 ) : null}
               </>
             )}
+          </span>
+        ) : syncPhase[node.node_id] === "restart-needed" ? (
+          <span className="stage-node__actions">
+            <span className="stage-node__ms is-muted">
+              {t("console.node.unreachable")}
+            </span>
+            <span className="stage-node__ms is-muted">
+              {t("connection.repair.changed")}
+            </span>
+            {onReconnectAndTest ? (
+              <button
+                type="button"
+                className="stage-node__repair"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void restartAndTest(node.node_id);
+                }}
+              >
+                {t("connection.repair.restart")}
+              </button>
+            ) : null}
+          </span>
+        ) : syncPhase[node.node_id] === "restarting" ? (
+          <span className="stage-node__actions">
+            <span className="stage-node__ms is-muted">
+              {t("console.node.unreachable")}
+            </span>
+            <span className="stage-node__ms is-muted" role="status">
+              {t("connection.repair.restarting")}
+            </span>
           </span>
         ) : syncing ? (
           <span className="stage-node__actions">
@@ -1277,20 +1377,24 @@ export function ConnectionStage({
           <p className="stage-note">{t("console.empty")}</p>
         ) : null}
 
+        {showStaleConfig ? (
+          <p className="stage-note">{t("console.staleConfig")}</p>
+        ) : null}
+
         <button
           type="button"
           className="stage-primary"
           onClick={onPrimary}
           disabled={primaryDisabled}
           aria-label={
-            primaryKind === "disconnect"
+            heroKind === "disconnect"
               ? t("console.primary.disconnectAria")
-              : primaryKind === "connect"
+              : heroKind === "connect"
                 ? t("console.primary.connectAria")
-                : primaryLabel
+                : heroLabel
           }
         >
-          {primaryLabel}
+          {heroLabel}
         </button>
 
         {connectBlocked ? (
@@ -1397,6 +1501,7 @@ export function ConnectionStage({
                     target.serverId,
                     target.name,
                     target.port,
+                    { force: true },
                   );
                 }
               : undefined

@@ -46,6 +46,10 @@ interface Props {
   onRenamed?: (server: MyServer) => void;
   /** 智能修复成功：让调用方重读节点数据（服务器数据走 onChanged）。 */
   onRotated?: () => void;
+  /** 隧道是否正在运行：运行中同步凭据后必须先 stop → start 再重测。 */
+  tunnelConnected?: boolean;
+  /** 先断开再连接（与连接页共用同一条链路）。 */
+  onReconnectAndTest?: () => Promise<boolean>;
 }
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
@@ -76,6 +80,8 @@ export function MyServerDetail({
   onForget,
   onRenamed,
   onRotated,
+  tunnelConnected = false,
+  onReconnectAndTest,
 }: Props) {
   const tr = useT();
   const [confirming, setConfirming] = useState(false);
@@ -265,6 +271,10 @@ export function MyServerDetail({
     setRepairResult(null);
     try {
       await bridge.myServerCredentials(server.server_id);
+      // 隧道在跑：探测/重读都拿旧配置，先 stop → start 让运行时读新值。
+      if (tunnelConnected && onReconnectAndTest) {
+        await onReconnectAndTest();
+      }
       onChanged();
       onRotated?.();
     } catch (err) {

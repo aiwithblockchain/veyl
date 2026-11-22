@@ -44,6 +44,7 @@ import { collectDanglingNodeIds } from "./myservers/tombstones";
 import { useServerSync } from "./myservers/useServerSync";
 import { uiLog } from "./log/uiLog";
 import { rotateNodeCredentials } from "./myservers/rotateCredentials";
+import { staleConfigNodeId } from "./myservers/staleConfig";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -349,12 +350,26 @@ export default function App() {
   } | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("ai");
   const [runtime, setRuntime] = useState<RuntimeView>(() => emptyRuntimeView());
+  /** 事件回调里判断「当前是否已连接、连的是哪台」用 ref，避免闭包过期。 */
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime;
+  /** 周期同步发现当前节点的配置变了：hero 区提示重新连接（本地节点 id）。 */
+  const [staleConfigNode, setStaleConfigNode] = useState<string | null>(null);
   // 失败快照里 connected_since 已被后端清空，只能记住这次失败是不是从已连接态掉下来的。
   // 每次状态迁移都整体覆盖，非失败迁移自然复位。
   const [failedAfterConnected, setFailedAfterConnected] = useState(false);
   const [appNotice, setAppNotice] = useState<AppNotice | null>(null);
   // 连接失败但原因只是「系统还没允许后台助手」：弹引导，不用 toast。
   const [helperGuideOpen, setHelperGuideOpen] = useState(false);
+  // 断开或换节点后，旧的「配置已变更」提示不再成立。
+  useEffect(() => {
+    if (!staleConfigNode) return;
+    const running = runtime.state === "running" || runtime.state === "degraded";
+    if (!running || runtime.node_id !== staleConfigNode) {
+      setStaleConfigNode(null);
+    }
+  }, [runtime.state, runtime.node_id, staleConfigNode]);
+
   // 成功类提示 4 秒自动消失；错误提示留到用户手动关闭。
   useEffect(() => {
     if (!appNotice || appNotice.level !== "info") return;
@@ -1065,6 +1080,11 @@ export default function App() {
         setSettingsConsulting(false);
         setSettingsPoint({ section: target, row: row ?? null, nonce: Date.now() });
         setSettingsOpen(true);
+      }
+      if (event.name === AGENT_EVENTS.nodeListChanged) {
+        // 两边都用本地节点 id（nd_…）；拿 server_id 比会永远不命中。
+        const stale = staleConfigNodeId(event.payload, runtimeRef.current);
+        if (stale !== null) setStaleConfigNode(stale);
       }
       if (event.name === AGENT_EVENTS.askUserQuestion) {
         const payload = event.payload;
@@ -1945,16 +1965,16 @@ export default function App() {
     }
   };
 
-  const handleVpnStart = () => {
+  const handleVpnStart = (): Promise<boolean> => {
     lastActionRef.current = { id: "client.primary" };
     stoppingRef.current = false;
-    void vpn.start().then((result) => {
+    return vpn.start().then((result) => {
       if (!result.ok && isHelperPermissionReason(result.reason)) {
         setHelperGuideOpen(true);
-        return;
+        return false;
       }
       showActionResult(result, translate("app.startFailed"));
-      if (!result.connected) return;
+      if (!result.connected) return result.ok;
       // start 成功说明后端已经连上。事件/快照可能还停在 starting 或 failed，
       // 不校正的话中间区会继续显示未连接/失败。先按在线显示，再拉快照补细节。
       setFailedAfterConnected(false);
@@ -1964,7 +1984,15 @@ export default function App() {
       refreshSnapshot();
       // 试用从第一次连上开始算：连接成功后重读一次状态。
       setTrialNonce((value) => value + 1);
+      return result.ok;
     });
+  };
+
+  /** 连接页「重新连接并测试」：等重连真正完成后再测，避免拿旧配置探测。 */
+  const handleReconnectAndTest = async (): Promise<boolean> => {
+    const stopped = await handleVpnStop();
+    if (!stopped) return false;
+    return handleVpnStart();
   };
 
   const handleVpnStop = (): Promise<boolean> => {
@@ -2682,6 +2710,10 @@ export default function App() {
           onRetry={() => void myServers.retry()}
           onChanged={() => void myServers.refresh()}
           onRotated={() => vpn.reload()}
+          tunnelConnected={
+            runtime.state === "running" || runtime.state === "degraded"
+          }
+          onReconnectAndTest={handleReconnectAndTest}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
@@ -2769,6 +2801,9 @@ export default function App() {
               return null;
             }
           }}
+          onReconnectAndTest={handleReconnectAndTest}
+          staleConfigNode={staleConfigNode !== null}
+          onStaleConfigRetry={() => setStaleConfigNode(null)}
           onGoServers={() => changeDestination("servers")}
           onRepaired={handleNodeRepaired}
         />

@@ -56,6 +56,9 @@ interface Props {
   onRenamed?: (server: MyServer) => void;
   /** 智能修复成功：重读节点数据（服务器数据走 onChanged）。 */
   onRotated?: () => void;
+  /** 隧道是否在跑：详情页「先更新配置」需要先 stop → start。 */
+  tunnelConnected?: boolean;
+  onReconnectAndTest?: () => Promise<boolean>;
 }
 
 /**
@@ -91,6 +94,8 @@ export function MyServersPage({
   pendingServer = false,
   onRenamed,
   onRotated,
+  tunnelConnected = false,
+  onReconnectAndTest,
 }: Props) {
   const t = useT();
   const trialHint = trial
@@ -164,6 +169,8 @@ export function MyServersPage({
             onForget={onForget}
             onRenamed={onRenamed}
             onRotated={onRotated}
+            tunnelConnected={tunnelConnected}
+            onReconnectAndTest={onReconnectAndTest}
           />
         )}
       </div>
