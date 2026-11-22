@@ -1161,7 +1161,13 @@ function redactAgentText(input: string): string {
   return input
     .replace(/agt_[A-Za-z0-9_-]+/g, "agt_***")
     .replace(/enr_[A-Za-z0-9_-]+/g, "enr_***")
-    .replace(/(password|token|authorization)\s*[=:]\s*[^\s,"}]+/gi, "$1=***");
+    // `Authorization: Bearer <token>` 的值在空格之后，scheme 必须一起吃掉。
+    .replace(
+      /(password|token|authorization)\s*[=:]\s*(?:(?:bearer|basic)\s+)?[^\s,"}]+/gi,
+      "$1=***",
+    )
+    // 没有 authorization 关键字、只出现 scheme + 值的形态。
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 ***");
 }
 
 interface AgentFailDetail {

@@ -810,7 +810,9 @@ describe("POST /v1/agent/fail", () => {
         body: JSON.stringify({
           stage: "download",
           line: 12,
-          error: "curl failed token=abc123 enr_deadbeef agt_live",
+          error:
+            "curl failed token=abc123 enr_deadbeef agt_live " +
+            "authorization: Bearer sk-live-abc123 -H Bearer eyJhbGciOi.xyz",
         }),
       }),
       env as never,
@@ -822,6 +824,8 @@ describe("POST /v1/agent/fail", () => {
     expect(detail.error).not.toContain("abc123");
     expect(detail.error).not.toContain("enr_deadbeef");
     expect(detail.error).not.toContain("agt_live");
+    expect(detail.error).not.toContain("sk-live-abc123");
+    expect(detail.error).not.toContain("eyJhbGciOi.xyz");
   });
 
   it("未知阶段与非整行号只落 null，不写任意文本进审计", async () => {
