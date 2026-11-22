@@ -48,34 +48,18 @@ jobs:
       # amd64 builds natively (musl-tools + rust target). cross is kept for arm64
       # only: on the x86_64 runner its container build stalled twice.
       # aws-lc-sys (reqwest's rustls stack) needs cmake/perl either way.
-      - name: Install musl toolchain (amd64)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools cmake perl
-          rustup target add x86_64-unknown-linux-musl
-      - name: Install cross (arm64)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      # Both targets go through cross: its musl toolchain links the bundled
+      # self-contained crt and produces a static binary. The native musl-gcc
+      # path kept emitting a dynamically-linked PIE (INTERP /lib/ld-musl-*),
+      # which cannot exec on Ubuntu/Debian hosts.
+      # agent/Cross.toml installs cmake/perl inside cross's target image.
+      - name: Install cross
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent -> target
           key: ${{ matrix.target }}
-      - name: Build amd64 (native musl)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        working-directory: agent
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          AR_x86_64_unknown_linux_musl: ar
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          # Static musl only: a dynamically-linked musl binary needs
-          # /lib/ld-musl-*.so.1, which Ubuntu and Debian images do not ship, and
-          # exec fails with ENOENT even though the file exists.
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      # agent/Cross.toml installs cmake/perl inside cross's target image.
-      - name: Build arm64 (cross)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      - name: Build (cross, static musl)
         working-directory: agent
         env:
           RUSTFLAGS: -C target-feature=+crt-static
