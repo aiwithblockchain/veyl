@@ -495,7 +495,7 @@ describe("节点诊断面板", () => {
 
   it("重测没跑成时带 Host 原因：显示人话，状态是未完成", async () => {
     const deps = makeDeps({
-      probeUntestedReason: () => "other_config",
+      probeUntestedReason: () => "node_not_in_config",
       reprobe: vi.fn(async () => null),
     });
     open(deps);
@@ -503,10 +503,26 @@ describe("节点诊断面板", () => {
     await startAndUpdate();
 
     expect(
-      await screen.findByText("这次没能重测：当前跑的是别的配置。"),
+      await screen.findByText("这次没能重测：这个节点还没进节点池，稍后再试。"),
     ).toBeTruthy();
     expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
     expect(screen.queryByRole("img", { name: "失败" })).toBeNull();
+  });
+
+  it("节点在池里但还没进运行中的配置：提示重新连接后再试", async () => {
+    const deps = makeDeps({
+      probeUntestedReason: () => "node_not_in_running_config",
+      reprobe: vi.fn(async () => null),
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(
+      await screen.findByText(
+        "这次没能重测：这个节点还没生效，重新连接后再试。",
+      ),
+    ).toBeTruthy();
   });
 
   it("重置后重测没跑成：结论是没能重测，绝不再给重置", async () => {

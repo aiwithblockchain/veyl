@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.58.0`
+> 契约版本：`2.59.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -550,7 +550,7 @@ type ConfigSetModeData = {
 | 新模式启动失败 | 把库写回 `previous_mode` → 用旧模式重启；成功则 `restored: true`、`changed: false`，**错误码用首次失败那个** |
 | **写回旧值也失败** | `restored: false`：库里已是新 `mode`、连接停在断开态。**不能只回第一次的错误码**，`details` 里同时带 `mode` 与 `previous_mode` |
 | 未连接 | 只写库；**不弹确认卡**，`confirmation: "not_needed"` |
-| 连接在跑但读不到属于哪套（接手 TUN） | 按 `route_set_mode` 先例：`PRECONDITION_FAILED / config_unknown`，**不写库、不停起、不重试** |
+| 连接在跑（含应用重启后接手的 TUN） | 单配置下接手即视为已连接本配置：按「这套已在运行」处理——先要确认（`PRECONDITION_FAILED / confirmation_required`），确认后在线切换 |
 | 并发 | Host 按 `config_id` 串行；同配置第二个请求未等到前一个结束 → `CONFLICT / switch_in_progress`（`retryable: true`），**不允许各停各起** |
 
 - **已知副作用**：切换会重新生成 plan 并重启，因此会**顺带应用该配置其它待生效的改动**（DNS、分流、节点集）。这不是 bug，但界面与 AI 的文案不能承诺「只改了接管方式」。切到 `tun` 还会清空已废弃的 `listen_port`（`tun` 与代理端口互斥）；切回来按自动分配，不恢复旧端口。
@@ -838,7 +838,7 @@ type NodeSwitchData = {
 | **有任何连接在启动**（还没起来，不论哪一套） | `PRECONDITION_FAILED`，`details.reason = "config_launching"`；`current_node_id` 不变。隧道正按启动那一刻捕获的节点起来，这时改库（或热切到用旧节点构建的实例）会让「记的节点」和「实际在跑的节点」分叉。等它连上或断开再切 |
 | 已连接、这套配置就是当前连接的配置 | 通过 selector 热切换（`runtime.md` §5.3 的 `PUT /configs?force=true` 或 Clash 选择器），不重启进程 → `connected = true` |
 | 已连接、但这套配置不是当前连接的配置 | `PRECONDITION_FAILED`，`details.reason = "config_not_running"`（**身份已知**：连接属于另一套）。先切配置还是先切节点，是两个动作，不合并 |
-| 已连接（接手上一次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED`，`details.reason = "config_unknown"`。与 `config_not_running` 的区别是**身份未知**，不能当成「连的是另一套」；提示用户先断开再切换节点，不要自行重试 |
+| 已连接（接手上一次运行的 TUN）、但连全局配置也复原不出配置 id | `PRECONDITION_FAILED`，`details.reason = "config_unknown"`。**极端防御分支**：身份未知，不能当成「连的是另一套」；提示用户先断开再切换节点，不要自行重试。正常接手会复原出全局配置，走上一行 |
 | `nodeId` 不属于该配置 | `NOT_FOUND`，`details.reason = "node_not_in_config"`。**幂等分支除外**：`nodeId` 等于库里 `current_node_id` 时先返回成功，即便该节点已不在池里（悬空选择不报错） |
 
 - 热切换失败 → `PRECONDITION_FAILED` / `runtime_switch_failed`，**`current_node_id` 不变**：库里记的必须是实际在跑的那个节点，否则重启后用户会连到另一台而不知道为什么。
@@ -879,15 +879,17 @@ type NodeProbeData = {
 | `reason` | 含义 |
 |---|---|
 | `connection_busy` | 正在连接或切换（启动 / 停止 / 重启在途），稍后再测 |
-| `other_config` | 已连接的是别的配置；不在别人的连接上测 |
+| `node_not_in_config` | 这个节点还没进节点池（`config_nodes` 里没有它），测不了；等绑定后再测 |
+| `node_not_in_running_config` | 节点在池里，但**运行中的那份配置**没有它（连接后新加、重建未成功）：Clash 对不存在的 proxy 返回 404，按没测成处理；重新连接后即可测 |
 | `clash_unavailable` | 已连接本配置，但读不到它的 Clash 接口 |
 | `no_credentials` | 节点缺凭据，渲染运行配置时已被跳过 |
 | `runtime_missing` | 测速用的运行库不可用 |
 | `runtime_failed` | 临时探针运行时没能启动 |
 | `runtime_timeout` | 临时探针运行时 8 秒内没起来 |
 
-- **何时能测**：已连接**本配置** → 用当前 Clash API；**完全空闲** → 起独立探针运行时（同一 Clash 口径；启动上限 8 秒；单节点测完保留 60 秒复用，连接开始 / 批次开始 / 进程退出立即停）；已连接**别套配置** → `untested / other_config`；启动或切换在途 → `untested / connection_busy`。
-- **失败不是错误**：`ok` / `unreachable` / `untested` 都是命令成功返回；只有 `nodeId` 不存在才返回 `Err(NOT_FOUND)`。
+- **何时能测**：已连接**本配置** → 用当前 Clash API；**完全空闲** → 起独立探针运行时（同一 Clash 口径；启动上限 8 秒；单节点测完保留 60 秒复用，连接开始 / 批次开始 / 进程退出立即停）；已连接但连接状态里没有配置 id（例如重启后接手 TUN）→ 单配置下按本配置测，不得判为「别的配置」；节点不在节点池 → `untested / node_not_in_config`；节点在池里、但运行中的配置没有它（Clash 404）→ `untested / node_not_in_running_config`；启动或切换在途 → `untested / connection_busy`。
+- **失败不是错误**：`ok` / `unreachable` / `untested` 都是命令成功返回；只有 `nodeId` 不存在才返回 `Err(NOT_FOUND)`。节点不在节点池同样是 `untested / node_not_in_config`（成功返回），**不是** `PRECONDITION_FAILED`。
+- **同名不同命名空间**：`node_switch` 的 `NOT_FOUND / node_not_in_config` 表示「这个节点不属于目标配置」（命令参数错误），与本文 `untested.reason` 里的 `node_not_in_config`（探测没能执行）不是一回事，实现不得混用。
 - **`untested` 不是「连不通」**：界面不得写「不可达」，模型不得说成节点坏了；`reachable` 是 `null`，任何地方都不能当 `false` 用。
 - **不登记问题**（J1）：单节点手动测试失败不等于用户被阻断；登记问题会把它变成中间区域的打扰。连接链路上的失败才登记（§5.2）。
 
@@ -958,7 +960,9 @@ type NodeProbeAllData = {
 |---|---|
 | 已连接，且是当前配置 | `clash`，直接复用运行中的 Clash API |
 | **完全未连接** | **临时起一次探针运行时**（探针槽：不写系统代理、不启 TUN、临时端口、只绑 `127.0.0.1`）→ `clash`；启动失败或 **8 秒内未就绪 → 整批 `untested`、`method = "none"`**，逐节点同一 `reason`，**不再降级 TCP**，不报错、不中断 |
-| 已连接**别的配置** | 不起第二个运行时，**整批 `untested / other_config`**、`method = "none"` |
+| 已连接，但连接状态里没有配置 id（重启后接手 TUN） | 单配置下就是这个配置：按 `clash` 测，**不判「别的配置」** |
+| 节点不在节点池（`config_nodes` 无绑定） | 该节点 `untested / node_not_in_config`、`method = "none"` |
+| 节点在池里、运行中的配置没有它（Clash 404） | 该节点 `untested / node_not_in_running_config`，不算不可达 |
 | 启动 / 切换在途 | **整批 `untested / connection_busy`**、`method = "none"` |
 
 - 临时运行时**不能污染连接状态**：`runtime_status` 与 `runtime-state-changed` 在探针期间仍报「未连接」，顶部按钮不能变成「断开」。
@@ -1174,7 +1178,7 @@ type IssueIgnoreData = { issue_id: string; state: IssueState };
 | 已在连接中、同一套配置 | 幂等：返回当前快照（`already_running = true`） |
 | 同一套配置**正在启动**（还没有 pid） | 幂等：不重启正在起来的连接，返回 `state = "starting"` 的快照 + `already_running = true`。这是**唯一**可以「成功但 `state != running`」的情形（§7.1.1） |
 | 已有连接在跑（已连接**或正在启动**）、目标是另一套配置 | **先停旧连接**（`runtime_stop(force = false)`，启动中也要真的作废在途启动并等停干净），再用目标配置启动；**不报错、不要求调用方先断开**。停不掉 → 如实返回停止阶段的错误，**不启动第二套** |
-| 已有连接在跑、但读不到它属于哪套（接手 TUN） | 同样先停再启动；停不掉则报错，不静默并行 |
+| 已有连接在跑（含应用重启后接手的 TUN） | 同样先停再启动；停不掉则报错，不静默并行 |
 | 成功后 | 系统代理已按连接方式设置、运行时 `state = running`；返回的 `RuntimeSnapshot` 必须满足 §7.3 |
 | `last_used_at` | 成功后刷新为该配置的当前毫秒时间 |
 
@@ -2742,8 +2746,10 @@ type RulesStatus = {
   `"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`（字段已知但已下线，不产生任何变更）；
   其它未知值 → `INVALID_ARGUMENT / invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → 走 Clash API selector 热切，`hot_switched = true`、`effective = "current_connection"`。
-- 有连接在跑、但**读不到它属于哪套配置**（常见于应用重启后接手 TUN）→ `PRECONDITION_FAILED`，`details.reason = "config_unknown"`，
-  **不写库、不热切**。提示用户先重连再切换分流方式；不要当成「未连接」走只写库的分支（`effective = "next_connection"` 会是假话）。
+- 已连接（含应用重启后接手的 TUN）→ 视为连接的是全局配置：读得到 Clash 端点就在线热切（`hot_switched = true`）；
+  读不到 → `PRECONDITION_FAILED`，`details.reason = "config_not_running"`，**不写库**。
+- **极端防御**：连全局配置都复原不出配置 id → `PRECONDITION_FAILED`，`details.reason = "config_unknown"`，
+  **不写库、不热切**。不要当成「未连接」走只写库的分支（`effective = "next_connection"` 会是假话）。
 - 只有**旧数据的 `proxy_selected`** 切到 `direct` / `proxy_all` 才是跨家族切换：已连接且未带 `confirmReconnect` →
   `PRECONDITION_FAILED`，`details.reason = "will_disconnect"`，**不产生任何变更**。新数据不会遇到这条。
 - 带 `confirmReconnect: true` → 按「停运行时 → 写库 → 启运行时」执行，`reconnect` 给出结果。**重连失败不抛错**：切换本身已成功。
@@ -3022,10 +3028,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.58.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** |
+| `contracts/commands.md` | **2.59.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** |
 | `contracts/events.md` | **2.24.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.25.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** |
+| `contracts/tools.md` | **3.25.1** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.4.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -3040,6 +3046,16 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.59.0（未发布，2026-11-22：探测原因回到单配置口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.59.0`；§4.4 `untested.reason` 封闭集合删 `other_config`、新增 `node_not_in_config`：全局单配置下不存在「别的配置」，删掉该原因；节点不在 `config_nodes` 时报 `node_not_in_config` | 语义变更 | 用户 2026-11-22：只有一套全局配置、一个节点池，凭据更新覆盖旧节点，不存在配置切换 |
+| 2 | 已连接但连接状态缺配置 id（重启后接手 TUN）不再判 `other_config`：单配置下按本配置直接测；Host 侧同时补上接手后从全局配置复原 `config_id` / `config_name` | 语义变更 | 同上；交叉排查发现该路径经 `adopt()` 可达 |
+| 3 | §4.4 明确：节点不在节点池一律返回 `untested / node_not_in_config`（成功返回），**不是** `PRECONDITION_FAILED`；并区分 `node_switch` 的 `NOT_FOUND / node_not_in_config`（参数错误）与本原因的命名空间 | 语义澄清 | Sage 复核：两条探测分支对同一情形形状不一致 |
+| 4 | §4.4 封闭集合新增 `node_not_in_running_config`：节点在池里但运行中的配置没有它（Clash `delay` 返回 404）报 `untested`，不再算 `unreachable`——否则刚加入、尚未生效的健康节点会被判成「连不通」 | 语义变更 | Sage 复核残留风险：重建失败不回滚入池，「进池即进运行配置」不成立 |
+| 5 | adopt 之后「接手 TUN」不再等于「身份未知」：重启接手的 TUN 复原出全局配置 id，视为已连接本配置。`config_set_mode` 走 `confirmation_required`；`node_switch` 目标即本配置时正常热切换；`route_set_mode` 读得到 Clash 端点就热切、读不到报 `config_not_running`；`config_unknown` 只保留「连全局配置也复原不出 id」的极端防御 | 语义变更 | PM 2026-11-22：adopt 落地的连带口径修正 |
 
 ### 2.58.0（未发布，2026-11-22：可达性探测区分「未执行」）
 

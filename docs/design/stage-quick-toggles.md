@@ -299,7 +299,7 @@ A 的代价是发现性——用户得先想到问。接受这个代价：这一
 
 - **接管方式：断开重连，不是热切换。** 走 `config_set_mode`，Host 的实际动作是「停旧 → 写库 → 用新模式启动」，连接状态按既有迁移 `stopping → idle → starting → running` 走一遍（`commands.md` §3.7）。**状态带不可能保持 `已连接`**，它会先变 `连接中…`，回来后是新的 `已连接`。
 - **计时清零。** 计时器唯一来源是 `runtime.connected_since`（`ConnectionStage.tsx`），它只在进入 `running` 时刷新（`runtime.md` §5.1）——重连就是新一次连接，计时从 0 开始。不暂停、不继承，也不为它新增本地计时状态。
-- **流量范围：真的热切换。** `route_set_mode` 对 `direct ↔ proxy_all` 走 Clash API selector，`hot_switched = true`、`effective = "current_connection"`，不断线、计时不间断（`commands.md` §10.2）。唯一例外：连接在跑但读不到属于哪套配置 → `config_unknown`，不热切、不改库，界面保留旧值并提示先重连。
+- **流量范围：真的热切换。** `route_set_mode` 对 `direct ↔ proxy_all` 走 Clash API selector，`hot_switched = true`、`effective = "current_connection"`，不断线、计时不间断（`commands.md` §10.2）。2026-11-22 修订：重启接手的 TUN 单配置下按全局配置认定（`tools.md` 3.25.1）；读不到 Clash 端点 → `config_not_running`，不热切、不改库，界面保留旧值并提示先重连；只有连全局配置也复原不出配置 id（防御分支）才是 `config_unknown`。
 - 用户看到的过程：确认条 → 模式行 `正在切换到 Tun 模式…` → 状态带按迁移显示 → 成功写回新值；失败见本节下表与 §8 第 5 条。
 - 切换失败且连接已断：状态带按既有失败分支显示，主按钮 `重新连接`，模式行按**库里真实值**写（见 §8 第 5 条），不一律写回切换前的值。
 
@@ -357,7 +357,7 @@ A 的代价是发现性——用户得先想到问。接受这个代价：这一
 ### 7.2 另外四条
 
 - **这一行什么时候出现**：用配置层的 `hasNodes`（`activeConfig.nodes.length > 0`，`App.tsx:661`），**不要用运行时状态**——没连接时运行时是空的，而这一行恰恰要在连接之前就能改。无节点 / 到期 / 新建节点屏自然不满足。
-- **流量范围是否真的不断线**：**是**。`direct ↔ proxy_all` 走 Clash selector，`hot_switched = true`、`effective = "current_connection"`。唯一例外：有连接在跑但读不到属于哪套配置 → `PRECONDITION_FAILED / config_unknown`，不热切、不改库；界面保留旧值并提示先重连。设计里「热切换」那句成立。
+- **流量范围是否真的不断线**：**是**。`direct ↔ proxy_all` 走 Clash selector，`hot_switched = true`、`effective = "current_connection"`。2026-11-22 修订：接手 TUN 单配置下按全局配置认定（`tools.md` 3.25.1）；读不到 Clash 端点 → `PRECONDITION_FAILED / config_not_running`，不热切、不改库；只有连全局配置也复原不出配置 id（防御分支）才是 `config_unknown`，界面保留旧值并提示先重连。设计里「热切换」那句成立。
 - **契约影响：零语义改动。** 命令、载荷、错误码都不变；`runtime.md` / `events.md` 不需要改。只在 `commands.md` §3.7 补一句「失败时 `details` 含 `restored`」的说明（实现已如此），不改字段、不升版本。
 - **当前值的来源**：`connect_mode` 来自 `activeConfig`（`config_detail`），流量范围来自 `activeRoutingMode`——即 `activeConfig.routing_mode` 叠加 `route_set_mode` / `routing-changed` 的覆盖层（`App.tsx:656`）。设置页收的也是这两个值（`App.tsx:2448/2473`）。**舞台直接复用，不新增状态、不本地缓存。**
 

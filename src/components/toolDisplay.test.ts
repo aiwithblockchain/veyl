@@ -117,6 +117,23 @@ describe("readToolDisplay", () => {
     ]);
   });
 
+  it("server.row 未知状态仍渲染，真正非法枚举才丢行", () => {
+    const unknown = readToolDisplay({
+      facts: [
+        {
+          key: "server.row",
+          params: { name: "东京 1", region: "日本", state: "unknown", ip: "1.2.3.4" },
+        },
+      ],
+    });
+    expect(unknown?.facts[0].value).toBe("东京 1 · 日本 · 状态未知 · 1.2.3.4");
+
+    const illegal = readToolDisplay({
+      facts: [{ key: "server.row", params: { name: "东京 1", region: "日本", state: "weird" } }],
+    });
+    expect(illegal).toBeNull();
+  });
+
   it("server.failure_code 已知码给原因，未知码给通用句", () => {
     const known = readToolDisplay({
       facts: [{ key: "server.failure_code", params: { code: "billing_unpaid" } }],
@@ -193,14 +210,21 @@ describe("readToolDisplay", () => {
   });
 
   it("rules.status 三值映射，未知值丢行", () => {
-    const value = (status: string) =>
-      readToolDisplay({ facts: [{ key: "rules.status", params: { status } }] })?.facts[0]
+    // 线上载荷的键是 state（后端 routing.rs 与 events.md 都这么发），不是 status。
+    const value = (state: string) =>
+      readToolDisplay({ facts: [{ key: "rules.status", params: { state } }] })?.facts[0]
         .value;
 
     expect(value("stale")).toBe("状态：可能已过期");
     expect(value("current")).toBe("状态：已是最新");
     expect(value("empty")).toBe("状态：还没有数据");
     expect(value("weird")).toBeUndefined();
+  });
+
+  it("rules.status 喂 status 键不渲染，钉死线上载荷格式", () => {
+    expect(
+      readToolDisplay({ facts: [{ key: "rules.status", params: { status: "stale" } }] }),
+    ).toBeNull();
   });
 
   it("数字类事实标 mono，文本不标", () => {

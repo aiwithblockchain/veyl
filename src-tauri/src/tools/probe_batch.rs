@@ -65,7 +65,11 @@ pub async fn probe_node(node: &Node, target: &ClashTarget) -> Value {
     }
     match clash_delay(&target.addr, &target.secret, &format!("node-{}", node.id)).await {
         Ok(latency) => probe_ok(&node.id, latency),
-        Err(message) => probe_unreachable(&node.id, &message),
+        // 节点在池里但还没进运行配置：如实报未测，不能冒充「连不通」。
+        Err(crate::runtime::health::DelayError::ProxyNotFound) => {
+            probe_untested(&node.id, "node_not_in_running_config")
+        }
+        Err(error) => probe_unreachable(&node.id, &error.to_string()),
     }
 }
 
@@ -970,7 +974,7 @@ mod tests {
         // 起不了运行时：整批 untested，不再降级 TCP。
         let outcome = run_batch(Arc::clone(&state), started.meta, nodes, |node: &Node| {
             let id = node.id.clone();
-            async move { probe_untested(&id, "other_config") }
+            async move { probe_untested(&id, "node_not_in_config") }
         })
         .await;
 
@@ -989,9 +993,56 @@ mod tests {
             assert_eq!(result["status"], "untested");
             assert_eq!(result["reachable"], Value::Null);
             assert_eq!(result["probe_method"], "none");
-            assert_eq!(result["error"]["reason"], "other_config");
+            assert_eq!(result["error"]["reason"], "node_not_in_config");
         }
         assert!(run.is_none());
+    }
+
+    /// 假的 Clash 控制口：固定回一个状态码，用于区分 404 与其它失败。
+    fn spawn_delay_api(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    /// 批量侧同样区分：Proxy 不在运行配置（404）→ untested，5xx → unreachable。
+    #[tokio::test]
+    async fn a_batch_probe_separates_missing_proxy_from_clash_errors() {
+        crate::test_support::install_test_secrets();
+        crate::secrets::set_secret("ref", "pw").unwrap(); // secret-scan:allow
+
+        let missing = ClashTarget {
+            addr: spawn_delay_api("404 Not Found", "{}"),
+            secret: "s".into(),
+        };
+        let result = probe_node(&node(1), &missing).await;
+        assert_eq!(result["status"], "untested");
+        assert_eq!(result["probe_method"], "none");
+        assert_eq!(
+            result["error"]["reason"], "node_not_in_running_config",
+            "{result}"
+        );
+
+        let broken = ClashTarget {
+            addr: spawn_delay_api("500 Internal Server Error", "{}"),
+            secret: "s".into(),
+        };
+        let result = probe_node(&node(2), &broken).await;
+        assert_eq!(result["status"], "unreachable");
+        assert_eq!(result["probe_method"], "clash_delay");
     }
 
     #[tokio::test]

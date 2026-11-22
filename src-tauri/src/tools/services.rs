@@ -2893,7 +2893,8 @@ fn probe_untested_message(reason: &str) -> &'static str {
         "runtime_failed" => "测速用的临时运行库没能启动",
         "runtime_timeout" => "测速用的临时运行库在 8 秒内没起来",
         "connection_busy" => "正在连接或切换，稍后再测",
-        "other_config" => "已连接别的配置，先断开再测",
+        "node_not_in_config" => "这个节点还没进节点池，先把它加到当前配置",
+        "node_not_in_running_config" => "节点还没进运行中的配置，重新连接后再测",
         "no_credentials" => "这个节点缺少凭据，先重新添加",
         "clash_unavailable" => "已连接，但读不到测速接口，重新连接一次再试",
         _ => "暂时测不了，稍后再试",
@@ -3027,11 +3028,14 @@ async fn clash_selector_members(
 }
 
 /// 已连接的节点延迟：Clash API `GET /proxies/{tag}/delay`。
-pub(crate) async fn clash_delay(addr: &str, secret: &str, tag: &str) -> Result<u64, String> {
+pub(crate) async fn clash_delay(
+    addr: &str,
+    secret: &str,
+    tag: &str,
+) -> Result<u64, crate::runtime::health::DelayError> {
     crate::runtime::health::ClashApi::new(addr, secret)
         .delay(tag)
         .await
-        .map_err(|error| error.to_string())
 }
 
 async fn http_reachable(url: &str) -> bool {
@@ -3538,10 +3542,39 @@ impl WiredServices {
         resolve_clash_endpoint(tun_connected, plan, tun)
     }
 
+    /// TUN 接手（App 重启 / 崩溃后 helper 还在跑）时 `launch_meta` 是空的：
+    /// 单配置下用库里唯一的全局配置补连接上下文。路由版本与地区无法从 helper
+    /// 快照恢复，如实留空，不编造。
+    fn tun_meta_with_fallback(
+        &self,
+        meta: Option<crate::tun::session::TunLaunchMeta>,
+    ) -> Option<crate::tun::session::TunLaunchMeta> {
+        if meta.is_some() {
+            return meta;
+        }
+        let conn = self.store.conn();
+        let global = match configs::global(&conn) {
+            Ok(Some(global)) => global,
+            _ => return None,
+        };
+        let node = global
+            .current_node_id
+            .as_deref()
+            .and_then(|id| configs::get_node(&conn, id).ok().flatten());
+        Some(crate::tun::session::TunLaunchMeta {
+            config_id: global.id,
+            config_name: Some(global.name),
+            node_id: node.as_ref().map(|node| node.id.clone()),
+            node_name: node.map(|node| node.name),
+            applied_route_revision: None,
+            route_region: None,
+        })
+    }
+
     /// 当前连接（TUN 或代理）的完整快照。`runtime_status` 与状态事件共用。
     async fn connection_status(&self) -> crate::runtime::RuntimeStatus {
         if let crate::tun::session::TunState::Running { pid } = self.tun.status() {
-            let meta = self.tun.launch_meta();
+            let meta = self.tun_meta_with_fallback(self.tun.launch_meta());
             let (data_plane, health_checked_at) = self.tun.data_plane_health();
             crate::runtime::RuntimeStatus::tun(crate::runtime::TunSnapshotInput {
                 pid,
@@ -3592,7 +3625,7 @@ impl WiredServices {
     /// 否则 TUN 已连接时会被当成「未连接」。
     async fn connection_state(&self) -> ConnectionState {
         if let crate::tun::session::TunState::Running { .. } = self.tun.status() {
-            let meta = self.tun.launch_meta();
+            let meta = self.tun_meta_with_fallback(self.tun.launch_meta());
             return ConnectionState {
                 connected: true,
                 launching: false,
@@ -3635,7 +3668,7 @@ impl WiredServices {
             self.tun.status_cached(),
             crate::tun::session::TunState::Running { .. }
         ) {
-            let meta = self.tun.running_cached().map(|(_, meta)| meta);
+            let meta = self.tun_meta_with_fallback(self.tun.running_cached().map(|(_, meta)| meta));
             return ConnectionState {
                 connected: true,
                 launching: false,
@@ -4851,24 +4884,28 @@ impl WiredServices {
     async fn probe_through_clash(&self, node: &configs::Node, addr: &str, secret: &str) -> Value {
         match clash_delay(addr, secret, &format!("node-{}", node.id)).await {
             Ok(latency) => probe_ok(&node.id, latency),
-            Err(message) => probe_unreachable(&node.id, &message),
+            // 节点在池里但还没进运行配置：如实报未测，不能冒充「连不通」。
+            Err(crate::runtime::health::DelayError::ProxyNotFound) => {
+                probe_untested(&node.id, "node_not_in_running_config")
+            }
+            Err(error) => probe_unreachable(&node.id, &error.to_string()),
         }
     }
 
     /// 空闲时用哪套配置起临时探针：优先当前配置，其次任一包含该节点的配置。
-    fn probe_config_for_node(&self, candidates: &[String]) -> anyhow::Result<configs::Config> {
+    /// 没有任何候选配置时返回 `None`（调用方按 untested 处理，不报错）。
+    fn probe_config_for_node(
+        &self,
+        candidates: &[String],
+    ) -> anyhow::Result<Option<configs::Config>> {
         let active = self.active_config_id();
-        let config_id = active
+        let Some(config_id) = active
             .filter(|id| candidates.iter().any(|candidate| candidate == id))
             .or_else(|| candidates.first().cloned())
-            .ok_or_else(|| {
-                svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    "这个节点不在任何配置里，先把它加到配置里再测",
-                    json!({ "reason": "node_not_in_config" }),
-                )
-            })?;
-        self.require_config(&config_id)
+        else {
+            return Ok(None);
+        };
+        self.require_config(&config_id).map(Some)
     }
 
     /// 完全空闲时测一个节点：起一次临时运行时，同一配置 60 秒内复用。
@@ -6529,6 +6566,10 @@ impl VpnToolServices for WiredServices {
                 configs::config_ids_for_node(&conn, node_id)
                     .map_err(|error| svc_error(error.code(), error))?
             };
+            // 节点不在节点池里：命令本身成功，只是测不了（契约 §4.4 的 untested）。
+            if candidates.is_empty() {
+                return Ok(probe_untested(node_id, "node_not_in_config"));
+            }
             let connection = self.connection_state().await;
             let runtime_state = self.manager.status().await.state;
 
@@ -6544,17 +6585,8 @@ impl VpnToolServices for WiredServices {
                 return Ok(probe_untested(node_id, "connection_busy"));
             }
 
-            // 运行时在跑：只测属于当前连接配置的节点（不要求是选中节点）。
+            // 运行时在跑：单配置下连接配置恒等于全局配置，直接用当前 Clash 测。
             if connection.connected {
-                let in_connected_config = connection
-                    .config_id
-                    .as_ref()
-                    .map(|id| candidates.iter().any(|candidate| candidate == id))
-                    .unwrap_or(false);
-                // TUN 起不了第二个运行时；proxy 模式也一律不起，避免双进程与端口/路由耦合。
-                if !in_connected_config {
-                    return Ok(probe_untested(node_id, "other_config"));
-                }
                 let Some((addr, secret)) = self.clash_endpoint(connection.tun).await else {
                     return Ok(probe_untested(node_id, "clash_unavailable"));
                 };
@@ -6575,7 +6607,9 @@ impl VpnToolServices for WiredServices {
             if !has_credentials {
                 return Ok(probe_untested(node_id, "no_credentials"));
             }
-            let config = self.probe_config_for_node(&candidates)?;
+            let Some(config) = self.probe_config_for_node(&candidates)? else {
+                return Ok(probe_untested(node_id, "node_not_in_config"));
+            };
             Ok(self.probe_with_idle_runtime(&node, &config).await)
         }
         .await;
@@ -6627,16 +6661,12 @@ impl VpnToolServices for WiredServices {
         let route = if launching {
             BatchRoute::Untested("connection_busy")
         } else if connection.connected {
-            if connection.config_id.as_deref() == Some(config.id.as_str()) {
-                match self.clash_endpoint(connection.tun).await {
-                    Some((addr, secret)) => {
-                        BatchRoute::Clash(probe_batch::ClashTarget { addr, secret })
-                    }
-                    None => BatchRoute::Untested("clash_unavailable"),
+            // 单配置下连接配置恒等于全局配置：批次的节点都已在本配置里，直接用当前 Clash。
+            match self.clash_endpoint(connection.tun).await {
+                Some((addr, secret)) => {
+                    BatchRoute::Clash(probe_batch::ClashTarget { addr, secret })
                 }
-            } else {
-                // TUN 起不了第二个运行时；proxy 模式也一律不起，避免双进程与端口/路由耦合。
-                BatchRoute::Untested("other_config")
+                None => BatchRoute::Untested("clash_unavailable"),
             }
         } else if !matches!(
             runtime_state,
@@ -11015,9 +11045,9 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 接手旧 TUN、读不到属于哪套：不写库、不停起。
+    /// 接手旧 TUN：单配置下连的就是全局配置，切接管方式先要确认，不再报 config_unknown。
     #[tokio::test]
-    async fn config_set_mode_reports_config_unknown_for_a_legacy_connection() {
+    async fn an_adopted_tun_connection_needs_confirmation_before_switching_mode() {
         let dir = temp_dir();
         let services = services(&dir);
         let created = services
@@ -11035,7 +11065,7 @@ mod config_service_tests {
         assert_eq!(service.code, "PRECONDITION_FAILED");
         assert_eq!(
             service.details.as_ref().unwrap()["reason"],
-            "config_unknown"
+            "confirmation_required"
         );
         assert_eq!(
             services
@@ -11326,9 +11356,9 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 接手老 TUN、meta 里没有 config_id：切分流要显式说明，不能假装「下次生效」。
+    /// 接手老 TUN：单配置下它就是全局配置；没有可用的 Clash 端点时如实说切不了。
     #[tokio::test]
-    async fn route_set_mode_reports_config_unknown_for_a_legacy_tun_connection() {
+    async fn an_adopted_tun_connection_without_a_clash_endpoint_cannot_hot_switch() {
         let dir = temp_dir();
         let services = services(&dir);
         let created = services
@@ -11346,7 +11376,7 @@ mod config_service_tests {
         assert_eq!(service.code, "PRECONDITION_FAILED");
         assert_eq!(
             service.details.as_ref().unwrap()["reason"],
-            "config_unknown"
+            "config_not_running"
         );
 
         // 设成当前值走幂等分支：仍返回快照，不报错。
@@ -12029,57 +12059,14 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 已连接且 `config_id` 是残留值：批量不再拿它比较，直接用当前 Clash 测。
     #[tokio::test]
-    async fn node_probe_is_untested_when_another_config_is_connected() {
+    async fn a_connected_batch_ignores_a_stale_config_id() {
         crate::test_support::install_test_secrets();
         let dir = temp_dir();
         let services = services(&dir);
         let created = services
-            .config_create(create_input("已连接"))
-            .await
-            .unwrap();
-        let config_id = created["config_id"].as_str().unwrap().to_string();
-        let node = services
-            .node_create(NodeCreateInput {
-                config_id: Some(config_id.clone()),
-                name: "池里的节点".into(),
-                server: "203.0.113.1".into(),
-                port: 443,
-                password: "pw".into(),
-                method: "aes-256-gcm".into(),
-            })
-            .await
-            .unwrap();
-        let node_id = node["node_id"].as_str().unwrap().to_string();
-
-        // 已连接的是另一套：TUN 起不了第二个运行时，proxy 模式也一律不起。
-        services
-            .tun
-            .force_running_for_test(4343, Some("cfg_somewhere_else"));
-        let probe = services.node_probe(&node_id).await.unwrap();
-        assert_eq!(probe["status"], "untested");
-        assert_eq!(probe["reachable"], Value::Null);
-        assert_eq!(probe["probe_method"], "none");
-        assert_eq!(probe["error"]["reason"], "other_config");
-        assert!(
-            probe["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("先断开"),
-            "{probe}"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 已连接另一套配置：整批直接判未测，不起任何探针运行时，快照 method 为 none。
-    #[tokio::test]
-    async fn probe_batch_is_untested_when_another_config_is_connected() {
-        crate::test_support::install_test_secrets();
-        let dir = temp_dir();
-        let services = services(&dir);
-        let created = services
-            .config_create(create_input("批量未测"))
+            .config_create(create_input("批量残留 id"))
             .await
             .unwrap();
         let config_id = created["config_id"].as_str().unwrap().to_string();
@@ -12097,25 +12084,23 @@ mod config_service_tests {
                 .unwrap();
         }
 
-        // 已连接的是另一套：TUN 起不了第二个运行时，proxy 模式也一律不起。
-        services
-            .tun
-            .force_running_for_test(4344, Some("cfg_somewhere_else"));
+        let addr = spawn_delay_api("404 Not Found", "{}");
+        services.tun.force_running_with_clash_for_test(
+            4344,
+            "cfg_stale_residue",
+            None,
+            &addr,
+            "tun-secret",
+        );
 
-        let started = services
+        services
             .node_probe_all(Some(config_id.clone()), None)
             .await
             .unwrap();
-        assert_eq!(started["total"], 2);
-
-        // 批次的探针任务还没拿到执行权：第一次快照一定能看到在跑的 run 与方式。
         let mut snapshot = services
             .node_probe_snapshot(Some(config_id.clone()))
             .await
             .unwrap();
-        assert!(!snapshot["run"].is_null(), "批次没有在跑：{snapshot}");
-        assert_eq!(snapshot["run"]["method"], "none");
-
         for _ in 0..200 {
             if snapshot["run"].is_null() {
                 break;
@@ -12128,19 +12113,208 @@ mod config_service_tests {
         }
         assert!(snapshot["run"].is_null(), "批次没有结束：{snapshot}");
 
+        // 这个 reason 只可能来自 Clash 的 404：说明批量真的走了当前连接。
         let results = snapshot["results"].as_array().unwrap();
         assert_eq!(results.len(), 2);
         for result in results {
             assert_eq!(result["status"], "untested", "{result}");
-            assert_eq!(result["reachable"], Value::Null);
-            assert_eq!(result["probe_method"], "none");
-            assert_eq!(result["error"]["reason"], "other_config");
+            assert_eq!(
+                result["error"]["reason"], "node_not_in_running_config",
+                "{result}"
+            );
         }
-        // 探针跑在独立槽位，误起探针不会改 `status`：直接看槽位里有没有 secret。
-        assert!(
-            services.manager.probe_secret().await.is_none(),
-            "untested 分支不应起探针运行时"
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未入池的节点：命令成功、报 untested；空闲路径也不能抛 PRECONDITION_FAILED。
+    #[tokio::test]
+    async fn an_idle_probe_of_an_unattached_node_is_untested_not_an_error() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let node_id = format!("nod_{:016x}", rand::random::<u64>());
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &configs::NewNode {
+                    id: &node_id,
+                    name: "池里未绑",
+                    server: "198.51.100.61",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: &format!("node:{node_id}"),
+                    source: configs::SOURCE_OWNED,
+                    source_key: &node_id,
+                },
+            )
+            .unwrap();
+        }
+
+        // 命令必须是成功返回：只有 nodeId 不存在才允许 Err（契约 §4.4）。
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "untested");
+        assert_eq!(probe["reachable"], Value::Null);
+        assert_eq!(probe["probe_method"], "none");
+        assert_eq!(probe["error"]["reason"], "node_not_in_config");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `config_id` 有残留值时不再当判据：已连接仍按当前 Clash 接口测。
+    #[tokio::test]
+    async fn a_connected_probe_ignores_a_stale_config_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("残留 id"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "在池的节点".into(),
+                server: "203.0.113.1".into(),
+                port: 443,
+                password: "pw".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        // 残留 id + 不可达端点：结果只能是「Clash 测不通」，不能是 node_not_in_config。
+        services.tun.force_running_with_clash_for_test(
+            4343,
+            "cfg_stale_residue",
+            None,
+            "127.0.0.1:9",
+            "tun-secret",
         );
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "unreachable");
+        assert_eq!(probe["probe_method"], "clash_delay");
+        assert!(
+            probe["error"].get("reason").is_none(),
+            "不能退回未入池：{probe}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 假的 Clash 控制口：固定回一个状态码，用于区分 404 与其它失败。
+    fn spawn_delay_api(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    /// 已连接、节点在池里但不在运行配置：Clash 404 → untested，不是 unreachable。
+    #[tokio::test]
+    async fn a_probe_missing_from_the_running_config_is_untested() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("未生效"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "未生效节点".into(),
+                server: "203.0.113.1".into(),
+                port: 443,
+                password: "pw".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let addr = spawn_delay_api("404 Not Found", "{}");
+        services
+            .tun
+            .force_running_with_clash_for_test(4343, &config_id, None, &addr, "tun-secret");
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "untested");
+        assert_eq!(probe["probe_method"], "none");
+        assert_eq!(
+            probe["error"]["reason"], "node_not_in_running_config",
+            "{probe}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clash 5xx 仍算探测失败：reachable=false，不能混成 untested。
+    #[tokio::test]
+    async fn a_clash_server_error_is_unreachable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("控制口报错"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "节点".into(),
+                server: "203.0.113.1".into(),
+                port: 443,
+                password: "pw".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let addr = spawn_delay_api("500 Internal Server Error", "{}");
+        services
+            .tun
+            .force_running_with_clash_for_test(4344, &config_id, None, &addr, "tun-secret");
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "unreachable");
+        assert_eq!(probe["probe_method"], "clash_delay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 接手后 `launch_meta` 为空：用库里唯一的全局配置补上下文。
+    #[tokio::test]
+    async fn an_adopted_tun_connection_takes_its_config_from_the_global_row() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("接手")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+
+        services.tun.force_running_for_test(4345, None);
+
+        let state = services.connection_state().await;
+        assert!(state.connected);
+        assert_eq!(state.config_id.as_deref(), Some(config_id.as_str()));
+
+        let status = services.runtime_status().await.unwrap();
+        assert_eq!(status["config_id"], config_id);
+        assert_eq!(status["config_name"], "接手");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

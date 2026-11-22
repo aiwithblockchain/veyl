@@ -94,7 +94,7 @@ fn visible_server(server: &Value) -> Value {
     Value::Object(visible)
 }
 
-/// 契约里的机器状态值；不认识的一律 `unknown`（UI 会丢弃未知枚举行）。
+/// 契约里的机器状态值；不认识的一律 `unknown`（UI 会按「状态未知」渲染）。
 fn state_param(state: &str) -> &str {
     match state {
         "creating" | "booting" | "installing" | "verifying" | "healthy" | "active" | "error"
@@ -104,15 +104,25 @@ fn state_param(state: &str) -> &str {
 }
 
 /// 列表一行：只给机器值，句子由 UI 组装（`server.row`）。
-fn server_row_fact(server: &Value) -> Fact {
+///
+/// 名称或地区缺失 / 为空时整行不推：前端不会收到空串，也不必拼出「 ()」。
+fn server_row_fact(server: &Value) -> Option<Fact> {
+    let name = server
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())?;
+    let region = server
+        .get("region")
+        .and_then(Value::as_str)
+        .filter(|region| !region.is_empty())?;
     let state = server.get("state").and_then(Value::as_str).unwrap_or("");
     let failure_code = server
         .get("failure")
         .and_then(|failure| failure.get("code"))
         .and_then(Value::as_str);
     let mut params = json!({
-        "name": server.get("name").and_then(Value::as_str).unwrap_or(""),
-        "region": server.get("region").and_then(Value::as_str).unwrap_or(""),
+        "name": name,
+        "region": region,
         "state": state_param(state),
     });
     if let Some(ip) = server.get("ip").and_then(Value::as_str) {
@@ -125,7 +135,7 @@ fn server_row_fact(server: &Value) -> Fact {
             "user"
         });
     }
-    Fact::with_params(FactKey::ServerRow, params)
+    Some(Fact::with_params(FactKey::ServerRow, params))
 }
 
 pub struct MyServersTool {
@@ -172,7 +182,7 @@ impl Tool for MyServersTool {
                 let facts = if original.is_empty() {
                     vec![Fact::new(FactKey::ServersEmpty)]
                 } else {
-                    original.iter().take(8).map(server_row_fact).collect()
+                    original.iter().take(8).filter_map(server_row_fact).collect()
                 };
                 let count = servers.len();
                 let mut visible = data;
@@ -261,6 +271,29 @@ mod tests {
         let visible = visible_server(&active);
         assert!(visible.get("destroyed_reason").is_none());
         assert_eq!(visible["state"], "active");
+    }
+
+    /// 名称或地区缺失 / 为空时整行不推：前端不会收到空串拼出的「 ()」。
+    #[test]
+    fn a_row_without_name_or_region_is_not_pushed() {
+        for server in [
+            json!({ "state": "active", "region": "lon1" }),
+            json!({ "state": "active", "name": "伦敦" }),
+            json!({ "state": "active", "name": "", "region": "" }),
+            json!({ "state": "active", "name": null, "region": "lon1" }),
+        ] {
+            assert!(
+                server_row_fact(&server).is_none(),
+                "缺名称或地区时不能推 server.row：{server}"
+            );
+        }
+        assert_eq!(
+            server_row_fact(&json!({ "state": "active", "name": "伦敦", "region": "lon1" })),
+            Some(Fact::with_params(
+                FactKey::ServerRow,
+                json!({ "name": "伦敦", "region": "lon1", "state": "active" })
+            ))
+        );
     }
 
     /// `failure: null` 只代表本次进程内没有记录，描述里必须写死这条，防止模型下错结论。

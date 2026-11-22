@@ -40,6 +40,12 @@ const DETAIL: ConfigDetail = {
   layout_revision: null,
 };
 
+/** 同一条节点改成手动导入：失败行保留「问 AI」，hero 保留「让 AI 检查」。 */
+const MANUAL_DETAIL: ConfigDetail = {
+  ...DETAIL,
+  nodes: [{ ...DETAIL.nodes[0], source: "manual" }],
+};
+
 const SUMMARY: ConfigSummary = {
   config_id: DETAIL.config_id,
   name: DETAIL.name,
@@ -245,6 +251,7 @@ describe("未配置 AI 的动作入口", () => {
 
   it("报告问题被拦：告警，取消后不建会话、不调 AI", async () => {
     seedSkipped();
+    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
     render(<App />);
     await waitForShell();
     fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
@@ -519,8 +526,8 @@ describe("未配置 AI 的动作入口", () => {
   }, 15_000);
 });
 
-/** 连接失败态：让「让 AI 检查」入口出现。 */
-async function failConnection() {
+/** 造出连接失败态；用哪种节点由调用方在 render 前 mock 的 configDetail 决定。 */
+async function emitConnectionFailure() {
   const start = vi.spyOn(bridge, "runtimeStart").mockImplementation(
     () => new Promise(() => {}) as never,
   );
@@ -549,15 +556,20 @@ async function failConnection() {
       },
     });
   });
+}
+
+/** 非 seed 节点失败态：让 hero 的「让 AI 检查」入口出现。 */
+async function failConnection() {
+  await emitConnectionFailure();
   return screen.findByRole("button", { name: "让 AI 检查" });
 }
 
-/** 自有节点测不通：让行内的「智能修复 · 问 AI」入口出现。 */
-function useOwnedUnreachable(): () => void {
+/** 手动导入节点测不通：让行内的「问 AI」入口出现。 */
+function useManualUnreachable(): () => void {
   vi.mocked(bridge.configDetail).mockResolvedValue({
     ...DETAIL,
-    // 非自有节点：失败行保留「问 AI」，不进入诊断面板。
-    nodes: [{ ...DETAIL.nodes[0], source: "seed" }],
+    // 手动导入节点：失败行保留「问 AI」，不进入诊断面板。
+    nodes: [{ ...DETAIL.nodes[0], source: "manual" }],
   });
   vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
     logged_in: true,
@@ -693,8 +705,25 @@ async function openFailedServer() {
 }
 
 describe("AI 入口双向闸门", () => {
+  it("免费节点连接失败：不给「让 AI 检查」，主按钮是重新连接", async () => {
+    seedSkipped();
+    render(<App />);
+    await waitForShell();
+    await emitConnectionFailure();
+
+    expect(
+      screen.queryByRole("button", { name: "让 AI 检查" }),
+    ).toBeNull();
+    expect(
+      (document.querySelector("button.stage-primary") as HTMLButtonElement)
+        .textContent,
+    ).toBe("重新连接");
+  }, 15_000);
+
   it("让 AI 检查：未配置弹告警、不发消息", async () => {
     seedSkipped();
+    // hero 的「让 AI 检查」只对非 seed 节点出现。
+    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
     render(<App />);
     await waitForShell();
     fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
@@ -715,6 +744,7 @@ describe("AI 入口双向闸门", () => {
   it("让 AI 检查：已配置发出诊断消息", async () => {
     seedSkipped();
     aiConfigured = true;
+    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
     render(<App />);
     await waitForShell();
     const button = await failConnection();
@@ -730,9 +760,9 @@ describe("AI 入口双向闸门", () => {
     ).toBeNull();
   }, 15_000);
 
-  it("非自有节点测不通问 AI：未配置弹告警、不发消息", async () => {
+  it("手动导入节点测不通问 AI：未配置弹告警、不发消息", async () => {
     seedSkipped();
-    const emitUnreachable = useOwnedUnreachable();
+    const emitUnreachable = useManualUnreachable();
     render(<App />);
     await waitForShell();
     fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
@@ -753,10 +783,10 @@ describe("AI 入口双向闸门", () => {
     expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
   }, 15_000);
 
-  it("非自有节点测不通问 AI：已配置发出节点消息", async () => {
+  it("手动导入节点测不通问 AI：已配置发出节点消息", async () => {
     seedSkipped();
     aiConfigured = true;
-    const emitUnreachable = useOwnedUnreachable();
+    const emitUnreachable = useManualUnreachable();
     render(<App />);
     await waitForShell();
     await waitFor(() => expect(bridge.nodeProbeAll).toHaveBeenCalled());

@@ -798,6 +798,7 @@ export const zh = {
   "myservers.state.destroying": "正在销毁",
   "myservers.state.destroyed": "已停机删除",
   "myservers.state.gone": "已失效",
+  "myservers.state.unknown": "状态未知",
   "myservers.tombstone.word": "已停机删除",
   "myservers.tombstone.text":
     "这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。",
@@ -1630,7 +1631,9 @@ export const zh = {
   "diagnosis.status.failed": "失败",
   "diagnosis.status.unknown": "未完成",
   "diagnosis.untested.connectionBusy": "连接正在忙",
-  "diagnosis.untested.otherConfig": "当前跑的是别的配置",
+  "diagnosis.untested.nodeNotInConfig": "这个节点还没进节点池，稍后再试",
+  "diagnosis.untested.nodeNotInRunningConfig":
+    "这个节点还没生效，重新连接后再试",
   "diagnosis.untested.clashUnavailable": "本地测速组件不可用",
   "diagnosis.connectivity.pending": "正在检查连通性…",
   "diagnosis.connectivity.icmpOk": "ICMP 通",

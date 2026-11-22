@@ -837,6 +837,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.state.destroying": "Destroying",
   "myservers.state.destroyed": "Deleted",
   "myservers.state.gone": "Gone",
+  "myservers.state.unknown": "Unknown status",
   "myservers.tombstone.word": "Deleted",
   "myservers.tombstone.text":
     "This server was stopped and destroyed because the balance ran out; its node can no longer connect. It disappears after you delete it.",
@@ -1699,7 +1700,10 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.status.failed": "Failed",
   "diagnosis.status.unknown": "Unfinished",
   "diagnosis.untested.connectionBusy": "a connection or switch is in progress",
-  "diagnosis.untested.otherConfig": "another config is connected",
+  "diagnosis.untested.nodeNotInConfig":
+    "this node isn't in the node pool yet, try again later",
+  "diagnosis.untested.nodeNotInRunningConfig":
+    "this node isn't active yet, reconnect and try again",
   "diagnosis.untested.clashUnavailable":
     "the local probe service is unavailable",
   "diagnosis.connectivity.pending": "Checking connectivity…",

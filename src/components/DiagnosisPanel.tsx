@@ -44,11 +44,12 @@ const STATUS_LABEL: Record<DiagnosisStep["status"], MessageKey> = {
   unknown: "diagnosis.status.unknown",
 };
 
-/** untested 的 Host 原因：常见的三种给人话，其余走通用语。 */
+/** untested 的 Host 原因：常见的几种给人话，其余走通用语。 */
 const UNTESTED_REASON_KEY: Record<string, MessageKey> = {
   connection_busy: "diagnosis.untested.connectionBusy",
-  other_config: "diagnosis.untested.otherConfig",
   clash_unavailable: "diagnosis.untested.clashUnavailable",
+  node_not_in_config: "diagnosis.untested.nodeNotInConfig",
+  node_not_in_running_config: "diagnosis.untested.nodeNotInRunningConfig",
 };
 
 /** 破坏性动作才用 danger-ghost；其余只有一个主按钮。 */

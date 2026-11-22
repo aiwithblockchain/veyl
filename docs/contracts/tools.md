@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.25.0`
+> 契约版本：`3.25.1`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.25.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.25.1`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.25.0";
+  contract_version: "3.25.1";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -883,7 +883,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.25.0";
+  contract_version: "3.25.1";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1083,7 +1083,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.25.0";
+  contract_version: "3.25.1";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1448,7 +1448,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 | **有连接正在启动**（还没起来，不论哪一套） | `PRECONDITION_FAILED / config_launching`；`current_node_id` 不变。这是正常拒绝，不是故障：等连接完成或断开后再切，**不要重试** |
 | 已连接、这套配置正在跑 | selector 热切换，进程不重启 |
 | 已连接、但这套配置不是当前配置 | `PRECONDITION_FAILED / config_not_running`（身份已知：连的是另一套） |
-| 已连接（接手上次运行的 TUN）、但读不到连接属于哪套配置 | `PRECONDITION_FAILED / config_unknown`（身份未知，不能当成「另一套」）；提示用户先断开再切换节点，**不要重试** |
+| 已连接（接手上次运行的 TUN） | 单配置下视为连的就是全局配置：目标即本配置时正常热切换；只有连全局配置也复原不出配置 id（防御分支）才报 `PRECONDITION_FAILED / config_unknown`，提示先断开再切，**不要重试** |
 | 节点不属于该配置 | `NOT_FOUND / node_not_in_config` |
 
 - **「选中」不是「切换」**：模型不要为了「看看别的节点」调用本工具——那会真的改出口。
@@ -1561,8 +1561,7 @@ Veyl **不重写**这个工具，只负责接线。工具实现与 schema 由 `c
 - **`mode` 只有 `direct` / `proxy_all` 两档**：`"proxy_selected"` → `INVALID_ARGUMENT / routing_mode_not_supported`；未知值 → `invalid_routing_mode`。
 - `direct` ↔ `proxy_all` 且已连接 → selector 热切，不断流。
 - 只有**旧配置仍是 `proxy_selected`** 时，切到两档才属于跨家族切换 → 未带 `confirm_reconnect` 时返回 `PRECONDITION_FAILED / will_disconnect`；**必须先问用户**，得到同意后再带 `true` 调一次。不得自行重试。
-- 有连接在跑、但**读不到它属于哪套配置**（重启后接手 TUN）→ `PRECONDITION_FAILED / config_unknown`；
-  这时不能写库、也不能说「下次生效」，用一句话请用户先重连再切换分流方式，**不得重试或改参数绕过**。
+- 有连接在跑（含重启后接手的 TUN：单配置下按全局配置认定）→ 读得到 Clash 端点就走 selector 热切；读不到端点 → `PRECONDITION_FAILED / config_not_running`；只有连全局配置也复原不出配置 id（防御分支）才是 `config_unknown`，此时不写库、不热切，用一句话请用户先重连，**不得重试或改参数绕过**。
 - 该工具会改网络；即使没有确认点，模型也应在调用前用一句话说明会断一下（§2.1.1）。
 - 跨家族的确认一句话要包含两点：会断开并自动重连、**域名解析方式也会改变**（`routing.md` §6.4）。
 
@@ -1841,7 +1840,7 @@ type CoreUpgradeData = {
 ```
 
 - **没有 `confirm` 参数**：确认由 Host 生成的卡片完成（§下），模型既不能传、也不能代答。多传任何键 → `INVALID_ARGUMENT / unknown_argument`。
-- `config_id` 省略 = 当前 active 配置；**读不到连接属于哪套时按 `RouteSetMode` 的先例拒绝**（`PRECONDITION_FAILED / config_unknown`），不写库、不停起、不换参数绕过。
+- `config_id` 省略 = 当前 active 配置；连接在跑（含接手 TUN，单配置下按全局配置认定）→ `PRECONDITION_FAILED / confirmation_required`，走确认卡在线切换；只有连全局配置也复原不出配置 id（防御分支）才按 `RouteSetMode` 先例报 `config_unknown`，不写库、不停起、不换参数绕过。
 - **调用前提（写进工具描述，模型必须遵守）**：**只在用户明确要求更换接管方式时调用**（例如「让所有软件都走 VPN」「改回只让设了代理的软件走」）。**不得为了"优化"网络、不得在排障时顺手切换、不得在用户没提这件事时主动建议后自行执行**。
 
 `data`：
@@ -2349,6 +2348,12 @@ type SubmitIssueToPublicWallData = {
 ---
 
 ## 8. 变更记录
+
+### 3.25.1（未发布，2026-11-22：接手 TUN 的身份口径）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.25.1`；重启接手的 TUN 复原出全局配置 id 后**视为已连接本配置**：`ConfigSetMode` 在连接运行时走 `PRECONDITION_FAILED / confirmation_required`，确认后在线切换；`NodeSwitch` 目标即本配置时正常热切换；`RouteSetMode` 读得到 Clash 端点就热切、读不到报 `config_not_running`。`config_unknown` 只保留「连全局配置也复原不出配置 id」的极端防御分支 | 语义修订 | `adopt()` 修复；2026-11-22 架构 |
 
 ### 3.25.0（未发布，2026-11-22：问题墙两个工具）
 

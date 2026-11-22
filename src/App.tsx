@@ -2147,7 +2147,7 @@ export default function App() {
         const result = await bridge.nodeProbe(localNodeId);
         nodeProbes.recordResults([result]);
         if (result.status === "untested") {
-          // untested = 没测成（connection_busy / other_config / clash_unavailable），不是不通。
+          // untested = 没测成（connection_busy / node_not_in_config / node_not_in_running_config / clash_unavailable），不是不通。
           probeUntestedReason =
             result.error?.reason ?? result.error?.code ?? null;
           uiLog(

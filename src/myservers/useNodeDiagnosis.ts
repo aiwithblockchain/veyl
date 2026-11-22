@@ -135,7 +135,7 @@ export interface DiagnosisDeps {
   syncConfig: () => Promise<SyncOutcome>;
   /** 只重测一次，不重启隧道；null = 没测成（untested）。 */
   reprobe: () => Promise<ProbeOutcome>;
-  /** 最近一次 untested 的 Host 原因（connection_busy / other_config / clash_unavailable）；没有为 null。 */
+  /** 最近一次 untested 的 Host 原因（connection_busy / node_not_in_config / node_not_in_running_config / clash_unavailable）；没有为 null。 */
   probeUntestedReason?: () => string | null;
   /** stop → start → 重测；重连失败与重连后测不通要分开。 */
   reconnectAndProbe: () => Promise<ReconnectOutcome>;

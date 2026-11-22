@@ -27,6 +27,28 @@ fn tool_error(error: anyhow::Error) -> AivpnError {
     }
 }
 
+/// 默认接口缺失或为空时不推 fact：不填中文兜底，句子由前端按语言组装。
+fn default_interface(data: &Value) -> Option<&str> {
+    data.get("route")
+        .and_then(|route| route.get("default_interface"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+}
+
+fn net_config_facts(services: usize, interface: Option<&str>) -> Vec<Fact> {
+    let mut facts = vec![Fact::with_params(
+        FactKey::NetServiceCount,
+        json!({ "count": services }),
+    )];
+    if let Some(interface) = interface {
+        facts.push(Fact::with_params(
+            FactKey::NetDefaultInterface,
+            json!({ "name": interface }),
+        ));
+    }
+    facts
+}
+
 pub struct NetConfigGetTool {
     services: Arc<dyn VpnToolServices>,
 }
@@ -64,23 +86,15 @@ impl Tool for NetConfigGetTool {
                     .and_then(Value::as_array)
                     .map(|items| items.len())
                     .unwrap_or(0);
-                let interface = data
-                    .get("route")
-                    .and_then(|route| route.get("default_interface"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("未知")
-                    .to_string();
-                ToolOutcome::ok(
-                    format!(
-                        "读取到 {} 个网络服务的代理设置；默认接口 {interface}。",
-                        services
+                let interface = default_interface(&data);
+                let summary = match interface {
+                    Some(interface) => format!(
+                        "读取到 {services} 个网络服务的代理设置；默认接口 {interface}。"
                     ),
-                    data,
-                )
-                .with_facts(vec![
-                    Fact::with_params(FactKey::NetServiceCount, json!({ "count": services })),
-                    Fact::with_params(FactKey::NetDefaultInterface, json!({ "name": interface })),
-                ])
+                    None => format!("读取到 {services} 个网络服务的代理设置。"),
+                };
+                let facts = net_config_facts(services, interface);
+                ToolOutcome::ok(summary, data).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
@@ -293,5 +307,41 @@ impl Tool for DefaultProfileStatusTool {
             Err(error) => ToolOutcome::fail(tool_error(error)),
         };
         envelope::finish(ctx, "DefaultProfileStatus", outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缺字段不推 fact：英文界面不能收到「未知」这样的中文兜底。
+    #[test]
+    fn a_missing_default_interface_is_not_pushed_as_a_fact() {
+        for data in [
+            json!({}),
+            json!({ "route": {} }),
+            json!({ "route": { "default_interface": null } }),
+            json!({ "route": { "default_interface": "" } }),
+        ] {
+            assert!(
+                default_interface(&data).is_none(),
+                "缺接口时不能推 net.default_interface：{data}"
+            );
+        }
+        assert_eq!(
+            net_config_facts(3, None),
+            vec![Fact::with_params(
+                FactKey::NetServiceCount,
+                json!({ "count": 3 })
+            )]
+        );
+        let connected = json!({ "route": { "default_interface": "en0" } });
+        assert_eq!(
+            net_config_facts(3, default_interface(&connected)),
+            vec![
+                Fact::with_params(FactKey::NetServiceCount, json!({ "count": 3 })),
+                Fact::with_params(FactKey::NetDefaultInterface, json!({ "name": "en0" })),
+            ]
+        );
     }
 }

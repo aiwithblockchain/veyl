@@ -283,14 +283,14 @@ describe("单节点与 progress 事件走同一套归一化", () => {
       checked_at: 1700000000000,
       error: {
         code: "PROBE_UNAVAILABLE",
-        reason: "other_config",
-        message: "已连接别的配置",
+        reason: "node_not_in_config",
+        message: "这个节点还没进节点池",
       },
     });
     const result = await new TauriAgentBridge().nodeProbe("n1");
     expect(result.error).toMatchObject({
       code: "PROBE_UNAVAILABLE",
-      reason: "other_config",
+      reason: "node_not_in_config",
     });
   });
 

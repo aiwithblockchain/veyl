@@ -547,6 +547,7 @@ const SERVER_STATES: Record<string, MessageKey> = {
   destroying: "myservers.state.destroying",
   destroyed: "myservers.state.destroyed",
   gone: "myservers.state.gone",
+  unknown: "myservers.state.unknown",
 };
 
 const HTTP_ERRORS: Record<string, MessageKey> = {
@@ -679,7 +680,7 @@ export function renderFact(fact: ToolFactPayload): ToolFact | null {
     case "routing.mode":
       return enumFact(ROUTING_MODES, paramOf(params, "mode"));
     case "rules.status":
-      return enumFact(RULES_STATUS, paramOf(params, "status"));
+      return enumFact(RULES_STATUS, paramOf(params, "state"));
     case "diag.result": {
       const failed = numParam(params, "failed");
       const skipped = numParam(params, "skipped");

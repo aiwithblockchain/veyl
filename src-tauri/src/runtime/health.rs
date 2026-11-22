@@ -101,7 +101,7 @@ impl ClashApi {
     ///
     /// 由 Clash 自己发起一次真实请求并返回毫秒数——测的是节点这一跳，
     /// 不是本机到控制口的往返。请求走控制口（`no_proxy` 直连），不经过代理。
-    pub async fn delay(&self, tag: &str) -> RuntimeResult<u64> {
+    pub async fn delay(&self, tag: &str) -> Result<u64, DelayError> {
         let response = self
             .http
             .get(format!("{}/proxies/{tag}/delay", self.base))
@@ -114,24 +114,50 @@ impl ClashApi {
             .timeout(Duration::from_secs(6))
             .send()
             .await
-            .map_err(|e| RuntimeError::ClashApi(format!("GET /proxies/{tag}/delay: {e}")))?;
+            .map_err(|e| DelayError::Other(format!("GET /proxies/{tag}/delay: {e}")))?;
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        // 404 = 这个 proxy 不在运行配置的 selector 里（连接后新增、重建还没生效）。
+        // 与「请求失败」不是一回事，调用方据此报 untested 而不是 unreachable。
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(DelayError::ProxyNotFound);
+        }
         if !status.is_success() {
             let detail = body.chars().take(200).collect::<String>();
-            return Err(RuntimeError::ClashApi(format!(
+            return Err(DelayError::Other(format!(
                 "GET /proxies/{tag}/delay returned HTTP {status}: {detail}"
             )));
         }
         let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|_| RuntimeError::ClashApi("delay response is not valid JSON".into()))?;
+            .map_err(|_| DelayError::Other("delay response is not valid JSON".into()))?;
         value
             .get("delay")
             .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| RuntimeError::ClashApi("delay response missing delay".into()))
+            .ok_or_else(|| DelayError::Other("delay response missing delay".into()))
     }
 }
+
+/// Clash 延迟探测的失败。
+///
+/// `ProxyNotFound` 表示节点不在运行中的 selector 里，属于「还没生效」，
+/// 不能算成「连不通」；其它失败才是真的探测失败。
+#[derive(Debug)]
+pub enum DelayError {
+    ProxyNotFound,
+    Other(String),
+}
+
+impl std::fmt::Display for DelayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProxyNotFound => write!(f, "proxy not found in the running config"),
+            Self::Other(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for DelayError {}
 
 /// 一次 `/connections` 采样：累计上下行字节 + 活跃连接数。
 ///

@@ -30,6 +30,14 @@ fn failure(error: anyhow::Error) -> AivpnError {
     }
 }
 
+/// 名称缺失或为空就不推这条 fact：不填中文兜底，句子由前端按语言组装。
+fn config_name_fact(data: &Value) -> Option<Fact> {
+    data.get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(|name| Fact::with_params(FactKey::ConfigName, json!({ "name": name })))
+}
+
 fn summarise_detail(data: &Value) -> String {
     let name = data.get("name").and_then(Value::as_str).unwrap_or("(未命名)");
     let nodes: Vec<&Value> = data
@@ -91,16 +99,16 @@ impl Tool for ConfigDetailTool {
         };
         let outcome = match self.services.config_detail(config_id).await {
             Ok(data) => {
-                let name = data.get("name").and_then(Value::as_str).unwrap_or("未命名");
                 let nodes = data
                     .get("nodes")
                     .and_then(Value::as_array)
                     .map(|items| items.len())
                     .unwrap_or(0);
-                let mut facts = vec![
-                    Fact::with_params(FactKey::ConfigName, json!({ "name": name })),
-                    Fact::with_params(FactKey::ConfigNodeCount, json!({ "count": nodes })),
-                ];
+                let mut facts: Vec<Fact> = config_name_fact(&data).into_iter().collect();
+                facts.push(Fact::with_params(
+                    FactKey::ConfigNodeCount,
+                    json!({ "count": nodes }),
+                ));
                 let current = data.get("current_node_id").and_then(Value::as_str);
                 if let Some(node_name) = data
                     .get("nodes")
@@ -239,14 +247,8 @@ impl Tool for ConfigUpdateTool {
             .await
         {
             Ok(data) => {
-                let name = data
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("未命名")
-                    .to_string();
-                ToolOutcome::ok("配置已更新，下一次连接生效。", data).with_facts(vec![
-                    Fact::with_params(FactKey::ConfigName, json!({ "name": name })),
-                ])
+                let facts: Vec<Fact> = config_name_fact(&data).into_iter().collect();
+                ToolOutcome::ok("配置已更新，下一次连接生效。", data).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
         };
@@ -745,3 +747,25 @@ impl Tool for NodeCreateTool {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缺字段不推 fact：英文界面不能收到「未命名」这样的中文兜底。
+    #[test]
+    fn a_missing_config_name_is_not_pushed_as_a_fact() {
+        for data in [json!({}), json!({ "name": null }), json!({ "name": "" })] {
+            assert!(
+                config_name_fact(&data).is_none(),
+                "缺名称时不能推 config.name：{data}"
+            );
+        }
+        assert_eq!(
+            config_name_fact(&json!({ "name": "东京" })),
+            Some(Fact::with_params(
+                FactKey::ConfigName,
+                json!({ "name": "东京" })
+            ))
+        );
+    }
+}
