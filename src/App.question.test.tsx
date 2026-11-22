@@ -1,8 +1,9 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
+import { AGENT_EVENTS, CONTRACT_VERSION } from "./agent/protocol";
 
 const CONFIG = {
   config_id: "cfg-home",
@@ -118,5 +119,62 @@ describe("提问的回答路径", () => {
       );
       expect(matches).toHaveLength(1);
     });
+  }, 15_000);
+});
+
+describe("问题墙上报卡", () => {
+  it("事件里的上报明细落到确认卡上，不是整片「未填写」", async () => {
+    prepareApp();
+    const replies = vi.spyOn(bridge, "replyUserQuestion");
+    await openPendingQuestion();
+
+    // 先答掉 mock 的第一问：拿到当前会话 id，pending 里只留下下面这一条。
+    fireEvent.click(screen.getByRole("button", { name: "只浏览网页" }));
+    await waitFor(() => expect(replies).toHaveBeenCalled());
+    await waitFor(() => expect(document.querySelector(".ask-card")).toBeNull());
+    const sessionId = replies.mock.calls[0][0] as string;
+
+    const emit = (
+      bridge as unknown as { emit: (event: unknown) => void }
+    ).emit.bind(bridge);
+    const now = Date.now();
+    await act(async () => {
+      emit({
+        name: AGENT_EVENTS.askUserQuestion,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          session_id: sessionId,
+          request_id: "req_issue",
+          question_id: "q_issue",
+          question: "要把这个问题发到问题墙吗？",
+          options: ["上报", "取消"],
+          created_at: now,
+          expires_at: now + 300_000,
+          kind: "issue_submit_confirm",
+          default_index: 1,
+          details: {
+            kind: "issue_submit_confirm",
+            title: "重置端口超时",
+            summary: "连通正常，重置时没有返回。",
+            expected: "自动重连并恢复",
+            actual: "停在正在重置",
+            repro: "连续两次触发",
+            platform: "macos",
+            app_version: "1.0.0",
+            steps: [
+              { step: "rotate", ok: false, duration_ms: 90_000, reason: "agent_timeout" },
+            ],
+          },
+          emitted_at: new Date(now).toISOString(),
+        },
+      });
+    });
+
+    // 页面上不止一个 dialog：按标题限定到问题墙确认卡。
+    const dialog = await screen.findByRole("dialog", { name: "发到问题墙" });
+    expect(dialog.textContent).toContain("重置端口超时");
+    expect(dialog.textContent).toContain("连通正常，重置时没有返回。");
+    expect(dialog.textContent).toContain("macOS · 1.0.0");
+    expect(dialog.textContent).not.toContain("未填写");
   }, 15_000);
 });
