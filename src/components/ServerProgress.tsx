@@ -4,13 +4,14 @@ import {
   formatBuildDuration,
   formatDuration,
   serverStateLabel,
-  serverStepDoneLabel,
 } from "../myservers/labels";
 import { useT } from "../i18n";
 
 const STAGES = ["creating", "booting", "installing", "verifying"] as const;
 /** 某一阶段超过这么久就换一句「还在继续」，不再说「通常 2–4 分钟」。 */
 const STAGE_TIMEOUT_MS = 180_000;
+/** 整机硬边界：从 created_at 起算 15 分钟，到点改判「安装超时」。 */
+const BUILD_TIMEOUT_MS = 15 * 60_000;
 /**
  * 进度块里每一格至少停留这么久。真机上安装 + 验证可能只有几秒：
  * 状态一次跨两格时逐格补齐，别让用户只看见「等待开机 → 可用」。
@@ -32,6 +33,12 @@ function stageStartedAt(server: MyServer): number | null {
   return Number.isFinite(at) ? at : null;
 }
 
+/** 整机计时起点：一律用 created_at，重进详情不从头算。 */
+function buildStartedAt(server: MyServer): number | null {
+  const at = Date.parse(server.created_at);
+  return Number.isFinite(at) ? at : null;
+}
+
 export function ServerProgress({ server }: { server: MyServer }) {
   const t = useT();
   // 建好之后这块原地换成完成态：四个步骤全打勾 + 创建用时，页面不位移。
@@ -47,18 +54,19 @@ export function ServerProgress({ server }: { server: MyServer }) {
   const [done, setDone] = useState(ready);
   const [shownServerId, setShownServerId] = useState(server.server_id);
   const advancedAtRef = useRef(Date.now());
-  // 计时基准是这台机器进入当前状态的时刻（有阶段时间戳就用它），
-  // 所以离开详情再回来不会从头算；只有没有时间戳时才退回进入详情的时刻。
+  // 整机计时一律从 created_at 起算：booting 没有阶段时间戳，也不会因为
+  // 离开详情再回来而从头算。只有 created_at 缺失时才退回进入详情的时刻。
   const baseRef = useRef<number | null>(null);
   const serverIdRef = useRef(server.server_id);
   const [now, setNow] = useState(() => Date.now());
 
   const stageStart = stageStartedAt(server);
+  const buildStart = buildStartedAt(server);
   if (serverIdRef.current !== server.server_id) {
     serverIdRef.current = server.server_id;
-    baseRef.current = stageStart ?? Date.now();
-  } else if (stageStart !== null) {
-    baseRef.current = stageStart;
+    baseRef.current = buildStart ?? Date.now();
+  } else if (buildStart !== null) {
+    baseRef.current = buildStart;
   } else if (baseRef.current === null) {
     baseRef.current = Date.now();
   }
@@ -107,20 +115,13 @@ export function ServerProgress({ server }: { server: MyServer }) {
         role="group"
         aria-label={t("progress.groupAria")}
       >
-        <ol className="myservers__steps">
-          {STAGES.map((stage) => (
-            <li key={stage} className="is-done">
-              <span className="myservers__step-tick" aria-hidden="true">
-                ✓
-              </span>
-              {serverStepDoneLabel(stage)}
-            </li>
-          ))}
-        </ol>
         <p className="myservers__created-in">
+          {t("progress.ready")}
+          {" · "}
           {buildDuration ? (
             <>
-              {t("progress.createdIn")} <span className="num">{buildDuration}</span>
+              {t("progress.used")}{" "}
+              <span className="num">{buildDuration}</span>
             </>
           ) : (
             t("progress.durationMissing")
@@ -141,6 +142,8 @@ export function ServerProgress({ server }: { server: MyServer }) {
     : server.state === "installing" && server.singbox_version
       ? t("progress.installing", { version: server.singbox_version })
       : t("progress.typical");
+  const elapsedMs = Math.max(0, now - (baseRef.current ?? now));
+  const buildTimedOut = elapsedMs >= BUILD_TIMEOUT_MS;
 
   return (
     <div className="myservers__progress" role="group" aria-label={t("progress.groupAria")}>
@@ -148,7 +151,7 @@ export function ServerProgress({ server }: { server: MyServer }) {
         <span>{serverStateLabel(server.state) || t("progress.processing")}</span>
         <span className="num">
           {t("progress.waited", {
-            duration: formatDuration((now - (baseRef.current ?? now)) / 1000),
+            duration: formatDuration(elapsedMs / 1000),
           })}
         </span>
       </div>
@@ -167,6 +170,14 @@ export function ServerProgress({ server }: { server: MyServer }) {
         ))}
       </div>
       <p className="myservers__progress-note">{note}</p>
+      {buildTimedOut ? (
+        <p
+          className="myservers__progress-note is-timeout"
+          role="status"
+        >
+          {t("progress.buildTimeout")}
+        </p>
+      ) : null}
       <ol className="myservers__steps">
         {STAGES.map((stage, stageIndex) => (
           <li

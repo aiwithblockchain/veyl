@@ -3073,6 +3073,10 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.myservers__progress-note.is-timeout {
+  color: var(--amber);
+}
+
 .myservers__steps {
   display: flex;
   gap: 12px;

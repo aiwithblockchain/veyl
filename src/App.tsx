@@ -45,6 +45,7 @@ import { useServerSync } from "./myservers/useServerSync";
 import { uiLog } from "./log/uiLog";
 import { rotateNodeCredentials } from "./myservers/rotateCredentials";
 import { staleConfigNodeId } from "./myservers/staleConfig";
+import { repairAvailableFor } from "./myservers/repairAvailability";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -2714,6 +2715,12 @@ export default function App() {
             runtime.state === "running" || runtime.state === "degraded"
           }
           runningNodeId={runtime.node_id}
+          repairAvailable={repairAvailableFor(
+            myServers.selected?.local_node_id ?? null,
+            vpn.activeConfig,
+            nodeProbes.results,
+            nodeProbes.probing,
+          )}
           onReconnectAndTest={handleReconnectAndTest}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}

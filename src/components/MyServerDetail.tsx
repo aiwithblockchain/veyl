@@ -51,6 +51,8 @@ interface Props {
   tunnelConnected?: boolean;
   /** 正在运行的本地节点 id（nd_…）；只有它等于这台时才重启。 */
   runningNodeId?: string | null;
+  /** 这台服务器的本地节点最近一次探测不可达：才显示智能修复。 */
+  repairAvailable?: boolean;
   /** 先断开再连接（与连接页共用同一条链路）。 */
   onReconnectAndTest?: () => Promise<boolean>;
 }
@@ -85,6 +87,7 @@ export function MyServerDetail({
   onRotated,
   tunnelConnected = false,
   runningNodeId = null,
+  repairAvailable = false,
   onReconnectAndTest,
 }: Props) {
   const tr = useT();
@@ -579,12 +582,12 @@ export function MyServerDetail({
 
       <div className="myservers__footer">
         <div className="myservers__danger">
-          {ready && !readOnly ? (
+          {ready && !readOnly && repairAvailable ? (
             <div className="myservers__repair">
               {repairConfirming ? null : (
                 <button
                   type="button"
-                  className="btn btn--danger-ghost"
+                  className="btn btn--ghost"
                   disabled={locked || repairing || confirming}
                   aria-busy={repairing || undefined}
                   onClick={() => {

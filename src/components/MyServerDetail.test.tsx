@@ -346,24 +346,58 @@ describe("服务器详情", () => {
     });
     expect(screen.queryByText(/已等待/)).toBeNull();
     expect(screen.getByRole("group", { name: "建机进度" })).toBeTruthy();
-    const doneSteps = [...document.querySelectorAll(".myservers__steps li")];
-    expect(doneSteps).toHaveLength(4);
-    expect(
-      doneSteps.every((step) => step.classList.contains("is-done")),
-    ).toBe(true);
-    expect(screen.getByText("用时未记录")).toBeTruthy();
+    // 完成态只留一行，不再是四段步骤。
+    expect(document.querySelectorAll(".myservers__steps li")).toHaveLength(0);
+    const doneLine = document.querySelector(".myservers__created-in");
+    expect(doneLine?.textContent).toContain("已开通");
+    expect(doneLine?.textContent).toContain("用时未记录");
   });
 
-  it("重进详情不从零算：以阶段进入时间为基准", () => {
+  it("重进详情不从零算：整机时间以 created_at 为基准", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
     renderDetail({
       state: "installing",
       created_at: new Date(2026, 10, 18, 9, 55, 0).toISOString(),
-      installing_at: new Date(2026, 10, 18, 9, 58, 0).toISOString(),
+      installing_at: new Date(2026, 10, 18, 9, 56, 0).toISOString(),
     });
 
-    // 安装阶段已过去 2 分钟，不因为刚打开详情而从 0 开始。
-    expect(screen.getByText("已等待 2 分 0 秒")).toBeTruthy();
+    // 整机已经过去 5 分钟，不因为刚打开详情而从 0 开始。
+    expect(screen.getByText("已等待 5 分 0 秒")).toBeTruthy();
+    // 阶段提示仍按阶段时间戳解释卡在哪一步。
+    expect(
+      document.querySelector(".myservers__progress-note")?.textContent,
+    ).toContain("这一步已经 4 分钟");
+  });
+
+  it("booting 没有阶段时间戳：整机时间仍从 created_at 起算", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    renderDetail({
+      state: "booting",
+      created_at: new Date(2026, 10, 18, 9, 57, 0).toISOString(),
+    });
+
+    expect(screen.getByText("已等待 3 分 0 秒")).toBeTruthy();
+  });
+
+  it("整机满 15 分钟：改判安装超时，阶段提示保留，销毁仍可点", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 15, 0) });
+    renderDetail({
+      state: "installing",
+      created_at: new Date(2026, 10, 18, 10, 0, 0).toISOString(),
+      installing_at: new Date(2026, 10, 18, 10, 1, 0).toISOString(),
+    });
+
+    const timeout = document.querySelector(
+      ".myservers__progress-note.is-timeout",
+    );
+    expect(timeout?.textContent).toContain("安装超时，可以销毁重建");
+    // 阶段提示仍在：解释卡在哪一步。
+    expect(
+      document.querySelector(".myservers__progress-note")?.textContent,
+    ).toBe("这一步已经 14 分钟，还在继续。");
+    const destroy = screen.getByRole("button", { name: "销毁" });
+    expect(destroy.className).toContain("btn--danger-ghost");
+    expect((destroy as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("切换服务器后计时按新服务器的时间重算", () => {
@@ -429,7 +463,7 @@ describe("服务器详情", () => {
       ready_at: "2026-11-18T10:02:55.000Z",
     });
     const createdLine = document.querySelector(".myservers__created-in");
-    expect(createdLine?.textContent).toContain("创建用时 2 分 55 秒");
+    expect(createdLine?.textContent).toContain("已开通 · 用了 2 分 55 秒");
     expect(createdLine?.querySelector(".num")?.textContent).toBe("2 分 55 秒");
     view.unmount();
 
@@ -438,7 +472,9 @@ describe("服务器详情", () => {
       created_at: created,
       ready_at: null,
     });
-    expect(screen.getByText("用时未记录")).toBeTruthy();
+    expect(
+      document.querySelector(".myservers__created-in")?.textContent,
+    ).toContain("用时未记录");
   });
 
   it("没建成的机器不显示创建用时", () => {
@@ -1021,6 +1057,7 @@ describe("智能修复", () => {
         onGone={vi.fn()}
         onForget={async () => {}}
         onRotated={onRotated}
+        repairAvailable
       />,
     );
     return { onChanged, onRotated, bridge, credentials };
@@ -1165,6 +1202,7 @@ describe("详情页「先更新配置」", () => {
         onGone={vi.fn()}
         onForget={async () => {}}
         onRotated={onRotated}
+        repairAvailable
       />,
     );
 
@@ -1219,6 +1257,7 @@ describe("详情页「先更新配置」", () => {
         onForget={async () => {}}
         tunnelConnected
         runningNodeId="local_node_1"
+        repairAvailable
         onReconnectAndTest={onReconnectAndTest}
       />,
     );
@@ -1265,6 +1304,7 @@ describe("详情页「先更新配置」", () => {
         onForget={async () => {}}
         tunnelConnected
         runningNodeId="local_node_other"
+        repairAvailable
         onReconnectAndTest={onReconnectAndTest}
       />,
     );
@@ -1307,6 +1347,7 @@ describe("详情页「先更新配置」", () => {
         onGone={vi.fn()}
         onForget={async () => {}}
         runningNodeId="local_node_1"
+        repairAvailable
         onReconnectAndTest={onReconnectAndTest}
       />,
     );
@@ -1320,5 +1361,50 @@ describe("详情页「先更新配置」", () => {
 
     await waitFor(() => expect(credentials).toHaveBeenCalledTimes(1));
     expect(onReconnectAndTest).not.toHaveBeenCalled();
+  });
+});
+
+describe("智能修复入口的条件与样式", () => {
+  it("探测不可达时才出现，且是普通描边而不是危险按钮", () => {
+    render(
+      <MyServerDetail
+        bridge={{} as unknown as AgentBridge}
+        server={server()}
+        regionLabel="新加坡 1"
+        onCreateAnother={vi.fn()}
+        onChanged={vi.fn()}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        repairAvailable
+      />,
+    );
+
+    const repair = screen.getByRole("button", { name: "智能修复" });
+    expect(repair.classList.contains("btn--ghost")).toBe(true);
+    expect(repair.classList.contains("btn--danger-ghost")).toBe(false);
+    const destroy = screen.getByRole("button", { name: "销毁" });
+    expect(destroy.classList.contains("btn--danger-ghost")).toBe(true);
+    expect(destroy.classList.contains("btn--ghost")).toBe(false);
+  });
+
+  it("探测可达 / untested / 拿不到状态时不出现", () => {
+    for (const available of [false]) {
+      render(
+        <MyServerDetail
+          bridge={{} as unknown as AgentBridge}
+          server={server()}
+          regionLabel="新加坡 1"
+          onCreateAnother={vi.fn()}
+          onChanged={vi.fn()}
+          onRebuilt={() => {}}
+          onGone={vi.fn()}
+          onForget={async () => {}}
+          repairAvailable={available}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: "智能修复" })).toBeNull();
+      cleanup();
+    }
   });
 });

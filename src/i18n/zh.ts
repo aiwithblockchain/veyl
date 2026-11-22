@@ -785,12 +785,15 @@ export const zh = {
   // 建机进度
   "progress.groupAria": "建机进度",
   "progress.createdIn": "创建用时",
+  "progress.ready": "已开通",
+  "progress.used": "用了",
   "progress.durationMissing": "用时未记录",
   "progress.overtime": "这一步已经 {minutes} 分钟，还在继续。",
   "progress.installing": "正在安装 sing-box {version}",
   "progress.typical": "通常 2–4 分钟。",
   "progress.processing": "正在处理",
   "progress.waited": "已等待 {duration}",
+  "progress.buildTimeout": "安装超时，可以销毁重建；不会自动销毁。",
 
   // 登录我的服务器
   "login.title": "登录我的服务器",

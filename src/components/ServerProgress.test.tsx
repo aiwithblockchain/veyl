@@ -127,9 +127,10 @@ describe("四段进度条", () => {
       vi.advanceTimersByTime(1);
     });
     expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
-    expect(container.querySelectorAll(".myservers__steps li.is-done")).toHaveLength(4);
+    // 已开通只留一行，不再列四段步骤。
+    expect(container.querySelectorAll(".myservers__steps li")).toHaveLength(0);
     expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
-      "创建用时 4 秒",
+      "已开通 · 用了 4 秒",
     );
   });
 
@@ -163,7 +164,7 @@ describe("四段进度条", () => {
     );
     expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
     expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
-      "创建用时 2 秒",
+      "已开通 · 用了 2 秒",
     );
     expect(currentStep(container)).toBeNull();
   });
@@ -203,5 +204,65 @@ describe("四段进度条", () => {
     expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
     rerender(<ServerProgress server={server({ state: "booting" })} />);
     expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
+  });
+});
+
+describe("整机 15 分钟边界", () => {
+  it("满 15 分钟：出现超时提示，阶段提示同时保留", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 15, 0) });
+    const now = Date.now();
+    const { container } = render(
+      <ServerProgress
+        server={server({
+          state: "installing",
+          created_at: new Date(now - 15 * 60_000).toISOString(),
+          installing_at: new Date(now - 4 * 60_000).toISOString(),
+        })}
+      />,
+    );
+
+    const notes = [
+      ...container.querySelectorAll(".myservers__progress-note"),
+    ];
+    expect(notes).toHaveLength(2);
+    expect(notes[0].textContent).toContain("这一步已经 4 分钟");
+    expect(notes[1].classList.contains("is-timeout")).toBe(true);
+    expect(notes[1].textContent).toContain("安装超时，可以销毁重建");
+  });
+
+  it("未满 15 分钟不出现超时提示", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    const now = Date.now();
+    const { container } = render(
+      <ServerProgress
+        server={server({
+          state: "booting",
+          created_at: new Date(now - 14 * 60_000).toISOString(),
+        })}
+      />,
+    );
+
+    expect(
+      container.querySelector(".myservers__progress-note.is-timeout"),
+    ).toBeNull();
+  });
+
+  it("跨过 15 分钟自动改判，不需要重新进入详情", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
+    const now = Date.now();
+    const { container } = render(
+      <ServerProgress
+        server={server({
+          state: "booting",
+          created_at: new Date(now - 14 * 60_000 - 59_000).toISOString(),
+        })}
+      />,
+    );
+    expect(container.querySelector(".is-timeout")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(container.querySelector(".is-timeout")).not.toBeNull();
   });
 });

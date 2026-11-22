@@ -59,6 +59,8 @@ interface Props {
   /** 隧道是否在跑：详情页「先更新配置」需要先 stop → start。 */
   tunnelConnected?: boolean;
   runningNodeId?: string | null;
+  /** 选中服务器的本地节点是否最近一次探测不可达。 */
+  repairAvailable?: boolean;
   onReconnectAndTest?: () => Promise<boolean>;
 }
 
@@ -97,6 +99,7 @@ export function MyServersPage({
   onRotated,
   tunnelConnected = false,
   runningNodeId = null,
+  repairAvailable = false,
   onReconnectAndTest,
 }: Props) {
   const t = useT();
@@ -173,6 +176,7 @@ export function MyServersPage({
             onRotated={onRotated}
             tunnelConnected={tunnelConnected}
             runningNodeId={runningNodeId}
+            repairAvailable={repairAvailable}
             onReconnectAndTest={onReconnectAndTest}
           />
         )}
