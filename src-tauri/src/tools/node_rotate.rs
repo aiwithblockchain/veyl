@@ -508,21 +508,64 @@ trait CredentialRefresher: Send + Sync {
     async fn refresh(&self, server_id: &str) -> bool;
 }
 
-struct LiveRefresher;
+/// 取凭据与发信号分开注入，测试才能数清「重读信号发了几次」。
+#[async_trait]
+trait CredentialFetcher: Send + Sync {
+    async fn fetch(&self, server_id: &str) -> bool;
+}
+
+trait RotationEvents: Send + Sync {
+    fn emit(&self, server_id: &str);
+}
+
+struct HostCredentials;
+
+#[async_trait]
+impl CredentialFetcher for HostCredentials {
+    async fn fetch(&self, server_id: &str) -> bool {
+        crate::control_plane::servers::credentials(server_id)
+            .await
+            .is_ok()
+    }
+}
+
+struct HostEvents;
+
+impl RotationEvents for HostEvents {
+    fn emit(&self, server_id: &str) {
+        let Some(server) = crate::control_plane::servers::local_server(server_id) else {
+            return;
+        };
+        let node_id = server.local_node_id.clone();
+        crate::control_plane::events::emit_server_changed(&server);
+        // 与界面按钮的 `vpn.reload()` 等价：连接页监听 `node-list-changed` 后重读配置与运行时。
+        if let (Some(node_id), Some(store)) = (node_id, crate::store::global()) {
+            crate::seed::emit_node_list_changed(store.as_ref(), "node_rotated", None, &[node_id]);
+        }
+    }
+}
+
+struct LiveRefresher {
+    credentials: Arc<dyn CredentialFetcher>,
+    events: Arc<dyn RotationEvents>,
+}
+
+impl LiveRefresher {
+    fn new() -> Self {
+        Self {
+            credentials: Arc::new(HostCredentials),
+            events: Arc::new(HostEvents),
+        }
+    }
+}
 
 #[async_trait]
 impl CredentialRefresher for LiveRefresher {
     async fn refresh(&self, server_id: &str) -> bool {
-        if crate::control_plane::servers::credentials(server_id)
-            .await
-            .is_err()
-        {
+        if !self.credentials.fetch(server_id).await {
             return false;
         }
-        // `credentials` 已按 server_id upsert 本地节点行；这里补一次事件让界面重读。
-        if let Some(server) = crate::control_plane::servers::local_server(server_id) {
-            crate::control_plane::events::emit_server_changed(&server);
-        }
+        self.events.emit(server_id);
         true
     }
 }
@@ -536,7 +579,7 @@ impl NodeRotateCredentialsTool {
     pub fn new() -> Self {
         Self {
             backend: Arc::new(LiveBackend::new()),
-            refresher: Arc::new(LiveRefresher),
+            refresher: Arc::new(LiveRefresher::new()),
         }
     }
 
@@ -1186,6 +1229,65 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
             .facts
             .iter()
             .any(|fact| fact.contains("本机凭据刷新失败")));
+    }
+
+    #[derive(Default)]
+    struct CountingFetcher {
+        calls: std::sync::Mutex<usize>,
+        ok: bool,
+    }
+
+    #[async_trait]
+    impl CredentialFetcher for CountingFetcher {
+        async fn fetch(&self, _server_id: &str) -> bool {
+            *self.calls.lock().unwrap() += 1;
+            self.ok
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingEvents {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RotationEvents for CountingEvents {
+        fn emit(&self, server_id: &str) {
+            self.calls.lock().unwrap().push(server_id.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_rotation_emits_the_reread_signal_exactly_once() {
+        let credentials = Arc::new(CountingFetcher {
+            ok: true,
+            ..Default::default()
+        });
+        let events = Arc::new(CountingEvents::default());
+        let refresher = LiveRefresher {
+            credentials: credentials.clone(),
+            events: events.clone(),
+        };
+
+        assert!(refresher.refresh("srv_abc123").await);
+        assert_eq!(*credentials.calls.lock().unwrap(), 1, "只取一次凭据");
+        assert_eq!(
+            *events.calls.lock().unwrap(),
+            vec!["srv_abc123".to_string()],
+            "重读信号恰好一次（按钮路径的 vpn.reload() 等价）"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_credential_fetch_emits_no_reread_signal() {
+        let credentials = Arc::new(CountingFetcher::default());
+        let events = Arc::new(CountingEvents::default());
+        let refresher = LiveRefresher {
+            credentials: credentials.clone(),
+            events: events.clone(),
+        };
+
+        assert!(!refresher.refresh("srv_abc123").await);
+        assert!(events.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
