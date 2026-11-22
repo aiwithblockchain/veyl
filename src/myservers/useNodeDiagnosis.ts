@@ -9,6 +9,8 @@ export interface IcmpProbe {
   rtt_ms: number | null;
   /** 丢包百分比 0–100。 */
   loss: number;
+  /** 命令没跑成时的短码（`spawn_failed` / `timeout` / `io_error`）；正常执行为 null。 */
+  error?: string | null;
 }
 
 /** TCP 控制端口一项（Host `node_probe_reachability` 的原样结果）。 */
@@ -83,6 +85,8 @@ export interface DiagnosisContext {
   connectivity: {
     icmp: IcmpProbe | null;
     tcp: TcpProbe | null;
+    /** 探测命令本身没跑起来时的短码；正常为 null。 */
+    probe_error: string | null;
   };
   config_update: {
     changed: boolean | null;
@@ -90,6 +94,8 @@ export interface DiagnosisContext {
     reprobe: boolean | null;
     /** 配置变化后的 stop → start → 重测结果；没走这条分支为 null。 */
     reconnect: boolean | null;
+    /** 同步请求本身失败时的短码；成功为 null。 */
+    control_plane_error: string | null;
   };
   rotate: {
     ok: boolean | null;
@@ -105,8 +111,10 @@ export interface DiagnosisContext {
 /** 全部依赖从参数注入，Hook 不直接碰 bridge。 */
 export interface DiagnosisDeps {
   facts: DiagnosisFacts;
-  /** 隧道正在运行，且跑的就是这台节点。 */
-  tunnelRunning: boolean;
+  /** 隧道正在运行，且跑的就是这台节点；每次判定时现读，避免旧快照。 */
+  isTunnelRunning: () => boolean;
+  /** 隧道正在运行任意节点；每次判定时现读。 */
+  isRuntimeRunning: () => boolean;
   /** ICMP + TCP 32100；Host 侧命令一次返回两项。 */
   probeReachability: () => Promise<ProbeReport>;
   /** 全量同步（`myServerSync`），判断这台是否有变化。 */
@@ -142,9 +150,17 @@ export type DiagnosisConclusion =
   | { kind: "config-control-plane" }
   | { kind: "config-recovered"; changed: boolean }
   | { kind: "config-failed"; changed: boolean }
+  /** 配置有变化，但隧道没在跑：不自动连接，提示重新连接后生效。 */
+  | { kind: "config-applied-idle" }
+  /** 配置没有变化，且隧道没在跑：结论中性，下一步给重置。 */
+  | { kind: "config-unchanged" }
   | { kind: "rotate-pending" }
   | { kind: "rotate-recovered" }
   | { kind: "rotate-reconnect-failed" }
+  /** 重置成功，但跑的是别的节点、只重测仍不通。 */
+  | { kind: "rotate-still-failed" }
+  /** 重置成功，但隧道没在跑：不探测、不自动连接。 */
+  | { kind: "rotate-applied-idle" }
   | { kind: "rotate-failed"; reason: string | null }
   | { kind: "ai-handed" };
 
@@ -185,8 +201,10 @@ export interface NodeDiagnosis {
 interface Collected {
   icmp: IcmpProbe | null;
   tcp: TcpProbe | null;
+  probeError: string | null;
   syncChanged: boolean | null;
   syncPortAfter: number | null;
+  controlPlaneError: string | null;
   reprobe: boolean | null;
   reconnect: boolean | null;
   rotateOk: boolean | null;
@@ -198,8 +216,10 @@ function emptyCollected(): Collected {
   return {
     icmp: null,
     tcp: null,
+    probeError: null,
     syncChanged: null,
     syncPortAfter: null,
+    controlPlaneError: null,
     reprobe: null,
     reconnect: null,
     rotateOk: null,
@@ -232,10 +252,13 @@ function deriveAction(
       return "askAi";
     case "config-control-plane":
       return "askAi";
+    case "config-unchanged":
+      return "resetPort";
     case "config-failed":
       return "resetPort";
     case "rotate-failed":
     case "rotate-reconnect-failed":
+    case "rotate-still-failed":
       return "askAi";
     default:
       return null;
@@ -270,12 +293,14 @@ function buildContext(
     connectivity: {
       icmp: collected.icmp,
       tcp: collected.tcp,
+      probe_error: collected.probeError,
     },
     config_update: {
       changed: collected.syncChanged,
       port_changed: portChanged,
       reprobe: collected.reprobe,
       reconnect: collected.reconnect,
+      control_plane_error: collected.controlPlaneError,
     },
     rotate: {
       ok: collected.rotateOk,
@@ -306,6 +331,34 @@ function probeErrorCode(error: unknown): string | null {
   if (typeof reason === "string" && reason.trim() !== "") return reason;
   if (problem.code !== "" && problem.code !== "INTERNAL") return problem.code;
   return null;
+}
+
+/** 给一次注入调用加硬超时；超时按稳定 reason 走失败分支，界面不会永远「进行中」。 */
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  reason: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject({
+        code: "TIMEOUT",
+        message: "",
+        retryable: true,
+        details: { reason },
+      });
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** 关闭时写一条固定模板日志；只含步骤名、布尔与错误码，不含任何凭据。 */
@@ -367,10 +420,15 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     let report: ProbeReport | null = null;
     let probeError: string | null = null;
     try {
-      report = await depsRef.current.probeReachability();
+      report = await withTimeout(
+        depsRef.current.probeReachability(),
+        25_000,
+        "timeout",
+      );
     } catch (error) {
       probeError = probeErrorCode(error);
     }
+    collectedRef.current.probeError = probeError;
 
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -409,6 +467,16 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       setSteps([
         { id: "connectivity", status: "failed", conclusion: { kind: "service-down" } },
       ]);
+    } else if (report.icmp.error) {
+      // ICMP 命令自己没跑成（spawn_failed / timeout / io_error）：不能判机器死了。
+      collectedRef.current.probeError = report.icmp.error;
+      setSteps([
+        {
+          id: "connectivity",
+          status: "failed",
+          conclusion: { kind: "probe-error", code: report.icmp.error },
+        },
+      ]);
     } else if (depsRef.current.facts.controlPlaneError) {
       setSteps([
         { id: "connectivity", status: "failed", conclusion: { kind: "local-network" } },
@@ -431,12 +499,21 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     let outcome: SyncOutcome;
     try {
-      outcome = await depsRef.current.syncConfig();
-    } catch {
-      outcome = { changed: false, controlPlaneError: "control_plane_unreachable" };
+      outcome = await withTimeout(
+        depsRef.current.syncConfig(),
+        30_000,
+        "timeout",
+      );
+    } catch (error) {
+      outcome = {
+        changed: false,
+        controlPlaneError:
+          probeErrorCode(error) ?? "control_plane_unreachable",
+      };
     }
 
     if (outcome.controlPlaneError) {
+      collectedRef.current.controlPlaneError = outcome.controlPlaneError;
       busyRef.current = false;
       if (mountedRef.current) {
         replaceLast({
@@ -454,9 +531,31 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       collectedRef.current.syncPortAfter = outcome.port;
     }
 
+    // 没在跑隧道：不自动连接、也不探测，只把配置结果说清楚。
+    if (!depsRef.current.isRuntimeRunning()) {
+      busyRef.current = false;
+      if (!mountedRef.current) return;
+      if (outcome.changed) {
+        replaceLast({
+          id: "config",
+          status: "passed",
+          conclusion: { kind: "config-applied-idle" },
+        });
+        updatePhase("done");
+      } else {
+        replaceLast({
+          id: "config",
+          status: "passed",
+          conclusion: { kind: "config-unchanged" },
+        });
+        updatePhase("awaiting");
+      }
+      return;
+    }
+
     // 面板关掉也把已经开始的同步收尾：配置变了就必须重启隧道，否则用户仍连着旧端口。
     let ok: boolean;
-    if (outcome.changed && depsRef.current.tunnelRunning) {
+    if (outcome.changed && depsRef.current.isTunnelRunning()) {
       try {
         ok = await depsRef.current.reconnectAndProbe();
       } catch {
@@ -504,9 +603,13 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
     let outcome: RotateOutcome;
     try {
-      outcome = await depsRef.current.rotateCredentials();
-    } catch {
-      outcome = { ok: false, reason: "" };
+      outcome = await withTimeout(
+        depsRef.current.rotateCredentials(),
+        120_000,
+        "agent_timeout",
+      );
+    } catch (error) {
+      outcome = { ok: false, reason: probeErrorCode(error) ?? "" };
     }
 
     if (!outcome.ok) {
@@ -528,14 +631,37 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     collectedRef.current.rotateOk = true;
     collectedRef.current.rotatePort = outcome.port;
 
-    // 端口和密码已经变了；面板关掉也要把重连跑完，否则隧道还连着旧凭据。
-    let ok: boolean;
-    try {
-      ok = await depsRef.current.reconnectAndProbe();
-    } catch {
-      ok = false;
+    // 没在跑隧道：端口已经换了，但不探测、也不替用户自动连接。
+    if (!depsRef.current.isRuntimeRunning()) {
+      busyRef.current = false;
+      if (!mountedRef.current) return;
+      replaceLast({
+        id: "rotate",
+        status: "passed",
+        conclusion: { kind: "rotate-applied-idle" },
+      });
+      updatePhase("done");
+      return;
     }
-    collectedRef.current.reconnect = ok;
+
+    // 面板关掉也要把已确认的动作收尾；跑的是别的节点时只重测，不重启它。
+    const reconnected = depsRef.current.isTunnelRunning();
+    let ok: boolean;
+    if (reconnected) {
+      try {
+        ok = await depsRef.current.reconnectAndProbe();
+      } catch {
+        ok = false;
+      }
+      collectedRef.current.reconnect = ok;
+    } else {
+      try {
+        ok = await depsRef.current.reprobe();
+      } catch {
+        ok = false;
+      }
+      collectedRef.current.reprobe = ok;
+    }
 
     busyRef.current = false;
     if (!mountedRef.current) return;
@@ -551,7 +677,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       replaceLast({
         id: "rotate",
         status: "failed",
-        conclusion: { kind: "rotate-reconnect-failed" },
+        conclusion: {
+          kind: reconnected ? "rotate-reconnect-failed" : "rotate-still-failed",
+        },
       });
       updatePhase("awaiting");
     }

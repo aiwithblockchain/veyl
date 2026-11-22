@@ -2454,7 +2454,7 @@ export class MockAgentBridge implements AgentBridge {
   ): Promise<NodeReachabilityReport> {
     const ok = serverIp.length > 0 && controlPort > 0;
     return {
-      icmp: { ok, rtt_ms: ok ? 32 : null, loss: ok ? 0 : 100 },
+      icmp: { ok, rtt_ms: ok ? 32 : null, loss: ok ? 0 : 100, error: null },
       tcp: { ok, ms: ok ? 12 : null, error: ok ? null : "refused" },
     };
   }

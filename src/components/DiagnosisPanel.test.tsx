@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   DiagnosisDeps,
@@ -28,19 +28,20 @@ function facts(over: Partial<DiagnosisFacts> = {}): DiagnosisFacts {
 }
 
 const reachable: ProbeReport = {
-  icmp: { ok: true, rtt_ms: 32, loss: 0 },
+  icmp: { ok: true, rtt_ms: 32, loss: 0, error: null },
   tcp: { ok: true, ms: 41, error: null },
 };
 
 const silent: ProbeReport = {
-  icmp: { ok: false, rtt_ms: null, loss: 100 },
+  icmp: { ok: false, rtt_ms: null, loss: 100, error: null },
   tcp: { ok: false, ms: null, error: "timeout" },
 };
 
 function makeDeps(over: Partial<DiagnosisDeps> = {}): DiagnosisDeps {
   return {
     facts: facts(),
-    tunnelRunning: true,
+    isTunnelRunning: () => true,
+    isRuntimeRunning: () => true,
     probeReachability: vi.fn(async () => reachable),
     syncConfig: vi.fn(async () => ({ changed: false, port: 20343 })),
     reprobe: vi.fn(async () => false),
@@ -105,7 +106,7 @@ describe("节点诊断面板", () => {
   it("TCP 端口拒绝连接：机器在线但控制服务不可用，不给销毁", async () => {
     const deps = makeDeps({
       probeReachability: vi.fn(async () => ({
-        icmp: { ok: false, rtt_ms: null, loss: 100 },
+        icmp: { ok: false, rtt_ms: null, loss: 100, error: null },
         tcp: { ok: false, ms: null, error: "refused" },
       })),
     });
@@ -132,7 +133,25 @@ describe("节点诊断面板", () => {
 
     await start();
 
-    expect(await screen.findByText("探测没能执行")).toBeTruthy();
+    expect(await screen.findByText(/探测没能执行/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "去销毁并重建" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("ICMP 命令自己没跑成：按探测失败处理，不给销毁", async () => {
+    const deps = makeDeps({
+      probeReachability: vi.fn(async () => ({
+        icmp: { ok: false, rtt_ms: null, loss: 100, error: "timeout" },
+        tcp: { ok: false, ms: null, error: "timeout" },
+      })),
+    });
+    open(deps);
+
+    await start();
+
+    expect(await screen.findByText("探测超时，没能完成。")).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "去销毁并重建" }),
     ).toBeNull();
@@ -142,7 +161,7 @@ describe("节点诊断面板", () => {
   it("ICMP 被屏蔽但 TCP 通：继续更新配置，并标出走的是 TCP", async () => {
     const deps = makeDeps({
       probeReachability: vi.fn(async () => ({
-        icmp: { ok: false, rtt_ms: null, loss: 100 },
+        icmp: { ok: false, rtt_ms: null, loss: 100, error: null },
         tcp: { ok: true, ms: 18, error: null },
       })),
     });
@@ -209,13 +228,92 @@ describe("节点诊断面板", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
 
-    expect(await screen.findByText("重置失败（agent_timeout）")).toBeTruthy();
+    expect(await screen.findByText("重置失败：服务器在重置时没有响应。")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("agent_timeout");
     fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
 
     expect(openAi).toHaveBeenCalledTimes(1);
     const context = openAi.mock.calls[0][0] as Record<string, unknown>;
     expect(context.rotate).toEqual({ ok: false, reason: "agent_timeout" });
     expect(JSON.stringify(context)).not.toContain("password");
+  });
+
+  it("配置有变化但隧道没在跑：不重连、不探测，提示重新连接后生效", async () => {
+    const reconnectAndProbe = vi.fn(async () => true);
+    const reprobe = vi.fn(async () => true);
+    const deps = makeDeps({
+      isRuntimeRunning: () => false,
+      isTunnelRunning: () => false,
+      syncConfig: vi.fn(async () => ({ changed: true, port: 21345 })),
+      reconnectAndProbe,
+      reprobe,
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(
+      await screen.findByText("配置已更新，重新连接后生效"),
+    ).toBeTruthy();
+    expect(reconnectAndProbe).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+  });
+
+  it("重置后隧道没在跑：不探测、不自动连接", async () => {
+    const reconnectAndProbe = vi.fn(async () => true);
+    const reprobe = vi.fn(async () => true);
+    const deps = makeDeps({
+      isRuntimeRunning: () => false,
+      isTunnelRunning: () => false,
+      reprobe,
+      reconnectAndProbe,
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(await screen.findByText("已重置，重新连接后生效")).toBeTruthy();
+    expect(reconnectAndProbe).not.toHaveBeenCalled();
+    expect(reprobe).not.toHaveBeenCalled();
+  });
+
+  it("重置后跑的是别的节点：只重测、不重启", async () => {
+    const reconnectAndProbe = vi.fn(async () => true);
+    const reprobe = vi.fn(async () => false);
+    const deps = makeDeps({
+      isRuntimeRunning: () => true,
+      isTunnelRunning: () => false,
+      reprobe,
+      reconnectAndProbe,
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(
+      await screen.findByText("端口与密码已重置，但仍然不通"),
+    ).toBeTruthy();
+    expect(reprobe).toHaveBeenCalled();
+    expect(reconnectAndProbe).not.toHaveBeenCalled();
+  });
+
+  it("步骤列表是 aria-live，动作切换后焦点跟到新的主按钮", async () => {
+    open(makeDeps());
+
+    await start();
+    const update = await screen.findByRole("button", { name: "更新配置" });
+    await waitFor(() => expect(document.activeElement).toBe(update));
+    expect(
+      document.querySelector(".diagnosis__steps")?.getAttribute("aria-live"),
+    ).toBe("polite");
   });
 
   it("关闭后重新打开从第一步开始，不保留上次的步骤", async () => {

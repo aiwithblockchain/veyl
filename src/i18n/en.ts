@@ -1577,24 +1577,52 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.connectivity.unreachable": "The whole machine is unreachable",
   "diagnosis.connectivity.serviceDown": "Machine is online, but the control service is unavailable",
   "diagnosis.connectivity.localNetwork": "Your local network may be down",
-  "diagnosis.connectivity.probeError": "The probe couldn't run ({reason})",
-  "diagnosis.connectivity.probeErrorNoReason": "The probe couldn't run",
   "diagnosis.config.pending": "Updating config…",
   "diagnosis.config.controlPlane": "Control plane is temporarily unreachable",
   "diagnosis.config.recovered": "Config updated; connection restored",
   "diagnosis.config.recoveredNoChange": "Config unchanged; connection restored",
   "diagnosis.config.stillDown": "Config updated, but still unreachable",
   "diagnosis.config.stillDownNoChange": "Config unchanged and still unreachable",
+  "diagnosis.config.appliedIdle": "Config updated; reconnect to apply",
+  "diagnosis.config.unchanged": "Config unchanged",
   "diagnosis.rotate.pending": "Resetting port and password…",
   "diagnosis.rotate.recovered": "Port and password reset; connection restored",
   "diagnosis.rotate.reconnectFailed":
     "Port and password reset, but still unreachable after reconnecting",
-  "diagnosis.rotate.failed": "Reset failed ({reason})",
+  "diagnosis.rotate.stillFailed":
+    "Port and password reset, but still unreachable",
+  "diagnosis.rotate.appliedIdle": "Reset done; reconnect to apply",
+  "diagnosis.rotate.failed": "Reset failed: {reason}",
   "diagnosis.rotate.failedNoReason": "Reset failed",
   "diagnosis.rotate.confirm":
     "This disconnects the current connection and changes the port and password; other devices must update their config before they can connect again.",
   "diagnosis.rotate.confirmAction": "Reset anyway",
   "diagnosis.ai.handed": "Diagnosis details handed to AI",
+  "diagnosis.reason.agentTokenUnavailable":
+    "The control plane is unreachable, so the reset didn't start.",
+  "diagnosis.reason.agentTlsUntrusted":
+    "Couldn't establish a trusted connection to this server.",
+  "diagnosis.reason.agentTokenRejected":
+    "The server rejected the connection credentials.",
+  "diagnosis.reason.agentToolFailed":
+    "The node agent on the server didn't finish the reset.",
+  "diagnosis.reason.agentTimeout":
+    "The server didn't respond while resetting.",
+  "diagnosis.reason.agentUnreachable": "Couldn't reach this server.",
+  "diagnosis.reason.agentBadResponse":
+    "The server returned an unrecognized result.",
+  "diagnosis.reason.unknown": "Unknown reason.",
+  "diagnosis.reason.unsupported":
+    "This version doesn't support resetting the port.",
+  "diagnosis.probeError.invalidIp":
+    "The machine address isn't usable, so the probe couldn't start.",
+  "diagnosis.probeError.invalidPort":
+    "The control port is invalid, so the probe couldn't start.",
+  "diagnosis.probeError.timeout": "The probe timed out.",
+  "diagnosis.probeError.spawnFailed":
+    "The local probe program couldn't start.",
+  "diagnosis.probeError.ioError": "The probe program failed.",
+  "diagnosis.probeError.generic": "The probe couldn't run.",
   "assistant.prompt.nodeDiagnosis":
     "Here is what the node diagnosis panel collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; never mention passwords, tokens, or full links.\n{context}",
 };

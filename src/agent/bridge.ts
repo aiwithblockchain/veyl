@@ -143,7 +143,13 @@ export type NodeProbeResult = NodeProbeData;
 
 /** Host `node_probe_reachability`：ICMP 与 TCP 控制端口一次返回（commands.md 2.56.0）。 */
 export interface NodeReachabilityReport {
-  icmp: { ok: boolean; rtt_ms: number | null; loss: number };
+  icmp: {
+    ok: boolean;
+    rtt_ms: number | null;
+    loss: number;
+    /** 命令没跑成时的短码（`spawn_failed` / `timeout` / `io_error`）；正常为 null。 */
+    error?: string | null;
+  };
   tcp: { ok: boolean; ms: number | null; error: string | null };
 }
 

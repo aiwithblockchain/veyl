@@ -43,10 +43,34 @@ const STATUS_LABEL: Record<DiagnosisStep["status"], MessageKey> = {
 /** 破坏性动作才用 danger-ghost；其余只有一个主按钮。 */
 const DANGER_ACTIONS = new Set<DiagnosisAction>(["resetPort", "goServers"]);
 
+/** 稳定码只进交给 AI 的清单；界面显示人话。 */
+const ROTATE_REASON_KEY: Record<string, MessageKey> = {
+  agent_token_unavailable: "diagnosis.reason.agentTokenUnavailable",
+  agent_tls_untrusted: "diagnosis.reason.agentTlsUntrusted",
+  agent_token_rejected: "diagnosis.reason.agentTokenRejected",
+  agent_tool_failed: "diagnosis.reason.agentToolFailed",
+  agent_timeout: "diagnosis.reason.agentTimeout",
+  agent_unreachable: "diagnosis.reason.agentUnreachable",
+  agent_bad_response: "diagnosis.reason.agentBadResponse",
+  UNSUPPORTED: "diagnosis.reason.unsupported",
+};
+
+const PROBE_ERROR_KEY: Record<string, MessageKey> = {
+  invalid_ip: "diagnosis.probeError.invalidIp",
+  invalid_port: "diagnosis.probeError.invalidPort",
+  timeout: "diagnosis.probeError.timeout",
+  spawn_failed: "diagnosis.probeError.spawnFailed",
+  io_error: "diagnosis.probeError.ioError",
+};
+
 export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
   const t = useT();
   const diagnosis = useNodeDiagnosis(deps);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const firstRenderRef = useRef(true);
 
   useFocusTrap(true, dialogRef);
 
@@ -57,6 +81,21 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
+
+  // 旧动作按钮消失后，焦点跟着新的主按钮；没有下一步就回到关闭。
+  useEffect(() => {
+    if (firstRenderRef.current) {
+      firstRenderRef.current = false;
+      return;
+    }
+    if (diagnosis.phase === "confirming") {
+      confirmRef.current?.focus();
+    } else if (diagnosis.action !== null) {
+      actionRef.current?.focus();
+    } else {
+      closeRef.current?.focus();
+    }
+  }, [diagnosis.action, diagnosis.phase]);
 
   const conclusionText = (conclusion: DiagnosisConclusion): ReactNode => {
     switch (conclusion.kind) {
@@ -83,9 +122,9 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
       case "service-down":
         return t("diagnosis.connectivity.serviceDown");
       case "probe-error":
-        return conclusion.code
-          ? t("diagnosis.connectivity.probeError", { reason: conclusion.code })
-          : t("diagnosis.connectivity.probeErrorNoReason");
+        return t(
+          PROBE_ERROR_KEY[conclusion.code ?? ""] ?? "diagnosis.probeError.generic",
+        );
       case "local-network":
         return t("diagnosis.connectivity.localNetwork");
       case "config-pending":
@@ -100,15 +139,28 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
         return conclusion.changed
           ? t("diagnosis.config.stillDown")
           : t("diagnosis.config.stillDownNoChange");
+      case "config-applied-idle":
+        return t("diagnosis.config.appliedIdle");
+      case "config-unchanged":
+        return t("diagnosis.config.unchanged");
       case "rotate-pending":
         return t("diagnosis.rotate.pending");
       case "rotate-recovered":
         return t("diagnosis.rotate.recovered");
       case "rotate-reconnect-failed":
         return t("diagnosis.rotate.reconnectFailed");
+      case "rotate-still-failed":
+        return t("diagnosis.rotate.stillFailed");
+      case "rotate-applied-idle":
+        return t("diagnosis.rotate.appliedIdle");
       case "rotate-failed":
         return conclusion.reason
-          ? t("diagnosis.rotate.failed", { reason: conclusion.reason })
+          ? t("diagnosis.rotate.failed", {
+              reason: t(
+                ROTATE_REASON_KEY[conclusion.reason] ??
+                  "diagnosis.reason.unknown",
+              ),
+            })
           : t("diagnosis.rotate.failedNoReason");
       case "ai-handed":
         return t("diagnosis.ai.handed");
@@ -132,6 +184,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
             {t("diagnosis.title", { name: nodeName })}
           </h2>
           <button
+            ref={closeRef}
             type="button"
             className="quit-dialog__close"
             aria-label={t("common.close")}
@@ -145,7 +198,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
         {diagnosis.steps.length === 0 ? (
           <p className="diagnosis__intro">{t("diagnosis.intro")}</p>
         ) : (
-          <ol className="diagnosis__steps">
+          <ol className="diagnosis__steps" aria-live="polite">
             {diagnosis.steps.map((step, index) => (
               <li key={`${step.id}-${index}`} className="diagnosis__step">
                 <span
@@ -167,6 +220,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
                   {index === diagnosis.steps.length - 1 && action !== null ? (
                     <div className="diagnosis__main">
                       <button
+                        ref={actionRef}
                         type="button"
                         className={`btn quit-dialog__btn ${
                           DANGER_ACTIONS.has(action)
@@ -197,6 +251,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
                 {t("common.cancel")}
               </button>
               <button
+                ref={confirmRef}
                 type="button"
                 className="btn btn--danger-ghost quit-dialog__btn"
                 onClick={diagnosis.confirmReset}
@@ -210,6 +265,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
         {diagnosis.steps.length === 0 && action !== null ? (
           <div className="diagnosis__main diagnosis__main--idle">
             <button
+              ref={actionRef}
               type="button"
               className={`btn quit-dialog__btn ${
                 DANGER_ACTIONS.has(action) ? "btn--danger-ghost" : "btn--primary"

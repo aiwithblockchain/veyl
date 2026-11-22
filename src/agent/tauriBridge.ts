@@ -1232,7 +1232,7 @@ export class TauriAgentBridge implements AgentBridge {
     controlPort: number,
   ): Promise<NodeReachabilityReport> {
     const raw = await call<{
-      icmp?: { ok?: unknown; rtt_ms?: unknown; loss?: unknown };
+      icmp?: { ok?: unknown; rtt_ms?: unknown; loss?: unknown; error?: unknown };
       tcp?: { ok?: unknown; ms?: unknown; error?: unknown };
     }>("node_probe_reachability", { serverIp, controlPort });
     if (typeof raw?.icmp?.ok !== "boolean" || typeof raw?.tcp?.ok !== "boolean") {
@@ -1246,6 +1246,7 @@ export class TauriAgentBridge implements AgentBridge {
         ok: raw.icmp.ok,
         rtt_ms: typeof raw.icmp.rtt_ms === "number" ? raw.icmp.rtt_ms : null,
         loss: typeof raw.icmp.loss === "number" ? raw.icmp.loss : 0,
+        error: typeof raw.icmp.error === "string" ? raw.icmp.error : null,
       },
       tcp: {
         ok: raw.tcp.ok,

@@ -15,6 +15,7 @@ import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, isTauri, readQuestionDetail,
 import type {
   AgentBridge,
   DefaultProfileStatus,
+  MyServer,
   NodeProbeResult,
   PendingQuestion,
   QuitDecisionAction,
@@ -2078,6 +2079,12 @@ export default function App() {
     askAiInPanel(prompt);
   };
 
+  /** 诊断只对服务正常且已开通的自有服务器出现；到期 / 停机不给入口。 */
+  const diagnosisEligibleServer = (server: MyServer): boolean =>
+    (server.state === "healthy" || server.state === "active") &&
+    server.billing_state !== "past_due" &&
+    server.billing_state !== "expired";
+
   /** 自有节点测不通 / 服务器详情「智能分析」：构造依赖并打开诊断面板。 */
   const handleAnalyzeNode = (target: {
     serverId: string;
@@ -2086,7 +2093,7 @@ export default function App() {
     const server = myServers.servers.find(
       (item) => item.server_id === target.serverId,
     );
-    if (!server) return;
+    if (!server || !diagnosisEligibleServer(server)) return;
     const localNodeId = server.local_node_id;
     const configNode = localNodeId
       ? (vpn.activeConfig?.nodes.find(
@@ -2126,13 +2133,38 @@ export default function App() {
         return false;
       }
     };
-    const tunnelRunning =
-      (runtime.state === "running" || runtime.state === "degraded") &&
+    const isRuntimeUp = () => {
+      const state = runtimeRef.current.state;
+      return state === "running" || state === "degraded";
+    };
+    const isThisTunnelUp = () =>
+      isRuntimeUp() &&
       localNodeId !== null &&
-      runtime.node_id === localNodeId;
+      runtimeRef.current.node_id === localNodeId;
+    /** stop → start 返回 ok 不等于运行时已就绪：轮询快照，别在 starting 上测。 */
+    const waitForRuntimeReady = async (): Promise<boolean> => {
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        try {
+          const snapshot = await bridge.getRuntimeSnapshot();
+          if (
+            snapshot?.state === "running" ||
+            snapshot?.state === "degraded"
+          ) {
+            return true;
+          }
+          if (snapshot?.state === "failed") return false;
+        } catch {
+          // 快照读不到就继续等到上限。
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      return false;
+    };
     const deps: DiagnosisDeps = {
       facts,
-      tunnelRunning,
+      isTunnelRunning: isThisTunnelUp,
+      isRuntimeRunning: isRuntimeUp,
       probeReachability: async () => {
         if (!server.ip) {
           throw {
@@ -2158,6 +2190,8 @@ export default function App() {
       reconnectAndProbe: async () => {
         const connected = await handleReconnectAndTest();
         if (!connected) return false;
+        const ready = await waitForRuntimeReady();
+        if (!ready) return false;
         return probeNode();
       },
       rotateCredentials: async () => {
@@ -2801,12 +2835,16 @@ export default function App() {
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
           onChanged={() => void myServers.refresh()}
-          repairAvailable={repairAvailableFor(
-            myServers.selected?.local_node_id ?? null,
-            vpn.activeConfig,
-            nodeProbes.results,
-            nodeProbes.probing,
-          )}
+          repairAvailable={
+            myServers.selected !== null &&
+            diagnosisEligibleServer(myServers.selected) &&
+            repairAvailableFor(
+              myServers.selected.local_node_id,
+              vpn.activeConfig,
+              nodeProbes.results,
+              nodeProbes.probing,
+            )
+          }
           onDiagnose={handleAnalyzeNode}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
@@ -2879,10 +2917,14 @@ export default function App() {
           onSetRoutingMode={handleSetRoutingMode}
           onAskAi={askAiInPanel}
           onAskAiAboutNode={handleAskAiAboutNode}
-          serverIdForNode={(nodeId) =>
-            myServers.servers.find((server) => server.local_node_id === nodeId)
-              ?.server_id ?? null
-          }
+          serverIdForNode={(nodeId) => {
+            const server = myServers.servers.find(
+              (item) => item.local_node_id === nodeId,
+            );
+            return server && diagnosisEligibleServer(server)
+              ? server.server_id
+              : null;
+          }}
           onReconnectAndTest={handleReconnectAndTest}
           staleConfigNode={staleConfigNode !== null}
           onStaleConfigRetry={() => setStaleConfigNode(null)}
