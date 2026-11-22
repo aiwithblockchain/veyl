@@ -16,6 +16,7 @@
 | 余额刷新：去掉 15 分钟轮询；换账户清空余额、晚到响应按代次丢弃、重试绕过门禁 | `1b969e5`、`ff4ca90` |
 | 界面事件写入日志（`ui_log` 通道） | `54a6c5f` |
 | 节点自救链路：共享防火墙、agent、控制面 agent 接口、桌面端 `NodeRotateCredentials`、发版流水线 | `edd46c3`、`4173443`、`8578dbd`、`3c65d21`、`a42eefc` |
+| AI 可选与统一入口：首启可跳过、右栏配置引导、统一告警、后端 `AI_NOT_CONFIGURED`、保存 Key 后激活 | `a25059e` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 
@@ -39,7 +40,6 @@
 | 12 | 余额修复真机验证 | 跨账户与门禁修复未在真机走过 | 构建后看 `logs/` 的 `ui::wallet` 与切换账户行为 | 用户 |
 | 13 | 节点凭据签发流程讨论 | 记在 `notes/pending-topics.md` #1 | 约一次专门讨论 | 用户 + PM |
 | 14 | 移动端导出（并行进行中） | 文档已回写真机结果并提交（`fa0b73f`）；Shadowrocket / Hiddify 真机通过 | 由该批次自行收尾 | 其它会话 |
-| 15 | AI 可选与统一入口 | 已派：Sage 拆解，Ivy/Leo 做前端（T1–T5、T8），Noah 做后端（T6）；契约 2.52.0 已补 `AI_NOT_CONFIGURED` | 开发完成后由 PM 派 Owen 审前端、Ruby 审后端；通过后 PM 提交 | Ivy / Leo / Noah |
 
 ---
 
@@ -49,17 +49,20 @@
 
 | # | 工作 | 现在的状态 | 下一步 | 谁 |
 |---|---|---|---|---|
-| N1 | agent release 产物 | CI run 44976898297 进行中（tag `agent-v0.1.0`） | 取 `SHA256SUMS` 里 `veyl-agent-linux-amd64` 那行的 sha256 | CI |
+| N1 | agent release 产物 | CI run 44976898297：首次 amd64 卡死已取消重跑，test 已过，两个 musl 构建进行中 | 取 `SHA256SUMS` 里 `veyl-agent-linux-amd64` 那行的 sha256 | CI |
 | N2 | 控制面 `AGENT_SHA256` | dev 与 prod 两处仍是 `REPLACE_WITH_AGENT_SHA256`（下载地址已对齐实际资产名） | 填 N1 的值 | 用户 |
 | N3 | dev 部署 | 迁移 0010 未应用；`AGENT_TOKEN_SIGNING_JWK` 未设置 | `wrangler d1 migrations apply` + `wrangler secret put AGENT_TOKEN_SIGNING_JWK` + `npm run deploy:dev` | 用户 |
 | N4 | 真机验收（设计 §13 五条） | 全部未做 | 建机上报 active / 停服务后修复 / 模拟端口被封后轮换并同步到手机 / 伪造与重放令牌被拒 / 修复失败引导重建 | 用户 |
-| N5 | 「智能修复」按钮 | 未做；当前只有 AI 工具 + 确认卡一条路 | 按 `node-agent-mcp.md` §8 落界面按钮 | fe-lead |
-| N6 | 控制面不可达的说明 | 未做 | 写明「智能修复不可用」，不静默失败 | fe-lead |
+| N5 | 「智能修复」按钮 | 已完成：按钮、确认、三态、7 类失败文案、真桥接；65 项测试绿 | 契约增量写入 `commands.md`（2.53.0） | 已交付 |
+| N6 | 控制面不可达的说明 | 已完成（`agent_token_unavailable` 就地提示，不静默失败） | — | 已交付 |
 | N7 | arm64 分发 | 只有一组 `AGENT_*` 配置，先按 amd64 | 按架构加第二组变量 | be-lead |
 | N8 | 控制端口限流 | 未做 | 令牌端点限流（流量近零，但公网可达） | be-agent |
-| N9 | `server_token` 轮换 | 触发条件未定 | 定策略（重建 / 泄漏 / 定时） | 架构师 |
+| N9 | `server_token` 轮换 | 已定：每次 enroll（含 TTL 内重放）重签，旧值立即失效，销毁即作废 | — | 已定 |
 | N10 | 并发修复 | 只有 agent 侧 busy 拒绝兜底 | 桌面端前置串行化，同一节点只允许一个修复在跑 | be-desktop |
-| N11 | musl 交叉构建 | 首次未验证，`Cross.toml` 是照 aws-lc-sys 的依赖推的 | N1 出结果后核对日志 | be-agent |
+| N11 | musl 交叉构建 | 首次未验证，`Cross.toml` 是照 aws-lc-sys 的依赖推的 | N1 出结果后核对日志 | Kai |
+| N12 | agent 评审修复（10 项） | 已完成并复核：79 项测试、release 构建无 warning、demo 10/10、release 拒绝 insecure 配置——MCP 任务监督、sing-box 存活检查、命令超时与先 bind 后 apply、重签后按连接重载证书、版本与 tar 路径校验、https 与 200 MiB 上限、状态损坏恢复与 409 终态、jti 落盘、脱敏双写 | 真机按最短剧本验证 | 已交付 |
+| N13 | 控制面评审修复（4 项） | 已完成并复核：258/258、typecheck 干净——`failed` 只销毁装机阶段、enroll TTL 内可重放换发、cloud-init 插值白名单与 0600、期望状态校验 | — | 已交付 |
+| N14 | agent 日志落盘 | 已完成：`/var/log/veyl-agent/agent.log`、5 MiB × 3、脱敏、启动横幅区分 cold/restored；55 项测试 | — | 已交付 |
 
 ---
 

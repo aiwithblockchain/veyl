@@ -60,7 +60,7 @@ agent 随后：
 
 | 接口 | 鉴权 | 用途 |
 |---|---|---|
-| `POST /v1/agent/enroll` | `Authorization: Bearer enr_…`（一次性 enrollment token，cloud-init 写进 agent 配置） | 领取期望状态与长期 `server_token`；token 消费一次即失效 |
+| `POST /v1/agent/enroll` | `Authorization: Bearer enr_…`（enrollment token，cloud-init 写进 agent 配置） | 领取期望状态与长期 `server_token`；**在 enrollment TTL 内、服务器未销毁时可重放**，每次换发新 `server_token` 并作废旧 token（§5.1） |
 | `POST /v1/agent/fail` | `Authorization: Bearer enr_…`（同一个一次性 token） | cloud-init 装机失败时回传：消费 token 并销毁服务器，不留计费实例 |
 | `POST /v1/agent/report` | `Authorization: Bearer agt_…`（`server_token`） | 上报阶段（`installing / verifying / active / failed / rotated`）、服务端口、agent 与 sing-box 版本；同时登记控制端口、TLS 指纹与自签 CA |
 | `GET /v1/agent/desired-state` | `Authorization: Bearer agt_…` | 拉取最新期望状态（端口、密码、sing-box 版本与 sha256）；后续轮换与升级都走它 |
@@ -86,7 +86,9 @@ agent 随后：
 
 - `singbox.url` 指向 sing-box 官方发布的 **tar.gz**；`sha256` 是该压缩包的摘要。版本与地址由控制面 env（`SING_BOX_VERSION` / `SING_BOX_SHA256` / `SING_BOX_DOWNLOAD_URL`）配置。
 - `token_public_key` 是**字符串**形式的 Ed25519 公钥 JWK（只含 `kty` / `crv` / `x`），agent 用它离线验证桌面端的令牌，不需要再回调控制面。
-- `server_token` 只在这里返回一次；控制面只存哈希（`servers.server_token_hash`）。重放同一个 enrollment token 返回 `409 already_used`。
+- `server_token` 只在 enroll 响应里出现；控制面只存哈希（`servers.server_token_hash`）。
+- **重放语义（2026-11-22 定）**：enrollment token 已消费、仍在 `enrollment_expires_at` 内、服务器未销毁时，再次 enroll 会换发新的 `server_token`（旧 token 立即失效）、按旧凭据重封（同一 host / 端口 / 密码，不重新生成），并写 `agent.re_enrolled` 审计；同一服务器 5 分钟内最多 3 次，超出 `429 rate_limited`。这是 agent 丢 `state.json` 或首次 enroll 响应丢失后的恢复路径。
+- 已销毁返回 `409 destroyed`；已过期返回 `409 expired`（并销毁服务器）。这两个是终态，agent 应写明确日志并长退避，不要短时间内反复重试。
 - 密码 32 位十六进制（16 字节随机），端口取 `servers.node_port`，host 取 `servers.ip`；三者封存进 `credentials`，也是 `desired-state` 的真源。
 - `node_id` 在 enroll 时由控制面生成并写回 `servers.node_id`；`report active` 只沿用它，不再另外生成。
 
@@ -98,7 +100,7 @@ agent 随后：
   - **幂等**：机器已经是 `active` / `healthy` 时再报 `active`，直接返回 `200 {ok:true, already_active:true}`，不重复激活、不销毁；并发两次也只有一个真正激活，另一个按成功处理。
   - 机器还在进度阶段（booting/installing/verifying）而 `port` 与 `servers.node_port` 不一致：按 `port_mismatch` 销毁（配置真漂移了）。
   - 机器**已经 active** 而端口不一致：只可能是轮换后的旧报文竞态，返回 `200 {ok:true, ignored:true}`，**不销毁**。
-- `failed` 立即销毁并按当前阶段写失败码（`install_failed` / `verify_failed` / `service_inactive`）。`error` 原文截断 300 字后写入 `servers.last_error` 与 `agent.report.failed` 审计。
+- `failed` **只在装机阶段销毁**：当前状态为 `booting` / `installing` / `verifying` 时按阶段写失败码（`install_failed` / `verify_failed` / `service_inactive`）并销毁；已经是 `active` / `healthy` 的机器只写 `last_error` 与 `agent.report.failed` 审计，返回 `200 {ok:true, recorded:true}`，**不销毁**——否则一次期望状态配错（版本 / URL / sha）就会把在跑的付费机器批量销毁。`error` 原文截断 300 字后写入 `servers.last_error`。
 - `rotated` 是**轮换结果的同步**，不是失败路径：
   - 请求：`{ stage: "rotated", port, password, cert_fingerprint? }`；
   - 校验：`port` 必须在 `30000-30999` 内、`password` 长度 ≥ 16、端口没有被同账户其它未销毁服务器占用（`servers(account_id, node_port)` 唯一索引兜底）；
@@ -227,7 +229,8 @@ MCP 远端传输用 Streamable HTTP。节点没有域名、也拿不到 Let's En
 
 - **已定**：GitHub Release，tag `agent-v<版本>`，资产 `veyl-agent-linux-{amd64,arm64}` + `SHA256SUMS`，发布物是裸二进制（`.github/workflows/agent-release.yml`）。
 - **arm64 待补配置**：控制面目前只有一组 `AGENT_DOWNLOAD_URL` / `AGENT_SHA256`，先按 amd64；要支持 arm64 需要按架构再加一组配置。
-- `server_token` 的存储与轮换触发条件（何时重签）。
+- **已定（2026-11-22）**：`server_token` 在每次 enroll（含 TTL 内的重放换发）时重签，旧值立即失效；节点被销毁即作废。
+- **已定（2026-11-22）**：`agent/` 自 `4173443` 起经过状态机、安全、可观测性三次评审，必修与应修项已按 §5 / §7 落地；遗留项（并发修复串行化、控制端口限流、arm64 第二组配置）见 `docs/status.md`。
 - 期望状态里是否携带多套端口候选（本期不需要，端口由 agent 轮换时自己选）。
 
 ## 13. 验收
