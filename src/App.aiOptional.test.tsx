@@ -556,9 +556,9 @@ async function failConnection() {
 function useOwnedUnreachable(): () => void {
   vi.mocked(bridge.configDetail).mockResolvedValue({
     ...DETAIL,
-    nodes: [{ ...DETAIL.nodes[0], source: "owned" }],
+    // 非自有节点：失败行保留「问 AI」，不进入诊断面板。
+    nodes: [{ ...DETAIL.nodes[0], source: "seed" }],
   });
-  // 行内动作要能把节点 id 映射到 server id，否则按设计不渲染。
   vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
     logged_in: true,
     email: "me@example.com",
@@ -730,7 +730,7 @@ describe("AI 入口双向闸门", () => {
     ).toBeNull();
   }, 15_000);
 
-  it("测不通问 AI：未配置弹告警、不发消息", async () => {
+  it("非自有节点测不通问 AI：未配置弹告警、不发消息", async () => {
     seedSkipped();
     const emitUnreachable = useOwnedUnreachable();
     render(<App />);
@@ -753,7 +753,7 @@ describe("AI 入口双向闸门", () => {
     expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
   }, 15_000);
 
-  it("测不通问 AI：已配置发出节点消息", async () => {
+  it("非自有节点测不通问 AI：已配置发出节点消息", async () => {
     seedSkipped();
     aiConfigured = true;
     const emitUnreachable = useOwnedUnreachable();

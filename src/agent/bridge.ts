@@ -141,6 +141,12 @@ export interface NodeSwitchResult {
 /** `node_probe` 的单节点结果；线格式与 commands.md §4.4 完全一致。 */
 export type NodeProbeResult = NodeProbeData;
 
+/** Host `node_probe_reachability`：ICMP 与 TCP 控制端口一次返回（commands.md 2.56.0）。 */
+export interface NodeReachabilityReport {
+  icmp: { ok: boolean; rtt_ms: number | null; loss: number };
+  tcp: { ok: boolean; ms: number | null; error: string | null };
+}
+
 /** 批量测速的运行态；`run` 非空才代表有批次在跑，缓存内容不代表已测完。 */
 export interface NodeProbeRun {
   runId: string;
@@ -936,6 +942,11 @@ export interface AgentBridge {
   nodeSwitch(configId: string, nodeId: string): Promise<NodeSwitchResult>;
   /** 测试单个节点连通性。不可达是正常结果，不抛错。 */
   nodeProbe(nodeId: string): Promise<NodeProbeResult>;
+  /** 节点诊断第一步：一次调用同时做 ICMP 与 TCP 控制端口；只回结果，不做判定。 */
+  nodeProbeReachability(
+    serverIp: string,
+    controlPort: number,
+  ): Promise<NodeReachabilityReport>;
   /** 批量测速：全局同时只允许一个批次；关闭面板不取消。nodeIds 省略 = 全部。 */
   nodeProbeAll(configId?: string, nodeIds?: string[]): Promise<NodeProbeAllData>;
   /** 取消批次；runId 不存在或已结束时 cancelled=false，不报错。 */

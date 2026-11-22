@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { DESTROY_RETRY_MS, MyServerDetail } from "./MyServerDetail";
@@ -1029,385 +1029,71 @@ describe("IP 复制在途时切服务器", () => {
   });
 });
 
-describe("智能修复", () => {
-  function renderRepair(
-    rotate: ((serverId: string) => Promise<unknown>) | undefined,
+describe("智能分析入口", () => {
+  function renderAnalyze(
+    onDiagnose = vi.fn(),
     over: Partial<MyServer> = {},
-    onChanged = vi.fn(),
-    onRotated = vi.fn(),
+    options: { readOnly?: boolean; available?: boolean } = {},
   ) {
-    const credentials = vi.fn(async () => ({
-      server_id: "srv_1",
-      node_id: "nd_control_1",
-      name: "东京 01",
-      host: "45.76.20.100",
-      port: 8388,
-      method: "aes-256-gcm",
-    }));
-    const bridge = {
-      myServerDestroy: vi.fn(),
-      nodeRotateCredentials: rotate,
-      myServerCredentials: credentials,
-    } as unknown as AgentBridge;
-    render(
-      <MyServerDetail
-        bridge={bridge}
-        server={server(over)}
-        regionLabel="新加坡 1"
-        onCreateAnother={vi.fn()}
-        onChanged={onChanged}
-        onRebuilt={() => {}}
-        onGone={vi.fn()}
-        onForget={async () => {}}
-        onRotated={onRotated}
-        repairAvailable
-      />,
-    );
-    return { onChanged, onRotated, bridge, credentials };
-  }
-
-  const ok = () => Promise.resolve({ ok: true as const, port: 8443, refreshed: true });
-
-  it("只在服务器可用时出现，安装中 / 出错 / 已销毁都没有", () => {
-    renderRepair(ok);
-    expect(screen.getByRole("button", { name: "智能修复" })).toBeTruthy();
-    cleanup();
-
-    renderRepair(ok, { state: "active" });
-    expect(screen.getByRole("button", { name: "智能修复" })).toBeTruthy();
-    cleanup();
-
-    for (const state of ["installing", "error", "destroyed"] as MyServerState[]) {
-      renderRepair(ok, { state });
-      expect(screen.queryByRole("button", { name: "智能修复" })).toBeNull();
-      cleanup();
-    }
-  });
-
-  it("点击先确认：说明后果，默认焦点在取消，Esc 收起", async () => {
-    renderRepair(ok);
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    const dialog = screen.getByRole("alertdialog");
-    expect(dialog.textContent).toContain("节点会重启一次");
-    const cancel = within(dialog).getByRole("button", { name: "取消" });
-    await waitFor(() => expect(document.activeElement).toBe(cancel));
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-  });
-
-  it("确认后调命令：成功显示端口并重读数据", async () => {
-    const rotate = vi.fn(ok);
-    const { onChanged, onRotated } = renderRepair(rotate);
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "智能修复",
-      }),
-    );
-
-    await waitFor(() => expect(rotate).toHaveBeenCalledWith("srv_1"));
-    expect(await screen.findByText("已修复，端口 8443")).toBeTruthy();
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    expect(onRotated).toHaveBeenCalledTimes(1);
-  });
-
-  it("进行中：按钮禁用并给一行进行中文案", async () => {
-    let release: (value: unknown) => void = () => {};
-    const pending = new Promise((resolve) => {
-      release = resolve;
-    });
-    renderRepair(() => pending);
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "智能修复",
-      }),
-    );
-
-    expect(await screen.findByText("正在修复…")).toBeTruthy();
-    expect(
-      (screen.getByRole("button", { name: "智能修复" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-
-    await act(async () => {
-      release({ ok: true, port: 9000, refreshed: true });
-    });
-    expect(await screen.findByText("已修复，端口 9000")).toBeTruthy();
-  });
-
-  it("失败按原因给不同文案", async () => {
-    const cases: Array<[string, RegExp]> = [
-      ["agent_token_unavailable", /控制面暂时不可达，智能修复暂不可用/],
-      ["agent_token_rejected", /无法与这台服务器建立可信连接/],
-      ["agent_tls_untrusted", /无法与这台服务器建立可信连接/],
-      ["agent_timeout", /服务器暂时连不上/],
-      ["agent_unreachable", /服务器暂时连不上/],
-      ["agent_tool_failed", /节点 agent 没完成修复/],
-      ["agent_bad_response", /节点 agent 没完成修复/],
-    ];
-    for (const [reason, pattern] of cases) {
-      renderRepair(() => Promise.reject({ code: "INTERNAL", message: reason }));
-      fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-      fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "智能修复",
-      }),
-    );
-      expect(await screen.findByText(pattern)).toBeTruthy();
-      cleanup();
-    }
-  });
-
-  it("Host 还没接命令：明说不支持，不静默失败", async () => {
-    renderRepair(undefined);
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "智能修复",
-      }),
-    );
-
-    expect(await screen.findByText("这个版本还不支持智能修复。")).toBeTruthy();
-  });
-});
-
-describe("详情页「先更新配置」", () => {
-  it("取回凭据并刷新数据，关闭弹窗，不调用修复", async () => {
-    const credentials = vi.fn(async () => ({
-      server_id: "srv_1",
-      node_id: "nd_control_1",
-      name: "东京 01",
-      host: "45.76.20.100",
-      port: 8388,
-      method: "aes-256-gcm",
-    }));
-    const rotate = vi.fn();
-    const onChanged = vi.fn();
-    const onRotated = vi.fn();
-    render(
-      <MyServerDetail
-        bridge={
-          {
-            myServerCredentials: credentials,
-            nodeRotateCredentials: rotate,
-          } as unknown as AgentBridge
-        }
-        server={server()}
-        regionLabel="新加坡 1"
-        onCreateAnother={vi.fn()}
-        onChanged={onChanged}
-        onRebuilt={() => {}}
-        onGone={vi.fn()}
-        onForget={async () => {}}
-        onRotated={onRotated}
-        repairAvailable
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "先更新配置",
-      }),
-    );
-
-    await waitFor(() =>
-      expect(credentials).toHaveBeenCalledWith("srv_1"),
-    );
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    expect(onRotated).toHaveBeenCalledTimes(1);
-    expect(rotate).not.toHaveBeenCalled();
-  });
-
-  it("隧道在跑：先取凭据，再 stop→start，然后重读数据", async () => {
-    const order: string[] = [];
-    const credentials = vi.fn(async () => {
-      order.push("credentials");
-      return {
-        server_id: "srv_1",
-        node_id: "nd_control_1",
-        name: "东京 01",
-        host: "45.76.20.100",
-        port: 8388,
-        method: "aes-256-gcm",
-      };
-    });
-    const onReconnectAndTest = vi.fn(async () => {
-      order.push("reconnect");
-      return true;
-    });
-    const onChanged = vi.fn();
-    render(
-      <MyServerDetail
-        bridge={
-          {
-            myServerCredentials: credentials,
-            nodeRotateCredentials: vi.fn(),
-          } as unknown as AgentBridge
-        }
-        server={server()}
-        regionLabel="新加坡 1"
-        onCreateAnother={vi.fn()}
-        onChanged={onChanged}
-        onRebuilt={() => {}}
-        onGone={vi.fn()}
-        onForget={async () => {}}
-        tunnelConnected
-        runningNodeId="local_node_1"
-        repairAvailable
-        onReconnectAndTest={onReconnectAndTest}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "先更新配置",
-      }),
-    );
-
-    await waitFor(() =>
-      expect(onReconnectAndTest).toHaveBeenCalledTimes(1),
-    );
-    expect(order).toEqual(["credentials", "reconnect"]);
-    expect(onChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it("运行的是别的节点：只取凭据，不重启", async () => {
-    const onReconnectAndTest = vi.fn(async () => true);
-    const credentials = vi.fn(async () => ({
-      server_id: "srv_1",
-      node_id: "nd_control_1",
-      name: "东京 01",
-      host: "45.76.20.100",
-      port: 8388,
-      method: "aes-256-gcm",
-    }));
-    const onChanged = vi.fn();
-    render(
-      <MyServerDetail
-        bridge={
-          {
-            myServerCredentials: credentials,
-            nodeRotateCredentials: vi.fn(),
-          } as unknown as AgentBridge
-        }
-        server={server()}
-        regionLabel="新加坡 1"
-        onCreateAnother={vi.fn()}
-        onChanged={onChanged}
-        onRebuilt={() => {}}
-        onGone={vi.fn()}
-        onForget={async () => {}}
-        tunnelConnected
-        runningNodeId="local_node_other"
-        repairAvailable
-        onReconnectAndTest={onReconnectAndTest}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "先更新配置",
-      }),
-    );
-
-    await waitFor(() => expect(credentials).toHaveBeenCalledTimes(1));
-    expect(onReconnectAndTest).not.toHaveBeenCalled();
-    expect(onChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it("隧道没在跑：只取凭据，不重启", async () => {
-    const onReconnectAndTest = vi.fn(async () => true);
-    const credentials = vi.fn(async () => ({
-      server_id: "srv_1",
-      node_id: "nd_control_1",
-      name: "东京 01",
-      host: "45.76.20.100",
-      port: 8388,
-      method: "aes-256-gcm",
-    }));
-    render(
-      <MyServerDetail
-        bridge={
-          {
-            myServerCredentials: credentials,
-            nodeRotateCredentials: vi.fn(),
-          } as unknown as AgentBridge
-        }
-        server={server()}
-        regionLabel="新加坡 1"
-        onCreateAnother={vi.fn()}
-        onChanged={vi.fn()}
-        onRebuilt={() => {}}
-        onGone={vi.fn()}
-        onForget={async () => {}}
-        runningNodeId="local_node_1"
-        repairAvailable
-        onReconnectAndTest={onReconnectAndTest}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "智能修复" }));
-    fireEvent.click(
-      within(screen.getByRole("alertdialog")).getByRole("button", {
-        name: "先更新配置",
-      }),
-    );
-
-    await waitFor(() => expect(credentials).toHaveBeenCalledTimes(1));
-    expect(onReconnectAndTest).not.toHaveBeenCalled();
-  });
-});
-
-describe("智能修复入口的条件与样式", () => {
-  it("探测不可达时才出现，且是普通描边而不是危险按钮", () => {
     render(
       <MyServerDetail
         bridge={{} as unknown as AgentBridge}
-        server={server()}
+        server={server(over)}
         regionLabel="新加坡 1"
+        readOnly={options.readOnly}
         onCreateAnother={vi.fn()}
         onChanged={vi.fn()}
         onRebuilt={() => {}}
         onGone={vi.fn()}
         onForget={async () => {}}
-        repairAvailable
+        repairAvailable={options.available ?? true}
+        onDiagnose={onDiagnose}
       />,
     );
+    return onDiagnose;
+  }
 
-    const repair = screen.getByRole("button", { name: "智能修复" });
-    expect(repair.classList.contains("btn--ghost")).toBe(true);
-    expect(repair.classList.contains("btn--danger-ghost")).toBe(false);
+  it("探测不可达时出现，点击把 server id 与名字交给 App", () => {
+    const onDiagnose = renderAnalyze();
+
+    const entry = screen.getByRole("button", { name: "智能分析" });
+    expect(entry.classList.contains("btn--ghost")).toBe(true);
+    expect(entry.classList.contains("btn--danger-ghost")).toBe(false);
+
+    fireEvent.click(entry);
+    expect(onDiagnose).toHaveBeenCalledWith({
+      serverId: "srv_1",
+      nodeName: "新加坡 1 · DigitalOcean",
+    });
+  });
+
+  it("探测可达或拿不到状态时不出现", () => {
+    renderAnalyze(vi.fn(), {}, { available: false });
+    expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+  });
+
+  it("安装中 / 出错 / 已销毁都不出现", () => {
+    for (const state of ["installing", "error", "destroyed"] as MyServerState[]) {
+      renderAnalyze(vi.fn(), { state });
+      expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("身份不可用（只读）时不给入口", () => {
+    renderAnalyze(vi.fn(), {}, { readOnly: true });
+    expect(screen.queryByRole("button", { name: "智能分析" })).toBeNull();
+  });
+
+  it("智能分析是普通描边，销毁仍是危险按钮", () => {
+    renderAnalyze();
+
+    const entry = screen.getByRole("button", { name: "智能分析" });
+    expect(entry.classList.contains("btn--ghost")).toBe(true);
+    expect(entry.classList.contains("btn--danger-ghost")).toBe(false);
+
     const destroy = screen.getByRole("button", { name: "销毁" });
     expect(destroy.classList.contains("btn--danger-ghost")).toBe(true);
     expect(destroy.classList.contains("btn--ghost")).toBe(false);
-  });
-
-  it("探测可达 / untested / 拿不到状态时不出现", () => {
-    for (const available of [false]) {
-      render(
-        <MyServerDetail
-          bridge={{} as unknown as AgentBridge}
-          server={server()}
-          regionLabel="新加坡 1"
-          onCreateAnother={vi.fn()}
-          onChanged={vi.fn()}
-          onRebuilt={() => {}}
-          onGone={vi.fn()}
-          onForget={async () => {}}
-          repairAvailable={available}
-        />,
-      );
-      expect(screen.queryByRole("button", { name: "智能修复" })).toBeNull();
-      cleanup();
-    }
   });
 });

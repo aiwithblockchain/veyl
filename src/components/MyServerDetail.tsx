@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
-import { NodeRepairDialog } from "./NodeRepairDialog";
 import { IconPencil } from "./icons";
 import {
   billingNoticeText,
@@ -15,11 +14,6 @@ import {
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
-import {
-  rotateFailureReason,
-  rotateNodeCredentials,
-} from "../myservers/rotateCredentials";
-import { updateConfigAndReconnect } from "../myservers/updateConfigAndReconnect";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
 import { errorText as describeError, failureText } from "../i18n/errorText";
@@ -46,16 +40,10 @@ interface Props {
   onForget: (serverId: string, nodeId: string) => Promise<void>;
   /** 改名成功：用返回的完整对象更新列表与详情，不二次拉取。 */
   onRenamed?: (server: MyServer) => void;
-  /** 智能修复成功：让调用方重读节点数据（服务器数据走 onChanged）。 */
-  onRotated?: () => void;
-  /** 隧道是否正在运行：运行中同步凭据后必须先 stop → start 再重测。 */
-  tunnelConnected?: boolean;
-  /** 正在运行的本地节点 id（nd_…）；只有它等于这台时才重启。 */
-  runningNodeId?: string | null;
-  /** 这台服务器的本地节点最近一次探测不可达：才显示智能修复。 */
+  /** 这台服务器的本地节点最近一次探测不可达：显示「智能分析」入口。 */
   repairAvailable?: boolean;
-  /** 先断开再连接（与连接页共用同一条链路）。 */
-  onReconnectAndTest?: () => Promise<boolean>;
+  /** 打开节点诊断面板；面板与命令依赖由 App 统一构造。 */
+  onDiagnose?: (target: { serverId: string; nodeName: string }) => void;
 }
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
@@ -83,11 +71,8 @@ export function MyServerDetail({
   onGone,
   onForget,
   onRenamed,
-  onRotated,
-  tunnelConnected = false,
-  runningNodeId = null,
   repairAvailable = false,
-  onReconnectAndTest,
+  onDiagnose,
 }: Props) {
   const tr = useT();
   const [confirming, setConfirming] = useState(false);
@@ -103,10 +88,6 @@ export function MyServerDetail({
   const focusRenameAfterSave = useRef(false);
   const [ipCopy, setIpCopy] = useState<"idle" | "copied" | "failed">("idle");
   const ipCopyTimer = useRef(0);
-  const [repairing, setRepairing] = useState(false);
-  const [repairConfirming, setRepairConfirming] = useState(false);
-  const [repairResult, setRepairResult] = useState<{ port: number } | null>(null);
-  const [repairError, setRepairError] = useState<string | null>(null);
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
 
@@ -227,74 +208,6 @@ export function MyServerDetail({
     }
   };
 
-  const repairErrorText = (err: unknown): string => {
-    if (toBridgeError(err).code === "UNSUPPORTED") {
-      return tr("detail.repair.unsupported");
-    }
-    switch (rotateFailureReason(err)) {
-      case "agent_token_unavailable":
-        return tr("detail.repair.tokenUnavailable");
-      case "agent_tls_untrusted":
-      case "agent_token_rejected":
-        return tr("detail.repair.auth");
-      case "agent_timeout":
-      case "agent_unreachable":
-        return tr("detail.repair.unreachable");
-      case "agent_tool_failed":
-      case "agent_bad_response":
-        return tr("detail.repair.agentFailed");
-      default:
-        return tr("detail.repair.failed");
-    }
-  };
-
-  /** 智能修复：换端口会重启节点，必须先过确认；失败按 reason 给不同出路。 */
-  const repair = async () => {
-    if (repairing) return;
-    setRepairConfirming(false);
-    setRepairing(true);
-    setRepairError(null);
-    setRepairResult(null);
-    try {
-      const result = await rotateNodeCredentials(bridge, server.server_id);
-      setRepairResult({ port: result.port });
-      // 服务器数据走 onChanged；节点数据由调用方的 onRotated 重读。
-      onChanged();
-      onRotated?.();
-    } catch (err) {
-      setRepairError(repairErrorText(err));
-    } finally {
-      setRepairing(false);
-    }
-  };
-
-  /** 确认弹窗的「先更新配置」：取回最新凭据并重读数据，不换端口。 */
-  const syncCredentials = async () => {
-    if (repairing) return;
-    setRepairConfirming(false);
-    setRepairing(true);
-    setRepairError(null);
-    setRepairResult(null);
-    try {
-      // 与连接页共用同一套：取凭据 →（跑的就是这台时）stop → start → 重读数据。
-      await updateConfigAndReconnect({
-        fetchPort: async () =>
-          (await bridge.myServerCredentials(server.server_id)).port,
-        tunnelRunning: tunnelConnected,
-        runningNodeId,
-        nodeId: server.local_node_id,
-        reconnect: () =>
-          onReconnectAndTest ? onReconnectAndTest() : Promise.resolve(false),
-      });
-      onChanged();
-      onRotated?.();
-    } catch (err) {
-      setRepairError(errorText(err));
-    } finally {
-      setRepairing(false);
-    }
-  };
-
   useEffect(() => {
     setBusy(false);
     setConfirming(false);
@@ -302,10 +215,6 @@ export function MyServerDetail({
     setRenaming(false);
     setRenameError(null);
     setNameDraft("");
-    setRepairing(false);
-    setRepairConfirming(false);
-    setRepairResult(null);
-    setRepairError(null);
   }, [server.server_id]);
 
   useEffect(() => {
@@ -581,38 +490,21 @@ export function MyServerDetail({
 
       <div className="myservers__footer">
         <div className="myservers__danger">
-          {ready && !readOnly && repairAvailable ? (
+          {ready && !readOnly && repairAvailable && onDiagnose ? (
             <div className="myservers__repair">
-              {repairConfirming ? null : (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  disabled={locked || repairing || confirming}
-                  aria-busy={repairing || undefined}
-                  onClick={() => {
-                    setConfirming(false);
-                    setRepairError(null);
-                    setRepairConfirming(true);
-                  }}
-                >
-                  {tr("detail.repair")}
-                </button>
-              )}
-              {repairing ? (
-                <p className="myservers__hint" role="status">
-                  {tr("detail.repair.working")}
-                </p>
-              ) : null}
-              {repairResult ? (
-                <p className="myservers__hint" role="status">
-                  {tr("detail.repair.done", { port: repairResult.port })}
-                </p>
-              ) : null}
-              {repairError ? (
-                <p className="myservers__error" role="alert">
-                  {repairError}
-                </p>
-              ) : null}
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={locked || confirming}
+                onClick={() =>
+                  onDiagnose({
+                    serverId: server.server_id,
+                    nodeName: server.name,
+                  })
+                }
+              >
+                {tr("diagnosis.entry")}
+              </button>
             </div>
           ) : null}
           {destroying && !destroyRetryAllowed ? (
@@ -649,9 +541,8 @@ export function MyServerDetail({
             <button
               type="button"
               className="btn btn--danger-ghost"
-              disabled={locked || repairing}
+              disabled={locked}
               onClick={() => {
-                setRepairConfirming(false);
                 setConfirming(true);
               }}
             >
@@ -670,14 +561,6 @@ export function MyServerDetail({
           </button>
         ) : null}
       </div>
-      {repairConfirming ? (
-        <NodeRepairDialog
-          nodeName={server.name}
-          onCancel={() => setRepairConfirming(false)}
-          onConfirm={() => void repair()}
-          onSync={() => void syncCredentials()}
-        />
-      ) : null}
     </div>
   );
 }

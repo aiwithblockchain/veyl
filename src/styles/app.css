@@ -6948,3 +6948,100 @@ details[open] > .settings-fold__summary::before {
     transition: none;
   }
 }
+
+/* ---------- 节点诊断面板（node-diagnosis-flow.md） ---------- */
+
+.diagnosis {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.diagnosis__intro {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.diagnosis__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnosis__step {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+}
+
+.diagnosis__status {
+  width: 16px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.diagnosis__status--passed {
+  color: var(--green);
+}
+
+.diagnosis__status--failed {
+  color: var(--red);
+}
+
+.diagnosis__status--running {
+  color: var(--ink-3);
+}
+
+.diagnosis__step-title {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.diagnosis__conclusion {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.diagnosis__confirm {
+  margin: 12px 0 0 24px;
+  padding: 12px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+}
+
+.diagnosis__confirm-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.diagnosis__confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.diagnosis__main {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.diagnosis__main--idle {
+  margin-top: 20px;
+}

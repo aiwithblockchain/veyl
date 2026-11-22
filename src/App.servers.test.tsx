@@ -1097,3 +1097,90 @@ describe("新建节点：导航与 Esc", () => {
     });
   }, 15_000);
 });
+
+describe("节点诊断入口", () => {
+  it("自有节点测不通：详情打开面板，面板用这台的事实发起探测", async () => {
+    prepare([SERVER]);
+
+    const ownedConfig: ConfigDetail = {
+      config_id: CONFIG_ID,
+      name: SUMMARY.name,
+      connect_mode: "tun",
+      routing_mode: "proxy_all",
+      node_count: 2,
+      listen_port: null,
+      is_active: true,
+      current_node_id: "node_1",
+      created_at: 0,
+      updated_at: 0,
+      last_used_at: null,
+      nodes: [
+        {
+          node_id: "node_1",
+          name: "东京 01",
+          server: "203.0.113.1",
+          port: 8388,
+          method: "aes-128-gcm",
+          protocol: "shadowsocks",
+          source: "seed",
+          created_at: 0,
+        },
+        {
+          node_id: "local_node_srv_1",
+          name: "新加坡 1 01",
+          server: "45.76.20.100",
+          port: 8388,
+          method: "aes-256-gcm",
+          protocol: "shadowsocks",
+          source: "owned",
+          created_at: 0,
+        },
+      ],
+      dns: { mode: "auto", local: [], remote: [] },
+      tun_excludes: [],
+      layout: null,
+      layout_revision: null,
+    };
+    vi.mocked(bridge.configDetail).mockResolvedValue(ownedConfig);
+    vi.spyOn(bridge, "nodeProbeSnapshot").mockResolvedValue({
+      configId: CONFIG_ID,
+      results: [
+        {
+          node_id: "local_node_srv_1",
+          status: "unreachable",
+          reachable: false,
+          latency_ms: null,
+          probe_method: "clash_delay",
+          checked_at: Date.now(),
+          error: { code: "probe_failed", message: "" },
+        },
+      ],
+      run: null,
+    });
+    const reachability = vi
+      .spyOn(bridge, "nodeProbeReachability")
+      .mockResolvedValue({
+        icmp: { ok: true, rtt_ms: 32, loss: 0 },
+        tcp: { ok: true, ms: 12, error: null },
+      });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "连接节点" });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "智能分析" }),
+    );
+    expect(
+      await screen.findByRole("dialog", {
+        name: "诊断：新加坡 1 · DigitalOcean",
+      }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
+    await waitFor(() =>
+      expect(reachability).toHaveBeenCalledWith("45.76.20.100", 32100),
+    );
+    expect(await screen.findByText(/ICMP 通/)).toBeTruthy();
+  });
+});

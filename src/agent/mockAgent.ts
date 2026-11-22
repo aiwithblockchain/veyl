@@ -19,6 +19,7 @@ import type {
   NodeProbeAllData,
   NodeProbeResult,
   NodeProbeSnapshotData,
+  NodeReachabilityReport,
   NodeSwitchResult,
   ProxyPortSaveResult,
   ProxyPortSettings,
@@ -2445,6 +2446,17 @@ export class MockAgentBridge implements AgentBridge {
     };
     this.probeCache.set(nodeId, result);
     return result;
+  }
+
+  async nodeProbeReachability(
+    serverIp: string,
+    controlPort: number,
+  ): Promise<NodeReachabilityReport> {
+    const ok = serverIp.length > 0 && controlPort > 0;
+    return {
+      icmp: { ok, rtt_ms: ok ? 32 : null, loss: ok ? 0 : 100 },
+      tcp: { ok, ms: ok ? 12 : null, error: ok ? null : "refused" },
+    };
   }
 
   /** 浏览器通道没有真实配置库：由 useVpnSession 在切换配置时登记节点。 */

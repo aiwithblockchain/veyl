@@ -525,27 +525,8 @@ export const zh = {
   "console.node.pendingNote": "重新连接后可用",
   "console.node.askAi": "问 AI",
   "console.node.probeFailedAria": "这次没测通",
-  "connection.repair.done": "已修复",
-  "connection.repair.probing": "已修复，端口 {port}，正在重新测速…",
-  "connection.repair.ariaRepair": "对{name}执行智能修复",
   "connection.repair.ariaAsk": "就{name}测不通咨询 AI",
-  "connection.repair.goServers": "去我的服务器",
-  "connection.repair.sync": "先更新配置",
-  "connection.repair.syncHint": "这台节点在别的设备上用过？",
-  "connection.repair.syncing": "正在更新配置…",
-  "connection.repair.changed": "配置已变更，请重试",
   "console.staleConfig": "配置已变更，请重新连接",
-  "connection.repair.restart": "重新连接并测试",
-  "connection.repair.restarting": "正在重新连接…",
-  "connection.repair.recovered": "已恢复",
-  "connection.repair.updated": "配置已更新，连接已恢复",
-  "connection.repair.title": "智能修复这台节点？",
-  "connection.repair.body":
-    "节点会重启一次，端口和密码都会变。正在用它的设备会短暂断开，其它设备需要更新配置后才能继续用。",
-  "connection.repair.auth": "无法与这台服务器建立可信连接，智能修复暂不可用。",
-  "connection.repair.agentFailed": "服务器上的节点 agent 没完成修复。",
-  "connection.repair.aiNote":
-    "已对「{name}」执行智能修复，已重新测速：{latency}。",
   "console.aria.main": "连接",
   "console.aria.nodes": "节点",
   "console.title.nodes": "节点",
@@ -935,21 +916,6 @@ export const zh = {
   "detail.retryDestroy": "重试销毁",
   "detail.destroy": "销毁",
   "detail.repair": "智能修复",
-  "detail.repair.confirmBody":
-    "智能修复会重启节点并更换端口；节点会短暂断线，当前连接可能中断。",
-  "detail.repair.confirm": "确认修复",
-  "detail.repair.working": "正在修复…",
-  "detail.repair.done": "已修复，端口 {port}",
-  "detail.repair.unsupported": "这个版本还不支持智能修复。",
-  "detail.repair.tokenUnavailable":
-    "控制面暂时不可达，智能修复暂不可用。稍后再试。",
-  "detail.repair.auth":
-    "无法与这台服务器建立可信连接，智能修复暂不可用。可以销毁重建。",
-  "detail.repair.unreachable":
-    "服务器暂时连不上，智能修复没完成。稍后再试。",
-  "detail.repair.agentFailed":
-    "服务器上的节点 agent 没完成修复。稍后再试；还是不行就销毁重建。",
-  "detail.repair.failed": "智能修复没完成。稍后再试。",
 
   // 新建节点向导
   "wizard.back": "返回",
@@ -1522,6 +1488,49 @@ export const zh = {
   /* 批次 4 补词：节点凭据。 */
   "error.reason.credentialExpired": "节点凭据已过期，重新同步后再试。",
   "error.reason.credentialInvalid": "节点凭据校验没通过，重新同步后再试。",
+
+  /* 节点诊断面板（node-diagnosis-flow.md）。 */
+  "diagnosis.title": "诊断：{name}",
+  "diagnosis.entry": "智能分析",
+  "diagnosis.entryAria": "对{name}进行智能分析",
+  "diagnosis.intro": "逐步确认问题出在哪；每一步都要你点按钮。",
+  "diagnosis.action.start": "开始分析",
+  "diagnosis.action.updateConfig": "更新配置",
+  "diagnosis.action.resetPort": "重置端口与密码",
+  "diagnosis.action.askAi": "去问 AI",
+  "diagnosis.action.goServers": "去销毁并重建",
+  "diagnosis.step.connectivity": "连通性",
+  "diagnosis.step.config": "更新配置",
+  "diagnosis.step.rotate": "重置端口与密码",
+  "diagnosis.step.ai": "交给 AI",
+  "diagnosis.status.running": "进行中",
+  "diagnosis.status.passed": "通过",
+  "diagnosis.status.failed": "失败",
+  "diagnosis.connectivity.pending": "正在检查连通性…",
+  "diagnosis.connectivity.icmpOk": "ICMP 通",
+  "diagnosis.connectivity.tcpOk": "ICMP 未通，TCP 连通",
+  "diagnosis.connectivity.unreachable": "这台机器整机不可达",
+  "diagnosis.connectivity.serviceDown": "机器在线，控制服务不可用",
+  "diagnosis.connectivity.localNetwork": "本机网络可能不通",
+  "diagnosis.connectivity.probeError": "探测没能执行（{reason}）",
+  "diagnosis.connectivity.probeErrorNoReason": "探测没能执行",
+  "diagnosis.config.pending": "正在更新配置…",
+  "diagnosis.config.controlPlane": "控制面暂时不可达",
+  "diagnosis.config.recovered": "配置已更新，连接已恢复",
+  "diagnosis.config.recoveredNoChange": "配置没有变化，连接已恢复",
+  "diagnosis.config.stillDown": "配置已更新，但仍然不通",
+  "diagnosis.config.stillDownNoChange": "配置没有变化，仍然不通",
+  "diagnosis.rotate.pending": "正在重置端口与密码…",
+  "diagnosis.rotate.recovered": "端口与密码已重置，连接已恢复",
+  "diagnosis.rotate.reconnectFailed": "端口与密码已重置，但重连后仍不通",
+  "diagnosis.rotate.failed": "重置失败（{reason}）",
+  "diagnosis.rotate.failedNoReason": "重置失败",
+  "diagnosis.rotate.confirm":
+    "会断开当前连接，端口和密码都会变；其它设备需要更新配置后才能继续用。",
+  "diagnosis.rotate.confirmAction": "确认重置",
+  "diagnosis.ai.handed": "已把诊断信息交给 AI",
+  "assistant.prompt.nodeDiagnosis":
+    "这是节点诊断面板收集到的信息。先读产品说明与 FAQ，再判断原因，告诉我下一步该做什么；不要提密码、令牌或完整链接。\n{context}",
 };
 
 export type MessageKey = keyof typeof zh;

@@ -551,29 +551,8 @@ export const en: Record<MessageKey, string> = {
   "console.node.pendingNote": "Available after reconnecting",
   "console.node.askAi": "Ask AI",
   "console.node.probeFailedAria": "Didn't connect this time",
-  "connection.repair.done": "Repaired",
-  "connection.repair.probing": "Repaired. Port {port}; re-testing…",
-  "connection.repair.ariaRepair": "Run smart repair on {name}",
   "connection.repair.ariaAsk": "Ask AI about {name} being unreachable",
-  "connection.repair.goServers": "Open My servers",
-  "connection.repair.sync": "Update config first",
-  "connection.repair.syncHint": "Used this node on another device?",
-  "connection.repair.syncing": "Updating configuration…",
-  "connection.repair.changed": "Config changed; try again",
   "console.staleConfig": "Config changed; reconnect to apply",
-  "connection.repair.restart": "Reconnect & test",
-  "connection.repair.restarting": "Reconnecting…",
-  "connection.repair.recovered": "Restored",
-  "connection.repair.updated": "Configuration updated; connection restored",
-  "connection.repair.title": "Repair this node?",
-  "connection.repair.body":
-    "The node restarts once; its port and password will change. Devices currently using it disconnect briefly, and other devices need to update their config before they can keep using it.",
-  "connection.repair.auth":
-    "Couldn't establish a trusted connection to this server. Smart repair isn't available.",
-  "connection.repair.agentFailed":
-    "The node agent couldn't finish the repair.",
-  "connection.repair.aiNote":
-    "Ran smart repair on \"{name}\" and re-tested: {latency}.",
   "console.aria.main": "Connection",
   "console.aria.nodes": "Nodes",
   "console.title.nodes": "Nodes",
@@ -990,21 +969,6 @@ export const en: Record<MessageKey, string> = {
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
   "detail.repair": "Smart repair",
-  "detail.repair.confirmBody":
-    "Smart repair restarts the node and changes its port; the node drops briefly and the current connection may be interrupted.",
-  "detail.repair.confirm": "Repair now",
-  "detail.repair.working": "Repairing…",
-  "detail.repair.done": "Repaired. Port {port}",
-  "detail.repair.unsupported": "This version doesn't support smart repair yet.",
-  "detail.repair.tokenUnavailable":
-    "The control plane is unreachable right now, so smart repair isn't available. Try again later.",
-  "detail.repair.auth":
-    "Couldn't establish a trusted connection to this server. Smart repair isn't available; rebuild this server instead.",
-  "detail.repair.unreachable":
-    "The server can't be reached right now, so smart repair didn't finish. Try again later.",
-  "detail.repair.agentFailed":
-    "The node agent couldn't finish the repair. Try again later, or rebuild this server.",
-  "detail.repair.failed": "Smart repair didn't finish. Try again later.",
 
   // New node wizard
   "wizard.back": "Back",
@@ -1590,4 +1554,48 @@ export const en: Record<MessageKey, string> = {
   /* Batch 4 addendum: node credentials. */
   "error.reason.credentialExpired": "The node credentials expired. Sync again and retry.",
   "error.reason.credentialInvalid": "The node credentials failed verification. Sync again and retry.",
+
+  /* Node diagnosis panel (node-diagnosis-flow.md). */
+  "diagnosis.title": "Diagnosis: {name}",
+  "diagnosis.entry": "Analyze",
+  "diagnosis.entryAria": "Analyze {name}",
+  "diagnosis.intro": "Work through the likely causes step by step; each step waits for your click.",
+  "diagnosis.action.start": "Start analysis",
+  "diagnosis.action.updateConfig": "Update config",
+  "diagnosis.action.resetPort": "Reset port and password",
+  "diagnosis.action.askAi": "Ask AI",
+  "diagnosis.action.goServers": "Destroy and rebuild",
+  "diagnosis.step.connectivity": "Connectivity",
+  "diagnosis.step.config": "Update config",
+  "diagnosis.step.rotate": "Reset port and password",
+  "diagnosis.step.ai": "Hand to AI",
+  "diagnosis.status.running": "In progress",
+  "diagnosis.status.passed": "Passed",
+  "diagnosis.status.failed": "Failed",
+  "diagnosis.connectivity.pending": "Checking connectivity…",
+  "diagnosis.connectivity.icmpOk": "ICMP reachable",
+  "diagnosis.connectivity.tcpOk": "ICMP blocked, TCP reachable",
+  "diagnosis.connectivity.unreachable": "The whole machine is unreachable",
+  "diagnosis.connectivity.serviceDown": "Machine is online, but the control service is unavailable",
+  "diagnosis.connectivity.localNetwork": "Your local network may be down",
+  "diagnosis.connectivity.probeError": "The probe couldn't run ({reason})",
+  "diagnosis.connectivity.probeErrorNoReason": "The probe couldn't run",
+  "diagnosis.config.pending": "Updating config…",
+  "diagnosis.config.controlPlane": "Control plane is temporarily unreachable",
+  "diagnosis.config.recovered": "Config updated; connection restored",
+  "diagnosis.config.recoveredNoChange": "Config unchanged; connection restored",
+  "diagnosis.config.stillDown": "Config updated, but still unreachable",
+  "diagnosis.config.stillDownNoChange": "Config unchanged and still unreachable",
+  "diagnosis.rotate.pending": "Resetting port and password…",
+  "diagnosis.rotate.recovered": "Port and password reset; connection restored",
+  "diagnosis.rotate.reconnectFailed":
+    "Port and password reset, but still unreachable after reconnecting",
+  "diagnosis.rotate.failed": "Reset failed ({reason})",
+  "diagnosis.rotate.failedNoReason": "Reset failed",
+  "diagnosis.rotate.confirm":
+    "This disconnects the current connection and changes the port and password; other devices must update their config before they can connect again.",
+  "diagnosis.rotate.confirmAction": "Reset anyway",
+  "diagnosis.ai.handed": "Diagnosis details handed to AI",
+  "assistant.prompt.nodeDiagnosis":
+    "Here is what the node diagnosis panel collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; never mention passwords, tokens, or full links.\n{context}",
 };

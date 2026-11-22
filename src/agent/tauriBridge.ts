@@ -61,6 +61,7 @@ import type {
   NodeProbeResult,
   NodeProbeRun,
   NodeProbeSnapshotData,
+  NodeReachabilityReport,
   NodeSwitchResult,
   PendingQuestion,
   ReportActionData,
@@ -1224,6 +1225,34 @@ export class TauriAgentBridge implements AgentBridge {
       );
     }
     return result;
+  }
+
+  async nodeProbeReachability(
+    serverIp: string,
+    controlPort: number,
+  ): Promise<NodeReachabilityReport> {
+    const raw = await call<{
+      icmp?: { ok?: unknown; rtt_ms?: unknown; loss?: unknown };
+      tcp?: { ok?: unknown; ms?: unknown; error?: unknown };
+    }>("node_probe_reachability", { serverIp, controlPort });
+    if (typeof raw?.icmp?.ok !== "boolean" || typeof raw?.tcp?.ok !== "boolean") {
+      throw new BridgeError(
+        "PROBE_RESULT_INVALID",
+        t("bridge.badProbeResult"),
+      );
+    }
+    return {
+      icmp: {
+        ok: raw.icmp.ok,
+        rtt_ms: typeof raw.icmp.rtt_ms === "number" ? raw.icmp.rtt_ms : null,
+        loss: typeof raw.icmp.loss === "number" ? raw.icmp.loss : 0,
+      },
+      tcp: {
+        ok: raw.tcp.ok,
+        ms: typeof raw.tcp.ms === "number" ? raw.tcp.ms : null,
+        error: typeof raw.tcp.error === "string" ? raw.tcp.error : null,
+      },
+    };
   }
 
   async nodeProbeAll(configId?: string, nodeIds?: string[]): Promise<NodeProbeAllData> {

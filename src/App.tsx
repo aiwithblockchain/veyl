@@ -30,6 +30,7 @@ import { AssistantOverlay } from "./components/AssistantOverlay";
 import { AssistantTab } from "./components/AssistantTab";
 import { ConnectionStage } from "./components/ConnectionStage";
 import { ConnectionOverlay } from "./components/ConnectionOverlay";
+import { DiagnosisPanel } from "./components/DiagnosisPanel";
 import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
@@ -43,9 +44,10 @@ import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
 import { collectDanglingNodeIds } from "./myservers/tombstones";
 import { useServerSync } from "./myservers/useServerSync";
 import { uiLog } from "./log/uiLog";
-import { rotateNodeCredentials } from "./myservers/rotateCredentials";
+import { rotateFailureReason, rotateNodeCredentials } from "./myservers/rotateCredentials";
 import { staleConfigNodeId } from "./myservers/staleConfig";
 import { repairAvailableFor } from "./myservers/repairAvailability";
+import type { DiagnosisDeps, DiagnosisFacts } from "./myservers/useNodeDiagnosis";
 import { Onboarding } from "./components/Onboarding";
 import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
@@ -63,7 +65,7 @@ import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession"
 import { createRuntimeAuthority } from "./config/runtimeAuthority";
 import { actionCardControls, readActionCards } from "./ui/actionCard";
 import { buildUiContext } from "./ui/controlIds";
-import { connectDiagAsk, serverFailureAsk } from "./ui/assistantPrompts";
+import { connectDiagAsk, nodeDiagnosisAsk, serverFailureAsk } from "./ui/assistantPrompts";
 import { mobileExportPrompt } from "./ai/advancedPrompts";
 import { useNodeProbes } from "./config/useNodeProbes";
 import {
@@ -71,7 +73,7 @@ import {
   shellLayout,
 } from "./ui/breakpoints";
 import { isDisconnectFailure } from "./ui/middleArea";
-import { displayNodeNames, formatLatency } from "./ui/nodeList";
+import { displayNodeNames } from "./ui/nodeList";
 import { issueReportOpening } from "./ui/issueReport";
 import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
@@ -532,8 +534,24 @@ export default function App() {
   }, [myServers.loggedIn]);
   /** 最近一次用户操作，随下一条消息的 context 上报。 */
   const lastActionRef = useRef<UiLastAction | null>(null);
-  /** 连接页行内「问 AI」最近问的是哪台节点：修复成功后据此决定要不要补一句。 */
-  const lastNodeAskRef = useRef<string | null>(null);
+  /** 节点诊断面板：deps 在打开时由 App 统一构造，关闭即丢弃。 */
+  const [diagnosis, setDiagnosis] = useState<{
+    nodeName: string;
+    deps: DiagnosisDeps;
+  } | null>(null);
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void bridge
+      .getAppVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
   /** 从「查看账单」拉起的登录：成功后回到账户页。 */
   const pendingBillsRef = useRef<"waiting" | "seen" | null>(null);
   const destinationRef = useRef(destination);
@@ -2055,29 +2073,117 @@ export default function App() {
     return vpn.switchNode(nodeId);
   };
 
-  // 连接页行内「问 AI」：记住问的是哪台，修复成功后据此决定要不要在右栏补一句。
-  const handleAskAiAboutNode = (nodeId: string, prompt: string) => {
-    lastNodeAskRef.current = nodeId;
+  // 连接页行内「问 AI」（非自有节点）：只发固定提示，不做修复。
+  const handleAskAiAboutNode = (_nodeId: string, prompt: string) => {
     askAiInPanel(prompt);
   };
 
-  // 修复成功且自动重测有数值时：只在右栏已开、且本轮确实在聊这台节点时补一条系统行。
-  // 不含端口与凭据；面板没开就不打扰，也不写进历史。
-  const handleNodeRepaired = (info: {
-    nodeId: string;
-    name: string;
-    latencyMs: number;
+  /** 自有节点测不通 / 服务器详情「智能分析」：构造依赖并打开诊断面板。 */
+  const handleAnalyzeNode = (target: {
+    serverId: string;
+    nodeName: string;
   }) => {
-    if (!panelOpenRef.current || !session) return;
-    if (lastNodeAskRef.current !== info.nodeId) return;
-    dispatch({
-      type: "append_system_message",
-      sessionId: session.id,
-      text: translate("connection.repair.aiNote", {
-        name: info.name,
-        latency: formatLatency(info.latencyMs),
-      }),
-    });
+    const server = myServers.servers.find(
+      (item) => item.server_id === target.serverId,
+    );
+    if (!server) return;
+    const localNodeId = server.local_node_id;
+    const configNode = localNodeId
+      ? (vpn.activeConfig?.nodes.find(
+          (node) => node.node_id === localNodeId,
+        ) ?? null)
+      : null;
+    const initialPort = configNode?.port ?? server.port ?? null;
+    const platform =
+      typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent)
+        ? "windows"
+        : typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent)
+          ? "linux"
+          : "macos";
+    const facts: DiagnosisFacts = {
+      serverId: server.server_id,
+      region: server.region,
+      createdAt: server.created_at,
+      state: server.state,
+      localNodeId,
+      port: initialPort,
+      nodeInUse:
+        localNodeId !== null &&
+        (runtime.node_id === localNodeId ||
+          vpn.activeConfig?.current_node_id === localNodeId),
+      appVersion,
+      platform,
+      uiLogPath: null,
+      controlPlaneError: myServers.error,
+    };
+    const probeNode = async (): Promise<boolean> => {
+      if (!localNodeId) return false;
+      try {
+        const result = await bridge.nodeProbe(localNodeId);
+        nodeProbes.recordResults([result]);
+        return result.reachable === true;
+      } catch {
+        return false;
+      }
+    };
+    const tunnelRunning =
+      (runtime.state === "running" || runtime.state === "degraded") &&
+      localNodeId !== null &&
+      runtime.node_id === localNodeId;
+    const deps: DiagnosisDeps = {
+      facts,
+      tunnelRunning,
+      probeReachability: async () => {
+        if (!server.ip) {
+          throw {
+            code: "INVALID_ARGUMENT",
+            message: "",
+            retryable: false,
+            details: { reason: "invalid_ip" },
+          };
+        }
+        return bridge.nodeProbeReachability(server.ip, 32100);
+      },
+      syncConfig: async () => {
+        // 单台凭据，只比端口；请求失败原样抛给 hook，按控制面不可达处理。
+        const node = await bridge.myServerCredentials(server.server_id);
+        vpn.reload();
+        void myServers.refresh();
+        return {
+          changed: initialPort === null || node.port !== initialPort,
+          port: node.port,
+        };
+      },
+      reprobe: probeNode,
+      reconnectAndProbe: async () => {
+        const connected = await handleReconnectAndTest();
+        if (!connected) return false;
+        return probeNode();
+      },
+      rotateCredentials: async () => {
+        try {
+          const result = await rotateNodeCredentials(bridge, server.server_id);
+          vpn.reload();
+          void myServers.refresh();
+          return { ok: true as const, port: result.port };
+        } catch (error) {
+          return {
+            ok: false as const,
+            reason: rotateFailureReason(error) ?? "unknown",
+          };
+        }
+      },
+      openAi: (context) => {
+        setDiagnosis(null);
+        askAiInPanel(nodeDiagnosisAsk(context));
+      },
+      onGoToServers: () => {
+        setDiagnosis(null);
+        changeDestination("servers");
+        myServers.select(server.server_id);
+      },
+    };
+    setDiagnosis({ nodeName: target.nodeName || server.name, deps });
   };
 
   // 手动测速：只更新延迟，不改选中/不连接；点击动作随下一条消息上报。
@@ -2695,18 +2801,13 @@ export default function App() {
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
           onChanged={() => void myServers.refresh()}
-          onRotated={() => vpn.reload()}
-          tunnelConnected={
-            runtime.state === "running" || runtime.state === "degraded"
-          }
-          runningNodeId={runtime.node_id}
           repairAvailable={repairAvailableFor(
             myServers.selected?.local_node_id ?? null,
             vpn.activeConfig,
             nodeProbes.results,
             nodeProbes.probing,
           )}
-          onReconnectAndTest={handleReconnectAndTest}
+          onDiagnose={handleAnalyzeNode}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}
@@ -2754,6 +2855,7 @@ export default function App() {
           danglingNodeIds={danglingNodeIds}
           onActionCardAction={handleActionCardAction}
           onDiagnose={handleDiagnose}
+          onAnalyzeNode={handleAnalyzeNode}
           trialSummary={trialFlow?.summary ?? null}
           trialExpiresAt={trial?.expires_at ?? null}
           pendingServerNodes={pendingServerNodes}
@@ -2781,25 +2883,9 @@ export default function App() {
             myServers.servers.find((server) => server.local_node_id === nodeId)
               ?.server_id ?? null
           }
-          onRepairCredentials={(serverId) =>
-            rotateNodeCredentials(bridge, serverId)
-          }
-          onSyncCredentials={async (serverId) => {
-            try {
-              const node = await bridge.myServerCredentials(serverId);
-              // 落库后重读配置，让节点行拿到新端口再测。
-              vpn.reload();
-              return node.port;
-            } catch {
-              return null;
-            }
-          }}
           onReconnectAndTest={handleReconnectAndTest}
-          runningNodeId={runtime.node_id}
           staleConfigNode={staleConfigNode !== null}
           onStaleConfigRetry={() => setStaleConfigNode(null)}
-          onGoServers={() => changeDestination("servers")}
-          onRepaired={handleNodeRepaired}
         />
       ) : (
         <StartChoice
@@ -3012,6 +3098,14 @@ export default function App() {
         runtime={runtime}
         connectMode={vpn.activeConfig?.connect_mode ?? null}
       />
+
+      {diagnosis ? (
+        <DiagnosisPanel
+          nodeName={diagnosis.nodeName}
+          deps={diagnosis.deps}
+          onClose={() => setDiagnosis(null)}
+        />
+      ) : null}
 
       {quitOpen ? (
         <QuitDialog
