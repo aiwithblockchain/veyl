@@ -33,33 +33,38 @@ jobs:
 
   build:
     needs: test
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          # 节点镜像固定为 ubuntu-24-04-x64：amd64 直接在同一个 OS 上原生构建，
+          # 链接的 glibc 一定存在于目标机器。不走 musl，也不用 cross 容器
+          # （它在 x86_64 runner 上的容器构建已经卡过两次）。
+          - target: x86_64-unknown-linux-gnu
             asset: veyl-agent-linux-amd64
+            os: ubuntu-24.04
+          # arm64 还没有对应的固定镜像，保留静态 musl。
           - target: aarch64-unknown-linux-musl
             asset: veyl-agent-linux-arm64
+            os: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # amd64 builds natively (musl-tools + rust target). cross is kept for arm64
-      # only: on the x86_64 runner its container build stalled twice.
-      # aws-lc-sys (reqwest's rustls stack) needs cmake/perl either way.
-      # Both targets go through cross: its musl toolchain links the bundled
-      # self-contained crt and produces a static binary. The native musl-gcc
-      # path kept emitting a dynamically-linked PIE (INTERP /lib/ld-musl-*),
-      # which cannot exec on Ubuntu/Debian hosts.
-      # agent/Cross.toml installs cmake/perl inside cross's target image.
-      - name: Install cross
-        run: cargo install cross --locked
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent -> target
           key: ${{ matrix.target }}
-      - name: Build (cross, static musl)
+      - name: Build amd64 (native, matches the node image)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: agent
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Install cross (arm64)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo install cross --locked
+      # agent/Cross.toml installs cmake/perl inside cross's target image.
+      - name: Build arm64 (cross, static musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         working-directory: agent
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -68,7 +73,13 @@ jobs:
         run: |
           cp "agent/target/${{ matrix.target }}/release/veyl-agent" "${{ matrix.asset }}"
           chmod +x "${{ matrix.asset }}"
-      - name: Verify the artifact has no ELF interpreter
+      - name: Verify amd64 executes on the build OS
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          "./${{ matrix.asset }}" --help >/dev/null
+          file "${{ matrix.asset }}"
+      - name: Verify arm64 has no ELF interpreter
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           if readelf -l "${{ matrix.asset }}" | grep -q "INTERP"; then
             echo "error: ${{ matrix.asset }} is dynamically linked; it fails on hosts without a musl loader" >&2
