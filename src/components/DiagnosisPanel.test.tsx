@@ -316,6 +316,43 @@ describe("节点诊断面板", () => {
     ).toBe("polite");
   });
 
+  it("重置确认：初始焦点在取消，Esc 仍关闭面板", async () => {
+    const onClose = vi.fn();
+    open(makeDeps(), onClose);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+
+    const cancel = screen.getByRole("button", { name: "取消" });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("Host 没接重置命令：UNSUPPORTED 走人话，不显示稳定码", async () => {
+    const deps = makeDeps({
+      rotateCredentials: vi.fn(async () => ({
+        ok: false as const,
+        reason: "UNSUPPORTED",
+      })),
+    });
+    open(deps);
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    expect(
+      await screen.findByText("重置失败：这个版本还不支持重置端口。"),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain("UNSUPPORTED");
+  });
+
   it("关闭后重新打开从第一步开始，不保留上次的步骤", async () => {
     const deps = makeDeps();
     const first = open(deps);

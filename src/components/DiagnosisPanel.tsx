@@ -68,7 +68,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
   const diagnosis = useNodeDiagnosis(deps);
   const dialogRef = useRef<HTMLDivElement>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const firstRenderRef = useRef(true);
 
@@ -89,7 +89,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
       return;
     }
     if (diagnosis.phase === "confirming") {
-      confirmRef.current?.focus();
+      cancelRef.current?.focus();
     } else if (diagnosis.action !== null) {
       actionRef.current?.focus();
     } else {
@@ -244,6 +244,7 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
             <p className="diagnosis__confirm-text">{t("diagnosis.rotate.confirm")}</p>
             <div className="diagnosis__confirm-actions">
               <button
+                ref={cancelRef}
                 type="button"
                 className="btn btn--ghost quit-dialog__btn"
                 onClick={diagnosis.cancelReset}
@@ -251,7 +252,6 @@ export function DiagnosisPanel({ nodeName, deps, onClose }: Props) {
                 {t("common.cancel")}
               </button>
               <button
-                ref={confirmRef}
                 type="button"
                 className="btn btn--danger-ghost quit-dialog__btn"
                 onClick={diagnosis.confirmReset}

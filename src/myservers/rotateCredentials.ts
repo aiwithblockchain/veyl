@@ -11,7 +11,8 @@ export type RotateCredentialsReason =
   | "agent_tool_failed"
   | "agent_timeout"
   | "agent_unreachable"
-  | "agent_bad_response";
+  | "agent_bad_response"
+  | "UNSUPPORTED";
 
 const REASONS = new Set<string>([
   "agent_token_unavailable",
@@ -21,6 +22,7 @@ const REASONS = new Set<string>([
   "agent_timeout",
   "agent_unreachable",
   "agent_bad_response",
+  "UNSUPPORTED",
 ]);
 
 /** 详情页唯一的调用点：Host 换实现只需要提供 `nodeRotateCredentials`。 */
