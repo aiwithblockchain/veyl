@@ -118,6 +118,8 @@ fn real_plan(mode: &str, region: &str, targets: &[&str]) -> RoutePlan {
         region: &region,
         targets: &targets,
         rules: &rules,
+        // 真实控制通道域名：让 check 也覆盖「控制通道直连」那两条规则。
+        control_domains: &veyl_lib::control_plane::env::control_domain_suffixes(),
     })
     .unwrap_or_else(|error| panic!("plan 生成失败（{mode}/{region}）：{error}"));
 
@@ -141,6 +143,7 @@ fn unknown_region_has_no_local_layer() {
         region: &Region::Unknown,
         targets: &targets,
         rules: &rules,
+        control_domains: &[],
     })
     .expect("未知地区不该让建配置失败");
 
@@ -163,6 +166,7 @@ fn missing_local_rule_set_degrades_instead_of_failing() {
         region: &region,
         targets: &targets,
         rules: &rules,
+        control_domains: &[],
     })
     .expect("系统推断的地区缺规则集应降级");
     assert!(plan.referenced.is_empty());

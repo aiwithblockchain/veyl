@@ -59,6 +59,10 @@ pub struct RouteInput<'a> {
     pub region: &'a Region,
     pub targets: &'a [String],
     pub rules: &'a InstalledRules,
+    /// App 自己的控制通道域名后缀（控制面 + 种子源）。**必须直连**，见
+    /// [`crate::control_plane::env::control_domain_suffixes`]：隧道坏掉时控制面
+    /// 不能跟着一起断，智能诊断与凭据刷新都要靠它。
+    pub control_domains: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +251,16 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
         "outbound": "direct",
     })];
 
+    // 顺序不可变：内网直连之后、所有分流之前（`docs/contracts/routing.md` §3.6）。
+    // 控制面与种子源永远直连——它们由 App 自己管理，不能交给 App 管理的隧道。
+    if !input.control_domains.is_empty() {
+        route_rules.push(json!({
+            "domain_suffix": input.control_domains,
+            "action": "route",
+            "outbound": "direct",
+        }));
+    }
+
     let (route_final, outbound_local) = if local_mode {
         if !referenced.is_empty() {
             route_rules.push(json!({
@@ -292,6 +306,13 @@ pub fn build(input: &RouteInput<'_>) -> Result<RoutePlan, PlanError> {
         .collect::<Vec<_>>();
 
     let mut dns_rules = Vec::new();
+    // 控制通道的域名也走本地解析：解析若借道隧道，隧道坏了照样拿不到控制面。
+    if !input.control_domains.is_empty() {
+        dns_rules.push(json!({
+            "domain_suffix": input.control_domains,
+            "server": "dns-local-1",
+        }));
+    }
     let dns_final = if dns_region_is_cn && local_mode {
         if !geosite_ids.is_empty() {
             dns_rules.push(json!({
@@ -398,6 +419,19 @@ mod tests {
             region,
             targets: &targets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
             rules: &rules(),
+            control_domains: &[],
+        })
+        .unwrap()
+    }
+
+    /// 带 App 控制通道域名的计划；控制通道默认直连。
+    fn plan_region_with_control(mode: &str, region: &Region, targets: &[&str]) -> RoutePlan {
+        build(&RouteInput {
+            mode,
+            region,
+            targets: &targets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            rules: &rules(),
+            control_domains: &[crate::control_plane::env::BASE_DOMAIN.to_string()],
         })
         .unwrap()
     }
@@ -479,6 +513,7 @@ mod tests {
             region: &Region::Cn,
             targets: &[],
             rules: &rules,
+            control_domains: &[],
         })
         .unwrap_err();
         assert_eq!(err.reason(), "route_targets_empty");
@@ -489,6 +524,7 @@ mod tests {
             region: &Region::Cn,
             targets: &targets,
             rules: &rules,
+            control_domains: &[],
         })
         .unwrap_err();
         assert_eq!(err.reason(), "category_unknown");
@@ -498,6 +534,63 @@ mod tests {
     fn quoted_paths_are_absolute() {
         let plan = plan("direct", "cn", &[]);
         assert!(plan.rule_sets[0]["path"].as_str().unwrap().starts_with('/'));
+    }
+
+    /// 控制通道永远直连，且排在内网直连之后、本地层之前。
+    #[test]
+    fn control_domains_are_direct_before_the_local_layer() {
+        for mode in ["direct", "proxy_all"] {
+            let plan = plan_region_with_control(mode, &Region::Cn, &[]);
+            assert_eq!(plan.route_rules[0]["ip_is_private"], true, "{mode}");
+            assert_eq!(
+                plan.route_rules[1]["domain_suffix"][0],
+                crate::control_plane::env::BASE_DOMAIN,
+                "{mode}"
+            );
+            assert_eq!(plan.route_rules[1]["outbound"], "direct", "{mode}");
+            assert_eq!(plan.route_rules[2]["rule_set"][0], "geosite-cn", "{mode}");
+
+            // 解析也走本地，不借道隧道。
+            assert_eq!(
+                plan.dns["rules"][0]["domain_suffix"][0],
+                crate::control_plane::env::BASE_DOMAIN,
+                "{mode}"
+            );
+            assert_eq!(plan.dns["rules"][0]["server"], "dns-local-1", "{mode}");
+            assert_eq!(plan.dns["rules"][1]["rule_set"][0], "geosite-cn", "{mode}");
+        }
+    }
+
+    #[test]
+    fn control_domains_are_direct_in_proxy_selected_too() {
+        let plan = plan_region_with_control("proxy_selected", &Region::Cn, &["openai"]);
+        assert_eq!(plan.route_rules[1]["outbound"], "direct");
+        assert_eq!(plan.route_rules[2]["outbound"], "proxy");
+        assert_eq!(plan.dns["rules"][0]["server"], "dns-local-1");
+        assert_eq!(plan.dns["rules"][1]["server"], "dns-remote-1");
+    }
+
+    /// 判不出地区也要保住控制通道。
+    #[test]
+    fn control_domains_hold_when_region_is_unknown() {
+        let plan = plan_region_with_control("direct", &Region::Unknown, &[]);
+        assert_eq!(plan.route_rules.len(), 2);
+        assert_eq!(
+            plan.route_rules[1]["domain_suffix"][0],
+            crate::control_plane::env::BASE_DOMAIN
+        );
+        assert_eq!(plan.dns["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(plan.dns["rules"][0]["server"], "dns-local-1");
+    }
+
+    /// 没有控制通道域名时不能凭空多出规则（探测运行时就是这么生成的）。
+    #[test]
+    fn empty_control_domains_emit_no_extra_rules() {
+        let plan = plan("direct", "cn", &[]);
+        assert_eq!(plan.route_rules.len(), 2);
+        assert!(plan.route_rules[1].get("domain_suffix").is_none());
+        assert_eq!(plan.dns["rules"].as_array().unwrap().len(), 1);
+        assert!(plan.dns["rules"][0].get("domain_suffix").is_none());
     }
 
     #[test]

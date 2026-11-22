@@ -1,6 +1,6 @@
 # 契约：分流与 DNS
 
-> 契约版本：`1.4.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
+> 契约版本：`1.5.0`（**已并入**。并入时基线：`commands.md` 2.3.1 / `events.md` 2.1.0 / `tools.md` 3.2.0 / `runtime.md` 2.1.0 / `data-model.md` 3。此后各文件独立演进，一律以各文件头为准，本行不再追更）
 > 状态：**已定稿并并入**，2026-11-04。`capabilities.md` 由 PM 维护，本文件不改它。
 > 依据：`docs/user-flows.md` §1.4、`docs/config-execution.md` §7、`docs/capabilities.md` G/I 组、`docs/tun-mode.md` §3/§5、`docs/upgrade.md` §3、`docs/review-checklist.md` B3-01～B3-08
 > 实现：`src-tauri/src/config/`（生成）、`src-tauri/src/rules/`（资源与更新）、Clash API（热切换）
@@ -156,11 +156,14 @@ app_data/rules/<version>/
   ],
   "rules": [
     { "ip_is_private": true, "action": "route", "outbound": "direct" },
+    { "domain_suffix": ["veyl.dessage.xyz"], "action": "route", "outbound": "direct" },
     { "rule_set": ["geosite-cn", "geoip-cn"], "action": "route", "outbound": "route-local" }
   ],
   "final": "proxy"
 }
 ```
+
+第二条是 App 自己的控制通道（当前控制面 host + `veyl.dessage.xyz` 后缀，覆盖种子源），**永远直连**，见 §3.6。
 
 生成时 `route-local` 的 `default` 按库里的模式填：`direct` 模式填 `direct`，`proxy_all` 填 `proxy`。运行时热切只是改这一个 selector 的当前值。
 
@@ -188,6 +191,7 @@ route-local = proxy
   ],
   "rules": [
     { "ip_is_private": true, "action": "route", "outbound": "direct" },
+    { "domain_suffix": ["veyl.dessage.xyz"], "action": "route", "outbound": "direct" },
     { "rule_set": ["geosite-openai", "geosite-google"], "action": "route", "outbound": "proxy" }
   ],
   "final": "direct"
@@ -213,11 +217,12 @@ route-local = proxy
 ### 3.6 顺序（不可变）
 
 ```
-sniff → hijack-dns → ip_is_private → 自定义规则 → 本地层/目标层 → final
+sniff → hijack-dns → ip_is_private → 控制通道直连 → 自定义规则 → 本地层/目标层 → final
 ```
 
 - `sniff` 必须在最前（`tun-mode.md` §3）。
 - `hijack-dns` 必须在 `ip_is_private` 与分流之前，且 sniffer 列表必须含 `dns`。
+- **控制通道直连**（`domain_suffix` → `direct`）紧跟内网直连，排在所有分流之前，用户规则也不能覆盖。控制面与种子源由 App 自己管理，**不能交给 App 管理的隧道**：2026-11-22 真机实测，轮换正在使用的节点时节点重启，经隧道发出的 `/credentials` 与 `/v1/servers` 连续 `tls handshake eof`，本机凭据只能等用户断开后才补上，智能诊断也拿不到数据。域名列表由 `control_plane::env::control_domain_suffixes()` 给出（当前控制面 host + `veyl.dessage.xyz`）；探测用的临时运行时传空列表，不生成这条规则。
 - 自定义规则在预置规则**之前**，用户覆盖优先。
 - 顺序错是**静默失效**，B3-03 会用脚本断言索引严格递增。
 
@@ -351,6 +356,10 @@ DNS 规则与 `final` **由同一个 `RoutePlan` 生成**，按「地区 + 模�
 | 其它 | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级（目标）+ 全本地（其余） |
 | 未知 | `direct` / `proxy_all` | **无域名规则** | `dns-local-1` | 无本地层（等价全走 VPN），DNS 用国际组 |
 | 未知 | `proxy_selected` | 目标层 + 自定义 `proxy` → `dns-remote-1`；自定义 `direct` → `dns-local-1` | `dns-local-1` | 域名级（目标）+ 全本地（其余） |
+
+**控制通道例外**：所有地区、所有模式的 `dns.rules` 都以
+`{ "domain_suffix": [控制通道域名], "server": "dns-local-1" }` 开头（只在 App 自己的连接运行时生成，探测运行时除外），
+保证解析也不借道隧道。它不参与「本地 / 目标」分类，不算第二份域名清单。
 
 **同源不变量（覆盖两种形态，必须写成测试）**
 
@@ -706,6 +715,13 @@ applied_route_revision: number | null;  // 本次连接生成配置时的 config
 ---
 
 ## 14. 变更记录
+
+### 1.5.0（2026-11-22，控制通道直连）
+
+| # | 变更 | 类型 | 来源 |
+|---|---|---|---|
+| 1 | §3.2 / §3.4 / §3.6：`route.rules` 在 `ip_is_private` 之后新增 `domain_suffix` → `direct`，覆盖 App 自己的控制通道（当前控制面 host + `veyl.dessage.xyz`，含种子源）；排在所有分流之前，用户规则不能覆盖 | 规则新增 | 2026-11-22 真机：轮换正在使用的节点，节点重启期间经隧道的 `/credentials`、`/v1/servers` 连续 `tls handshake eof`，凭据刷新与智能诊断都拿不到控制面 |
+| 2 | §6.2：`dns.rules` 首条为同一组域名的 `domain_suffix` → `dns-local-1`（探测用的临时运行时不生成） | 规则新增 | 同上：解析也不能借道隧道 |
 
 ### 1.4.0（2026-11-11，macOS 也改 `ipv4_only`）
 

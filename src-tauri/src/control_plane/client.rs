@@ -24,6 +24,9 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 ///
 /// **边界**：只有控制面直连。用户订阅导入、节点探测、运行时下载等仍然走
 /// 用户当前网络策略（`public_http.rs` 等），不要复用这个 builder。
+///
+/// TUN 是网络层劫持，`no_proxy` 挡不住它：生成路由时另有一条控制通道直连规则
+/// （`rules::plan` 的 `control_domains`，`docs/contracts/routing.md` §3.6）。
 pub fn builder(proxy: Option<reqwest::Proxy>) -> reqwest::ClientBuilder {
     match proxy {
         None => reqwest::Client::builder().no_proxy(),

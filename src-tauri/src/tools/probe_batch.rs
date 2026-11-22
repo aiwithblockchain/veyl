@@ -597,6 +597,8 @@ pub async fn start_probe_runtime(
         region: &region,
         targets: &[],
         rules: &rules,
+        // 探测运行时只跑 Clash 延迟，不承载 App 自己的流量。
+        control_domains: &[],
     })
     .map_err(|_| ProbeFailure::Failed)?;
 

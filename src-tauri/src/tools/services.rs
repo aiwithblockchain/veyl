@@ -8902,11 +8902,15 @@ impl WiredServices {
             .unwrap_or_default();
         let (region, _) = self.effective_region();
         let route_region = region.code().map(str::to_string);
+        // App 自己的控制通道（控制面 + 种子源）永远直连：轮换活动节点时隧道会
+        // 短暂失效，控制面请求不能跟着一起断（2026-11-22 真机连续 tls handshake eof）。
+        let control_domains = crate::control_plane::env::control_domain_suffixes();
         let plan = crate::rules::plan::build(&crate::rules::plan::RouteInput {
             mode: &config.routing_mode,
             region: &region,
             targets: &targets,
             rules: &installed_rules,
+            control_domains: &control_domains,
         })
         .map_err(|error| {
             svc_error_with_details(

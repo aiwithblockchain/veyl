@@ -5,6 +5,8 @@
 
 pub const DEV_URL: &str = "https://cp-dev.veyl.dessage.xyz";
 pub const PROD_URL: &str = "https://veyl.dessage.xyz";
+/// 自有域名：控制面与种子源都在它下面。
+pub const BASE_DOMAIN: &str = "veyl.dessage.xyz";
 
 pub const ENV_VAR: &str = "VEYL_CONTROL_PLANE_ENV";
 pub const URL_VAR: &str = "VEYL_CONTROL_PLANE_URL";
@@ -102,6 +104,33 @@ pub fn current() -> Resolved {
     let env = std::env::var(ENV_VAR).ok();
     let url = std::env::var(URL_VAR).ok();
     resolve(cfg!(debug_assertions), env.as_deref(), url.as_deref())
+}
+
+/// App 自己的控制通道（控制面 + 种子源）必须直连的域名后缀。
+///
+/// 隧道由 App 管理，控制通道**不能依赖它**：2026-11-22 真机实测，轮换正在使用的
+/// 节点时节点重启，经隧道发出的 `/credentials` 与 `/v1/servers` 连续
+/// `tls handshake eof`，本机凭据只能等用户断开后才补上；智能诊断恰恰在最需要
+/// 控制面的时候拿不到数据。生成路由时把它放在内网直连之后、所有分流之前。
+pub fn control_domain_suffixes() -> Vec<String> {
+    control_domain_suffixes_for(&current().base_url)
+}
+
+fn control_domain_suffixes_for(base_url: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(host) = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    {
+        // `cp-dev.veyl.dessage.xyz` 这类子域由下面那条后缀覆盖。
+        let under_base = host == BASE_DOMAIN || host.ends_with(&format!(".{BASE_DOMAIN}"));
+        if !under_base {
+            out.push(host);
+        }
+    }
+    // 自有域名永远直连：种子源也在它下面，dev 构建同样要能拉种子。
+    out.push(BASE_DOMAIN.to_string());
+    out
 }
 
 #[cfg(test)]
@@ -208,5 +237,30 @@ mod tests {
             assert_eq!(resolved.base_url, DEV_URL, "{value:?}");
             assert_eq!(resolved.source, Sources::Default, "{value:?}");
         }
+    }
+
+    #[test]
+    fn control_domains_cover_prod_dev_and_overrides() {
+        assert_eq!(
+            control_domain_suffixes_for(PROD_URL),
+            vec![BASE_DOMAIN.to_string()]
+        );
+        // dev 是自有域名的子域，一条后缀足够。
+        assert_eq!(
+            control_domain_suffixes_for(DEV_URL),
+            vec![BASE_DOMAIN.to_string()]
+        );
+        assert_eq!(
+            control_domain_suffixes_for("https://example.test/api"),
+            vec!["example.test".to_string(), BASE_DOMAIN.to_string()]
+        );
+        // 端口不进域名，大小写归一。
+        let with_port = control_domain_suffixes_for("https://Example.Test:8443");
+        assert_eq!(with_port[0], "example.test");
+        // 解析不出来也不能丢自有域名。
+        assert_eq!(
+            control_domain_suffixes_for("not a url"),
+            vec![BASE_DOMAIN.to_string()]
+        );
     }
 }
