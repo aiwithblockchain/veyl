@@ -322,6 +322,11 @@ export function ConnectionStage({
     : (localPick ?? config?.current_node_id ?? null);
   const connectTargetId =
     selectedId ?? config?.current_node_id ?? nodes[0]?.node_id ?? null;
+  /** 失败发生在免费节点上：不给 AI 诊断（用户没有恢复手段，只能换节点）。 */
+  const failedOnSeed =
+    failed &&
+    nodes.find((node) => node.node_id === connectTargetId)?.source === "seed";
+  const canDiagnose = failed && onDiagnose !== undefined && !failedOnSeed;
 
   const switchTo = async (nodeId: string) => {
     if (switching) return;
@@ -374,8 +379,8 @@ export function ConnectionStage({
       onStop();
       return;
     }
-    if (failed && onDiagnose) {
-      onDiagnose();
+    if (canDiagnose) {
+      onDiagnose?.();
       return;
     }
     if (noTraffic) {
@@ -503,7 +508,7 @@ export function ConnectionStage({
       ? "disconnecting"
       : connected && (!noTraffic || !connectTargetUsable)
         ? "disconnect"
-        : failed && onDiagnose
+        : canDiagnose
           ? "diagnose"
           : failed || noTraffic
             ? "reconnect"
@@ -590,12 +595,13 @@ export function ConnectionStage({
       node.source === "owned" &&
       serverId !== null &&
       onAnalyzeNode !== undefined;
-    /** 非自有节点（或查不到服务器）仍保留「问 AI」。 */
+    /** 非自有节点（或查不到服务器）仍保留「问 AI」；免费节点不保证可用，问了也只有「换个节点」。 */
     const canAskInRow =
       msState === "bad" &&
       !expired &&
       !dangling &&
       !canAnalyze &&
+      node.source !== "seed" &&
       Boolean(onAskAi || onAskAiAboutNode);
     /** 行内要放真按钮，容器不能再用 <button>（不能嵌套）。 */
     const rowLocked = switching !== null || expired || dangling;

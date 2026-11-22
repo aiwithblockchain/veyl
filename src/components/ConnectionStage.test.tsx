@@ -277,9 +277,15 @@ describe("连接舞台", () => {
   it("失败时主按钮是让 AI 检查，旁边保留重新连接", async () => {
     const onDiagnose = vi.fn();
     const onStart = vi.fn();
+    const manualNode = {
+      ...CONFIG.nodes[0],
+      node_id: "m1",
+      name: "订阅节点",
+      source: "manual" as const,
+    };
     render(
       <ConnectionStage
-        config={CONFIG}
+        config={{ ...CONFIG, current_node_id: "m1", nodes: [manualNode] }}
         connection="idle"
         runtime={runtime({
           state: "failed",
@@ -307,6 +313,34 @@ describe("连接舞台", () => {
     expect(onDiagnose).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("免费节点失败：主按钮不是让 AI 检查，只剩重新连接", () => {
+    const onDiagnose = vi.fn();
+    render(
+      <ConnectionStage
+        config={CONFIG}
+        connection="idle"
+        runtime={runtime({ state: "failed" })}
+        onStart={() => {}}
+        onStop={() => {}}
+        onReconnect={() => {}}
+        onSwitchNode={async () => ({ ok: true })}
+        nodeProbes={probes()}
+        failedAfterConnected={false}
+        helperPreparing={false}
+        onDiagnose={onDiagnose}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "让 AI 检查" }),
+    ).toBeNull();
+    expect(
+      (document.querySelector("button.stage-primary") as HTMLButtonElement)
+        .textContent,
+    ).toBe("重新连接");
+    expect(onDiagnose).not.toHaveBeenCalled();
   });
 
   it("失败态显示原因与报告入口", async () => {
@@ -2330,11 +2364,17 @@ describe("测不通时的智能分析入口", () => {
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
   });
 
-  it("非自有节点测不通：仍保留「问 AI」，不出现智能分析", () => {
+  it("手动导入节点测不通：仍保留「问 AI」，不出现智能分析", () => {
+    const MANUAL: ConfigDetail["nodes"][number] = {
+      ...CONFIG.nodes[0],
+      node_id: "m1",
+      name: "订阅节点",
+      source: "manual",
+    };
     const onAskAi = vi.fn();
     renderStage({
-      config: withNodes([CONFIG.nodes[0]], CONFIG.nodes[0].node_id),
-      nodeProbes: probes({ results: { n1: failedProbe("n1") } }),
+      config: withNodes([MANUAL], MANUAL.node_id),
+      nodeProbes: probes({ results: { m1: failedProbe("m1") } }),
       onAskAi,
       onAnalyzeNode: vi.fn(),
       serverIdForNode: () => null,
@@ -2345,6 +2385,24 @@ describe("测不通时的智能分析入口", () => {
     ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /咨询 AI/ }));
     expect(onAskAi).toHaveBeenCalledTimes(1);
+  });
+
+  it("免费节点测不通：只有「测不通」文字，没有任何按钮", () => {
+    const onAskAi = vi.fn();
+    renderStage({
+      config: withNodes([CONFIG.nodes[0]], CONFIG.nodes[0].node_id),
+      nodeProbes: probes({ results: { n1: failedProbe("n1") } }),
+      onAskAi,
+      onAnalyzeNode: vi.fn(),
+      serverIdForNode: () => null,
+    });
+
+    const row = screen.getAllByRole("option")[0];
+    expect(within(row).getByText("测不通")).toBeTruthy();
+    expect(within(row).queryByRole("button")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /智能分析|咨询 AI|问 AI/ }),
+    ).toBeNull();
   });
 
   it("未测、测速中、停机删除、查不到服务器都不出现智能分析入口", () => {
