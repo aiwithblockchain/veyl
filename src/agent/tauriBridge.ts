@@ -757,7 +757,7 @@ function normalizeMyServerFailure(value: unknown): MyServerFailure | null {
   };
 }
 
-const SYNC_INTERVALS = new Set<number>([0, 5, 15, 30, 60]);
+const SYNC_INTERVALS = new Set<number>([0, 30, 60, 240, 480, 1440]);
 
 function normalizeSyncInterval(value: unknown): SyncIntervalMinutes | null {
   return typeof value === "number" && SYNC_INTERVALS.has(value)

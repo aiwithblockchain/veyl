@@ -385,8 +385,8 @@ export default function App() {
   const [syncInterval, setSyncInterval] = useState<SyncIntervalMinutes | null>(null);
   const [syncIntervalUnsaved, setSyncIntervalUnsaved] = useState(false);
   // 成功确认的当前档位 / 最后一次用户意图：迟到写入据此补发，保证最终落库是最新值。
-  const syncIntervalConfirmedRef = useRef<SyncIntervalMinutes>(30);
-  const syncIntervalTargetRef = useRef<SyncIntervalMinutes>(30);
+  const syncIntervalConfirmedRef = useRef<SyncIntervalMinutes>(240);
+  const syncIntervalTargetRef = useRef<SyncIntervalMinutes>(240);
   // 账户代次：登出/登录/换号时递增；同步的迟到结果据此丢弃。
   const [accountEpoch, setAccountEpoch] = useState(0);
   // 读/写的迟到响应不能覆盖用户刚选的档位：只认最新一次写入。
@@ -1193,7 +1193,7 @@ export default function App() {
     };
   }, [refreshDefaultProfile, refreshAiStatus]);
 
-  // 节点配置同步间隔：启动读一次；读失败重试一次，仍失败按 30（不写库）。
+  // 节点配置同步间隔：启动读一次；读失败重试一次，仍失败按 240（不写库）。
   useEffect(() => {
     let cancelled = false;
     const load = (attempt: number): void => {
@@ -1211,9 +1211,9 @@ export default function App() {
             load(1);
             return;
           }
-          syncIntervalConfirmedRef.current = 30;
-          syncIntervalTargetRef.current = 30;
-          setSyncInterval(30);
+          syncIntervalConfirmedRef.current = 240;
+          syncIntervalTargetRef.current = 240;
+          setSyncInterval(240);
         });
     };
     load(0);
@@ -1381,8 +1381,8 @@ export default function App() {
       })
       .catch(() => {
         if (seq !== syncIntervalWriteSeqRef.current) return;
-        // 写库失败：回退到上一个有效值；首次设置失败则按 30。
-        const fallback = previous ?? syncIntervalConfirmedRef.current ?? 30;
+        // 写库失败：回退到上一个有效值；首次设置失败则按 240。
+        const fallback = previous ?? syncIntervalConfirmedRef.current ?? 240;
         syncIntervalTargetRef.current = fallback;
         setSyncInterval(fallback);
         setSyncIntervalUnsaved(true);
@@ -3054,7 +3054,7 @@ export default function App() {
         onViewBills={() => void handleViewBills()}
         mobileExportOpen={mobileExportOpen}
         trapPaused={aiRequiredOpen}
-        syncInterval={syncInterval ?? 30}
+        syncInterval={syncInterval ?? 240}
         syncIntervalUnsaved={syncIntervalUnsaved}
         onSyncIntervalChange={changeSyncInterval}
         onSyncNow={() => void serverSync.syncNow()}

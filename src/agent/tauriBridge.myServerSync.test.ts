@@ -113,21 +113,21 @@ describe("server_sync_interval_get / set", () => {
   });
 
   it("保存传 minutes，并返回 Host 写入后的值", async () => {
-    invoke.mockResolvedValueOnce({ minutes: 5 });
+    invoke.mockResolvedValueOnce({ minutes: 60 });
 
-    const data = await new TauriAgentBridge().serverSyncIntervalSet(5);
+    const data = await new TauriAgentBridge().serverSyncIntervalSet(60);
 
     expect(invoke).toHaveBeenCalledWith("server_sync_interval_set", {
-      minutes: 5,
+      minutes: 60,
     });
-    expect(data).toEqual({ minutes: 5 });
+    expect(data).toEqual({ minutes: 60 });
   });
 
   it("保存返回非法值时报错", async () => {
     invoke.mockResolvedValueOnce({ minutes: 12 });
 
     await expect(
-      new TauriAgentBridge().serverSyncIntervalSet(15),
+      new TauriAgentBridge().serverSyncIntervalSet(60),
     ).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
   });
 });

@@ -260,15 +260,7 @@ export function formatBuildDuration(
   return formatDuration((end - start) / 1000);
 }
 
-/** 计费日期：本地日期 YYYY-MM-DD。 */
-export function formatPaidUntil(iso: string): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return iso;
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-}
-
-/** 机器详情费用行：日价 + 计费截止的单一文案函数。 */
+/** 机器详情费用行：日价 + 计费状态的单一文案函数。 */
 export function serverBillingText(
   server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
   now = Date.now(),
@@ -277,10 +269,7 @@ export function serverBillingText(
     return t("myservers.paid.pending");
   }
   const price = formatDailyPrice(server.daily_price_cents);
-  if (!server.paid_until) {
-    return t("myservers.billing.daily", { price });
-  }
-  const ends = new Date(server.paid_until).getTime();
+  const ends = server.paid_until ? new Date(server.paid_until).getTime() : NaN;
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。
   if (
     server.billing_state === "active" &&
@@ -292,11 +281,7 @@ export function serverBillingText(
       word: t("myservers.paid.expired"),
     });
   }
-  return t("myservers.billing.dailyThrough", {
-    price,
-    word: t("myservers.paid.through"),
-    date: formatPaidUntil(server.paid_until),
-  });
+  return t("myservers.billing.daily", { price });
 }
 
 /** 宽限剩余天数：向上取整，过期为 0。 */

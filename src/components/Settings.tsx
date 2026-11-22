@@ -2265,9 +2265,12 @@ export function Settings({
                   }
                 >
                   <option value={0}>{t("settings.sync.manual")}</option>
-                  {([5, 15, 30, 60] as const).map((minutes) => (
-                    <option key={minutes} value={minutes}>
-                      {t("settings.sync.minutes", { count: minutes })}
+                  <option value={30}>
+                    {t("settings.sync.minutes", { count: 30 })}
+                  </option>
+                  {([1, 4, 8, 24] as const).map((hours) => (
+                    <option key={hours} value={hours * 60}>
+                      {t("settings.sync.hours", { count: hours })}
                     </option>
                   ))}
                 </select>

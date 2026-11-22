@@ -613,7 +613,7 @@ export interface MyServer {
 }
 
 /** 节点配置同步间隔；0 = 手动，不跑定时任务。 */
-export type SyncIntervalMinutes = 0 | 5 | 15 | 30 | 60;
+export type SyncIntervalMinutes = 0 | 30 | 60 | 240 | 480 | 1440;
 
 /** 一次同步中端口或密码发生变化的节点；只给事实，不给值。 */
 export interface ServerSyncChanged {

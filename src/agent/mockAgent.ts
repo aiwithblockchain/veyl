@@ -101,7 +101,7 @@ const HELPER_STATES: TunHelperState[] = [
 /** mock 通道固定出口 IP，方便自动化断言。 */
 export const MOCK_EXIT_IP = "203.0.113.7";
 const MOCK_SYNC_INTERVAL_KEY = "veyl.mock.serverSyncInterval";
-const SYNC_INTERVALS = new Set<number>([0, 5, 15, 30, 60]);
+const SYNC_INTERVALS = new Set<number>([0, 30, 60, 240, 480, 1440]);
 
 /** 直连出口：与代理出口不同，面板才能看出代理真的生效。 */
 export const MOCK_DIRECT_IP = "198.51.100.9";
@@ -720,7 +720,7 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.list();
   }
 
-  private syncIntervalMinutes: SyncIntervalMinutes = 30;
+  private syncIntervalMinutes: SyncIntervalMinutes = 240;
 
   async myServerSync(): Promise<ServerSyncData> {
     return { ...this.myServers.list(), changed: [], failed: [] };

@@ -305,7 +305,7 @@ describe("节点配置同步", () => {
   }, 15_000);
 
   it("启动先同步一次：间隔非手动时挂载即跑", async () => {
-    intervalMinutes = 5;
+    intervalMinutes = 30;
     render(<App />);
     await waitForShell();
     await waitFor(() => expect(bridge.myServerAccount).toHaveBeenCalled());
@@ -318,7 +318,7 @@ describe("节点配置同步", () => {
 
   it("未登录：不启动同步、也不排定时", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    intervalMinutes = 5;
+    intervalMinutes = 30;
     vi.mocked(bridge.myServerAccount).mockResolvedValue({
       logged_in: false,
       email: null,
@@ -340,7 +340,7 @@ describe("节点配置同步", () => {
       ({ enabled }: { enabled: boolean }) =>
         useServerSync({
           bridge,
-          intervalMinutes: 5,
+          intervalMinutes: 30,
           enabled,
           accountEpoch: 0,
           onChanged,
@@ -362,12 +362,12 @@ describe("节点配置同步", () => {
   }, 15_000);
 
   it("迟到的间隔读取不覆盖用户刚选的档位", async () => {
-    let resolveGet!: (value: { minutes: 5 | 30 }) => void;
+    let resolveGet!: (value: { minutes: 30 | 240 }) => void;
     defineMethod(
       "serverSyncIntervalGet",
       vi.fn(
         () =>
-          new Promise<{ minutes: 5 | 30 }>((done) => {
+          new Promise<{ minutes: 30 | 240 }>((done) => {
             resolveGet = done;
           }),
       ),
@@ -384,29 +384,29 @@ describe("节点配置同步", () => {
     const select = (await within(settings).findByRole("combobox", {
       name: "同步间隔",
     })) as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "5" } });
+    fireEvent.change(select, { target: { value: "30" } });
     await waitFor(() =>
       expect(
         (
           document.querySelector(".settings-sync__select") as HTMLSelectElement
         ).value,
-      ).toBe("5"),
+      ).toBe("30"),
     );
 
-    // 迟到的读取（30）落地，档位仍是用户选的 5。
+    // 迟到的读取（240）落地，档位仍是用户选的 30。
     await act(async () => {
-      resolveGet({ minutes: 30 });
+      resolveGet({ minutes: 240 });
     });
     await act(async () => {});
     expect(
       (document.querySelector(".settings-sync__select") as HTMLSelectElement)
         .value,
-    ).toBe("5");
+    ).toBe("30");
   }, 15_000);
 
   it("改间隔只重建定时器，不立即触发同步", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    intervalMinutes = 5;
+    intervalMinutes = 30;
     render(<App />);
     await waitForShell();
     await waitFor(() =>
@@ -419,16 +419,16 @@ describe("节点配置同步", () => {
     const select = (await within(settings).findByRole("combobox", {
       name: "同步间隔",
     })) as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "15" } });
+    fireEvent.change(select, { target: { value: "60" } });
     await waitFor(() =>
-      expect(bridge.serverSyncIntervalSet).toHaveBeenCalledWith(15),
+      expect(bridge.serverSyncIntervalSet).toHaveBeenCalledWith(60),
     );
     await act(async () => {});
     expect(bridge.myServerSync).toHaveBeenCalledTimes(1);
 
-    // 新的 15 分钟周期到点才跑。
+    // 新的 60 分钟周期到点才跑。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
     });
     await waitFor(() =>
       expect(bridge.myServerSync).toHaveBeenCalledTimes(2),
@@ -587,7 +587,7 @@ describe("节点配置同步", () => {
     fireEvent.click(within(settings).getByRole("tab", { name: "连接" }));
     const select = await openSyncSelect();
 
-    fireEvent.change(select, { target: { value: "5" } });
+    fireEvent.change(select, { target: { value: "60" } });
     await waitFor(() => expect(toastText()).toBe("同步间隔保存失败"));
     // 回退到读取到的旧档位，并标未保存。
     expect(select.value).toBe("30");
@@ -596,34 +596,34 @@ describe("节点配置同步", () => {
     // 下一次写入成功：档位更新、未保存清除。
     defineMethod(
       "serverSyncIntervalSet",
-      vi.fn(async () => ({ minutes: 15 })),
+      vi.fn(async () => ({ minutes: 60 })),
     );
-    fireEvent.change(select, { target: { value: "15" } });
-    await waitFor(() => expect(select.value).toBe("15"));
+    fireEvent.change(select, { target: { value: "60" } });
+    await waitFor(() => expect(select.value).toBe("60"));
     expect(screen.queryByText("未保存")).toBeNull();
   }, 15_000);
 
   it("首次读取间隔失败会重试一次", async () => {
-    intervalMinutes = 5;
+    intervalMinutes = 30;
     defineMethod(
       "serverSyncIntervalGet",
       vi
         .fn()
         .mockRejectedValueOnce({ code: "INTERNAL", message: "" })
-        .mockResolvedValueOnce({ minutes: 5 }),
+        .mockResolvedValueOnce({ minutes: 30 }),
     );
     render(<App />);
     await waitForShell();
     await waitFor(() =>
       expect(bridge.serverSyncIntervalGet).toHaveBeenCalledTimes(2),
     );
-    // 5 分钟档生效后启动首轮同步。
+    // 30 分钟档生效后启动首轮同步。
     await waitFor(() =>
       expect(bridge.myServerSync).toHaveBeenCalledTimes(1),
     );
   }, 15_000);
 
-  it("读取间隔连续失败按 30，不写库", async () => {
+  it("读取间隔连续失败按 240，不写库", async () => {
     defineMethod(
       "serverSyncIntervalGet",
       vi.fn(async () => {
@@ -641,21 +641,21 @@ describe("节点配置同步", () => {
     const settings = screen.getByRole("dialog", { name: "设置" });
     fireEvent.click(within(settings).getByRole("tab", { name: "连接" }));
     const select = await openSyncSelect();
-    expect(select.value).toBe("30");
+    expect(select.value).toBe("240");
     expect(screen.queryByText("未保存")).toBeNull();
   }, 15_000);
 
   it("旧 set 的迟到成功不回写、迟到失败不弹提示", async () => {
     intervalMinutes = 30;
-    let resolveFirst!: (value: { minutes: 5 | 15 }) => void;
+    let resolveFirst!: (value: { minutes: 30 | 60 }) => void;
     const setMock = vi.fn();
     setMock.mockImplementationOnce(
       () =>
-        new Promise<{ minutes: 5 | 15 }>((done) => {
+        new Promise<{ minutes: 30 | 60 }>((done) => {
           resolveFirst = done;
         }),
     );
-    setMock.mockImplementationOnce(async () => ({ minutes: 5 }));
+    setMock.mockImplementationOnce(async () => ({ minutes: 30 }));
     defineMethod("serverSyncIntervalSet", setMock);
     render(<App />);
     await waitForShell();
@@ -665,20 +665,20 @@ describe("节点配置同步", () => {
     fireEvent.click(within(settings).getByRole("tab", { name: "连接" }));
     const select = await openSyncSelect();
 
-    fireEvent.change(select, { target: { value: "15" } });
-    fireEvent.change(select, { target: { value: "5" } });
-    await waitFor(() => expect(select.value).toBe("5"));
+    fireEvent.change(select, { target: { value: "60" } });
+    fireEvent.change(select, { target: { value: "30" } });
+    await waitFor(() => expect(select.value).toBe("30"));
 
     // 第一次写入的迟到结果不应覆盖第二次。
     await act(async () => {
-      resolveFirst({ minutes: 15 });
+      resolveFirst({ minutes: 60 });
     });
     await act(async () => {});
-    expect(select.value).toBe("5");
+    expect(select.value).toBe("30");
     expect(toastText()).toBeNull();
     // 迟到的旧写入之后补发一次最新意图，保证最终落库是新档。
     expect(setMock).toHaveBeenCalledTimes(3);
-    expect(setMock.mock.calls[2][0]).toBe(5);
+    expect(setMock.mock.calls[2][0]).toBe(30);
   }, 15_000);
 
   it("成功同步记录 lastSyncedAt，失败不更新", async () => {
@@ -715,7 +715,7 @@ describe("节点配置同步", () => {
       (props: { accountEpoch: number; enabled: boolean }) =>
         useServerSync({
           bridge,
-          intervalMinutes: 5,
+          intervalMinutes: 30,
           enabled: props.enabled,
           accountEpoch: props.accountEpoch,
           onChanged,
@@ -750,7 +750,7 @@ describe("节点配置同步", () => {
           rejectFirst = reject;
         }),
     );
-    setMock.mockImplementationOnce(async () => ({ minutes: 5 }));
+    setMock.mockImplementationOnce(async () => ({ minutes: 30 }));
     defineMethod("serverSyncIntervalSet", setMock);
     render(<App />);
     await waitForShell();
@@ -760,16 +760,16 @@ describe("节点配置同步", () => {
     fireEvent.click(within(settings).getByRole("tab", { name: "连接" }));
     const select = await openSyncSelect();
 
-    fireEvent.change(select, { target: { value: "15" } });
-    fireEvent.change(select, { target: { value: "5" } });
-    await waitFor(() => expect(select.value).toBe("5"));
+    fireEvent.change(select, { target: { value: "60" } });
+    fireEvent.change(select, { target: { value: "30" } });
+    await waitFor(() => expect(select.value).toBe("30"));
 
     await act(async () => {
       rejectFirst({ code: "INTERNAL", message: "" });
     });
     await act(async () => {});
     expect(toastText()).toBeNull();
-    expect(select.value).toBe("5");
+    expect(select.value).toBe("30");
   }, 15_000);
 
   it("初始列表失败后同步成功：列表恢复且可交互", async () => {
@@ -800,9 +800,9 @@ describe("节点配置同步", () => {
     expect(row.hasAttribute("disabled")).toBe(false);
   }, 15_000);
 
-  it("间隔 5 分钟：启动跑一次，到点再跑一次", async () => {
+  it("间隔 30 分钟：启动跑一次，到点再跑一次", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    intervalMinutes = 5;
+    intervalMinutes = 30;
     render(<App />);
     await waitForShell();
     await waitFor(() =>
@@ -810,7 +810,7 @@ describe("节点配置同步", () => {
     );
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
     });
     await waitFor(() =>
       expect(bridge.myServerSync).toHaveBeenCalledTimes(2),

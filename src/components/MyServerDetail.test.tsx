@@ -70,7 +70,7 @@ describe("服务器详情", () => {
     expect(value?.textContent).toBe("未就绪");
   });
 
-  it("费用按日价与本期有效期展示，不出现时价", () => {
+  it("费用只按日价展示，不写本期有效期", () => {
     // 固定「现在」，paid_until 用相对它算出的未来日期，避免写死的日期过期变红。
     vi.useFakeTimers({ now: new Date(2026, 10, 17, 9, 0, 0) });
     renderDetail({
@@ -79,7 +79,8 @@ describe("服务器详情", () => {
     });
 
     const detail = document.querySelector(".myservers__detail");
-    expect(detail?.textContent).toContain("每天 $0.20 · 本期有效至 2026-12-15");
+    expect(detail?.textContent).toContain("每天 $0.20");
+    expect(detail?.textContent).not.toContain("本期有效至");
     expect(detail?.textContent).not.toContain("/小时");
   });
 
@@ -198,15 +199,17 @@ describe("服务器详情", () => {
     expect(screen.queryByText("流量")).toBeNull();
   });
 
-  it("可用机器照旧显示本期有效至与流量", () => {
+  it("可用机器只显示日价与流量", () => {
     renderDetail({
       state: "healthy",
+      daily_price_cents: 20,
       paid_until: new Date(Date.now() + 86_400_000).toISOString(),
       transfer_gib: 1000,
     });
 
     const facts = document.querySelector(".myservers__facts");
-    expect(facts?.textContent).toContain("本期有效至");
+    expect(facts?.textContent).toContain("每天 $0.20");
+    expect(facts?.textContent).not.toContain("本期有效至");
     expect(screen.getByText("流量")).toBeTruthy();
   });
 

@@ -741,12 +741,10 @@ export const en: Record<MessageKey, string> = {
   "myservers.duration.hours": "{hours} hr {minutes} min",
   "myservers.duration.minutes": "{minutes} min {seconds} s",
   "myservers.duration.seconds": "{seconds} s",
-  "myservers.paid.through": "Paid through",
   "myservers.paid.expired": "Current period ended; service is running normally",
   "myservers.paid.pending": "Creating; billing starts when it's ready",
   "myservers.billing.daily": "{price} per day",
   "myservers.billing.dailyExpired": "{price} per day · {word}",
-  "myservers.billing.dailyThrough": "{price} per day · {word} {date}",
   "myservers.billing.pastDueNoGrace":
     "Balance is short and the last charge failed. Top up within 7 days to keep using it.",
   "myservers.billing.pastDueGrace":
@@ -1327,6 +1325,7 @@ export const en: Record<MessageKey, string> = {
   "settings.sync.rowLabel": "Node config sync",
   "settings.sync.interval": "Sync interval",
   "settings.sync.minutes": "{count} min",
+  "settings.sync.hours": "{count} h",
   "settings.sync.manual": "Manual",
   "settings.sync.now": "Sync now",
   "settings.sync.lastSynced": "Last synced {time}",
