@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_EVENTS, CONTRACT_VERSION } from "../agent/protocol";
 import type { AgentEvent, AivpnErrorCode } from "../agent/protocol";
+import { setLanguage } from "../i18n";
+import { en } from "../i18n/en";
+import { zh } from "../i18n/zh";
 import type { ChatState, ChatMessage } from "./chatStore";
 import {
+  PHASE_STATUS_KEYS,
+  STATUS_TEXT_KEYS,
   activeSession,
   chatReducer,
   createInitialState,
@@ -763,6 +768,245 @@ describe("chatReducer", () => {
     expect(activeSession(state)!.status?.text).toBe("正在处理…");
   });
 });
+
+// events.md 2.23.0：界面文案只由 text_key + params 决定，后端 text 不再渲染。
+describe("ai-status / ai-compact 的 text_key", () => {
+  const baseStatus = {
+    contract_version: CONTRACT_VERSION,
+    request_id: "req_key",
+    assistant_message_id: "asst_key",
+    phase: "thinking",
+    text: "",
+    emitted_at: "2026-11-06T00:00:01Z",
+  };
+
+  function statusEvent(
+    over: Partial<typeof baseStatus> & {
+      text_key?: string;
+      params?: Record<string, string | number>;
+    },
+  ): AgentEvent {
+    return {
+      name: AGENT_EVENTS.status,
+      payload: { ...baseStatus, ...over },
+    } as AgentEvent;
+  }
+
+  function compactEvent(over: {
+    text?: string;
+    text_key?: string;
+  } = {}): AgentEvent {
+    return {
+      name: AGENT_EVENTS.compact,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        request_id: "req_key",
+        assistant_message_id: "asst_key",
+        phase: "completed",
+        text_key: "ai.compact.done",
+        text: "",
+        tokens_before: 100,
+        tokens_after: 20,
+        emitted_at: "2026-11-06T00:00:02Z",
+        ...over,
+      },
+    } as AgentEvent;
+  }
+
+  function withRequest(): ChatState {
+    let state = withOneSession();
+    const sessionId = state.activeSessionId;
+    state = chatReducer(state, {
+      type: "send_user_message",
+      sessionId,
+      text: "查状态",
+      localRequestId: "local_key",
+    });
+    return chatReducer(state, {
+      type: "request_started",
+      sessionId,
+      requestId: "req_key",
+    });
+  }
+
+  it("text_key 决定文案，后端 text 不渲染", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({
+        phase: "streaming_answer",
+        text: "上游英文 spinner 文本",
+        text_key: "ai.status.streaming",
+      }),
+    });
+
+    const status = activeSession(state)!.status!;
+    expect(status.text).toBe("正在回复");
+    expect(status.text).not.toContain("spinner");
+  });
+
+  it("缺 text_key 的旧事件按 phase 兜底", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({ phase: "compacting", text: "后端压缩中文" }),
+    });
+
+    expect(activeSession(state)!.status?.text).toBe("正在压缩上下文…");
+  });
+
+  it("未知 text_key 也按 phase 兜底", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({
+        phase: "preparing_tool",
+        text_key: "ai.status.something_new",
+      }),
+    });
+
+    expect(activeSession(state)!.status?.text).toBe("正在准备…");
+  });
+
+  it("retrying 的四个变量按中英模板渲染", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({
+        phase: "retrying",
+        text_key: "ai.status.retrying",
+        params: { attempt: 1, max_attempts: 3, delay_seconds: 2, reason: "429" },
+      }),
+    });
+
+    expect(activeSession(state)!.status?.text).toBe(
+      "上游临时波动，2 秒后重试（1/3）…",
+    );
+  });
+
+  it("retrying 缺 params 时退到不带变量的句子", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({ phase: "retrying", text_key: "ai.status.retrying" }),
+    });
+
+    const text = activeSession(state)!.status!.text;
+    expect(text).toBe("上游临时波动，正在重试…");
+    expect(text).not.toMatch(/\{\w+\}/);
+  });
+
+  it("retrying 只缺一个参数也退到不带变量的句子", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: statusEvent({
+        phase: "retrying",
+        text_key: "ai.status.retrying",
+        params: { attempt: 2, max_attempts: 3 },
+      }),
+    });
+
+    const text = activeSession(state)!.status!.text;
+    expect(text).toBe("上游临时波动，正在重试…");
+    expect(text).not.toMatch(/\{\w+\}/);
+  });
+
+  it("英文界面只显示映射句，不漏后端中文", () => {
+    setLanguage("en");
+    try {
+      let state = withRequest();
+      state = chatReducer(state, {
+        type: "agent_event",
+        event: statusEvent({
+          phase: "thinking",
+          text: "正在检查连接状态",
+          text_key: "ai.status.thinking",
+        }),
+      });
+
+      const status = activeSession(state)!.status!;
+      expect(status.text).toBe("Thinking…");
+      expect(status.text).not.toContain("正在");
+    } finally {
+      setLanguage("zh");
+    }
+  });
+
+  it("英文下未知 text_key 按 phase 兜底，不出现占位符或中文", () => {
+    setLanguage("en");
+    try {
+      let state = withRequest();
+      state = chatReducer(state, {
+        type: "agent_event",
+        event: statusEvent({
+          phase: "preparing_tool",
+          text: "正在准备工具",
+          text_key: "ai.status.something_unknown",
+        }),
+      });
+
+      const text = activeSession(state)!.status!.text;
+      expect(text).toBe("Preparing…");
+      expect(text).not.toMatch(/\{\w+\}/);
+      expect(text).not.toMatch(/[一-龥]/);
+    } finally {
+      setLanguage("zh");
+    }
+  });
+
+  it("ai-compact 只渲染本地文案，不读后端 text", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: compactEvent({ text: "后端压缩文案" }),
+    });
+
+    const session = activeSession(state)!;
+    const assistant = session.messages.find((item) => item.role === "assistant");
+    expect(assistant?.role).toBe("assistant");
+    if (assistant?.role === "assistant") {
+      expect(assistant.items).toContainEqual(
+        expect.objectContaining({ kind: "notice", text: "上下文已压缩" }),
+      );
+      expect(JSON.stringify(assistant.items)).not.toContain("后端压缩文案");
+    }
+  });
+
+  it("ai-compact 缺 text_key 时也是同一句", () => {
+    let state = withRequest();
+    state = chatReducer(state, {
+      type: "agent_event",
+      event: compactEvent({ text: "旧后端文案", text_key: undefined }),
+    });
+
+    const assistant = activeSession(state)!.messages.find(
+      (item) => item.role === "assistant",
+    );
+    if (assistant?.role === "assistant") {
+      expect(assistant.items).toContainEqual(
+        expect.objectContaining({ kind: "notice", text: "上下文已压缩" }),
+      );
+    }
+  });
+
+  it("两张状态映射表用到的字典 key 中英齐全", () => {
+    const used = new Set<string>();
+    for (const key of Object.values(STATUS_TEXT_KEYS)) used.add(key);
+    for (const textKey of Object.values(PHASE_STATUS_KEYS)) {
+      used.add(STATUS_TEXT_KEYS[textKey]);
+    }
+    // 直接使用的兜底句。
+    used.add("chat.status.working");
+    used.add("chat.status.retryingBare");
+
+    for (const key of used) {
+      expect(typeof zh[key as keyof typeof zh], `zh 缺 ${key}`).toBe("string");
+      expect(typeof en[key as keyof typeof en], `en 缺 ${key}`).toBe("string");
+    }
+  });
+});
+
 
 
 // 单飞回归：requesting 到 request_end、气泡按 localRequestId 认领、BUSY 撤回。

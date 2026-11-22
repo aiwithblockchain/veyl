@@ -505,7 +505,7 @@ impl AivpnSession {
         // 布局归属：开始时先取一份快照，结束时再取一次，后者优先（见 `layout_owner`）。
         let layout_config_id = active_config_id();
 
-        emitter.status("thinking", "正在思考");
+        emitter.status("thinking", "ai.status.thinking", None, "正在思考");
 
         let session_id = self.session_id.clone();
         let tools_snapshot: Vec<(String, String, Option<Value>)> = self
@@ -554,11 +554,11 @@ impl AivpnSession {
                                         consumer_emitter.message_chunk(&visible);
                                     }
                                     consumer_emitter
-                                        .status("streaming_answer", "正在回复");
+                                        .status("streaming_answer", "ai.status.streaming", None, "正在回复");
                                 }
                                 ContentDelta::ThinkingDelta { thinking } => {
                                     consumer_emitter.thinking_chunk(thinking);
-                                    consumer_emitter.status("thinking", "正在思考");
+                                    consumer_emitter.status("thinking", "ai.status.thinking", None, "正在思考");
                                 }
                                 _ => {}
                             }
@@ -607,7 +607,12 @@ impl AivpnSession {
                             preview,
                         );
                         // 状态行不拼工具名：模型可见名（RuntimeStatus 等）不能出现在用户面前。
-                        consumer_emitter.status("running_tool", RUNNING_TOOL_STATUS);
+                        consumer_emitter.status(
+                            "running_tool",
+                            "ai.status.working",
+                            None,
+                            RUNNING_TOOL_STATUS,
+                        );
                     }
                     QueryEvent::ToolEnd {
                         tool_name,
@@ -656,7 +661,7 @@ impl AivpnSession {
                     }
                     QueryEvent::Status(text) => {
                         let phase = phase_for_status(text);
-                        consumer_emitter.status(phase, text);
+                        consumer_emitter.status(phase, text_key_for_phase(phase), None, text);
                     }
                     QueryEvent::Retry {
                         attempt,
@@ -666,9 +671,16 @@ impl AivpnSession {
                     } => {
                         consumer_emitter.status(
                             "retrying",
+                            "ai.status.retrying",
+                            Some(events::retry_params(
+                                *attempt,
+                                *max_attempts,
+                                *delay_ms,
+                                reason,
+                            )),
                             &format!(
                                 "上游临时波动（{reason}），正在重试 {attempt}/{max_attempts}，{} 秒后重试…",
-                                delay_ms / 1000
+                                events::retry_delay_seconds(*delay_ms)
                             ),
                         );
                     }
@@ -758,7 +770,7 @@ impl AivpnSession {
                 );
             }
             Ok(QueryOutcome::MaxTokens { usage, .. }) => {
-                emitter.status("completed", "输出达到长度上限，已截断");
+                emitter.status("completed", "ai.status.truncated", None, "输出达到长度上限，已截断");
                 emitter.request_end(
                     "success",
                     Some(final_text),
@@ -890,6 +902,20 @@ fn phase_for_status(text: &str) -> &'static str {
         "completed"
     } else {
         "thinking"
+    }
+}
+
+/// `phase` → 界面文案 key（`events.md` §3.5）。Host 侧固定映射，不按上游文本猜。
+fn text_key_for_phase(phase: &str) -> &'static str {
+    match phase {
+        "waiting_permission" => "ai.status.waiting_permission",
+        "preparing_tool" => "ai.status.preparing",
+        "running_tool" => "ai.status.working",
+        "streaming_answer" => "ai.status.streaming",
+        "compacting" => "ai.status.compacting",
+        "completed" => "ai.status.completed",
+        // `thinking` 与未知 phase 都用思考文案兜底。
+        _ => "ai.status.thinking",
     }
 }
 
@@ -1904,7 +1930,7 @@ mod prompt_tests {
         );
         assert_eq!(
             tools.len(),
-            41,
+            43,
             "英文表条数与工具集不一致：新增/删除工具时同步改英文表"
         );
     }
@@ -2065,6 +2091,60 @@ mod prompt_tests {
                 "{name} 的英文 description 末尾缺表达约束"
             );
         }
+    }
+
+    /// 每个 phase 的文案 key 与契约表一致（`events.md` §3.5）。
+    #[test]
+    fn every_phase_has_the_documented_text_key() {
+        for (phase, key) in [
+            ("thinking", "ai.status.thinking"),
+            ("streaming_answer", "ai.status.streaming"),
+            ("preparing_tool", "ai.status.preparing"),
+            ("running_tool", "ai.status.working"),
+            ("waiting_permission", "ai.status.waiting_permission"),
+            ("compacting", "ai.status.compacting"),
+            ("completed", "ai.status.completed"),
+        ] {
+            assert_eq!(text_key_for_phase(phase), key, "{phase}");
+        }
+        // 契约「其他 → thinking」：未知 phase 不能返回空 key。
+        assert_eq!(text_key_for_phase("nope"), "ai.status.thinking");
+    }
+
+    /// `Status(s)` 文本落到的每个分支，再映射成对应 key。
+    #[test]
+    fn status_texts_map_to_phases_and_keys() {
+        for (text, phase, key) in [
+            (
+                "Waiting for permission",
+                "waiting_permission",
+                "ai.status.waiting_permission",
+            ),
+            (
+                "Preparing tool call",
+                "preparing_tool",
+                "ai.status.preparing",
+            ),
+            ("Running tool", "running_tool", "ai.status.working"),
+            (
+                "Streaming response",
+                "streaming_answer",
+                "ai.status.streaming",
+            ),
+            ("Compacting context", "compacting", "ai.status.compacting"),
+            ("Completed", "completed", "ai.status.completed"),
+            ("Thinking…", "thinking", "ai.status.thinking"),
+        ] {
+            assert_eq!(phase_for_status(text), phase, "{text}");
+            assert_eq!(text_key_for_phase(phase), key, "{text}");
+        }
+    }
+
+    /// 状态事件与命令信封共用同一个契约版本。
+    #[test]
+    fn the_status_contract_versions_match() {
+        assert_eq!(events::CONTRACT_VERSION, "2.23.0");
+        assert_eq!(crate::runtime::EVENT_CONTRACT_VERSION, "2.23.0");
     }
 
     /// running 状态文案不能拼工具名：模型不说话时也会显示给用户。

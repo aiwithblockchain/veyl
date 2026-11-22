@@ -1,6 +1,9 @@
 import { AGENT_EVENTS } from "../agent/protocol";
 import type {
+  AiStatusParams,
+  AiStatusPayload,
   AiStatusPhase,
+  AiStatusTextKey,
   CallSource,
   NextAction,
   RequestResult,
@@ -9,8 +12,63 @@ import type {
 } from "../agent/protocol";
 import { readToolDisplay, toolCopy } from "../components/toolDisplay";
 import { t } from "../i18n";
+import type { MessageKey } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import type { ToolDisplayInfo } from "../components/toolDisplay";
+
+/** events.md 2.23.0：状态文案只由 `text_key` + `params` 决定，`text` 不再渲染。 */
+export const STATUS_TEXT_KEYS: Record<AiStatusTextKey, MessageKey> = {
+  "ai.status.thinking": "chat.status.thinking",
+  "ai.status.streaming": "chat.status.replying",
+  "ai.status.preparing": "chat.status.preparing",
+  "ai.status.working": "chat.status.working",
+  "ai.status.waiting_permission": "chat.status.waitingPermission",
+  "ai.status.compacting": "chat.status.compacting",
+  "ai.status.completed": "chat.status.completed",
+  "ai.status.retrying": "chat.status.retrying",
+  "ai.status.truncated": "chat.status.truncated",
+};
+
+/** 缺 `text_key` 的旧事件：按契约 §3.5 的来源表用 `phase` 兜底。 */
+export const PHASE_STATUS_KEYS: Record<AiStatusPhase, AiStatusTextKey> = {
+  thinking: "ai.status.thinking",
+  streaming_answer: "ai.status.streaming",
+  preparing_tool: "ai.status.preparing",
+  running_tool: "ai.status.working",
+  waiting_permission: "ai.status.waiting_permission",
+  retrying: "ai.status.retrying",
+  compacting: "ai.status.compacting",
+  completed: "ai.status.completed",
+};
+
+function statusTextKey(payload: AiStatusPayload): AiStatusTextKey | null {
+  const key = payload.text_key;
+  // 不用 `key in`：原型链上的名字（如 toString）会被误命中。
+  if (key !== undefined && Object.prototype.hasOwnProperty.call(STATUS_TEXT_KEYS, key)) {
+    return key;
+  }
+  return PHASE_STATUS_KEYS[payload.phase] ?? null;
+}
+
+/**
+ * retrying 的模板变量；缺任何一个都返回 null，不让占位符露到界面。
+ * `reason` 是诊断字段，不进模板。
+ */
+function statusVars(
+  key: AiStatusTextKey,
+  params: AiStatusParams | undefined,
+): Record<string, string | number> | null {
+  if (key !== "ai.status.retrying" || !params) return null;
+  const { attempt, max_attempts, delay_seconds } = params;
+  if (
+    attempt === undefined ||
+    max_attempts === undefined ||
+    delay_seconds === undefined
+  ) {
+    return null;
+  }
+  return { attempt, maxAttempts: max_attempts, delaySeconds: delay_seconds };
+}
 
 export type ToolCallState = "running" | "ok" | "error";
 
@@ -670,28 +728,46 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           });
         }
 
-        case AGENT_EVENTS.status:
+        case AGENT_EVENTS.status: {
+          const payload = event.payload;
+          const key = statusTextKey(payload);
+          let messageKey: MessageKey;
+          let vars: Record<string, string | number> | undefined;
+          if (key === null) {
+            messageKey = "chat.status.working";
+          } else {
+            messageKey = STATUS_TEXT_KEYS[key];
+            const filled = statusVars(key, payload.params);
+            if (filled === null && key === "ai.status.retrying") {
+              // 缺参不让 {delaySeconds} 这类占位符露出来，退到不带变量的句子。
+              messageKey = "chat.status.retryingBare";
+            } else {
+              vars = filled ?? undefined;
+            }
+          }
+          const text = t(messageKey, vars);
           return patchSession(state, current.id, (session) => ({
             ...session,
             // running_tool 的原始文案可能带工具名，保留 tool-call-start 写的用户语言。
             status: {
               text:
-                event.payload.phase === "running_tool"
-                  ? session.status?.phase === "running_tool"
-                    ? session.status.text
-                    : t("chat.status.working")
-                  : event.payload.text,
-              phase: event.payload.phase,
+                payload.phase === "running_tool" &&
+                session.status?.phase === "running_tool"
+                  ? session.status.text
+                  : text,
+              phase: payload.phase,
             },
           }));
+        }
 
         case AGENT_EVENTS.compact:
+          // 2.23.0 唯一合法 text_key 是 ai.compact.done；旧事件缺它也是同一句。
           return patchSession(state, current.id, (session) =>
             withAssistant(session, event.payload.assistant_message_id, event.payload.request_id, (message) => ({
               ...message,
               items: [
                 ...message.items,
-                { kind: "notice", id: nextId("notice"), text: event.payload.text || t("chat.notice.compacted") },
+                { kind: "notice", id: nextId("notice"), text: t("chat.notice.compacted") },
               ],
             })),
           );

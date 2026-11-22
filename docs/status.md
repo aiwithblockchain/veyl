@@ -73,6 +73,7 @@
 
 - `runtime_status` / `chat_history` 仍返回字符串错误，不走六字段信封；界面已按 `errorText` 兜底。
 - `app_language_*` / `server_sync_interval_*` 的 `INTERNAL` 没有 `details.reason`，界面只能走调用点兜底。
+- 问题报告产出的文件名与章节标题仍是中文（`报告.md` / `现场.json` / `先看我.txt`、`SECTIONS` 标题硬编码），英文会话下报告内容会中英混杂；属 i18n 批次 5 已知缺口。
 - 连接页探测 tooltip 仍读 `probe.error.message`，若后端把它清空会显示空 title。
 - `trial.error.fetchWith` 已无引用，待清理。
 - `tools.md` §4.13 / §4.54 仍有「全部软件 / 本机代理」旧用词，未收口。

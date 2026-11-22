@@ -27,14 +27,15 @@ function renderCard(overrides: Partial<ToolCall> = {}) {
 }
 
 describe("ToolCallCard：默认一行", () => {
-  it("只显示用户文案，不显示工具名、action 与 JSON", () => {
+  it("只显示用户文案，不显示工具名、action 与后端 display.text", () => {
     renderCard({
-      display: { text: "已连接", facts: [], changed: "none" },
+      display: { text: "后端原始文案不该出现", facts: [], changed: "none" },
       result: "已连接到 东京 01，出口 IP 203.0.113.7。",
       argsPreview: { node_id: "seed-jp-01" },
     });
 
     expect(screen.getByText("已连接")).toBeTruthy();
+    expect(screen.queryByText("后端原始文案不该出现")).toBeNull();
     expect(screen.queryByText("VpnConnect")).toBeNull();
     expect(screen.queryByText("连接 seed-jp-01")).toBeNull();
     expect(screen.queryByText(/seed-jp-01/)).toBeNull();
@@ -153,7 +154,7 @@ describe("ToolCallCard：展开详情", () => {
     });
 
     expect(screen.queryByRole("button", { name: "换一个节点" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /节点没有响应/ }));
+    fireEvent.click(screen.getByRole("button", { name: /没能连上/ }));
     const action = screen.getByRole("button", { name: "换一个节点" });
     fireEvent.click(action);
     expect(onNextAction).toHaveBeenCalledWith(
@@ -172,8 +173,9 @@ describe("ToolCallCard：失败", () => {
       nextActions: [{ label: "换一个节点", tool: "CatalogSearch", args: {} }],
     });
 
-    expect(screen.getByText("节点没有响应，没能连上")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /节点没有响应/ }));
+    expect(screen.getAllByText("没能连上").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/节点没有响应/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /没能连上/ }));
 
     expect(screen.getByText("发生了什么")).toBeTruthy();
     expect(screen.getByText("有没有改动")).toBeTruthy();
@@ -216,8 +218,9 @@ describe("ToolCallCard：失败", () => {
       display: { text: "没能保存配置", facts: [], changed: null },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /没能保存配置/ }));
+    fireEvent.click(screen.getByRole("button", { name: /没能连上/ }));
     expect(screen.getByText("不确定，诊断日志里有记录")).toBeTruthy();
+    expect(screen.queryByText("没能保存配置")).toBeNull();
     expect(screen.queryByRole("button", { name: "复制诊断信息" })).toBeNull();
   });
 });
@@ -341,7 +344,8 @@ describe("ToolCallCard：诊断卡的接管范围", () => {
     renderCard(diagCall());
 
     expect(screen.queryByText("不覆盖浏览器 HTTP/3")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+    fireEvent.click(screen.getByRole("button", { name: /诊断已完成/ }));
+    expect(screen.queryByText(/诊断完成，发现/)).toBeNull();
 
     expect(screen.getByText("接管范围")).toBeTruthy();
     expect(screen.getByText("不覆盖浏览器 HTTP/3")).toBeTruthy();
@@ -352,7 +356,7 @@ describe("ToolCallCard：诊断卡的接管范围", () => {
 
   it("点击「切到全部接管」把动作与参数原样交给调用方", () => {
     const { onNextAction } = renderCard(diagCall());
-    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+    fireEvent.click(screen.getByRole("button", { name: /诊断已完成/ }));
     fireEvent.click(screen.getByRole("button", { name: "切到全部接管" }));
 
     expect(onNextAction).toHaveBeenCalledTimes(1);
@@ -379,7 +383,7 @@ describe("ToolCallCard：诊断卡的接管范围", () => {
       }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /诊断完成/ }));
+    fireEvent.click(screen.getByRole("button", { name: /诊断已完成/ }));
     expect(screen.getByText("接管全部流量")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "切到全部接管" })).toBeNull();
   });

@@ -1,4 +1,4 @@
-//! 前端事件的构造与发送（`docs/contracts/events.md` v1.0.4）。
+//! 前端事件的构造与发送（`docs/contracts/events.md` 2.23.0）。
 //!
 //! 事件名是契约冻结值，不带 `ai-` 前缀；payload 一律带 `contract_version`
 //! 与 `emitted_at`。
@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.19.0";
+pub const CONTRACT_VERSION: &str = "2.23.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -38,6 +38,22 @@ const RESULT_LIMIT: usize = 8 * 1024;
 
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// 重试等待的整秒数。claurst 首次 backoff 是 750–999ms，向下取整会得到 0；
+/// 说「0 秒后重试」既怪又不准，所以至少 1 秒（1500ms → 1 不变）。
+pub fn retry_delay_seconds(delay_ms: u64) -> u64 {
+    (delay_ms / 1000).max(1)
+}
+
+/// `retrying` 的插值参数（`events.md` §3.5）：秒数取整，1500ms → 1、750ms → 1。
+pub fn retry_params(attempt: u32, max_attempts: u32, delay_ms: u64, reason: &str) -> Value {
+    json!({
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "delay_seconds": retry_delay_seconds(delay_ms),
+        "reason": reason,
+    })
 }
 
 /// 一轮请求的事件发射器：把 request_id / assistant_message_id 绑在一起，
@@ -82,20 +98,51 @@ impl SessionEmitter {
         self.emit(EV_THINKING_CHUNK, payload);
     }
 
-    pub fn status(&self, phase: &str, text: &str) {
+    /// `ai-status` 的 payload。`text_key` 是界面唯一文案来源（`events.md` §3.5）；
+    /// `text` 保留一版给旧界面，2.24.0 删除。
+    fn status_payload(
+        &self,
+        phase: &str,
+        text_key: &str,
+        params: Option<Value>,
+        text: &str,
+    ) -> Value {
         let mut payload = self.base();
         payload["phase"] = Value::String(phase.to_string());
+        payload["text_key"] = Value::String(text_key.to_string());
+        if let Some(params) = params {
+            payload["params"] = params;
+        }
         payload["text"] = Value::String(text.to_string());
-        self.emit(EV_STATUS, payload);
+        payload
     }
 
-    pub fn compact(&self, phase: &str, text: &str, before: Option<u64>, after: Option<u64>) {
+    pub fn status(&self, phase: &str, text_key: &str, params: Option<Value>, text: &str) {
+        self.emit(
+            EV_STATUS,
+            self.status_payload(phase, text_key, params, text),
+        );
+    }
+
+    /// `ai-compact` 的 payload。`text_key` 固定 `ai.compact.done`（`events.md` §3.6）。
+    fn compact_payload(
+        &self,
+        phase: &str,
+        text: &str,
+        before: Option<u64>,
+        after: Option<u64>,
+    ) -> Value {
         let mut payload = self.base();
         payload["phase"] = Value::String(phase.to_string());
+        payload["text_key"] = Value::String("ai.compact.done".to_string());
         payload["text"] = Value::String(text.to_string());
         payload["tokens_before"] = json!(before);
         payload["tokens_after"] = json!(after);
-        self.emit(EV_COMPACT, payload);
+        payload
+    }
+
+    pub fn compact(&self, phase: &str, text: &str, before: Option<u64>, after: Option<u64>) {
+        self.emit(EV_COMPACT, self.compact_payload(phase, text, before, after));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -172,6 +219,31 @@ impl SessionEmitter {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn request_end_payload(
+        &self,
+        result: &str,
+        final_text: Option<String>,
+        error: Option<AivpnError>,
+        usage: Option<Value>,
+        duration_ms: u64,
+    ) -> Value {
+        let mut payload = self.base();
+        payload["result"] = Value::String(result.to_string());
+        payload["final_text"] = json!(final_text);
+        payload["error"] = serde_json::to_value(error).unwrap_or(Value::Null);
+        // 嵌在事件里的错误对象跟事件契约版本走；工具通道的 `AivpnError`
+        // 仍是 tools.md 的版本，这里只在出事件时覆写。
+        if let Some(obj) = payload["error"].as_object_mut() {
+            obj.insert(
+                "contract_version".into(),
+                Value::String(CONTRACT_VERSION.into()),
+            );
+        }
+        payload["usage"] = usage.unwrap_or(Value::Null);
+        payload["duration_ms"] = json!(duration_ms);
+        payload
+    }
+
     pub fn request_end(
         &self,
         result: &str,
@@ -180,13 +252,10 @@ impl SessionEmitter {
         usage: Option<Value>,
         duration_ms: u64,
     ) {
-        let mut payload = self.base();
-        payload["result"] = Value::String(result.to_string());
-        payload["final_text"] = json!(final_text);
-        payload["error"] = serde_json::to_value(error).unwrap_or(Value::Null);
-        payload["usage"] = usage.unwrap_or(Value::Null);
-        payload["duration_ms"] = json!(duration_ms);
-        self.emit(EV_REQUEST_END, payload);
+        self.emit(
+            EV_REQUEST_END,
+            self.request_end_payload(result, final_text, error, usage, duration_ms),
+        );
     }
 }
 
@@ -212,6 +281,101 @@ fn truncate_result(text: &str) -> (String, bool) {    if text.len() <= RESULT_LI
         cut -= 1;
     }
     (format!("{}…(truncated)", &text[..cut]), true)
+}
+
+#[cfg(test)]
+mod status_payload_tests {
+    use super::*;
+
+    fn status(phase: &str, key: &str, params: Option<Value>, text: &str) -> Value {
+        SessionEmitter::new("req_1", "msg_1").status_payload(phase, key, params, text)
+    }
+
+    /// 2.23.0：状态事件必须带 `text_key`，`text` 保留一版（`events.md` §3.5）。
+    #[test]
+    fn every_status_payload_carries_the_key_and_keeps_text() {
+        let payload = status("thinking", "ai.status.thinking", None, "正在思考");
+        assert_eq!(payload["phase"], json!("thinking"));
+        assert_eq!(payload["text_key"], json!("ai.status.thinking"));
+        assert_eq!(payload["text"], json!("正在思考"), "text 要保留一版");
+        assert!(
+            payload.get("params").is_none(),
+            "没有插值参数时不出现 params"
+        );
+        assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
+        assert_eq!(CONTRACT_VERSION, "2.23.0");
+    }
+
+    /// retrying 的四个插值参数（`events.md` §3.5）；秒数取整且至少 1：
+    /// 1500ms → 1，claurst 首次 backoff 750ms → 1（不能说「0 秒后重试」）。
+    #[test]
+    fn retry_params_carry_the_four_documented_values() {
+        let params = retry_params(1, 3, 1500, "rate_limited");
+        assert_eq!(
+            params,
+            json!({
+                "attempt": 1,
+                "max_attempts": 3,
+                "delay_seconds": 1,
+                "reason": "rate_limited",
+            })
+        );
+
+        assert_eq!(retry_params(1, 3, 750, "rate_limited")["delay_seconds"], 1);
+        assert_eq!(retry_delay_seconds(750), 1);
+        assert_eq!(retry_delay_seconds(1500), 1);
+        assert_eq!(retry_delay_seconds(3_200), 3);
+
+        let payload = status("retrying", "ai.status.retrying", Some(params), "…");
+        assert_eq!(payload["params"]["delay_seconds"], 1);
+        assert_eq!(payload["params"]["reason"], json!("rate_limited"));
+    }
+
+    /// 事件里的错误对象跟事件契约版本（2.23.0）；工具通道的
+    /// `AivpnError` 仍取 tools.md 的 3.24.0，code / details 原样保留。
+    #[test]
+    fn request_end_error_carries_the_event_contract_version() {
+        let error = AivpnError::new("UPSTREAM_ERROR", "上游原文")
+            .with_details(json!({ "reason": "provider_unavailable" }));
+        assert_eq!(error.contract_version, crate::tools::envelope::CONTRACT_VERSION);
+
+        let payload = SessionEmitter::new("req_1", "msg_1").request_end_payload(
+            "error",
+            None,
+            Some(error),
+            None,
+            12,
+        );
+        assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
+        assert_eq!(
+            payload["error"]["contract_version"],
+            json!(CONTRACT_VERSION)
+        );
+        assert_eq!(payload["error"]["code"], json!("UPSTREAM_ERROR"));
+        assert_eq!(payload["error"]["message"], json!("上游原文"));
+        assert_eq!(
+            payload["error"]["details"]["reason"],
+            json!("provider_unavailable")
+        );
+        assert_eq!(crate::tools::envelope::CONTRACT_VERSION, "3.24.0");
+    }
+
+    /// 压缩事件有自己的 key（`events.md` §3.6），tokens 两个字段不动。
+    #[test]
+    fn compact_payload_carries_its_own_key() {
+        let payload = SessionEmitter::new("req_1", "msg_1").compact_payload(
+            "completed",
+            "上下文已压缩，早前消息已折叠。",
+            Some(1200),
+            Some(400),
+        );
+        assert_eq!(payload["phase"], json!("completed"));
+        assert_eq!(payload["text_key"], json!("ai.compact.done"));
+        assert_eq!(payload["tokens_before"], json!(1200));
+        assert_eq!(payload["tokens_after"], json!(400));
+        assert_eq!(payload["text"], json!("上下文已压缩，早前消息已折叠。"));
+        assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
+    }
 }
 
 #[cfg(test)]

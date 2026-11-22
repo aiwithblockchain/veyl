@@ -3022,6 +3022,74 @@ check("代码里的通用错误码都在 runtime.md §6.1 登记（契约）", (
   return problems;
 });
 
+// --- 21.1：契约文件版本 ↔ 实现常量（非对称） ---
+//
+// 契约可以先于代码升版：`doc > code` 时实现还没跟上，只报 advisory；
+// `code > doc` 说明代码里有契约没登记的行为，**阻断**。
+// 版本按分段数值比较（2.24.0 > 2.10.0），不能按字符串比。
+// 常量名 + 文件都固定；其余实现版本仍由第 5 项以 advisory 形式全量扫描。
+
+const VERSION_CONSTANTS = [
+  {
+    rel: "src-tauri/src/runtime/manager.rs",
+    name: "EVENT_CONTRACT_VERSION",
+    doc: "docs/contracts/events.md",
+  },
+  {
+    rel: "src-tauri/src/runtime/manager.rs",
+    name: "CONTRACT_VERSION",
+    doc: "docs/contracts/runtime.md",
+  },
+  {
+    rel: "src-tauri/src/claurst_session/events.rs",
+    name: "CONTRACT_VERSION",
+    doc: "docs/contracts/events.md",
+  },
+  {
+    rel: "src-tauri/src/tools/envelope.rs",
+    name: "CONTRACT_VERSION",
+    doc: "docs/contracts/tools.md",
+  },
+];
+
+/** 分段数值比较：返回 -1 / 0 / 1。缺失段按 0 处理。 */
+function compareVersion(a, b) {
+  const pa = a.split(".").map((n) => Number(n) || 0);
+  const pb = b.split(".").map((n) => Number(n) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+function versionDrift(filter) {
+  const problems = [];
+  for (const { rel, name, doc } of VERSION_CONSTANTS) {
+    const m = read(rel).match(new RegExp(`pub const ${name}: &str = "([^"]+)"`));
+    if (!m) {
+      problems.push(`${rel} 找不到 \`pub const ${name}\``);
+      continue;
+    }
+    const expected = docContractVersion(doc);
+    if (filter(compareVersion(m[1], expected))) {
+      problems.push(`${rel} 的 ${name} = ${m[1]}，${doc} 是 ${expected}`);
+    }
+  }
+  return problems;
+}
+
+check("契约版本与实现常量：实现不得领先契约（契约）", () =>
+  versionDrift((cmp) => cmp > 0),
+);
+
+check(
+  "契约先行：实现常量待升级（advisory）",
+  () => versionDrift((cmp) => cmp < 0),
+  { advisory: true },
+);
+
 // --- 22：解释入口固定串前后端一致 ---
 
 check("解释入口固定串：questions.rs 与前端字典逐字一致（契约）", () => {

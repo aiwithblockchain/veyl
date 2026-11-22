@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.22.0" as const;
+export const CONTRACT_VERSION = "2.23.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -204,11 +204,35 @@ export type AiStatusPhase =
   | "compacting"
   | "completed";
 
+/** events.md §3.5：界面文案的唯一来源；`params` 只给 retrying 用。 */
+export type AiStatusTextKey =
+  | "ai.status.thinking"
+  | "ai.status.streaming"
+  | "ai.status.preparing"
+  | "ai.status.working"
+  | "ai.status.waiting_permission"
+  | "ai.status.compacting"
+  | "ai.status.completed"
+  | "ai.status.retrying"
+  | "ai.status.truncated";
+
+export interface AiStatusParams {
+  attempt?: number;
+  max_attempts?: number;
+  delay_seconds?: number;
+  /** 诊断字段：Host 写日志，界面不渲染。 */
+  reason?: string;
+}
+
 export interface AiStatusPayload {
   contract_version: typeof CONTRACT_VERSION;
   request_id: string;
   assistant_message_id: string;
   phase: AiStatusPhase;
+  /** 2.23.0 起必填；旧事件缺失时按 phase 兜底。 */
+  text_key?: AiStatusTextKey;
+  params?: AiStatusParams;
+  /** 保留一版；界面不渲染（2.24.0 删除）。 */
   text: string;
   emitted_at: string;
 }
@@ -218,6 +242,9 @@ export interface AiCompactPayload {
   request_id: string;
   assistant_message_id: string;
   phase: "compacting" | "completed";
+  /** 2.23.0 起必带；旧事件缺省，界面固定用本地句。 */
+  text_key?: "ai.compact.done";
+  /** 保留一版；界面不渲染（2.24.0 删除）。 */
   text: string;
   tokens_before: number | null;
   tokens_after: number | null;

@@ -57,10 +57,7 @@ export function ToolCallCard({
   const showDuration =
     !running && call.durationMs !== undefined && call.durationMs >= DURATION_THRESHOLD_MS;
 
-  const text = running
-    ? copy.running
-    : call.display?.text ??
-      (failed ? copy.failed : copy.done);
+  const text = running ? copy.running : failed ? copy.failed : copy.done;
 
   const changed = call.display?.changed ?? null;
   const nextAction = call.nextActions[0];
@@ -169,7 +166,7 @@ export function ToolCallCard({
         <div className="tool-line__body">
           {failed ? (
             <dl className="tool-line__facts">
-              <FactRow label={t("tool.body.what")} value={call.display?.text ?? copy.failed} />
+              <FactRow label={t("tool.body.what")} value={copy.failed} />
               <FactRow
                 label={t("tool.body.changed")}
                 value={changedLabel(changed, copy.readOnly)}

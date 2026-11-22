@@ -1,8 +1,8 @@
 /**
  * 工具调用的用户语言映射。
  *
- * 默认视图只用这张表与后端 `display.text`；`call.tool` / `call.action`
- * 永远不出现在用户界面里，技术细节除外。
+ * 完成后按本表渲染，不读后端 `display.text`（events.md 2.23.0）；
+ * `call.tool` / `call.action` 永远不出现在用户界面里，技术细节除外。
  * 工具名集合必须与 `docs/contracts/tools.md` §3 完全一致（测试有集合断言）。
  */
 import { getLanguage, t } from "../i18n";
@@ -33,7 +33,7 @@ export interface ToolDisplayInfo {
 export interface ToolCopy {
   /** 进行中的一句话。 */
   running: string;
-  /** 完成后的通用兜底；有 `display.text` 时以后端为准。 */
+  /** 完成后的通用句；界面不读后端 `display.text`。 */
   done: string;
   /** 失败时的一行标题。 */
   failed: string;

@@ -300,7 +300,7 @@ type AiStatusTextKey =
 |---|---|---|
 | 请求开始 | `thinking` | `ai.status.thinking` |
 | `Status(s)` 含 permission | `waiting_permission` | `ai.status.waiting_permission` |
-| `Status(s)` 含 prepar + tool | `preparing_tool` | `ai.status.preparing` |
+| `Status(s)` 含 prepar | `preparing_tool` | `ai.status.preparing` |
 | `Status(s)` 含 tool / bash / command | `running_tool` | `ai.status.working` |
 | `Status(s)` 含 stream / respond / answer | `streaming_answer` | `ai.status.streaming` |
 | `Status(s)` 含 compact | `compacting` | `ai.status.compacting` |
@@ -309,12 +309,14 @@ type AiStatusTextKey =
 | `Retry { … }` | `retrying` | `ai.status.retrying` + `params` |
 | 达到长度上限 | `completed` | `ai.status.truncated` |
 
+`ai.status.retrying` 的 `params.reason` 只是诊断字段（上游原因的原文，多为英文），**界面不渲染**：`text_key` 的模板只用 `attempt` / `max_attempts` / `delay_seconds`。`reason` 保留在 payload 里供日志与排障对照。`delay_seconds` 至少为 1：首次退避 750ms 也显示「1 秒」。
+
 来源：
 
 | QueryEvent | phase |
 |---|---|
 | `Status(s)` 含 permission | `waiting_permission` |
-| `Status(s)` 含 prepar + tool | `preparing_tool` |
+| `Status(s)` 含 prepar | `preparing_tool` |
 | `Status(s)` 含 tool / bash / command | `running_tool` |
 | `Status(s)` 含 stream / respond / answer | `streaming_answer` |
 | `Status(s)` 含 compact | `compacting` |
@@ -337,7 +339,9 @@ type AiStatusTextKey =
 
 UI 处理：更新顶部状态行；`waiting_permission` 时同时高亮权限卡。
 
-**本地化（2.23.0）**：界面文案只由 `text_key` + `params` 决定，按界面语言查表；**UI 不渲染 `text`**，也不再显示上游状态文本（claurst 的英文 spinner 文本过去会原样漏进中文界面）。`text` 仍随事件下发一版（内容为原中文状态句），2.24.0 删除。新增 `text_key` 必须同时补齐中英字典，否则按 `phase` 的通用文案兜底并记 `i18n missing key`。
+**本地化（2.23.0）**：界面文案只由 `text_key` + `params` 决定，按界面语言查表；**UI 不渲染 `text`**，也不再显示上游状态文本（claurst 的英文 spinner 文本过去会原样漏进中文界面）。`text` 是**降级字段**：内容是上游/旧版的原文（可能英文），UI 不渲染，2.24.0 删除。新增 `text_key` 必须同时补齐中英字典，否则按 `phase` 的通用文案兜底并记 `i18n missing key`。
+
+映射边界：含 `prepar` 的状态（包括上游的 `Preparing request`）都落 `preparing_tool`；**未列出的上游状态一律落 `thinking`**。
 
 ---
 
@@ -386,12 +390,13 @@ type AiRequestEndPayload = {
 };
 ```
 
+`error` 是 `AivpnError`（形状见 `runtime.md` §2.6；`tools.md` §1.4 引用同一形状，不另写一份）。**`ai-request-end` 里的 `error.contract_version` 取本事件契约的版本（2.23.0）**；同一个形状出现在工具结果里时取 `tools.md` 的版本。前端不比较两者，按 `code` + `details.reason` 用。
+
 来源：
 
 | QueryOutcome | result | 其他字段 |
 |---|---|---|
-| 正常结束 | `success` | `final_text` + `usage` |
-| `QueryOutcome::Error` | `error` | `error.code = "UPSTREAM_ERROR"` 或具体码 |
+| 正常结束 | `success` | `final_text` + `usage` || `QueryOutcome::Error` | `error` | `error.code = "UPSTREAM_ERROR"` 或具体码 |
 | `QueryOutcome::BudgetExceeded` | `error` | `error.code = "PRECONDITION_FAILED"`，`details.reason = "budget_exceeded"` |
 | 用户停止 | `cancelled` | `error.code = "CANCELLED"` |
 
@@ -436,7 +441,7 @@ type RuntimeStateChangedPayload = {
 
 - `snapshot.state === to`。不一致说明有人绕过了单写者，属于实现缺陷。
 - `snapshot.mixed_port` 是 `to = "running" | "degraded"` 时 `proxy_card` 的唯一端口来源（`proxy_params` 的 `runtime` 来源）。
-- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.21.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
+- `snapshot.contract_version` 跟 **`runtime.md`**（当前 `2.8.0`），与顶层的 `contract_version`（本文件 `2.23.0`）**可以不同**：一个声明快照形状的版本，一个声明事件形状的版本，两处都对。消费方不要拿其中一个去校验另一个。
 - payload ≤ 64 KB；`RuntimeSnapshot` 本身远小于上限，不需要截断。
 
 UI 处理：更新状态栏与顶部主按钮；`to = "failed"` 时显示诊断入口；用 `snapshot.mixed_port` 重渲染代理卡。
@@ -1392,6 +1397,7 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 | 2 | §3.5 `AiStatusPayload` 新增必填 `text_key` 与可选 `params`；界面只按 `text_key` 查表，**不再渲染 `text`**（保留一版，2.24.0 删除）。同时修掉上游 claurst 英文状态文本漏进中文界面的问题 | 新增字段 / 语义 | 同上 |
 | 3 | §3.6 `AiCompactPayload` 新增 `text_key: "ai.compact.done"`；`text` 保留一版、UI 不渲染 | 新增字段 | 同上 |
 | 4 | §3.4 `ToolDisplay.text` 标记为 UI 不渲染、下一版删除；完成/失败那句话一律用前端映射表（`tools.md` §2.4） | 语义 | 同上 |
+| 5 | §3.7 明确 `ai-request-end` 内 `error.contract_version` 取**本事件契约**的版本；`AivpnError` 的形状只引用 `runtime.md` §2.6，不再各文件各写一份 | 语义澄清 | PM 2026-11-22 |
 
 ### 2.22.0（未发布，2026-11-22：节点凭据变化的原因值）
 
