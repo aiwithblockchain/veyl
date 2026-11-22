@@ -1496,6 +1496,7 @@ export const zh = {
   "diagnosis.action.start": "开始分析",
   "diagnosis.action.updateConfig": "更新配置",
   "diagnosis.action.resetPort": "重置端口与密码",
+  "diagnosis.action.retest": "重新测一次",
   "diagnosis.action.askAi": "去问 AI",
   "diagnosis.action.goServers": "去销毁并重建",
   "diagnosis.step.connectivity": "连通性",

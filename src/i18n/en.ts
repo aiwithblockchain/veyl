@@ -1562,6 +1562,7 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.action.start": "Start analysis",
   "diagnosis.action.updateConfig": "Update config",
   "diagnosis.action.resetPort": "Reset port and password",
+  "diagnosis.action.retest": "Re-test",
   "diagnosis.action.askAi": "Ask AI",
   "diagnosis.action.goServers": "Destroy and rebuild",
   "diagnosis.step.connectivity": "Connectivity",

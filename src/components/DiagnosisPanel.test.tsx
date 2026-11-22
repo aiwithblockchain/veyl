@@ -513,7 +513,7 @@ describe("节点诊断面板", () => {
     expect(
       screen.queryByRole("button", { name: "重置端口与密码" }),
     ).toBeNull();
-    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新测一次" })).toBeTruthy();
   });
 
   it("重连本身失败：说没能重连，不说不通，也不给重置", async () => {
@@ -623,5 +623,96 @@ describe("节点诊断面板", () => {
     expect(
       screen.getByRole("dialog", { name: "诊断：东京 01" }),
     ).toBeTruthy();
+  });
+
+  it("更新配置连续三次没测成：不再给更新配置，只给去问 AI", async () => {
+    const reprobe = vi.fn<() => Promise<boolean | null>>(async () => null);
+    open(makeDeps({ reprobe }));
+
+    await startAndUpdate();
+    await screen.findByText(/这次没能重测/);
+
+    fireEvent.click(screen.getByRole("button", { name: "更新配置" }));
+    await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "更新配置" }),
+    );
+    await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(3));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "更新配置" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("重置后连续两次没测成：不再给重新测，只剩去问 AI", async () => {
+    const reprobe = vi
+      .fn<() => Promise<boolean | null>>(async () => null)
+      // 第一次是配置步骤的重测：判为不通，先走到重置。
+      .mockResolvedValueOnce(false);
+    open(
+      makeDeps({
+        isTunnelRunning: () => false,
+        isRuntimeRunning: () => true,
+        reprobe,
+      }),
+    );
+
+    await startAndUpdate();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重置端口与密码" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    await screen.findByText("端口与密码已重置，但这次没能重测。");
+    fireEvent.click(screen.getByRole("button", { name: "重新测一次" }));
+    await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(3));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重新测一次" }),
+    );
+    await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(4));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "重新测一次" }),
+      ).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "重置端口与密码" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+  });
+
+  it("关闭重开：次数计数清零，重新从第一次更新配置开始", async () => {
+    const firstProbe = vi.fn<() => Promise<boolean | null>>(async () => null);
+    const first = open(makeDeps({ reprobe: firstProbe }));
+
+    await startAndUpdate();
+    await screen.findByText(/这次没能重测/);
+    fireEvent.click(screen.getByRole("button", { name: "更新配置" }));
+    await waitFor(() => expect(firstProbe).toHaveBeenCalledTimes(2));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "更新配置" }),
+    );
+    await waitFor(() => expect(firstProbe).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "更新配置" }),
+      ).toBeNull(),
+    );
+    first.unmount();
+
+    open(
+      makeDeps({ reprobe: vi.fn<() => Promise<boolean | null>>(async () => null) }),
+    );
+    await startAndUpdate();
+
+    expect(await screen.findByText(/这次没能重测/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去问 AI" })).toBeNull();
   });
 });

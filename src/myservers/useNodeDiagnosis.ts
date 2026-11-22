@@ -196,6 +196,7 @@ export type DiagnosisAction =
   | "start"
   | "updateConfig"
   | "resetPort"
+  | "retest"
   | "askAi"
   | "goServers";
 
@@ -254,6 +255,8 @@ function emptyCollected(): Collected {
 function deriveAction(
   steps: DiagnosisStep[],
   phase: DiagnosisPhase,
+  configAttempts: number,
+  postRotateRetests: number,
 ): DiagnosisAction | null {
   if (phase === "running" || phase === "confirming" || phase === "done") {
     return null;
@@ -279,17 +282,19 @@ function deriveAction(
     case "config-reconnect-failed":
       return "askAi";
     case "config-untested":
-      // 没测成不是不通：回到「更新配置」再测一次，绝不跳到重置。
-      return "updateConfig";
+      // 没测成不是不通：同一轮最多试 3 次更新配置，之后交 AI。
+      return configAttempts < 3 ? "updateConfig" : "askAi";
     case "config-unchanged":
       return "resetPort";
     case "config-failed":
       // 配置可能是别的设备改的：ICMP 通说明 IP 没被封，重置通常还能救回来。
       return "resetPort";
+    case "rotate-untested":
+      // 重置后最多再测 2 次，仍没测成才交 AI；重置本身不再给第二次。
+      return postRotateRetests < 2 ? "retest" : "askAi";
     case "rotate-failed":
     case "rotate-reconnect-failed":
     case "rotate-timeout":
-    case "rotate-untested":
     case "rotate-still-failed":
       return "askAi";
     default:
@@ -435,6 +440,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   const busyRef = useRef(false);
   const collectedRef = useRef<Collected>(emptyCollected());
   const runRef = useRef<string | null>(null);
+  /** 同一轮的次数上限；mount 归零，关闭重开就是新的一轮。 */
+  const configAttemptsRef = useRef(0);
+  const postRotateRetestsRef = useRef(0);
 
   /** 每行都带本次诊断的 run 码，方便在 logs/ 里串起一次分析。 */
   const log = (level: UiLogLevel, body: string) => {
@@ -566,6 +574,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
   const runConfig = async () => {
     busyRef.current = true;
+    configAttemptsRef.current += 1;
     updatePhase("running");
     setSteps((prev) => [
       ...prev,
@@ -903,6 +912,57 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     }
   };
 
+  /** 重置后的重测：只 reprobe，不再 rotate；同一轮最多 2 次。 */
+  const runPostRotateRetest = async () => {
+    busyRef.current = true;
+    postRotateRetestsRef.current += 1;
+    updatePhase("running");
+    replaceLast({
+      id: "rotate",
+      status: "running",
+      conclusion: { kind: "rotate-pending" },
+    });
+    log("info", `action=retest n=${postRotateRetestsRef.current}`);
+
+    let ok: ProbeOutcome;
+    try {
+      ok = await depsRef.current.reprobe();
+    } catch {
+      ok = null;
+    }
+    collectedRef.current.reprobe = ok;
+
+    log(
+      "info",
+      `rotate retest n=${postRotateRetestsRef.current} result=${ok === null ? "untested" : ok ? "ok" : "fail"}`,
+    );
+    busyRef.current = false;
+    if (!mountedRef.current) return;
+
+    if (ok === null) {
+      replaceLast({
+        id: "rotate",
+        status: "failed",
+        conclusion: { kind: "rotate-untested" },
+      });
+      updatePhase("awaiting");
+    } else if (ok) {
+      replaceLast({
+        id: "rotate",
+        status: "passed",
+        conclusion: { kind: "rotate-recovered" },
+      });
+      updatePhase("done");
+    } else {
+      replaceLast({
+        id: "rotate",
+        status: "failed",
+        conclusion: { kind: "rotate-still-failed" },
+      });
+      updatePhase("awaiting");
+    }
+  };
+
   const handOffToAi = () => {
     const handed = depsRef.current.openAi(
       buildContext(depsRef.current.facts, collectedRef.current),
@@ -925,7 +985,12 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
   const run = () => {
     if (busyRef.current) return;
-    const action = deriveAction(stepsRef.current, phaseRef.current);
+    const action = deriveAction(
+      stepsRef.current,
+      phaseRef.current,
+      configAttemptsRef.current,
+      postRotateRetestsRef.current,
+    );
     if (action === null) return;
     switch (action) {
       case "start":
@@ -938,6 +1003,9 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       case "resetPort":
         log("info", "action=reset");
         updatePhase("confirming");
+        break;
+      case "retest":
+        void runPostRotateRetest();
         break;
       case "askAi":
         handOffToAi();
@@ -961,7 +1029,12 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   return {
     steps,
     phase,
-    action: deriveAction(steps, phase),
+    action: deriveAction(
+      steps,
+      phase,
+      configAttemptsRef.current,
+      postRotateRetestsRef.current,
+    ),
     context: buildContext(depsRef.current.facts, collectedRef.current),
     run,
     confirmReset,

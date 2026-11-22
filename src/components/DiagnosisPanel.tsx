@@ -32,6 +32,7 @@ const ACTION_LABEL: Record<DiagnosisAction, MessageKey> = {
   start: "diagnosis.action.start",
   updateConfig: "diagnosis.action.updateConfig",
   resetPort: "diagnosis.action.resetPort",
+  retest: "diagnosis.action.retest",
   askAi: "diagnosis.action.askAi",
   goServers: "diagnosis.action.goServers",
 };
