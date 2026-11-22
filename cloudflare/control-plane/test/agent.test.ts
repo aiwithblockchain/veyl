@@ -261,6 +261,12 @@ describe("POST /v1/agent/enroll", () => {
     const env = await envWith(db, await signingJwk());
     seedServer(db);
     await seedEnrollment(db);
+    // 先正常 enroll 消费 token，再把有效期拉到「还剩 1 分钟」：仍在 20 分钟 TTL 内，可以重放。
+    expect((await handleServers(enrollRequest(), env as never))?.status).toBe(200);
+    db.rows("servers")[0].enrollment_expires_at = Date.now() + 60_000;
+    expect((await handleServers(enrollRequest(), env as never))?.status).toBe(200);
+
+    // 超过 20 分钟（expires_at 已过）：409 expired 并销毁。
     db.rows("servers")[0].enrollment_expires_at = Date.now() - 1;
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 

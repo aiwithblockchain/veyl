@@ -309,6 +309,10 @@ describe("orders", () => {
     expect(server.state).toBe("booting");
     expect(server.provider_id).toBe("424242");
     expect(typeof server.enrollment_hash).toBe("string");
+    // enrollment 有效期 20 分钟（建机正常 2–3 分钟；过期后 sweepExpiredEnrollments 销毁）。
+    const enrollmentExpiresAt = Number(server.enrollment_expires_at);
+    expect(enrollmentExpiresAt).toBeGreaterThan(Date.now() + 19 * 60_000);
+    expect(enrollmentExpiresAt).toBeLessThan(Date.now() + 21 * 60_000);
     // 结算前不写计费三列。
     expect(server.billing_state).toBe("pending");
     expect(server.paid_until).toBeNull();

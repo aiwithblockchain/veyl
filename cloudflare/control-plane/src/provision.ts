@@ -50,7 +50,13 @@ export type ProvisionResult =
   | { ok: true; providerId: string; ip: string | null }
   | { ok: false; reason: string; retryable: boolean; refunded?: boolean };
 
-const ENROLL_TTL_MS = 45 * 60 * 1000;
+/**
+ * 一次性 enrollment token 的有效期，**同时是 agent 丢 state.json 后的重放窗口**。
+ * 正常建机只要 2–3 分钟；原来的 45 分钟会让一台确定卡住的机器白占计费，2026-11-22 收紧到 20 分钟。
+ * 取舍：恢复窗口也随之缩短到 20 分钟——丢状态基本发生在重启后的头几分钟，超过窗口的机器
+ * 交给 sweepExpiredEnrollments 销毁重建，这是可接受的。
+ */
+const ENROLL_TTL_MS = 20 * 60 * 1000;
 
 async function fail(
   env: ProvisionEnv,
