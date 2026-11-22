@@ -1,0 +1,7 @@
+{
+  "control_url": "https://control.example.com",
+  "enroll_url": "https://control.example.com/v1/agent/enroll",
+  "enroll_token": "enr_REPLACE_ME",
+  "log_level": "debug",
+  "detect_public_ip": true
+}

@@ -1,0 +1,5 @@
+# cross 在目标镜像里构建。aws-lc-sys（reqwest 的 rustls 栈）需要 cmake/perl。
+[build]
+pre-build = [
+  "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends cmake perl make; fi",
+]

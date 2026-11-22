@@ -1,0 +1,67 @@
+[package]
+name = "veyl-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone project: deliberately not part of the repo's Tauri workspace.
+[workspace]
+
+[features]
+default = []
+# Dev-only CLI helpers (serve/gen-certs/mint-token). Not compiled into the
+# production binary.
+dev = []
+
+[lib]
+name = "veyl_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "veyl-agent"
+path = "src/main.rs"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+required-features = ["dev"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.7"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = { version = "0.14", features = ["x509-parser"] }
+# Pin the same rmcp / reqwest major that src-tauri/Cargo.lock resolves.
+rmcp = { version = "=1.8.0", default-features = false, features = [
+    "client",
+    "server",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+    "reqwest-tls-no-provider",
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls-no-provider",
+    "json",
+    "stream",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+rustls-pki-types = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
