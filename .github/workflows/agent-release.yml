@@ -68,16 +68,30 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           AR_x86_64_unknown_linux_musl: ar
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          # Static musl only: a dynamically-linked musl binary needs
+          # /lib/ld-musl-*.so.1, which Ubuntu and Debian images do not ship, and
+          # exec fails with ENOENT even though the file exists.
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked --target ${{ matrix.target }}
       # agent/Cross.toml installs cmake/perl inside cross's target image.
       - name: Build arm64 (cross)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         working-directory: agent
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cross build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
           cp "agent/target/${{ matrix.target }}/release/veyl-agent" "${{ matrix.asset }}"
           chmod +x "${{ matrix.asset }}"
+      - name: Verify the artifact has no ELF interpreter
+        run: |
+          if readelf -l "${{ matrix.asset }}" | grep -q "INTERP"; then
+            echo "error: ${{ matrix.asset }} is dynamically linked; it fails on hosts without a musl loader" >&2
+            readelf -l "${{ matrix.asset }}" | grep -A1 INTERP >&2
+            exit 1
+          fi
+          file "${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}

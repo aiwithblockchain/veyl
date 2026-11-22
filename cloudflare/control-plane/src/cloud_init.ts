@@ -124,5 +124,20 @@ systemctl disable ssh 2>/dev/null || systemctl disable sshd 2>/dev/null || true
 systemctl daemon-reload 2>>"\${ERR_FILE}"
 systemctl enable veyl-agent >/dev/null 2>&1
 systemctl restart veyl-agent 2>>"\${ERR_FILE}"
+
+# 6. 真的起来了才算装好：装上了但跑不起来（比如二进制装载器缺失）时，机器会
+#    一直停在 booting 直到过期销毁，现场只剩控制面日志。这里主动回传。
+for _ in $(seq 1 30); do
+  if systemctl is-active --quiet veyl-agent; then
+    exit 0
+  fi
+  sleep 1
+done
+{
+  echo "veyl-agent did not become active within 30s"
+  systemctl status veyl-agent --no-pager 2>&1 | tail -20
+  journalctl -u veyl-agent -n 40 --no-pager 2>&1
+} >>"\${ERR_FILE}" 2>&1
+on_error \${LINENO}
 `;
 }

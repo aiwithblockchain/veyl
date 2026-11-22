@@ -98,6 +98,15 @@ describe("cloud-init（只装 agent）", () => {
     expect(body).toContain("systemctl disable ssh");
   });
 
+  it("启动后确认 agent 真的 active，否则把 unit 状态回传", () => {
+    const body = script();
+    expect(body).toContain("systemctl is-active --quiet veyl-agent");
+    expect(body).toContain("veyl-agent did not become active within 30s");
+    expect(body).toContain("journalctl -u veyl-agent -n 40 --no-pager");
+    // 失败时走同一个 trap，控制面能拿到 stage=systemd 与 journal 摘要。
+    expect(body).toContain("on_error ${LINENO}");
+  });
+
   it("配置文件先以 600 建出来，脚本以 umask 077 起步", () => {
     const body = script();
     expect(body).toContain("umask 077");
