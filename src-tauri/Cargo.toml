@@ -103,6 +103,20 @@ pbkdf2 = "0.12"
 # 手机端导出：URL 拼接与二维码（mobile-export-technical.md §4.1–§4.3）。
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 url = "2"
+# 节点 agent 的 MCP 客户端（node-agent-mcp.md §7 / §10）：rmcp 1.8 + 独立 reqwest 0.13，
+# 与 claurst 依赖树里的版本一致。上面的 reqwest 0.12 是运行期在用的，两者并存，故改名引入。
+rmcp = { version = "1.8", default-features = false, features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest-tls-no-provider",
+] }
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false, features = [
+    "rustls",
+    "json",
+    "stream",
+] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

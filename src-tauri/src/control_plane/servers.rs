@@ -1176,7 +1176,8 @@ fn cache_and_link(conn: &rusqlite::Connection, server: &mut MyServer) {
     server.local_node_id = linked_node_id(conn, &server.server_id, server.node_id.as_deref());
 }
 
-fn local_server(server_id: &str) -> Option<MyServer> {
+/// 本地镜像里的一条服务器（不联网）。`credentials` 刷新后由调用方拿去发事件。
+pub(crate) fn local_server(server_id: &str) -> Option<MyServer> {
     let store = crate::store::global()?;
     let conn = store.conn();
     let row = crate::store::servers::get(&conn, server_id).ok().flatten()?;
