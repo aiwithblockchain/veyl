@@ -194,6 +194,105 @@ MCP 远端传输用 Streamable HTTP。节点没有域名、也拿不到 Let's En
 
 失败：agent 返回 fatal，或调用超时 → UI 显示「自动修复失败，需要重建节点」并就地给重建入口。
 
+图形版如下。两张图都以 HEAD 的实现为准，边上标注对应接口或文件；HTTP 错误码取自 `servers.ts` 的实际返回。
+
+### 9.1 时序图：从 cloud-init 到手机刷新
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CI as cloud-init
+    participant CP as 控制面 Worker
+    participant AG as veyl-agent
+    participant SB as sing-box
+    participant UI as 桌面 App
+    participant PH as 手机客户端
+
+    CI->>AG: 下载/校验二进制 → systemd 启动（配置含 enroll_url 与 enr_…）
+    AG->>CP: POST /v1/agent/enroll（Bearer enr_…，servers.ts:1044）
+    alt 首次 enroll
+        CP-->>AG: 200 server_id + server_token + desired(port/password/singbox) + token_public_key
+    else TTL 内重放（reEnroll，servers.ts:945）
+        CP-->>AG: 200 新 server_token（旧立即失效），复用旧凭据；5 分钟超过 3 次 → 429
+    else 已销毁 / 已过期
+        CP-->>AG: 409 destroyed / expired（expired 同时销毁机器）
+    end
+
+    Note over AG: MCP 控制端口在首次 apply 之前就已监听（agent/src/agent.rs:210）
+    AG->>CP: POST /v1/agent/report {installing}（Bearer agt_…）
+    AG->>SB: 下载/校验 sing-box → 写配置 → check → 启动（agent/src/rotation.rs:543）
+    AG->>CP: POST /v1/agent/report {verifying, cert_fingerprint, ca_pem}
+    AG->>SB: 验活：本机监听 + 出站探测
+    AG->>CP: POST /v1/agent/report {active, port, versions}
+    CP-->>AG: 200 {ok:true}（已激活则 already_active）
+    loop 每 poll_interval（默认 30s）
+        AG->>CP: GET /v1/agent/desired-state（Bearer agt_…，servers.ts:1410）
+    end
+
+    UI->>CP: POST /v1/servers/{id}/agent-token（账户 access token，servers.ts:1450）
+    CP-->>UI: endpoint + ca_pem/指纹 + Ed25519 JWT（60s、jti）
+    UI->>AG: MCP initialize（Bearer JWT；自签 CA 优先，缺失时按指纹 pin）
+    AG->>AG: 离线验签 + exp + jti 未用 + server_id 匹配（agent/src/auth.rs）
+    UI->>AG: tools/list → tools/call rotate_credentials {reason:"user"}
+    AG->>CP: report {installing, new_port}
+    AG->>SB: 写新配置 → check → 重启 → 验活
+    alt 控制面接受轮换
+        AG->>CP: report {rotated, port, password, cert_fingerprint}
+        CP->>CP: 更新 node_port + 重封 credential + 审计（同一 D1 batch）
+        CP-->>AG: 200 {ok:true, port}
+        AG-->>UI: {ok:true, port}
+    else 控制面拒绝 / 超时
+        CP-->>AG: 409 port_out_of_band / port_taken / 5xx / 超时
+        AG->>SB: 回滚旧配置（rotation.rs，restore）
+        AG-->>UI: error（retryable / fatal）
+    end
+    UI->>CP: 同步我的服务器 → 新端口与密码
+    PH->>CP: GET /v1/mobile/profile（下一次刷新）
+```
+
+### 9.2 失败分支图
+
+```mermaid
+flowchart TD
+    A["cloud-init 装机"] -->|"trap: POST /v1/agent/fail（Bearer enr_…）"| F{"token 未消费且未销毁?"}
+    F -->|是| FD["消费 token → 销毁 → agent.install_failed"]
+    F -->|"否 409"| FX["不重复销毁（already_used / server_destroyed）"]
+
+    E["agent 启动 enroll<br/>agent/src/agent.rs:393"] --> R{"enroll 响应"}
+    R -->|200| OK["持有 server_token"]
+    R -->|409 destroyed| T1["终态：重建；退避 10 分钟"]
+    R -->|409 expired| T2["控制面已销毁：重建；退避 10 分钟"]
+    R -->|"TTL 内重放 200"| RE["换发 server_token，复用凭据<br/>5 分钟最多 3 次"]
+    R -->|429| RL["rate_limited：退避后重试"]
+    R -->|404 unknown_token| N["3 次退避后退出 → systemd 重启"]
+
+    P["report failed<br/>servers.ts:1201"] --> PS{"当前 state"}
+    PS -->|"booting / installing / verifying"| PD["写失败码 → 销毁 → 409"]
+    PS -->|"active / healthy"| PR["只写 last_error + 审计 → 200 recorded"]
+
+    Q["report active"] --> QP{"port 与 node_port 一致?"}
+    QP -->|"否，且未 active"| QD["port_mismatch → 销毁"]
+    QP -->|"否，但已 active"| QI["200 ignored（轮换后的旧报文）"]
+    QP -->|是| QA["激活 / already_active"]
+
+    G["MCP rotate_credentials"] --> GA["apply + verify"]
+    GA -->|失败| GB["回滚旧配置；不报 failed；节点继续服务"]
+    GA -->|成功| GC["report rotated"]
+    GC -->|200| GD["提交新端口 + 重封凭据"]
+    GC -->|"409 port_out_of_band / password_too_short / port_taken / server_destroyed"| GE["回滚旧配置"]
+    GC -->|超时 / 不可达| GF["回滚旧配置"]
+
+    H["控制面不可达"] --> H1{"agent 启动时"}
+    H1 -->|有持久化 desired| H2["用 last_desired 继续服务；轮询告警"]
+    H1 -->|无| H3["等待轮询；MCP 仍可用"]
+    H --> H4["桌面取 agent-token 失败 → agent_token_unavailable"]
+
+    S["state.json 丢失 / 损坏<br/>agent/src/state.rs:155"] --> S1["备份损坏文件 → 冷启动"]
+    S1 --> S2{"enrollment token 仍在 TTL 内?"}
+    S2 -->|是| S3["re-enroll 换发新 server_token"]
+    S2 -->|否| S4["409 expired → 销毁 → 重建"]
+```
+
 ## 10. 桌面端接入（路线 B，已由调研确认）
 
 - 不改 `mcp_manager`（会话工具列表构造时冻结，改它会侵入主流程）。
