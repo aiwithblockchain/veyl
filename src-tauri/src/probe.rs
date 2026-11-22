@@ -38,6 +38,9 @@ pub struct IcmpReachability {
     pub rtt_ms: Option<u32>,
     /// 丢包百分比，0.0–100.0。退出码 0 但解析不出回复行时为 0.0（无法测量，不臆造丢包）。
     pub loss: f32,
+    /// 探测**没跑起来**的原因：`spawn_failed` / `timeout` / `io_error`。
+    /// 正常执行完（无论退出码 0 还是非 0）为 `None`，此时 `ok` 才是对机器的判定。
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,14 +97,24 @@ fn validate_ip(raw: &str) -> Result<IpAddr, &'static str> {
 }
 
 fn probe_icmp(ip: IpAddr) -> IcmpReachability {
-    let Some((status, output)) = run_ping(ip) else {
-        return IcmpReachability {
-            ok: false,
-            rtt_ms: None,
-            loss: 100.0,
-        };
-    };
-    icmp_from_output(status.success(), &output)
+    icmp_from_result(run_ping(ip))
+}
+
+/// 把 ping 的执行结果变成报告。未执行与「执行了但没回包」必须分开：
+/// 前者 `error` 有值，后者 `error = None`、由退出码决定 `ok`。
+fn icmp_from_result(result: Result<(ExitStatus, String), &'static str>) -> IcmpReachability {
+    match result {
+        Ok((status, output)) => icmp_from_output(status.success(), &output),
+        Err(reason) => {
+            log::warn!("[node_probe_reachability] ICMP 未执行：{reason}");
+            IcmpReachability {
+                ok: false,
+                rtt_ms: None,
+                loss: 100.0,
+                error: Some(reason.to_string()),
+            }
+        }
+    }
 }
 
 /// 把 ping 的退出码与输出变成报告。抽成纯函数便于用固定样例做单测。
@@ -129,10 +142,11 @@ fn icmp_from_output(exit_ok: bool, output: &str) -> IcmpReachability {
         ok: exit_ok,
         rtt_ms,
         loss,
+        error: None,
     }
 }
 
-fn run_ping(ip: IpAddr) -> Option<(ExitStatus, String)> {
+fn run_ping(ip: IpAddr) -> Result<(ExitStatus, String), &'static str> {
     let mut command = Command::new(ping_program(ip));
     #[cfg(windows)]
     {
@@ -211,13 +225,17 @@ fn ping_args(ip: IpAddr) -> Vec<String> {
 }
 
 /// 等进程结束，超过 `limit` 就杀掉；不会无限期阻塞。
-fn run_limited(mut command: Command, limit: Duration) -> Option<(ExitStatus, String)> {
+/// 失败原因按稳定短码返回：`spawn_failed` / `timeout` / `io_error`。
+fn run_limited(
+    mut command: Command,
+    limit: Duration,
+) -> Result<(ExitStatus, String), &'static str> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let mut child = command.spawn().ok()?;
+    let mut child = command.spawn().map_err(|_| "spawn_failed")?;
     let mut stdout = child.stdout.take();
     let started = Instant::now();
 
@@ -228,18 +246,18 @@ fn run_limited(mut command: Command, limit: Duration) -> Option<(ExitStatus, Str
                 if let Some(mut pipe) = stdout.take() {
                     let _ = pipe.read_to_end(&mut bytes);
                 }
-                return Some((status, String::from_utf8_lossy(&bytes).into_owned()));
+                return Ok((status, String::from_utf8_lossy(&bytes).into_owned()));
             }
             Ok(None) if started.elapsed() >= limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err("timeout");
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err("io_error");
             }
         }
     }
@@ -386,6 +404,7 @@ round-trip min/avg/max/stddev = 0.049/0.051/0.053/0.002 ms
         assert!(report.ok);
         assert_eq!(report.rtt_ms, Some(0));
         assert_eq!(report.loss, 0.0);
+        assert_eq!(report.error, None);
     }
 
     #[test]
@@ -407,6 +426,7 @@ round-trip min/avg/max/stddev = 0.049/0.051/0.053/0.002 ms
         assert!(report.ok, "退出码为 0 就算通，解析失败不影响判定");
         assert_eq!(report.rtt_ms, Some(7));
         assert!((report.loss - 33.333_336).abs() < 0.01);
+        assert_eq!(report.error, None);
     }
 
     #[test]
@@ -415,6 +435,22 @@ round-trip min/avg/max/stddev = 0.049/0.051/0.053/0.002 ms
         assert!(report.ok);
         assert_eq!(report.rtt_ms, None);
         assert_eq!(report.loss, 0.0);
+        assert_eq!(report.error, None);
+    }
+
+    #[test]
+    fn icmp_not_run_reports_reason_instead_of_unreachable() {
+        let report = icmp_from_result(Err("spawn_failed"));
+        assert!(!report.ok);
+        assert_eq!(report.rtt_ms, None);
+        assert_eq!(report.loss, 100.0);
+        assert_eq!(report.error.as_deref(), Some("spawn_failed"));
+
+        let report = icmp_from_result(Err("timeout"));
+        assert_eq!(report.error.as_deref(), Some("timeout"));
+
+        let report = icmp_from_result(Err("io_error"));
+        assert_eq!(report.error.as_deref(), Some("io_error"));
     }
 
     #[test]
@@ -432,6 +468,7 @@ Request timeout for icmp_seq 2
         assert!(!report.ok);
         assert_eq!(report.rtt_ms, None);
         assert_eq!(report.loss, 100.0);
+        assert_eq!(report.error, None, "执行完的失败不是未执行");
     }
 
     #[cfg(unix)]
@@ -440,11 +477,23 @@ Request timeout for icmp_seq 2
         let mut command = Command::new("/bin/sleep");
         command.arg("5");
         let started = Instant::now();
-        assert!(run_limited(command, Duration::from_millis(100)).is_none());
+        assert!(matches!(
+            run_limited(command, Duration::from_millis(100)),
+            Err("timeout")
+        ));
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "超时分支必须在预算内返回"
         );
+    }
+
+    #[test]
+    fn run_limited_reports_spawn_failure() {
+        let command = Command::new("/nonexistent/veyl-probe-test");
+        assert!(matches!(
+            run_limited(command, Duration::from_millis(100)),
+            Err("spawn_failed")
+        ));
     }
 
     #[test]
@@ -464,5 +513,6 @@ Request timeout for icmp_seq 2
         let report = probe_icmp("127.0.0.1".parse().unwrap());
         assert!(report.ok);
         assert!(report.rtt_ms.is_some());
+        assert_eq!(report.error, None);
     }
 }
