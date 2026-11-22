@@ -117,7 +117,7 @@ describe("问题报告入口", () => {
       () => new Promise((resolve) => (gate.resolve = resolve)) as never,
     );
     render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
     fireEvent.click(await screen.findByRole("button", { name: "连接节点" }));
     await waitFor(() => expect(bridge.runtimeStart).toHaveBeenCalled());
@@ -165,7 +165,7 @@ describe("问题报告入口", () => {
   it("AI 未配置时只显示首启页，报告入口不可达", async () => {
     aiConfigured = false;
     render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
 
     expect(await screen.findByLabelText("DeepSeek API Key")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "报告问题" })).toBeNull();

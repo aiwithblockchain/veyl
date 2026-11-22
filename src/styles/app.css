@@ -1175,6 +1175,11 @@ body[data-resizing] {
   z-index: 80;
 }
 
+/* 全局告警要压过设置与它自己叠起来的嵌套弹层。 */
+.modal-backdrop--top {
+  z-index: 90;
+}
+
 .modal {
   width: min(480px, calc(100vw - 48px));
   max-height: min(86vh, 780px);
@@ -5098,26 +5103,9 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-.ai-panel__banner {
-  flex: none;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 24px 8px 22px;
-  border-bottom: 1px solid var(--hair);
-  border-left: 2px solid var(--focus);
-  background: transparent;
-  font-size: 13px;
-  color: var(--ink-2);
-}
-
-.ai-panel__banner-action {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--link);
-  font-size: 13px;
+.ai-panel__setup-action {
+  margin-top: 16px;
+  align-self: flex-start;
 }
 
 .ai-panel__body {

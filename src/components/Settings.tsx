@@ -78,8 +78,8 @@ interface Props {
   /** 咨询 AI：设置缩左、右侧并排助手；App 据此隐藏原来的右栏。 */
   assistant?: ReactNode;
   onConsultingChange?: (consulting: boolean) => void;
-  /** 从关闭态打开咨询时，带着当前设置总览去发一条消息。 */
-  onConsultAi?: (prompt: string) => void;
+  /** 从关闭态打开咨询时，带着当前设置总览去发一条消息；false = 被拦下，不切换布局。 */
+  onConsultAi?: (prompt: string) => boolean;
   /** 切 tab 时通知 App，重新打开设置能落回原处。 */
   onSectionChange?: (section: SectionId) => void;
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
@@ -102,6 +102,8 @@ interface Props {
   onViewBills?: () => void;
   /** 「在手机上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
   mobileExportOpen?: boolean;
+  /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
+  trapPaused?: boolean;
   onOpenMobileExport?: (trigger: HTMLElement) => void;
 }
 
@@ -736,6 +738,7 @@ export function Settings({
   onLogin,
   onTopUp,
   mobileExportOpen = false,
+  trapPaused = false,
   onOpenMobileExport,
 }: Props) {
   const t = useT();
@@ -842,11 +845,19 @@ export function Settings({
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
   useFocusTrap(
-    open && !consulting && resetPhase === "idle" && !importOpen && !mobileExportOpen,
+    open &&
+      !consulting &&
+      resetPhase === "idle" &&
+      !importOpen &&
+      !mobileExportOpen &&
+      !trapPaused,
     dialogRef,
   );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
-  useFocusTrap(open && consulting && resetPhase === "idle" && !importOpen, backdropRef);
+  useFocusTrap(
+    open && consulting && resetPhase === "idle" && !importOpen && !trapPaused,
+    backdropRef,
+  );
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
   useFocusTrap(importOpen, importDialogRef);
 
@@ -1037,10 +1048,12 @@ export function Settings({
       onConsultingChange?.(false);
       return;
     }
+    // 打开即告诉 AI 用户在看哪个分区；先读文档，再问要咨询哪个模块。
+    // 被拦下（未配置 AI）时不要切到并排布局。
+    const allowed = onConsultAi?.(settingsConsultPrompt(t(SECTION_NAMES[section])));
+    if (allowed === false) return;
     setConsulting(true);
     onConsultingChange?.(true);
-    // 打开即告诉 AI 用户在看哪个分区；先读文档，再问要咨询哪个模块。
-    onConsultAi?.(settingsConsultPrompt(t(SECTION_NAMES[section])));
   };
 
   const commitConnectMode = useCallback(
@@ -1156,6 +1169,8 @@ export function Settings({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      // 更上层弹层（AI 告警）的 Esc 归它自己：别连带关设置。
+      if (trapPaused) return;
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
@@ -1180,7 +1195,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit, mobileExportOpen]);
+  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit, mobileExportOpen, trapPaused]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();

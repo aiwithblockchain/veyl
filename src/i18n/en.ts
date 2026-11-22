@@ -34,6 +34,7 @@ export const en: Record<MessageKey, string> = {
   "onboarding.connect": "Connect",
   "onboarding.getKey": "Get a key",
   "onboarding.useOtherAi": "Use another AI service",
+  "onboarding.skip": "I know networking — skip AI",
 
   "assistant.panelAria": "AI chat",
   "assistant.backToChat": "Back to chat",
@@ -42,9 +43,9 @@ export const en: Record<MessageKey, string> = {
   "assistant.notConnected": "No AI connected",
   "assistant.newChat": "New chat",
   "assistant.collapse": "Collapse assistant",
-  "assistant.banner.noAi":
-    "No AI is set up yet. For now you can only work with the network manually.",
-  "assistant.banner.configure": "Set up",
+  "assistant.setup.title": "AI isn't set up yet",
+  "assistant.setup.body": "Set one up to chat and let it handle things for you.",
+  "assistant.setup.configure": "Set up AI",
   "assistant.historyEmpty": "No conversations yet. Start one, or just ask me.",
   "assistant.sessionTitle": "Conversation title",
   "assistant.error.rename": "Couldn't save. Try again.",
@@ -73,6 +74,10 @@ export const en: Record<MessageKey, string> = {
   "assistant.delete.body": "\"{title}\" will be deleted permanently.",
   "assistant.delete.deleting": "Deleting…",
   "assistant.delete.action": "Delete",
+
+  "aiRequired.title": "AI isn't set up yet",
+  "aiRequired.body": "Set one up to use chat and AI actions.",
+  "aiRequired.configure": "Set it up",
 
   "composer.placeholderNoAi": "Set up AI to chat here",
   "composer.stop": "Stop",
@@ -480,7 +485,6 @@ export const en: Record<MessageKey, string> = {
   "app.imported": "Imported {count} nodes",
   "app.dropOneFile":
     "Only one file can be imported at a time. You dropped {count}; drop them one by one.",
-  "app.noAi": "No AI is set up yet. Set one up before chatting.",
   "app.busyAnswer": "Answer the question above first, or skip it.",
   "app.busyReplying": "The last reply is still coming. Wait for it to finish.",
   "app.sendFailed": "This message wasn't sent. Try again.",

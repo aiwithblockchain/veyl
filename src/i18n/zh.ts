@@ -30,6 +30,7 @@ export const zh = {
   "onboarding.connect": "连接",
   "onboarding.getKey": "获取 Key",
   "onboarding.useOtherAi": "使用其他 AI 服务",
+  "onboarding.skip": "我懂网络，不用 AI",
 
   "assistant.panelAria": "AI 对话",
   "assistant.backToChat": "返回对话",
@@ -38,8 +39,9 @@ export const zh = {
   "assistant.notConnected": "未连接 AI",
   "assistant.newChat": "新对话",
   "assistant.collapse": "收起助手",
-  "assistant.banner.noAi": "还没有配置 AI，现在只能手动操作网络。",
-  "assistant.banner.configure": "去配置",
+  "assistant.setup.title": "还没有配置 AI 服务",
+  "assistant.setup.body": "配置后才能对话和自动操作。",
+  "assistant.setup.configure": "配置 AI",
   "assistant.historyEmpty": "还没有对话。新建一个，或者直接问我。",
   "assistant.sessionTitle": "会话标题",
   "assistant.error.rename": "保存失败，请重试",
@@ -66,6 +68,10 @@ export const zh = {
   "assistant.delete.body": "「{title}」删除后无法恢复。",
   "assistant.delete.deleting": "删除中…",
   "assistant.delete.action": "删除",
+
+  "aiRequired.title": "还没有配置 AI 服务",
+  "aiRequired.body": "配置后才能使用对话与智能操作。",
+  "aiRequired.configure": "去配置",
 
   "composer.placeholderNoAi": "配置 AI 后可以直接对话",
   "composer.stop": "停止",
@@ -459,7 +465,6 @@ export const zh = {
   "app.importJsonOnly": "窗口拖入只支持 .json 种子文件；节点文本请到 设置 › 连接 › 添加节点导入。",
   "app.imported": "已导入 {count} 个节点",
   "app.dropOneFile": "一次只能导入一个文件，你拖入了 {count} 个，请逐个拖入。",
-  "app.noAi": "还没有配置 AI，先配置后再对话。",
   "app.busyAnswer": "先回答上面的问题，或者点跳过。",
   "app.busyReplying": "上一条还在回复，等它结束再发。",
   "app.sendFailed": "这条没有发出去，再试一次。",

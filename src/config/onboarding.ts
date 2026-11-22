@@ -1,9 +1,8 @@
-import type { DeepSeekKeyState, LlmProvider } from "../agent/bridge";
+import type { LlmProvider } from "../agent/bridge";
 import { isLocalEndpoint } from "../agent/bridge";
 
-/** 首启判定只关心本机 Key 与服务商目录。 */
+/** 首启判定只看服务商目录里当前 active 的服务商。 */
 export interface OnboardingInput {
-  key: Pick<DeepSeekKeyState, "masked"> | null;
   providers: {
     providers: Array<Pick<LlmProvider, "providerId" | "hasKey" | "baseUrl">>;
     activeProviderId: string | null;
@@ -18,24 +17,27 @@ export function providerUsable(
 }
 
 /**
- * 内置服务商默认就是 active，但它不代表用户配过。
- * 判断「能不能用」必须看当前服务商是否可用，不能看 activeProviderId 是否存在。
+ * 与后端 has_credentials() 同语义：只看当前 active 服务商是否可用。
+ * 内置服务商默认就是 active，但它不代表用户配过，不能看 activeProviderId 是否存在。
  */
 export function isAiReady(
-  input: Pick<OnboardingInput, "key" | "providers">,
+  input: Pick<OnboardingInput, "providers">,
 ): boolean {
   const activeProvider = input.providers
     ? input.providers.providers.find(
         (provider) => provider.providerId === input.providers?.activeProviderId,
       )
     : undefined;
-  return (
-    (input.key?.masked ?? null) !== null ||
-    (activeProvider ? providerUsable(activeProvider) : false)
-  );
+  return activeProvider ? providerUsable(activeProvider) : false;
 }
 
-/** 首启页只在没有可用 AI 时出现；AI 是必需路径，不允许跳过。 */
-export function shouldShowOnboarding(input: OnboardingInput): boolean {
-  return !isAiReady(input);
+/** 用户点过「不用 AI」的标记；只决定下次启动还弹不弹首启。 */
+export const ONBOARDING_SKIPPED_KEY = "veyl.onboarding.skipped";
+
+/** 首启页只在没有可用 AI 且用户没跳过时出现。 */
+export function shouldShowOnboarding(
+  input: OnboardingInput,
+  skipped: boolean,
+): boolean {
+  return !skipped && !isAiReady(input);
 }

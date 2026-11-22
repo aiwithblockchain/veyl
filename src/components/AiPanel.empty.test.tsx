@@ -41,6 +41,8 @@ function renderPanel(over: {
   question?: PendingQuestion | null;
   onEmptySend?: (text: string) => void;
   onAnswerFromComposer?: (text: string) => void;
+  onOpenSettings?: () => void;
+  onNewSession?: () => void;
 } = {}) {
   const session = over.session === undefined ? makeSession() : over.session;
   render(
@@ -56,7 +58,7 @@ function renderPanel(over: {
       focusSignal={0}
       question={over.question ?? null}
       onSelectSession={noop}
-      onNewSession={noop}
+      onNewSession={over.onNewSession ?? noop}
       onRenameSession={asyncOk}
       onDeleteSession={asyncOk}
       onSend={noop}
@@ -64,7 +66,7 @@ function renderPanel(over: {
       onAnswerFromComposer={over.onAnswerFromComposer}
       onStop={noop}
       onNextAction={noop}
-      onOpenSettings={noop}
+      onOpenSettings={over.onOpenSettings ?? noop}
       onConfigureKey={noop}
       onCollapse={noop}
     />,
@@ -79,6 +81,43 @@ function shownPresets(): string[] {
       )
     : [];
 }
+
+describe("未配置 AI 的右栏", () => {
+  it("整块换成配置引导：没有输入框、没有新对话与历史入口", () => {
+    const onOpenSettings = vi.fn();
+    renderPanel({ aiReady: false, onOpenSettings });
+
+    expect(screen.getByText("还没有配置 AI 服务")).toBeTruthy();
+    expect(screen.getByText("配置后才能对话和自动操作。")).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新对话" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "历史会话" })).toBeNull();
+    // 旧的常驻提示条已删除。
+    expect(screen.queryByText(/现在只能手动操作网络/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "配置 AI" }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("有历史消息也显示配置引导，不渲染会话内容", () => {
+    renderPanel({
+      aiReady: false,
+      session: makeSession({
+        messages: [{ id: "m1", role: "user", text: "你好", at: 1 }],
+      }),
+    });
+    expect(screen.getByRole("button", { name: "配置 AI" })).toBeTruthy();
+    expect(screen.queryByText("你好")).toBeNull();
+  });
+
+  it("配置好后恢复输入框与新对话、历史入口", () => {
+    renderPanel({ aiReady: true });
+    expect(screen.getByRole("textbox")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "新对话" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "历史会话" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "配置 AI" })).toBeNull();
+  });
+});
 
 describe("对话空态的预制问题", () => {
   it("空会话一次显示五条原文", () => {

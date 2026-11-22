@@ -407,6 +407,13 @@ pub fn credentials(store: &Store) -> Option<LlmCredentials> {
     })
 }
 
+/// 保存 DeepSeek Key 后：当前没有可用凭据时激活内置 DeepSeek，保证保存即已配置。
+pub fn activate_builtin_if_unconfigured(store: &Store) {
+    if credentials(store).is_none() {
+        let _ = set_active_id(store, Some(PROVIDER_DEEPSEEK));
+    }
+}
+
 /// 某个 provider 的凭据（不要求它是 active）；旧 DeepSeek 命令用。
 pub fn credentials_for(store: &Store, provider_id: &str) -> Option<LlmCredentials> {
     let record = records(store)
@@ -907,6 +914,39 @@ mod tests {
         )
         .unwrap();
         let id = saved["provider_id"].as_str().unwrap().to_string();
+        assert_eq!(active_id(&store).as_deref(), Some(id.as_str()));
+    }
+
+    /// 保存 DeepSeek Key 后，没有可用凭据时激活内置 DeepSeek（保存即已配置）。
+    #[test]
+    fn saving_a_deepseek_key_activates_it_when_nothing_is_usable() {
+        ensure_secrets();
+        let store = store();
+        ensure_migrated(&store);
+        set_active_id(&store, None).unwrap();
+
+        activate_builtin_if_unconfigured(&store);
+        assert_eq!(active_id(&store).as_deref(), Some(PROVIDER_DEEPSEEK));
+    }
+
+    /// 已有可用的 active（例如自定义服务商）时，保存 DeepSeek Key 不得抢 active。
+    #[test]
+    fn saving_a_deepseek_key_keeps_a_usable_active_provider() {
+        ensure_secrets();
+        let store = store();
+        let saved = save(
+            &store,
+            input(
+                "anthropic",
+                Some("https://api.anthropic.com"),
+                Some("sk-custom"),
+            ),
+        )
+        .unwrap();
+        let id = saved["provider_id"].as_str().unwrap().to_string();
+        assert_eq!(active_id(&store).as_deref(), Some(id.as_str()));
+
+        activate_builtin_if_unconfigured(&store);
         assert_eq!(active_id(&store).as_deref(), Some(id.as_str()));
     }
 

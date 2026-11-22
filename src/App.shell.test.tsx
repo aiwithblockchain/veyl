@@ -948,25 +948,29 @@ describe("三区外壳与连接舞台", () => {
     expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
   }, 15_000);
 
-  it("AI 未配置时点「问 AI」只提示并进设置，不展开面板", async () => {
+  it("AI 未配置时点「问 AI」弹统一告警，不展开面板也不进设置", async () => {
     seedCardConfig();
-    // 启动时还能读到 Key（进得去主界面），关一次设置重读时变为未配置。
-    vi.spyOn(bridge, "getDeepSeekKey")
+    // 启动时 active 服务商可用（进得去主界面），关一次设置重读时变为未配置。
+    vi.spyOn(bridge, "llmProviderList")
       .mockResolvedValueOnce({
-        masked: "sk-****0123",
-        verified: true,
-        validation: "ok",
+        providers: [
+          {
+            providerId: "deepseek",
+            name: "DeepSeek",
+            protocol: "openai",
+            baseUrl: "https://api.deepseek.com",
+            model: "deepseek-chat",
+            hasKey: true,
+            isActive: true,
+            isBuiltin: true,
+          },
+        ],
+        activeProviderId: "deepseek",
       })
       .mockResolvedValue({
-        masked: null,
-        verified: false,
-        validation: "unverified",
+        providers: [],
+        activeProviderId: null,
       });
-    // mock 运行时内部仍记得 Key，服务商目录会继续报「可用」；这里一并清空。
-    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
-      providers: [],
-      activeProviderId: null,
-    });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
@@ -985,16 +989,24 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "问 AI" }));
 
+    const dialog = await screen.findByRole("dialog", {
+      name: "还没有配置 AI 服务",
+    });
+    expect(dialog).toBeTruthy();
+    expect(screen.getByText("配置后才能使用对话与智能操作。")).toBeTruthy();
+    // 没有跳设置，助手仍是收起的 tab。
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
+
+    // 去配置：关告警，落设置 › AI。
+    fireEvent.click(screen.getByRole("button", { name: "去配置" }));
     expect(
-      await screen.findByText("还没有配置 AI，先配置后再对话。"),
-    ).toBeTruthy();
-    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
-    // 落在 AI 段，而不是任意一段设置。
+      screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
+    ).toBeNull();
+    expect(await screen.findByRole("dialog", { name: "设置" })).toBeTruthy();
     expect(
       screen.getByText("AI 助手用这里的服务回答你；换服务或换模型都在这里。"),
     ).toBeTruthy();
-    // 没有先展开再跳走：助手仍是收起的 tab。
-    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
   }, 15_000);
 
   it("控件文案与舞台一致：node_pick 用国家 + 序号", async () => {

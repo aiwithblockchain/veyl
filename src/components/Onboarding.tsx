@@ -18,6 +18,8 @@ interface Props {
   bridge: AgentBridge;
   /** 首启成功：App 负责打开右栏并刷新 AI 状态。 */
   onDone: () => void;
+  /** 用户选择不用 AI：App 负责写跳过标记并进主界面。 */
+  onSkip: () => void;
 }
 
 interface CustomForm {
@@ -58,7 +60,7 @@ function prefersReducedMotion(): boolean {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-export function Onboarding({ bridge, onDone }: Props) {
+export function Onboarding({ bridge, onDone, onSkip }: Props) {
   const t = useT();
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState<"key" | "provider" | null>(null);
@@ -443,6 +445,13 @@ export function Onboarding({ bridge, onDone }: Props) {
                   onClick={() => switchMode(true)}
                 >
                   {t("onboarding.useOtherAi")}
+                </button>
+                <button
+                  type="button"
+                  className="first-run__link"
+                  onClick={onSkip}
+                >
+                  {t("onboarding.skip")}
                 </button>
               </div>
             </>

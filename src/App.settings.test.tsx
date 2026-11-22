@@ -148,7 +148,7 @@ afterEach(() => {
 describe("设置 → 咨询 AI", () => {
   it("咨询时不关设置，助手并排；关闭后重开回到连接 tab", async () => {
     const { container } = render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
 
     fireEvent.click(await screen.findByRole("button", { name: "设置" }));
@@ -182,7 +182,7 @@ describe("设置 → 咨询 AI", () => {
 
   it("咨询开场带上当前分区，不再塞整份设置快照", async () => {
     render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
 
     fireEvent.click(await screen.findByRole("button", { name: "设置" }));
@@ -203,7 +203,7 @@ describe("设置 → 咨询 AI", () => {
 
   it("咨询开关来回切两次，输入框里的草稿还在", async () => {
     const { container } = render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
 
     fireEvent.click(await screen.findByRole("button", { name: "设置" }));
@@ -305,7 +305,7 @@ describe("设置 → 添加节点", () => {
 describe("设置页 Esc 与输入法", () => {
   it("组合态的 Esc 不关闭设置，普通 Esc 才关", async () => {
     render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
 
     fireEvent.click(await screen.findByRole("button", { name: "设置" }));
@@ -349,7 +349,7 @@ describe("settings-point（AI 指路）", () => {
 
   async function readyApp() {
     render(<App />);
-    await waitFor(() => expect(bridge.getDeepSeekKey).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.llmProviderList).toHaveBeenCalled());
     await act(async () => {});
   }
 

@@ -147,6 +147,8 @@ interface Props {
   onGoServers: () => void;
   /** 底部「不会操作？问 AI」：由 App 关闭弹层并在右栏发送固定提示词。 */
   onAskAi: () => void;
+  /** 更上层的全局弹层（AI 告警）开着：让出焦点陷阱与 Esc，免得两层互抢。 */
+  trapPaused?: boolean;
 }
 
 type CopyState = "idle" | "ok" | "fail";
@@ -159,6 +161,7 @@ export function MobileExport({
   onLogin,
   onGoServers,
   onAskAi,
+  trapPaused = false,
 }: Props) {
   const tr = useT();
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
@@ -184,7 +187,7 @@ export function MobileExport({
   const aliveRef = useRef(true);
 
   // 关闭后由 App 统一把焦点还给触发行（或左栏 ＋），这里不让陷阱自己归还。
-  useFocusTrap(true, dialogRef, false);
+  useFocusTrap(!trapPaused, dialogRef, false);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -266,6 +269,8 @@ export function MobileExport({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // 更上层弹层（AI 告警）的 Esc 归它自己。
+      if (trapPaused) return;
       // 就地确认在展开面板里：Esc 只取消确认，不关弹层、不收面板。
       if (confirming) {
         setConfirming(false);
@@ -280,7 +285,7 @@ export function MobileExport({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirming, openId, onClose]);
+  }, [confirming, openId, onClose, trapPaused]);
 
   const loadClientQr = (id: MobileClientId) => {
     if (clientQrRef.current[id] || loadingClientsRef.current.has(id)) return;

@@ -93,6 +93,11 @@ async fn send_message_for_state(
         client_status(parsed_context.as_ref()).as_ref(),
     )?;
 
+    // 没有任何可用 AI 时直接拒绝（契约 §9.1，2.52.0）：不占槽、不落库、不建会话。
+    // 放在输入校验之后：非法请求就是非法请求，不因 AI 未配置改报另一种错误。
+    // 只兜住绕过界面的直接命令调用；界面以前端判断为准。
+    require_configured_ai(state)?;
+
     let request_id = AppState::next_request_id();
     let cancel = match state.reserve_request(&request_id, session_id) {
         Ok(token) => token,
@@ -141,6 +146,21 @@ async fn send_message_for_state(
     });
 
     Ok(json!({ "request_id": request_id }))
+}
+
+/// 未配置 AI 时拒绝发送（契约 §9.1，2.52.0）。
+///
+/// 只回答「有没有配」：当前 active provider 有 Key 或是本机端点即可，
+/// 不在这里验证 Key 是否有效——那是保存/测试连接的事。
+fn require_configured_ai(state: &AppState) -> Result<(), Value> {
+    if state.has_credentials() {
+        return Ok(());
+    }
+    Err(command_error(
+        "AI_NOT_CONFIGURED",
+        "还没有配置 AI 服务",
+        json!({ "reason": "ai_not_configured" }),
+    ))
 }
 
 /// `screen = client` 时补上界面 chip 的当前值。
@@ -2343,6 +2363,24 @@ pub async fn chat_history(session_id: Option<String>) -> Result<Value, String> {
     }))
 }
 
+/// 保存 DeepSeek Key 之后的后处理，顺序只在这里一处。
+///
+/// 已知无效（401/403）不激活：界面会提示失败，应用不该变成「已配置」。
+/// `ok` / `unverified`（网络/超时）都激活内置 DeepSeek，离线用户不能被卡住；
+/// 已有可用 active 时 `activate_builtin_if_unconfigured` 不会抢。
+fn apply_saved_deepseek_key(store: &crate::store::Store, validation: &str) -> Result<(), Value> {
+    if validation == "invalid" {
+        return Err(json!({
+            "code": "INVALID_KEY",
+            "message": "DeepSeek 鉴权失败，Key 可能无效或已被吊销",
+        }));
+    }
+    crate::llm::activate_builtin_if_unconfigured(store);
+    // 热更新内存凭据：只有当前 active provider 是 DeepSeek 时才换 key。
+    crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
+    Ok(())
+}
+
 /// 设置页保存 DeepSeek Key。与工具路径共用 `secrets::save_deepseek_key`。
 /// 返回值绝不包含明文 Key。
 #[tauri::command]
@@ -2352,13 +2390,8 @@ pub async fn deepseek_save_key(
 ) -> Result<Value, Value> {
     match crate::secrets::save_deepseek_key(&key).await {
         Ok(outcome) => {
-            // 热更新内存凭据：只有当前 active provider 是 DeepSeek 时才换 key。
-            crate::agent::refresh_credentials_if_active(crate::llm::PROVIDER_DEEPSEEK);
-            if outcome.validation == "invalid" {
-                return Err(json!({
-                    "code": "INVALID_KEY",
-                    "message": "DeepSeek 鉴权失败，Key 可能无效或已被吊销",
-                }));
+            if let Some(store) = crate::store::global() {
+                apply_saved_deepseek_key(&store, &outcome.validation)?;
             }
             Ok(json!({
                 "masked": outcome.masked,
@@ -2700,11 +2733,82 @@ mod send_message_tests {
         )))
     }
 
+    /// 有凭据但不会真发请求：只用来穿过 2.52.0 的 AI_NOT_CONFIGURED 闸门，
+    /// 让 BUSY 这类占槽之后的状态可观测。
+    fn configured_state() -> Arc<AppState> {
+        let state = test_state();
+        state.apply_credentials(Some("sk-test-key-0001".into()));
+        state
+    }
+
+    /// 没有任何可用 AI 时直接拒绝：不占槽、不落库、不建会话（契约 §9.1，2.52.0）。
+    #[tokio::test]
+    async fn no_credentials_is_rejected_without_reserving() {
+        install_store();
+        let state = test_state();
+        let session_id = "ses_ai_not_configured";
+
+        let error = send_message_for_state(&state, session_id, Some("你好"), false, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "AI_NOT_CONFIGURED");
+        assert_eq!(error["message"], "还没有配置 AI 服务");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["details"]["reason"], "ai_not_configured");
+        assert_eq!(error["request_id"], "");
+        assert!(state.existing(session_id).await.is_none(), "不能建会话");
+        assert!(
+            state
+                .reserve_request(&AppState::next_request_id(), session_id)
+                .is_ok(),
+            "被拒绝的消息不能占槽"
+        );
+        let store = crate::store::global().expect("全局库已安装");
+        let conn = store.conn();
+        assert!(crate::store::chat::messages(&conn, session_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 输入错误优先于 AI 状态：无凭据时，空文本仍报 INVALID_ARGUMENT。
+    #[tokio::test]
+    async fn empty_text_wins_over_missing_credentials() {
+        let state = test_state();
+        let error = send_message_for_state(&state, "ses_empty_no_ai", Some("   "), false, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        assert_eq!(error["details"]["reason"], "empty_text");
+    }
+
+    /// 闸门本身：没有可用凭据就拒绝。
+    #[test]
+    fn require_configured_ai_rejects_without_credentials() {
+        let state = test_state();
+        let error = require_configured_ai(&state).unwrap_err();
+        assert_eq!(error["code"], "AI_NOT_CONFIGURED");
+        assert_eq!(error["details"]["reason"], "ai_not_configured");
+    }
+
+    /// 闸门本身：本机端点免 Key，算已配置（只注入凭据，不真发请求）。
+    #[test]
+    fn a_local_endpoint_counts_as_configured() {
+        let state = test_state();
+        state.apply_provider(Some(crate::claurst_session::provider::LlmCredentials {
+            provider_id: "ollama".into(),
+            protocol: "openai".into(),
+            api_key: String::new(),
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "test-model".into(),
+        }));
+        assert!(require_configured_ai(&state).is_ok());
+    }
+
     /// 同一会话第二条请求必须被拒绝，而且**不能落库**。
     #[tokio::test]
     async fn a_second_send_is_rejected_without_persisting() {
         install_store();
-        let state = test_state();
+        let state = configured_state();
         let session_id = "ses_busy_test";
 
         let first = AppState::next_request_id();
@@ -2771,23 +2875,6 @@ mod send_message_tests {
                 .reserve_request(&AppState::next_request_id(), "ses_panic")
                 .is_ok(),
             "panic 后槽位必须释放"
-        );
-    }
-
-    /// 会话创建失败（没有凭据）也要释放槽位，不留下一条永远没人处理的“进行中”。
-    #[tokio::test]
-    async fn a_failed_session_creation_releases_the_slot() {
-        let state = test_state();
-        let session_id = "ses_no_credentials";
-        let error = send_message_for_state(&state, session_id, Some("你好"), false, None)
-            .await
-            .unwrap_err();
-        assert_eq!(error["code"], "INTERNAL", "{error}");
-        assert!(
-            state
-                .reserve_request(&AppState::next_request_id(), session_id)
-                .is_ok(),
-            "会话创建失败后槽位必须释放"
         );
     }
 
@@ -3774,5 +3861,66 @@ mod ui_log_tests {
         ui_log("info".into(), "wallet".into(), "刷新余额：手动".into());
         ui_log("nonsense".into(), "bad target".into(), "应被丢弃".into());
         ui_log("".into(), "wallet".into(), "".into());
+    }
+}
+
+#[cfg(test)]
+mod deepseek_save_key_tests {
+    use super::*;
+
+    fn store() -> crate::store::Store {
+        crate::test_support::install_test_secrets();
+        crate::store::Store::open_in_memory().unwrap()
+    }
+
+    /// 已知无效的 Key 不激活：界面收到 INVALID_KEY，应用仍是「未配置」。
+    #[test]
+    fn an_invalid_key_does_not_activate_the_builtin() {
+        let store = store();
+        // 同下：内置记录在、active 为空，激活与否才可观测。
+        crate::llm::ensure_migrated(&store);
+        crate::llm::set_active_id(&store, None).unwrap();
+
+        let error = apply_saved_deepseek_key(&store, "invalid").unwrap_err();
+        assert_eq!(error["code"], "INVALID_KEY");
+        assert_eq!(crate::llm::active_id(&store), None);
+    }
+
+    /// 无法验证（离线/超时）也算保存成功，并激活内置 DeepSeek。
+    #[test]
+    fn an_unverified_key_activates_the_builtin() {
+        let store = store();
+        // 内置记录先落库再清空 active，模拟「active 为空、内置 DeepSeek 还在」。
+        crate::llm::ensure_migrated(&store);
+        crate::llm::set_active_id(&store, None).unwrap();
+
+        apply_saved_deepseek_key(&store, "unverified").unwrap();
+        assert_eq!(
+            crate::llm::active_id(&store).as_deref(),
+            Some(crate::llm::PROVIDER_DEEPSEEK)
+        );
+    }
+
+    /// 已有可用的自定义 active 时，保存 DeepSeek Key 不抢 active。
+    #[test]
+    fn a_valid_key_keeps_a_usable_active_provider() {
+        let store = store();
+        let saved = crate::llm::save(
+            &store,
+            crate::llm::ProviderInput {
+                provider_id: None,
+                name: "自定义".into(),
+                protocol: "anthropic".into(),
+                base_url: Some("https://api.anthropic.com".into()),
+                model: "test-model".into(),
+                api_key: Some("sk-custom".into()),
+            },
+        )
+        .unwrap();
+        let id = saved["provider_id"].as_str().unwrap().to_string();
+        assert_eq!(crate::llm::active_id(&store).as_deref(), Some(id.as_str()));
+
+        apply_saved_deepseek_key(&store, "ok").unwrap();
+        assert_eq!(crate::llm::active_id(&store).as_deref(), Some(id.as_str()));
     }
 }

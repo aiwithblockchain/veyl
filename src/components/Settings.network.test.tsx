@@ -100,7 +100,7 @@ function renderSettings(
     onAskAi?: (text: string, section: string) => void;
     onNotice?: (notice: { level: "info" | "error"; text: string }) => void;
     onReportProblem?: () => void;
-    onConsultAi?: (prompt: string) => void;
+    onConsultAi?: (prompt: string) => boolean;
   } = {},
 ) {
   return render(
@@ -616,7 +616,7 @@ describe("咨询 AI 的焦点", () => {
 
 describe("咨询 AI 的提示词", () => {
   it("从关闭态打开：回调收到带当前分区的咨询提示词", async () => {
-    const onConsultAi = vi.fn();
+    const onConsultAi = vi.fn((_prompt: string) => true);
     renderSettings(makeBridge(), {
       connectMode: "system_proxy",
       runtimeView: runtime({ state: "running" }),
@@ -645,7 +645,7 @@ describe("咨询 AI 的提示词", () => {
       ["advanced", "高级"],
     ] as const;
     for (const [section, label] of cases) {
-      const onConsultAi = vi.fn();
+      const onConsultAi = vi.fn((_prompt: string) => true);
       const view = renderSettings(makeBridge(), { section, onConsultAi });
       fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
       expect(onConsultAi.mock.calls[0][0]).toContain(`当前在「${label}」`);
@@ -654,7 +654,7 @@ describe("咨询 AI 的提示词", () => {
   });
 
   it("开启态再点只关闭，不再发消息", async () => {
-    const onConsultAi = vi.fn();
+    const onConsultAi = vi.fn((_prompt: string) => true);
     renderSettings(makeBridge(), { connectMode: "tun", onConsultAi });
     await act(async () => {});
 
@@ -666,5 +666,22 @@ describe("咨询 AI 的提示词", () => {
     fireEvent.click(button);
     expect(onConsultAi).toHaveBeenCalledTimes(1);
     expect(button.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("回调返回 false：不进入咨询布局", async () => {
+    const onConsultAi = vi.fn(() => false);
+    const { container } = renderSettings(makeBridge(), {
+      connectMode: "tun",
+      onConsultAi,
+    });
+    await act(async () => {});
+
+    const button = await screen.findByRole("button", { name: "咨询 AI" });
+    fireEvent.click(button);
+
+    expect(onConsultAi).toHaveBeenCalledTimes(1);
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector(".settings-backdrop.is-consulting")).toBeNull();
+    expect(container.querySelector(".settings-assistant")).toBeNull();
   });
 });

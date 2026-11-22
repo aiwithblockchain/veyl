@@ -56,7 +56,7 @@ function makeBridge(): AgentBridge {
 
 describe("Onboarding 原生表单与输入法", () => {
   it("Key 表单：组合态回车被拦，普通回车不拦", () => {
-    render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+    render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
     const input = screen.getByLabelText("DeepSeek API Key");
 
     expect(fireEvent.keyDown(input, { key: "Enter", keyCode: 229 })).toBe(false);
@@ -64,12 +64,25 @@ describe("Onboarding 原生表单与输入法", () => {
   });
 
   it("自定义服务商表单：同样", () => {
-    render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+    render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /使用其他 AI 服务/ }));
     const input = screen.getByLabelText("Base URL");
 
     expect(fireEvent.keyDown(input, { key: "Enter", keyCode: 229 })).toBe(false);
     expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(true);
+  });
+
+  it("「我懂网络，不用 AI」触发 onSkip，不触发 onDone", () => {
+    const onDone = vi.fn();
+    const onSkip = vi.fn();
+    render(
+      <Onboarding bridge={makeBridge()} onDone={onDone} onSkip={onSkip} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "我懂网络，不用 AI" }));
+
+    expect(onSkip).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
   });
 
   it("连接中的三点由真实请求决定，不会按固定时长自行结束", async () => {
@@ -83,7 +96,7 @@ describe("Onboarding 原生表单与输入法", () => {
         }),
     );
     const onDone = vi.fn();
-    render(<Onboarding bridge={bridge} onDone={onDone} />);
+    render(<Onboarding bridge={bridge} onDone={onDone} onSkip={() => {}} />);
 
     fireEvent.change(screen.getByLabelText("DeepSeek API Key"), {
       target: { value: "sk-abcdefghijklmnopqrstuvwxyz" },
@@ -112,7 +125,7 @@ describe("Onboarding 原生表单与输入法", () => {
   it("偏好减少动态：切换表单立即生效，不进入淡出态", () => {
     const restore = stubMatchMedia(true);
     try {
-      render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+      render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
       fireEvent.click(screen.getByRole("button", { name: "使用其他 AI 服务" }));
       expect(
         screen.getByRole("button", { name: "← 使用 DeepSeek Key" }),
@@ -131,7 +144,7 @@ describe("Onboarding 原生表单与输入法", () => {
     vi.useFakeTimers();
     const restore = stubMatchMedia(false);
     try {
-      render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+      render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
       const switcher = () => document.querySelector(".first-run__switcher");
 
       fireEvent.click(screen.getByRole("button", { name: "使用其他 AI 服务" }));
@@ -159,12 +172,13 @@ describe("Onboarding 原生表单与输入法", () => {
   });
 
   it("展开其他 AI 服务：Key 输入框收起，只留一个连接按钮", () => {
-    render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+    render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
 
     fireEvent.click(screen.getByRole("button", { name: /使用其他 AI 服务/ }));
 
     expect(screen.queryByLabelText("DeepSeek API Key")).toBeNull();
     expect(screen.queryByRole("button", { name: /获取 Key/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /我懂网络/ })).toBeNull();
     expect(screen.getAllByRole("button", { name: "连接" })).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("button", { name: /使用 DeepSeek Key/ }));
@@ -185,7 +199,7 @@ describe("Onboarding 原生表单与输入法", () => {
         }),
     );
     const onDone = vi.fn();
-    render(<Onboarding bridge={bridge} onDone={onDone} />);
+    render(<Onboarding bridge={bridge} onDone={onDone} onSkip={() => {}} />);
 
     fireEvent.change(screen.getByLabelText("DeepSeek API Key"), {
       target: { value: "sk-test-123456" },
@@ -200,7 +214,7 @@ describe("Onboarding 原生表单与输入法", () => {
   });
 
   it("Key 格式不对：就地报错且不清空输入", () => {
-    render(<Onboarding bridge={makeBridge()} onDone={() => {}} />);
+    render(<Onboarding bridge={makeBridge()} onDone={() => {}} onSkip={() => {}} />);
     const input = screen.getByLabelText("DeepSeek API Key");
 
     fireEvent.change(input, { target: { value: "not-a-key" } });
@@ -233,7 +247,7 @@ describe("Onboarding 原生表单与输入法", () => {
     }));
 
     const onDone = vi.fn();
-    render(<Onboarding bridge={bridge} onDone={onDone} />);
+    render(<Onboarding bridge={bridge} onDone={onDone} onSkip={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /使用其他 AI 服务/ }));
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "https://api.example.com" },
@@ -279,7 +293,7 @@ describe("Onboarding 原生表单与输入法", () => {
     }));
 
     const onDone = vi.fn();
-    render(<Onboarding bridge={bridge} onDone={onDone} />);
+    render(<Onboarding bridge={bridge} onDone={onDone} onSkip={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /使用其他 AI 服务/ }));
     fireEvent.change(screen.getByLabelText("Base URL"), {
       target: { value: "http://127.0.0.1:11434" },

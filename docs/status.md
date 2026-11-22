@@ -39,6 +39,7 @@
 | 12 | 余额修复真机验证 | 跨账户与门禁修复未在真机走过 | 构建后看 `logs/` 的 `ui::wallet` 与切换账户行为 | 用户 |
 | 13 | 节点凭据签发流程讨论 | 记在 `notes/pending-topics.md` #1 | 约一次专门讨论 | 用户 + PM |
 | 14 | 移动端导出（并行进行中） | 文档已回写真机结果并提交（`fa0b73f`）；Shadowrocket / Hiddify 真机通过 | 由该批次自行收尾 | 其它会话 |
+| 15 | AI 可选与统一入口 | 已派：Sage 拆解，Ivy/Leo 做前端（T1–T5、T8），Noah 做后端（T6）；契约 2.52.0 已补 `AI_NOT_CONFIGURED` | 开发完成后由 PM 派 Owen 审前端、Ruby 审后端；通过后 PM 提交 | Ivy / Leo / Noah |
 
 ---
 

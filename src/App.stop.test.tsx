@@ -145,6 +145,21 @@ function prepareBridge() {
     verified: true,
     validation: "ok",
   });
+  vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+    providers: [
+      {
+        providerId: "deepseek",
+        name: "DeepSeek",
+        protocol: "openai",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-chat",
+        hasKey: true,
+        isActive: true,
+        isBuiltin: true,
+      },
+    ],
+    activeProviderId: "deepseek",
+  });
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [SUMMARY],
     active_config_id: CONFIG_ID,

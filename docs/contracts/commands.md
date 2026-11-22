@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.51.0`
+> 契约版本：`2.52.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -2235,7 +2235,7 @@ type SeedImportResult = {
 
 以下命令在 2.0 **不变**，只在这里保留完整语义，避免实现方回到历史版本里翻。
 
-### 9.1 `ai_send_message { sessionId, text?, hidden?, context? }` → `{ request_id }`（2.36.0 增 `context`）
+### 9.1 `ai_send_message { sessionId, text?, hidden?, context? }` → `{ request_id }`（2.36.0 增 `context`；2.52.0 增 `AI_NOT_CONFIGURED`）
 
 发送一条用户消息，返回本轮请求 id。事件见 `events.md` §3。
 
@@ -2244,6 +2244,14 @@ type SeedImportResult = {
 - `code = BUSY`，`details = { "reason": "request_in_flight", "active_request_id": "<在跑的那条>" }`；
 - **不写 `chat_messages`、不启动请求**——落库再失败会让用户看到一条永远不回的消息，比拒绝更糟；
 - 前端应在发送入口就拦住（或把这条错误按「等上一条回完再发」展示），不要当普通失败重试。
+
+**未配置 AI 时（2.52.0 新增）**：直接命令调用在没有任何可用 AI 时返回结构化错误，**不占槽、不落库、不启动请求**：
+
+- `code = AI_NOT_CONFIGURED`，`message = "还没有配置 AI 服务"`，`retryable = false`，`details = { "reason": "ai_not_configured" }`；
+- **判定口径：只回答「有没有配」，不回答「Key 有没有效」**。当前 active 服务商存在、Key 非空（本机端点免 Key）即算已配置。Key 是否有效不在闸门内：系统不持久化有效性，Key 也可能临时连不上服务商；无效 Key 由发送时的服务商错误反馈，不在发送前联网探测；
+- 界面 `isAiReady` 与后端 `has_credentials()` 同语义（2.52.0 起去掉「旧 DeepSeek Key 单独算配置」的分支），不存在界面与后端两套口径；
+- **优先级**：输入校验在前（`context` 非法 / `empty_text` → 各自既有错误），`AI_NOT_CONFIGURED` 在后；即只有「本来能发」的请求才会被配置状态拦下；
+- 这条只兜住绕过界面的直接命令调用。界面仍以前端判断为准（未配置时不渲染输入框、动作入口先弹统一告警），**不要用空回复代替**。
 
 | 参数 | 规则 |
 |---|---|
@@ -2869,6 +2877,14 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.52.0（未发布，2026-11-22：AI 可选）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.52.0`；§9.1 `ai_send_message` 在未配置任何可用 AI 时返回 `AI_NOT_CONFIGURED`（`details.reason = "ai_not_configured"`），不占槽、不落库、不启动请求 | 语义新增 | `docs/design/ai-optional.md` §5 |
+| 2 | 判定口径：当前 active 服务商存在且 Key 非空（本机端点免 Key）才算已配置；Key 有效性不在闸门内；界面 `isAiReady` 与后端 `has_credentials()` 同语义 | 约束 | `ai-optional.md` §5；PM 2026-11-22 定 |
+| 3 | 界面 `isAiReady` 去掉「存在 DeepSeek Key 即就绪」的分支；保存 DeepSeek Key 成功（未返回 `INVALID_KEY`）后，若当前没有可用 active 服务商，则激活内置 DeepSeek，保证首启保存后即为已配置；已知无效的 Key 不激活 | 语义变更 | 同上；避免首启保存后仍判未配置 |
 
 ### 2.51.0（未发布，2026-11-21：语言设置与中英文提示词）
 

@@ -41,6 +41,7 @@ import { isProvisioning, trialAvailableHint } from "./myservers/labels";
 import { collectPendingServerNodes } from "./myservers/pendingServerNodes";
 import { collectDanglingNodeIds } from "./myservers/tombstones";
 import { Onboarding } from "./components/Onboarding";
+import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
 import { MyServerWizard } from "./components/MyServerWizard";
 import { QuitDialog } from "./components/QuitDialog";
@@ -49,6 +50,7 @@ import type { DisplayActionOutcome } from "./components/ToolCallCard";
 import type { ToolDisplayAction } from "./components/toolDisplay";
 import {
   isAiReady,
+  ONBOARDING_SKIPPED_KEY,
   shouldShowOnboarding,
 } from "./config/onboarding";
 import { useVpnSession, isHelperPermissionReason } from "./config/useVpnSession";
@@ -356,6 +358,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [appNotice]);
   const [aiReady, setAiReady] = useState(false);
+  const [aiRequiredOpen, setAiRequiredOpen] = useState(false);
   // 当前服务商的显示名；未配置或读取失败时为空，由助手头部决定回退文案。
   const [aiProviderName, setAiProviderName] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -820,11 +823,8 @@ export default function App() {
 
   const refreshAiStatus = useCallback(
     async (initial = false) => {
-      const [key, providers] = await Promise.all([
-        bridge.getDeepSeekKey().catch(() => null),
-        bridge.llmProviderList().catch(() => null),
-      ]);
-      const ready = isAiReady({ key, providers });
+      const providers = await bridge.llmProviderList().catch(() => null);
+      const ready = isAiReady({ providers });
       const activeProvider =
         providers?.providers.find(
           (provider) => provider.providerId === providers?.activeProviderId,
@@ -836,11 +836,21 @@ export default function App() {
       if (!initial && !wasReady && ready) maybeAutoOpenPanel();
       return {
         ready,
-        showOnboarding: shouldShowOnboarding({ key, providers }),
+        showOnboarding: shouldShowOnboarding(
+          { providers },
+          readFlag(ONBOARDING_SKIPPED_KEY),
+        ),
       };
     },
     [bridge, maybeAutoOpenPanel],
   );
+
+  /** 所有「点一下让 AI 干活」的入口共用：未配置就弹告警，不做任何动作。 */
+  const requireAi = (): boolean => {
+    if (aiConfiguredRef.current) return true;
+    setAiRequiredOpen(true);
+    return false;
+  };
 
   useEffect(() => {
     panelOpenRef.current = panelOpen;
@@ -1194,6 +1204,14 @@ export default function App() {
     void completeOnboarding();
   };
 
+  // 跳过 AI：只记「别再弹首启」，不展开右栏，也不发开场词。
+  const skipOnboarding = () => {
+    writeFlag(ONBOARDING_SKIPPED_KEY);
+    setShowOnboarding(false);
+    setOnboardingLoaded(true);
+    void Promise.all([refreshDefaultProfile(), refreshAiStatus()]);
+  };
+
   const closeSettings = () => {
     setSettingsOpen(false);
     setSettingsConsulting(false);
@@ -1424,11 +1442,7 @@ export default function App() {
     text: string | undefined,
     options: { hidden?: boolean; lastAction?: UiLastAction } = {},
   ): Promise<boolean> => {
-    if (!aiConfiguredRef.current) {
-      setAppNotice({ level: "error", text: translate("app.noAi") });
-      openSettings("ai");
-      return false;
-    }
+    if (!requireAi()) return false;
     const target = state.sessions.find((item) => item.id === sessionId);
     if (
       sendBusyRef.current.has(sessionId) ||
@@ -1489,7 +1503,7 @@ export default function App() {
 
   // 三处入口共用：打开右栏 + 新建会话 + 契约里的开场指令（hidden，不落用户气泡）。
   const handleReportProblem = () => {
-    if (!aiReady || reportOpeningRef.current) return;
+    if (!requireAi() || reportOpeningRef.current) return;
     reportOpeningRef.current = true;
     setReportOpening(true);
     setSettingsOpen(false);
@@ -1549,11 +1563,7 @@ export default function App() {
   };
 
   const handleAskAi = (text: string) => {
-    if (!aiReady) {
-      setAppNotice({ level: "error", text: translate("app.noAi") });
-      openSettings("ai");
-      return;
-    }
+    if (!requireAi()) return;
     const fresh = createSession();
     dispatch({ type: "add_session", session: fresh });
     sendToSession(fresh.id, text);
@@ -1879,10 +1889,12 @@ export default function App() {
   };
 
   // 三个「问 AI」入口共用：连接页两个 chip、设置页「咨询 AI」、新建节点向导的「让 AI 帮我选」。
-  // AI 未配置时不展开——handleAskAi 会提示并跳设置，先展开只会白闪一下。
-  const askAiInPanel = (prompt: string) => {
-    if (aiReady) openAssistant();
+  // 未配置时先弹告警；面板保持收起，取消后不留痕迹。返回 false = 被拦下。
+  const askAiInPanel = (prompt: string): boolean => {
+    if (!requireAi()) return false;
+    openAssistant();
     handleAskAi(prompt);
+    return true;
   };
 
   const handleSwitchNode = (nodeId: string) => {
@@ -1914,6 +1926,7 @@ export default function App() {
 
   // action_card 的按钮只上报：hidden 消息 + context.last_action，不直接调命令。
   const handleActionCardAction = (action: { id: string }) => {
+    if (!requireAi()) return;
     lastActionRef.current = { id: action.id };
     let target = session;
     if (!target) {
@@ -1931,6 +1944,7 @@ export default function App() {
 
   // 「AI 定位」：只上报这个动作并带上固定前缀，不直接调 MyServerFailure。
   const handleAiLocate = (serverId: string) => {
+    if (!requireAi()) return;
     lastActionRef.current = { id: "servers.ai_locate", value: serverId };
     let target = session;
     if (!target) {
@@ -2285,7 +2299,7 @@ export default function App() {
 
   if (showOnboarding) {
     return (
-      <Onboarding bridge={bridge} onDone={finishOnboarding} />
+      <Onboarding bridge={bridge} onDone={finishOnboarding} onSkip={skipOnboarding} />
     );
   }
 
@@ -2546,7 +2560,7 @@ export default function App() {
           nodeProbes={nodeProbes}
           failedAfterConnected={failedAfterConnected}
           helperPreparing={vpn.preparingHelper}
-          onReportProblem={aiReady ? handleReportProblem : undefined}
+          onReportProblem={handleReportProblem}
           reportBusy={reportOpening}
           actionCards={actionCards}
           danglingNodeIds={danglingNodeIds}
@@ -2663,6 +2677,15 @@ export default function App() {
         onOpenSettings={() => bridge.tunHelperOpenSettings()}
       />
 
+      <AiRequiredDialog
+        open={aiRequiredOpen}
+        onClose={() => setAiRequiredOpen(false)}
+        onConfigure={() => {
+          setAiRequiredOpen(false);
+          openSettings("ai");
+        }}
+      />
+
       <Settings
         open={settingsOpen}
         bridge={bridge}
@@ -2689,9 +2712,10 @@ export default function App() {
           setSettingsOpen(false);
           void handleRestoreNetwork();
         }}
-        onReportProblem={aiReady ? handleReportProblem : undefined}
+        onReportProblem={handleReportProblem}
         reportBusy={reportOpening}
         onAskAi={(text, section) => {
+          if (!requireAi()) return;
           setSettingsSection(section);
           closeSettings();
           askAiInPanel(text);
@@ -2731,6 +2755,7 @@ export default function App() {
         }}
         onViewBills={() => void handleViewBills()}
         mobileExportOpen={mobileExportOpen}
+        trapPaused={aiRequiredOpen}
         onOpenMobileExport={openMobileExport}
       />
 
@@ -2738,6 +2763,7 @@ export default function App() {
         <MobileExport
           bridge={bridge}
           nested={settingsOpen}
+          trapPaused={aiRequiredOpen}
           onClose={closeMobileExport}
           onLogin={() => {
             // 登录弹层马上接管焦点：不要再把焦点还给弹层后面的左栏行。
@@ -2753,6 +2779,7 @@ export default function App() {
             refreshServersOnce();
           }}
           onAskAi={() => {
+            if (!requireAi()) return;
             closeMobileExport(false);
             closeSettings();
             askAiInPanel(mobileExportPrompt());

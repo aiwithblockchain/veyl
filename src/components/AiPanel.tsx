@@ -252,28 +252,32 @@ export function AiPanel({
           </div>
         )}
         <div className="ai-panel__head-right">
-          <button
-            type="button"
-            className="ai-panel__icon"
-            onClick={() => {
-              onNewSession();
-              setView("chat");
-            }}
-            aria-label={t("assistant.newChat")}
-            title={t("assistant.newChat")}
-          >
-            <IconPlus size={16} />
-          </button>
-          {view === "chat" ? (
-            <button
-              type="button"
-              className="ai-panel__icon"
-              onClick={() => setView("history")}
-              aria-label={t("assistant.history")}
-              title={t("assistant.history")}
-            >
-              <IconList size={16} />
-            </button>
+          {aiReady ? (
+            <>
+              <button
+                type="button"
+                className="ai-panel__icon"
+                onClick={() => {
+                  onNewSession();
+                  setView("chat");
+                }}
+                aria-label={t("assistant.newChat")}
+                title={t("assistant.newChat")}
+              >
+                <IconPlus size={16} />
+              </button>
+              {view === "chat" ? (
+                <button
+                  type="button"
+                  className="ai-panel__icon"
+                  onClick={() => setView("history")}
+                  aria-label={t("assistant.history")}
+                  title={t("assistant.history")}
+                >
+                  <IconList size={16} />
+                </button>
+              ) : null}
+            </>
           ) : null}
           <button
             type="button"
@@ -287,17 +291,18 @@ export function AiPanel({
         </div>
       </header>
 
-      {!aiReady ? (
-        <div className="ai-panel__banner">
-          {t("assistant.banner.noAi")}
-          <button type="button" className="ai-panel__banner-action" onClick={onOpenSettings}>
-            {t("assistant.banner.configure")}
-          </button>
-        </div>
-      ) : null}
-
       <div className="ai-panel__body">
-        {view === "history" ? (
+        {!aiReady ? (
+          <div className="ai-empty ai-panel__setup">
+            <p className="ai-empty__line">{t("assistant.setup.title")}</p>
+            <p className="ai-empty__text">{t("assistant.setup.body")}</p>
+            <div className="ai-panel__setup-action">
+              <button type="button" className="btn btn--primary" onClick={onOpenSettings}>
+                {t("assistant.setup.configure")}
+              </button>
+            </div>
+          </div>
+        ) : view === "history" ? (
           <div className="ai-history">
             {sessions.length === 0 ? (
               <p className="ai-history__empty">{t("assistant.historyEmpty")}</p>

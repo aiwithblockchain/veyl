@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
+import type { LlmProvider } from "./agent/bridge";
 
 const KICKOFF =
   "用户刚进入 Veyl，还没有可用的节点。请先打个招呼，然后问他想自建服务器还是先用免费节点。";
@@ -19,6 +20,23 @@ function keyState() {
     : { masked: null, verified: false, validation: "unverified" as const };
 }
 
+/** 可用判定只看 active 服务商：存过 Key 后内置 DeepSeek 报 hasKey。 */
+function providers(): LlmProvider[] {
+  if (!keyConfigured) return [];
+  return [
+    {
+      providerId: "deepseek",
+      name: "DeepSeek",
+      protocol: "openai",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-chat",
+      hasKey: true,
+      isActive: true,
+      isBuiltin: true,
+    },
+  ];
+}
+
 beforeEach(() => {
   keyConfigured = false;
   localStorage.clear();
@@ -30,10 +48,10 @@ beforeEach(() => {
     keyConfigured = true;
     return keyState();
   });
-  vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
-    providers: [],
-    activeProviderId: null,
-  });
+  vi.spyOn(bridge, "llmProviderList").mockImplementation(async () => ({
+    providers: providers(),
+    activeProviderId: providers().find((item) => item.isActive)?.providerId ?? null,
+  }));
   vi.spyOn(bridge, "getRuntimeSnapshot").mockResolvedValue(null);
   vi.spyOn(bridge, "configList").mockResolvedValue({
     configs: [],
