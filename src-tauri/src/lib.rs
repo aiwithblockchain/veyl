@@ -16,6 +16,7 @@ pub mod veyl_paths;
 pub mod net_reset;
 pub mod netcfg;
 pub mod nodes;
+pub mod probe;
 pub mod proxy;
 pub mod public_http;
 pub mod reports;
@@ -405,6 +406,7 @@ pub fn run() {
                 agent::commands::server_sync_interval_get,
                 agent::commands::server_sync_interval_set,
                 agent::commands::node_rotate_credentials,
+                probe::node_probe_reachability,
                 agent::commands::node_forget,
                 agent::commands::mobile_export_get,
                 agent::commands::mobile_export_rotate,
@@ -505,6 +507,7 @@ pub fn run() {
                 agent::commands::server_sync_interval_get,
                 agent::commands::server_sync_interval_set,
                 agent::commands::node_rotate_credentials,
+                probe::node_probe_reachability,
                 agent::commands::node_forget,
                 agent::commands::mobile_export_get,
                 agent::commands::mobile_export_rotate,

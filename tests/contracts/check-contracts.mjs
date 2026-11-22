@@ -348,6 +348,7 @@ const INJECTED_PARAMS = new Set(["state", "app", "window", "request"]);
 const COMMAND_IMPL_FILES = [
   "src-tauri/src/agent/commands.rs",
   "src-tauri/src/claurst_session/mod.rs",
+  "src-tauri/src/probe.rs",
 ];
 
 function rustCommands() {
