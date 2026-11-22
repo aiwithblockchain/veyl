@@ -35,7 +35,7 @@ function makeBridge(): AgentBridge {
 }
 
 function renderSettings({
-  syncInterval = 30 as SyncIntervalMinutes,
+  syncInterval = 240 as SyncIntervalMinutes,
   onSyncIntervalChange,
   onSyncNow,
   syncBusy = false,
@@ -74,15 +74,15 @@ function renderSettings({
 }
 
 describe("设置 › 节点配置同步", () => {
-  it("渲染行、五个间隔档位与立即同步按钮", () => {
+  it("渲染行、六个间隔档位与立即同步按钮", () => {
     renderSettings({ onSyncIntervalChange: () => {}, onSyncNow: () => {} });
 
     expect(screen.getByText("节点配置同步")).toBeTruthy();
     const select = screen.getByLabelText("同步间隔") as HTMLSelectElement;
-    expect(select.value).toBe("30");
+    expect(select.value).toBe("240");
     expect(
       Array.from(select.options).map((option) => option.textContent),
-    ).toEqual(["手动", "5 分钟", "15 分钟", "30 分钟", "60 分钟"]);
+    ).toEqual(["手动", "30 分钟", "1 小时", "4 小时", "8 小时", "24 小时"]);
     expect(screen.getByRole("button", { name: "立即同步" })).toBeTruthy();
   });
 
@@ -91,11 +91,11 @@ describe("设置 › 节点配置同步", () => {
     renderSettings({ onSyncIntervalChange, onSyncNow: () => {} });
 
     fireEvent.change(screen.getByLabelText("同步间隔"), {
-      target: { value: "5" },
+      target: { value: "60" },
     });
 
     expect(onSyncIntervalChange).toHaveBeenCalledTimes(1);
-    expect(onSyncIntervalChange).toHaveBeenCalledWith(5);
+    expect(onSyncIntervalChange).toHaveBeenCalledWith(60);
   });
 
   it("同步中禁用「立即同步」", () => {
