@@ -6,8 +6,16 @@ import {
   serverStateLabel,
 } from "../myservers/labels";
 import { useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 
 const STAGES = ["creating", "booting", "installing", "verifying"] as const;
+/** 每个阶段一句自己的说明；通用句会让用户以为创建中也在下载节点程序。 */
+const STAGE_NOTE_KEYS: Partial<Record<MyServer["state"], MessageKey>> = {
+  creating: "progress.creating",
+  booting: "progress.booting",
+  installing: "progress.installing",
+  verifying: "progress.verifying",
+};
 /** 某一阶段超过这么久就换一句「还在继续」，不再说「通常 2–4 分钟」。 */
 const STAGE_TIMEOUT_MS = 180_000;
 /** 整机硬边界：从 created_at 起算 15 分钟，到点改判「安装超时」。 */
@@ -140,8 +148,8 @@ export function ServerProgress({ server }: { server: MyServer }) {
         minutes: Math.floor((stageElapsed ?? 0) / 60_000),
       })
     : server.state === "installing" && server.singbox_version
-      ? t("progress.installing", { version: server.singbox_version })
-      : t("progress.typical");
+      ? t("progress.installingVersion", { version: server.singbox_version })
+      : t(STAGE_NOTE_KEYS[server.state] ?? "progress.processing");
   const elapsedMs = Math.max(0, now - (baseRef.current ?? now));
   const buildTimedOut = elapsedMs >= BUILD_TIMEOUT_MS;
 

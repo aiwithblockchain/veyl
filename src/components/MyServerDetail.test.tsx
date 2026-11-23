@@ -526,7 +526,9 @@ describe("服务器详情", () => {
       state: "booting",
       created_at: new Date(2026, 10, 18, 9, 0, 0).toISOString(),
     });
-    expect(screen.getByText("通常 2–4 分钟。")).toBeTruthy();
+    expect(
+      screen.getByText("服务器已创建，正在启动，通常 30–60 秒。"),
+    ).toBeTruthy();
     expect(screen.queryByText(/还在继续/)).toBeNull();
     booting.unmount();
 
@@ -536,7 +538,9 @@ describe("服务器详情", () => {
       created_at: new Date(2026, 10, 18, 9, 0, 0).toISOString(),
       installing_at: null,
     });
-    expect(screen.getByText("通常 2–4 分钟。")).toBeTruthy();
+    expect(
+      screen.getByText("正在下载节点程序并启动服务，通常 2–4 分钟。"),
+    ).toBeTruthy();
     expect(screen.queryByText(/还在继续/)).toBeNull();
     expect(screen.queryByText(/这一步已经/)).toBeNull();
   });
@@ -547,7 +551,9 @@ describe("服务器详情", () => {
       installing_at: new Date(Date.now() - 10_000).toISOString(),
       singbox_version: "1.14.4",
     });
-    expect(screen.getByText("正在安装 sing-box 1.14.4")).toBeTruthy();
+    expect(
+      screen.getByText("正在安装 sing-box 1.14.4，通常 2–4 分钟。"),
+    ).toBeTruthy();
   });
 
   it("流量行只留额度一个事实，不带括号补充", () => {

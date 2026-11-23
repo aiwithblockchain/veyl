@@ -266,3 +266,61 @@ describe("整机 15 分钟边界", () => {
     expect(container.querySelector(".is-timeout")).not.toBeNull();
   });
 });
+
+describe("阶段说明按阶段给", () => {
+  const recent = () => new Date(Date.now() - 10_000).toISOString();
+
+  it("四个阶段各渲染自己的句子", () => {
+    const cases = [
+      ["creating", "正在创建云服务器，通常 1–2 分钟。"],
+      ["booting", "服务器已创建，正在启动，通常 30–60 秒。"],
+      ["installing", "正在下载节点程序并启动服务，通常 2–4 分钟。"],
+      ["verifying", "正在检查节点是否可用，通常 1–2 分钟。"],
+    ] as const;
+
+    for (const [state, note] of cases) {
+      const view = render(
+        <ServerProgress server={server({ state, created_at: recent() })} />,
+      );
+      expect(
+        view.container.querySelector(".myservers__progress-note")?.textContent,
+      ).toBe(note);
+      view.unmount();
+    }
+  });
+
+  it("installing 有版本号：版本句后接固定时长", () => {
+    const { container } = render(
+      <ServerProgress
+        server={server({
+          state: "installing",
+          created_at: recent(),
+          singbox_version: "1.14.4",
+        })}
+      />,
+    );
+    expect(
+      container.querySelector(".myservers__progress-note")?.textContent,
+    ).toBe("正在安装 sing-box 1.14.4，通常 2–4 分钟。");
+  });
+
+  it("阶段超时优先于阶段句与版本句", () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 5, 0) });
+    const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
+    const { container } = render(
+      <ServerProgress
+        server={server({
+          state: "installing",
+          created_at: startedAt,
+          installing_at: startedAt,
+          singbox_version: "1.14.4",
+        })}
+      />,
+    );
+
+    expect(
+      container.querySelector(".myservers__progress-note")?.textContent,
+    ).toBe("这一步已经 4 分钟，还在继续。");
+    expect(container.textContent).not.toContain("sing-box");
+  });
+});

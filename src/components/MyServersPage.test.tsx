@@ -406,11 +406,15 @@ describe("我的服务器 destination", () => {
     expect(document.querySelector(".myservers--empty")).not.toBeNull();
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
     expect(within(rail).getByText("我的服务器")).toBeTruthy();
-    // 未登录左栏只留标题与一行提示，不渲染行、计数与任何按钮。
+    // 未登录左栏只留守提示与底部建机入口，不渲染服务器行。
     expect(
       within(rail).getByText("登录后这里会列出你的服务器。"),
     ).toBeTruthy();
-    expect(within(rail).queryByRole("button")).toBeNull();
+    expect(
+      within(rail).getByRole("button", { name: /新建节点/ }),
+    ).toBeTruthy();
+    expect(within(rail).queryByRole("button", { name: /新加坡/ })).toBeNull();
+    expect(within(rail).queryByRole("button", { name: "登录 / 注册" })).toBeNull();
     expect(bridge.myServerList).not.toHaveBeenCalled();
 
     expect(
@@ -960,7 +964,7 @@ describe("空态里的免费节点说明", () => {
 });
 
 describe("服务器列表行的开通状态", () => {
-  it("billing_state=pending 时显示开通中，不显示日价", () => {
+  it("进行中显示状态与计时，不写开通中、不显示日价", () => {
     render(
       <MyServersRail
         servers={[
@@ -981,7 +985,9 @@ describe("服务器列表行的开通状态", () => {
     );
 
     const meta = document.querySelector(".rail-server__meta");
-    expect(meta?.textContent).toContain("开通中");
+    expect(meta?.textContent).toContain("安装中");
+    expect(meta?.querySelector(".num")?.textContent).toMatch(/^\d+:\d{2}(:\d{2})?$/);
+    expect(meta?.textContent).not.toContain("开通中");
     expect(meta?.textContent).not.toContain("/天");
   });
 
@@ -1110,7 +1116,7 @@ describe("左栏滚动容器与常驻新建行", () => {
     expect(row?.textContent).toContain("新建节点");
   });
 
-  it("空列表不显示新建行（空态由中间主按钮承担）", () => {
+  it("空列表仍保留左栏 CTA，但不带填充色（主按钮在中间）", () => {
     render(
       <MyServersRail
         servers={[]}
@@ -1122,7 +1128,13 @@ describe("左栏滚动容器与常驻新建行", () => {
       />,
     );
 
-    expect(document.querySelector(".rail__new-row")).toBeNull();
+    const cta = document.querySelector<HTMLButtonElement>(
+      ".rail__new-row.rail-build",
+    );
+    expect(cta).not.toBeNull();
+    expect(cta?.textContent).toContain("新建节点");
+    // 一屏唯一的实心按钮仍是中间空态那个。
+    expect(cta?.className).not.toContain("btn--primary");
   });
 
   it("点常驻新建行调用 onNew；禁用时不可点", () => {

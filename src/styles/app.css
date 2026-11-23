@@ -4522,6 +4522,8 @@ body[data-resizing] {
   background: var(--canvas);
   border-right: 1px solid var(--hair);
   overflow: hidden;
+  /* 左栏底部的建机入口按栏宽换行（见 .rail-build 一段）。 */
+  container-type: inline-size;
 }
 
 .rail__brand {
@@ -6283,6 +6285,82 @@ details[open] > .settings-fold__summary::before {
 }
 
 .rail__new-row__icon { display: inline-flex; color: var(--ink-3); }
+
+/* 我的服务器左栏 · 新建节点入口
+   整块一个按钮：上行「＋ 新建节点」与右对齐日价，下行价值句。
+   细线沿用 .rail__new-row 的 border-top；这里只补两行排版与窄栏换行。
+   容器宽度取 .rail 的内容盒（栏宽 − 32 内边距 − 1px 右边框）：
+   栏宽 230 → 197，所以内容宽 196px 以下（栏宽 < 230）价格挪到价值句右端。 */
+.rail-build {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0;
+  height: auto;
+  min-height: 56px;
+  padding: 10px;
+  color: var(--ink);
+}
+
+/* 未登录时左栏没有列表占位，靠这条把入口贴到底部；已登录保留基类的 8px 上边距。 */
+.rail-build--flush {
+  margin-top: auto;
+}
+
+.rail-build__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title price"
+    "value value";
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: center;
+}
+
+.rail-build__title {
+  grid-area: title;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* 英文标题更长：宁可截断，也不让两列互相挤压。 */
+.rail-build__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-build__price {
+  grid-area: price;
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.rail-build__value {
+  grid-area: value;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@container (max-width: 196px) {
+  .rail-build__grid {
+    grid-template-areas:
+      "title title"
+      "value price";
+  }
+}
 
 .rail-servers {
   list-style: none;

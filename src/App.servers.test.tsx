@@ -1371,13 +1371,17 @@ describe("左栏门禁", () => {
     expect(rail.querySelector(".rail__action-row")).toBeTruthy();
   }, 15_000);
 
-  it("设备身份（未登录）：左栏只留标题与提示，没有服务器行与手机入口", async () => {
+  it("设备身份（未登录）：左栏留提示与建机入口，没有服务器行与手机入口", async () => {
     prepare([SERVER]);
     vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
 
     const rail = await openServers();
     expect(await screen.findByText("登录后这里会列出你的服务器。")).toBeTruthy();
-    expect(within(rail).queryByRole("button")).toBeNull();
+    // 未登录仍保留底部建机入口（点击门禁到登录弹窗），但不渲染服务器行。
+    expect(
+      within(rail).getByRole("button", { name: /新建节点/ }),
+    ).toBeTruthy();
+    expect(within(rail).queryByRole("button", { name: /新加坡/ })).toBeNull();
     expect(rail.querySelector(".rail__action-row")).toBeNull();
     // 中间是登录引导，不是服务器详情。
     expect(

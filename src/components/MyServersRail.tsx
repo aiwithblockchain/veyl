@@ -1,10 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { MyServer, MyServerCatalog } from "../agent/bridge";
 import { formatDailyPrice, isProvisioning, serverRailState, serverTone } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
 import { IconClose, IconPhone, IconPlus } from "./icons";
 import { useT } from "../i18n";
-
 interface Props {
   servers: MyServer[];
   selectedId: string | null;
@@ -38,35 +37,52 @@ interface Props {
   onNew: () => void;
 }
 
+/** 左栏计时：m:ss；满一小时才带小时，避免列表行里出现三位数。 */
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${minutes}:${pad(seconds)}`;
+}
+
 function ServerRow({
   server,
   selected,
   disabled,
   regionLabel,
+  now,
   onSelect,
 }: {
   server: MyServer;
   selected: boolean;
   disabled: boolean;
   regionLabel: string;
+  now: number;
   onSelect: (serverId: string) => void;
 }) {
   const t = useT();
+  const provisioning = isProvisioning(server.state);
+  const created = provisioning ? Date.parse(server.created_at) : NaN;
+  const elapsed =
+    provisioning && Number.isFinite(created) ? formatElapsed(now - created) : null;
   // 失败机器的计费字段可能是 0：副行不写日价，避免读成「免费 / 计费坏了」。
   // 停机删除的墓碑也不再报价：机器已经没了，价格只会误导。
+  // 进行中的行只报状态与计时，不报日价，也不再说「开通中」。
   const billingPart =
-    server.state === "error" || isTombstone(server)
+    server.state === "error" || isTombstone(server) || provisioning
       ? null
-      : server.billing_state === "pending" && isProvisioning(server.state)
-        ? t("rail.enabling")
-        : (
-            <>
-              <span className="num">
-                {formatDailyPrice(server.daily_price_cents)}
-              </span>
-              {t("rail.perDay")}
-            </>
-          );
+      : (
+          <>
+            <span className="num">
+              {formatDailyPrice(server.daily_price_cents)}
+            </span>
+            {t("rail.perDay")}
+          </>
+        );
   return (
     <button
       type="button"
@@ -86,10 +102,55 @@ function ServerRow({
         />
       </span>
       <span className="rail-server__meta">
-        {serverRailState(server)} · {regionLabel}
+        {serverRailState(server)}
+        {elapsed ? (
+          <>
+            {" "}
+            <span className="num" aria-hidden="true">
+              {elapsed}
+            </span>
+          </>
+        ) : null}
+        {" · "}
+        {regionLabel}
         {billingPart ? <> · {billingPart}</> : null}
       </span>
     </button>
+  );
+}
+
+/**
+ * 目录里可售档位的最低日价；未登录 / 目录缺失 / 没有 > 0 的档位时返回 null。
+ * `regions` 明确为空数组说明这个档位没有可用地区，不参与取价；缺省按不限制保留。
+ */
+function lowestDailyPrice(
+  catalog: MyServerCatalog | null,
+  signedIn: boolean,
+): number | null {
+  if (!signedIn || !catalog) return null;
+  let min = Number.POSITIVE_INFINITY;
+  for (const plan of catalog.plans) {
+    if (plan.regions !== undefined && plan.regions.length === 0) continue;
+    if (plan.daily_price_cents > 0 && plan.daily_price_cents < min) {
+      min = plan.daily_price_cents;
+    }
+  }
+  return Number.isFinite(min) ? min : null;
+}
+
+/** 价格里只有数字套等宽：前缀（英文 from）与后缀走正文。 */
+function PriceLabel({ cents }: { cents: number }) {
+  const t = useT();
+  const price = formatDailyPrice(cents);
+  const text = t("rail.build.price", { price });
+  const at = text.indexOf(price);
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, at)}
+      <span className="num">{price}</span>
+      {text.slice(at + price.length)}
+    </>
   );
 }
 
@@ -116,10 +177,50 @@ export function MyServersRail({
 }: Props) {
   const t = useT();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // 整张列表只跑一个每秒时钟：进行中的行共用同一个 now，不为每行各开一个 timer。
+  const counting = servers.some(
+    (server) =>
+      isProvisioning(server.state) && Number.isFinite(Date.parse(server.created_at)),
+  );
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!counting) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [counting]);
   const regionName = (regionId: string) =>
     catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
 
-  // 未登录：不渲染服务器行、新建、同步与「在手机上使用」；只留标题与一行提示。
+  const buildPrice = lowestDailyPrice(catalog, signedIn);
+  /** 底部唯一的建机入口：整块可点，零台与未登录都保留；列表加载中 / 读取失败时不出现。 */
+  const buildCta = (modifier = "") =>
+    !loading && !error ? (
+      <button
+        type="button"
+        className={`rail__new-row rail-build ${modifier}`.trim()}
+        disabled={disabled}
+        onClick={onNew}
+      >
+        <span className="rail-build__grid">
+          <span className="rail-build__title">
+            <span className="rail__new-row__icon">
+              <IconPlus size={14} />
+            </span>
+            <span className="rail-build__label">{t("rail.newNode")}</span>
+          </span>
+          {buildPrice !== null ? (
+            <span className="rail-build__price">
+              <PriceLabel cents={buildPrice} />
+            </span>
+          ) : null}
+          <span className="rail-build__value">{t("rail.build.value")}</span>
+        </span>
+      </button>
+    ) : null;
+
+  // 未登录：不渲染服务器行、同步与「在手机上使用」；错误态只留标题与「连不上」，
+  // 非错误态保留底部建机入口（点击由 App 门禁到登录弹窗）。
   if (!signedIn) {
     const unreachable = Boolean(error) || accountError || catalogError;
     return (
@@ -137,6 +238,7 @@ export function MyServersRail({
         >
           {unreachable ? t("rail.error") : t("rail.loginHint")}
         </p>
+        {!compact && !unreachable ? buildCta("rail-build--flush") : null}
       </aside>
     );
   }
@@ -179,6 +281,7 @@ export function MyServersRail({
                 selected={server.server_id === selectedId}
                 disabled={disabled}
                 regionLabel={regionName(server.region)}
+                now={now}
                 onSelect={(serverId) => {
                   onSelect(serverId);
                   setDrawerOpen(false);
@@ -277,19 +380,7 @@ export function MyServersRail({
           {/* 列表自己滚：.rail 是 overflow:hidden，不套这层超出的行会被裁掉。 */}
           <div className="rail__body">{content}</div>
           {trialNote}
-          {servers.length > 0 && !loading && !error ? (
-            <button
-              type="button"
-              className="rail__new-row"
-              disabled={disabled}
-              onClick={onNew}
-            >
-              <span className="rail__new-row__icon">
-                <IconPlus size={14} />
-              </span>
-              <span>{t("rail.newNode")}</span>
-            </button>
-          ) : null}
+          {buildCta()}
           {showMobile && onMobile && !loading && !error ? (
             <button
               type="button"
