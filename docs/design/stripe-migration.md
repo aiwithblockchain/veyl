@@ -244,7 +244,7 @@ checkout.session.expired
 | 文件 | 改动 |
 |---|---|
 | `src/payments/stripe.ts` | **新增**：Checkout Session 创建 + Stripe 验签 |
-| `src/webhooks/stripe.ts` | **新增**：三个事件的处理、匹配、入账、留证 |
+| `src/webhooks/stripe.ts` | **新增**：四个事件的处理（含 `expired`）、匹配、入账、留证 |
 | `src/topups.ts` | 注入从 `DodoEnv` 换成 `StripeEnv`；校验面额改为白名单；`product_id` 留 `NULL` |
 | `src/lib/config.ts` | 删 `dodoProductId` / `topupProductId` / `dodoApiBase`；新增档位白名单读取 |
 | `src/wallet.ts` | `refType` 联合类型增加 `"stripe_payment"`（保留 `"dodo_payment"` 供历史行） |
@@ -253,7 +253,7 @@ checkout.session.expired
 | `wrangler.jsonc` | 删 Dodo define / 产品映射；两套环境写 `TOPUP_DENOMINATIONS_CENTS`；secret 注释改 Stripe |
 | `src/payments/dodo.ts` | **删除** |
 | `src/webhooks/dodo.ts` | **删除** |
-| `test/payments.test.ts` | 充值 / 回调段改 Stripe：`price_data` 请求体、Stripe 签名、三个事件、异步到账、重复投递 |
+| `test/payments.test.ts` | 充值 / 回调段改 Stripe：`price_data` 请求体、Stripe 签名、四个事件、异步到账、重复投递 |
 | `src/lib/webhook_sample.ts` | 头 allowlist 与 id 前缀适配 |
 | `src/orders.ts` | 删掉未使用的 Dodo env 字段 |
 
