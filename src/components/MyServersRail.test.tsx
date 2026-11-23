@@ -105,7 +105,12 @@ describe("左栏底部的「新建节点」入口", () => {
     expect(hint?.nextElementSibling).toBe(cta);
     expect(cta?.className).toContain("rail-build");
     expect(cta?.textContent).toContain("新建节点");
-    expect(cta?.textContent).toContain("独享 IP，按天付费");
+    // 单行：只有标题与价格，不再有第二行价值句。
+    expect(cta?.textContent).not.toContain("独享 IP");
+    // jsdom 没有布局：至少保证截断时有悬停全文。
+    expect(cta?.querySelector(".rail-build__label")?.getAttribute("title")).toBe(
+      "新建节点",
+    );
     // 200 / 100 / 50（regions 为空数组，排除）→ 最小 $1.00。
     expect(cta?.querySelector(".rail-build__price .num")?.textContent).toBe(
       "$1.00",
@@ -115,13 +120,13 @@ describe("左栏底部的「新建节点」入口", () => {
     expect(cta?.querySelector("a, button")).toBeNull();
   });
 
-  it("点击整块（含价值句）都打开新建向导", () => {
+  it("点击整块（标题或价格）都打开新建向导", () => {
     const onNew = vi.fn();
     const { container } = renderCta({ onNew });
     const cta = container.querySelector<HTMLButtonElement>(".rail__new-row");
-    const value = container.querySelector(".rail-build__value") as HTMLElement;
+    const price = container.querySelector(".rail-build__price") as HTMLElement;
     fireEvent.click(cta as HTMLButtonElement);
-    fireEvent.click(value);
+    fireEvent.click(price);
     expect(onNew).toHaveBeenCalledTimes(2);
   });
 

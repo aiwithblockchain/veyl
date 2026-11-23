@@ -207,14 +207,15 @@ export function MyServersRail({
             <span className="rail__new-row__icon">
               <IconPlus size={14} />
             </span>
-            <span className="rail-build__label">{t("rail.newNode")}</span>
+            <span className="rail-build__label" title={t("rail.newNode")}>
+              {t("rail.newNode")}
+            </span>
           </span>
           {buildPrice !== null ? (
             <span className="rail-build__price">
               <PriceLabel cents={buildPrice} />
             </span>
           ) : null}
-          <span className="rail-build__value">{t("rail.build.value")}</span>
         </span>
       </button>
     ) : null;

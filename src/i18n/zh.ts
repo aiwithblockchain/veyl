@@ -1001,7 +1001,6 @@ export const zh = {
   "rail.error": "连不上服务器，稍后再试",
   "rail.closeList": "关闭服务器列表",
   "rail.perDay": "/天",
-  "rail.build.value": "独享 IP，按天付费",
   "rail.build.price": "{price}/天起",
   "rail.sync": "同步节点配置",
 

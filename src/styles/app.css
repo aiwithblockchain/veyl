@@ -4522,8 +4522,6 @@ body[data-resizing] {
   background: var(--canvas);
   border-right: 1px solid var(--hair);
   overflow: hidden;
-  /* 左栏底部的建机入口按栏宽换行（见 .rail-build 一段）。 */
-  container-type: inline-size;
 }
 
 .rail__brand {
@@ -6287,17 +6285,15 @@ details[open] > .settings-fold__summary::before {
 .rail__new-row__icon { display: inline-flex; color: var(--ink-3); }
 
 /* 我的服务器左栏 · 新建节点入口
-   整块一个按钮：上行「＋ 新建节点」与右对齐日价，下行价值句。
-   细线沿用 .rail__new-row 的 border-top；这里只补两行排版与窄栏换行。
-   容器宽度取 .rail 的内容盒（栏宽 − 32 内边距 − 1px 右边框）：
-   栏宽 230 → 197，所以内容宽 196px 以下（栏宽 < 230）价格挪到价值句右端。 */
+   单行：左「＋ 新建节点」，右日价；细线沿用 .rail__new-row 的 border-top。
+   价格只取最小可用档位，未登录 / 目录缺失时不渲染，也不留占位。 */
 .rail-build {
   flex-direction: column;
   align-items: stretch;
   justify-content: center;
   gap: 0;
   height: auto;
-  min-height: 56px;
+  min-height: 44px;
   padding: 10px;
   color: var(--ink);
 }
@@ -6310,24 +6306,26 @@ details[open] > .settings-fold__summary::before {
 .rail-build__grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "title price"
-    "value value";
-  column-gap: 10px;
-  row-gap: 2px;
-  align-items: center;
+  grid-template-areas: "title price";
+  column-gap: 6px;
+  align-items: baseline;
 }
 
 .rail-build__title {
   grid-area: title;
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
   min-width: 0;
   font-size: 15px;
   font-weight: 500;
   color: var(--ink);
   white-space: nowrap;
+}
+
+/* 图标不参与首基线：网格基线取文字，价格不再低 1px。 */
+.rail-build__title .rail__new-row__icon {
+  align-self: center;
 }
 
 /* 英文标题更长：宁可截断，也不让两列互相挤压。 */
@@ -6339,27 +6337,9 @@ details[open] > .settings-fold__summary::before {
 
 .rail-build__price {
   grid-area: price;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--ink-2);
   white-space: nowrap;
-}
-
-.rail-build__value {
-  grid-area: value;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--ink-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-@container (max-width: 196px) {
-  .rail-build__grid {
-    grid-template-areas:
-      "title title"
-      "value price";
-  }
 }
 
 .rail-servers {

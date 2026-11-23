@@ -1056,7 +1056,6 @@ export const en: Record<MessageKey, string> = {
   "rail.error": "Can't reach the server. Try again later.",
   "rail.closeList": "Close server list",
   "rail.perDay": "/day",
-  "rail.build.value": "Dedicated IP, paid by the day",
   "rail.build.price": "{price}+/day",
   "rail.sync": "Sync node config",
 
