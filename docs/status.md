@@ -22,7 +22,7 @@
 | 事件状态与工具卡文案按 `text_key` 渲染（批次 B）、两语言回归手册 | `950b876` |
 | 工具卡事实结构化（B3/B2b，100 条 `tool.fact.*`）、公开问题墙（`tools.md` 3.25.0）、节点诊断收尾、版本 1.1.0、同步档位改 30 分钟–24 小时 | `adace5b` |
 | B3 复核修复与节点探测语义收口：工具卡参数名/枚举、缺字段不发 fact、`other_config` → `node_not_in_config`、Clash 404 独立原因、接手 TUN 复原连接上下文、契约 2.59.0 / tools 3.25.1 | `c8a142f` |
-| 未登录门禁与登录保持：未登录不展示服务器数据、会话 30 天滑动、轮换 60 秒宽限且限次、设备停用保留原错误、契约 2.60.0 / tools 3.26.0（**迁移 0012 需在部署控制面前 apply**） | `078f771` |
+| 未登录门禁与登录保持：未登录不展示服务器数据、会话 30 天滑动、轮换 60 秒宽限且限次、设备停用保留原错误、契约 2.60.0 / tools 3.26.0；迁移 0012 已 apply 到 dev 与 prod，控制面 Worker 待部署 | `078f771`、`9885e09` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 
@@ -82,6 +82,7 @@
 - `trial.error.fetchWith` 已无引用，待清理。
 - `tools.md` §4.13 / §4.54 仍有「全部软件 / 本机代理」旧用词，未收口。
 - `docs/design/issue-report-api.md`、`docs/design/node-diagnosis-flow.md` 是未提交的设计草案（后者主张取代现有修复动作设计），待产品确认。
+- 旧 Host 没有 `my_server_account` 命令时，服务器列表的兜底拉取会被未登录守卫挡住；Host 与界面同包发布，只在版本错配或热更时出现，未加旁路（`9885e09`）。
 - 可选字段：`vpn.rs` 的 `config_name` / `node_name` 为空串时仍会推出 fact，卡片会显示空值；属可选字段、无中文兜底，未收（`c8a142f` 复核记录）。
 - 偶发：`agent::questions::memory_tests::explaining_a_setting_marks_a_pending_explanation` 在并行全量中挂过一次；事后单跑 20 次全过，判为时序 flake，尚未复现。
 - 偶发：`App.servers.test.tsx`「登录弹窗开着时 Esc 只关弹窗」与 `DiagnosisPanel.test`「重置后连续两次没测成」，在并行全量中各挂过一次；单跑与复跑均通过，待观察。
