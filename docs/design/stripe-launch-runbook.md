@@ -67,7 +67,7 @@ npx wrangler secret list --env dev
 
 | 项 | 生产 | dev |
 |---|---|---|
-| URL | `https://veyl.dessage.xyz/v1/webhooks/stripe` | `https://cp-dev.veyl.dessage.xyz/v1/webhooks/stripe` |
+| URL | `https://veyl.dessage.xyz/v1/webhooks/stripe` | `https://dev.veyl.dessage.xyz/v1/webhooks/stripe` |
 | 事件 | `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、`checkout.session.expired` | 同生产 |
 | 版本 | 端点 API 版本固定 `2026-11-18.endive`，与控制面 `src/payments/stripe.ts` 的 `STRIPE_VERSION` 一致 | 同生产 |
 | 模式 | Live 端点只能指向生产 Worker；Test 端点只能指向 dev Worker | 禁止交叉 |
@@ -112,7 +112,7 @@ Settings → Payments → Payment methods：
 | 项 | 期望 |
 |---|---|
 | Statement descriptor | `VEYL`（≤22 字符，Dashboard 账户级设置） |
-| `success_url` / `cancel_url` | 生产 `https://veyl.dessage.xyz/payment/return`；dev `https://cp-dev.veyl.dessage.xyz/payment/return` |
+| `success_url` / `cancel_url` | 生产 `https://veyl.dessage.xyz/payment/return`；dev `https://dev.veyl.dessage.xyz/payment/return` |
 | 回跳参数 | Stripe 会把 `{CHECKOUT_SESSION_ID}` 替换成真实 `cs_…`；上线冒烟时看地址栏确认，不能只看代码 |
 
 ### 2.7 打款与通知

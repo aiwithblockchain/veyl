@@ -4,14 +4,14 @@ import { forward } from "../proxy";
 
 function upstream(response: Response | (() => Response)) {
   return {
-    fetch: vi.fn(async () => (typeof response === "function" ? response() : response)),
+    fetch: vi.fn(async (_request: Request) => (typeof response === "function" ? response() : response)),
   };
 }
 
 describe("edge proxy", () => {
   it("把方法、路径、请求体和请求头原样转给控制面", async () => {
     const binding = upstream(new Response("{}", { status: 200 }));
-    const request = new Request("https://cp-dev.veyl.dessage.xyz/v1/orders", {
+    const request = new Request("https://dev.veyl.dessage.xyz/v1/orders", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer t" },
       body: JSON.stringify({ region: "sgp1", plan: "s-1vcpu-1gb" }),

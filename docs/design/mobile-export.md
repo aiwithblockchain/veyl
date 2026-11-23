@@ -86,12 +86,12 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 
 | 构建 | 控制面 origin | 生成的远程配置 URL origin |
 |---|---|---|
-| debug（`tauri dev` / `tauri build --debug`） | `https://cp-dev.veyl.dessage.xyz` | 同左 |
+| debug（`tauri dev` / `tauri build --debug`） | `https://dev.veyl.dessage.xyz` | 同左 |
 | release / 安装包 | `https://veyl.dessage.xyz` | 同左 |
 
 - **一律使用自有域名，不使用 `*.workers.dev`**。Cloudflare 默认域名会暴露供应商与 Worker 名，且大陆实测 TLS 中断（`environments.md` §1）。
 - **不为导出功能另写域名常量**：URL 的 origin 必须取自控制面环境解析结果（`src-tauri/src/control_plane/env.rs` 的 `DEV_URL` / `PROD_URL`）。写第二处常量，就会在两个构建里指向不同环境。
-- 环境是构建属性：release 包忽略 `VEYL_CONTROL_PLANE_ENV` / `VEYL_CONTROL_PLANE_URL`（`environments.md` §2.3）。因此 **release 生成的二维码永远是 `veyl.dessage.xyz`，debug 包生成的是 `cp-dev.veyl.dessage.xyz`**，这条不需要用户理解，也不出现在界面文案里。
+- 环境是构建属性：release 包忽略 `VEYL_CONTROL_PLANE_ENV` / `VEYL_CONTROL_PLANE_URL`（`environments.md` §2.3）。因此 **release 生成的二维码永远是 `veyl.dessage.xyz`，debug 包生成的是 `dev.veyl.dessage.xyz`**，这条不需要用户理解，也不出现在界面文案里。
 - 二维码 / 链接内容里**不出现** `workers.dev`、账户邮箱、设备号；只出现自有域名 + 路径 + 令牌。
 - 2026-11-19 实测：两个域名均返回 200。
 
@@ -146,7 +146,7 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 |---|---|
 | 谁在更新 | **客户端**按自己的周期拉取；官方默认 60 分钟。我们**不推送、不主动连接设备** |
 | 我们保证 | URL 长期稳定；内容按请求生成或短时缓存，节点变化在客户端下一个周期可被拉到 |
-| URL 域名 | 取自控制面环境解析结果：debug → `cp-dev.veyl.dessage.xyz`，release → `veyl.dessage.xyz`；**任何情况下不出现 `workers.dev`**（§2.4） |
+| URL 域名 | 取自控制面环境解析结果：debug → `dev.veyl.dessage.xyz`，release → `veyl.dessage.xyz`；**任何情况下不出现 `workers.dev`**（§2.4） |
 | 令牌 | 随 URL 下发；具体放在 query 还是 HTTP Basic credentials 由架构设计定（客户端原生支持 Basic 认证） |
 | 吊销 | 桌面端提供「重新生成」，旧 URL 立即失效；M1 不做设备数与频率限制 |
 | 没有可用节点时 | 不允许继续返回旧节点。返回空配置或错误状态由架构设计定，但**必须让客户端感知到失效**（见 §11） |
@@ -189,7 +189,7 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 | ME-6 | 点「重新生成」 | 旧二维码 / 旧链接在客户端下一次拉取时失败；新链接可正常导入 |
 | ME-7 | 服务器销毁 / 到期 | 该节点从配置移除；全部销毁后客户端触发「无可用节点」表现 |
 | ME-8 | 桌面端点击两个下载链接 | 外链在系统浏览器打开；不接受应用内嵌网页 |
-| ME-9 | 导出链接的域名 | 与该构建的控制面环境一致：release 包生成 `veyl.dessage.xyz`，debug 包生成 `cp-dev.veyl.dessage.xyz`；任何情况下不出现 `workers.dev` |
+| ME-9 | 导出链接的域名 | 与该构建的控制面环境一致：release 包生成 `veyl.dessage.xyz`，debug 包生成 `dev.veyl.dessage.xyz`；任何情况下不出现 `workers.dev` |
 
 验收由产品负责人 / 同事在真机执行；AI 只负责取证与核对。
 
@@ -203,7 +203,7 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 | `my-servers.md` §17.3「界面不显示 IP / 端口 / 协议」 | **不冲突但需补一句**：导出内容必然含地址与密码，但不在界面文本中展示 |
 | `login-and-payment.md` §2.5 令牌 | 若采用账户级长期令牌，需说明它与 access / refresh 令牌的关系（独立用途、独立吊销），不得复用用户会话令牌 |
 | `global-config-merge.md` | 节点池是全局的，导出时从池中筛 `source = owned` 且服务器 `ready` 的节点即可，不新增节点存储 |
-| `environments.md` §1 / §4.1 | **已过期**：文中端点常量与日志示例仍写 `*.workers.dev`，而 `env.rs` 与 `wrangler.jsonc` 已切到 `veyl.dessage.xyz` / `cp-dev.veyl.dessage.xyz`。本次不改它，登记待 be- 或架构师同批更新 |
+| `environments.md` §1 / §4.1 | **已过期**：文中端点常量与日志示例仍写 `*.workers.dev`，而 `env.rs` 与 `wrangler.jsonc` 已切到 `veyl.dessage.xyz` / `dev.veyl.dessage.xyz`。本次不改它，登记待 be- 或架构师同批更新 |
 | `docs/README.md` | 索引已过期（未收 `design/`），本次不处理 |
 
 ---

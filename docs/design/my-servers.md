@@ -130,12 +130,12 @@ veyl-edge-dev.pages.dev            → 172.66.47.47（Cloudflare）  200  0.74s
 先例在同账号里已经跑着：`dessage.xyz` 的 DNS 在 GoDaddy，apex 指 GitHub Pages，两个子域名用外部 CNAME 接到 Pages 项目；账号的 `workers/domains`（Workers 自定义域名）**一个都没有**。控制面照这个模式接：
 
 ```
-cp-dev.veyl.dessage.xyz ──CNAME──> veyl-edge-dev.pages.dev  ──service binding──> veyl-control-plane-dev
+dev.veyl.dessage.xyz ──CNAME──> veyl-edge-dev.pages.dev  ──service binding──> veyl-control-plane-dev
 veyl.dessage.xyz        ──CNAME──> veyl-edge.pages.dev      ──service binding──> veyl-control-plane
 ```
 
 - 边缘代码在 `cloudflare/edge/`：一个 `functions/[[path]].ts` 把请求原样交给绑定的 Worker，**不过公网**，也就不依赖 `workers.dev` 这个被污染的域名。
-- **Pages 不认自定义配置文件路径**（实测报错 `Pages does not support custom paths for the Wrangler configuration file`），一个目录只能对应一个环境。先只建 dev（`veyl-edge-dev` → `cp-dev.veyl.dessage.xyz`）；生产上线时另建同名结构的目录，`service` 换成 `veyl-control-plane`。
+- **Pages 不认自定义配置文件路径**（实测报错 `Pages does not support custom paths for the Wrangler configuration file`），一个目录只能对应一个环境。先只建 dev（`veyl-edge-dev` → `dev.veyl.dessage.xyz`）；生产上线时另建同名结构的目录，`service` 换成 `veyl-control-plane`。
 - 为什么不让控制面自己搬到 Pages Functions：那样会丢掉 Cron Triggers（将来的对账 / 超时销毁）和 Smart Placement（拉近与 DO API 的距离）；薄代理零改动、将来域名迁到 Cloudflare 时删掉即可。
 - 为什么不用 Workers Custom Domain：需要 zone 在 Cloudflare（见上表），而 `dessage.xyz` 的 DNS 在 GoDaddy。
 - `ENROLL_BASE_URL`（cloud-init 回传地址）必须改成边缘域名，否则机器建好后回传不到控制面。
@@ -1215,7 +1215,7 @@ CREATE TABLE my_servers (
 | 2 | 销毁后多久从 `GET /v2/droplets` 消失（返回码已知是 204） | “已销毁”能不能说 |
 | 3 | 计费粒度、关机是否仍收 IP / 存储费、账单周期 | “销毁即停”的说明口径（本期只写文档） |
 | 4 | 云厂商回收 / 欠费 / 滥用的通知机制（邮件 / API） | 实例消失的发现路径 |
-| 5 | ~~**我们自己的控制面在中国大陆的可达性**~~ | **已定性（2026-11-15，见 §2.3）**：`*.workers.dev` 被 DNS 污染到 `128.242.240.59`（NTT America），TCP 连接失败；Cloudflare 托管的普通域名解析正常。方案=Pages 边缘承接域名（dev `cp-dev.veyl.dessage.xyz`，prod `veyl.dessage.xyz`）。剩余待做：DNS 生效后在国内网络实测延迟 |
+| 5 | ~~**我们自己的控制面在中国大陆的可达性**~~ | **已定性（2026-11-15，见 §2.3）**：`*.workers.dev` 被 DNS 污染到 `128.242.240.59`（NTT America），TCP 连接失败；Cloudflare 托管的普通域名解析正常。方案=Pages 边缘承接域名（dev `dev.veyl.dessage.xyz`，prod `veyl.dessage.xyz`）。剩余待做：DNS 生效后在国内网络实测延迟 |
 | 6 | DO 是否返回 / 邮件发送 root 密码 | 仅记录；本设计不使用 root 密码（节点凭据由 cloud-init 生成） |
 
 补充：从中国大陆到各地区的实际延迟仍待实测，只影响默认地区排序，不阻塞实现。

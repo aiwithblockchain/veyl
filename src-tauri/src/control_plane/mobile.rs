@@ -525,7 +525,7 @@ mod tests {
         for base in [
             "https://veyl.dessage.xyz",
             "https://veyl.dessage.xyz/",
-            "https://cp-dev.veyl.dessage.xyz",
+            "https://dev.veyl.dessage.xyz",
             "https://example.test/api",
         ] {
             assert!(ProfileOrigin::parse(base).is_ok(), "{base}");

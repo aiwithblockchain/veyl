@@ -3,7 +3,7 @@
 //! 优先级：URL 覆盖 > 环境覆盖 > 编译期 debug 标志。
 //! **release 构建只认 Prod**：环境变量不能把它骗到测试端点。
 
-pub const DEV_URL: &str = "https://cp-dev.veyl.dessage.xyz";
+pub const DEV_URL: &str = "https://dev.veyl.dessage.xyz";
 pub const PROD_URL: &str = "https://veyl.dessage.xyz";
 /// 自有域名：控制面与种子源都在它下面。
 pub const BASE_DOMAIN: &str = "veyl.dessage.xyz";
@@ -122,7 +122,7 @@ fn control_domain_suffixes_for(base_url: &str) -> Vec<String> {
         .ok()
         .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
     {
-        // `cp-dev.veyl.dessage.xyz` 这类子域由下面那条后缀覆盖。
+        // `dev.veyl.dessage.xyz` 这类子域由下面那条后缀覆盖。
         let under_base = host == BASE_DOMAIN || host.ends_with(&format!(".{BASE_DOMAIN}"));
         if !under_base {
             out.push(host);

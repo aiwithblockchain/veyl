@@ -96,8 +96,8 @@ Stripe-Version: 2026-11-18.endive
 
 ```
 mode=payment
-success_url=https://cp-dev.veyl.dessage.xyz/payment/return?session_id={CHECKOUT_SESSION_ID}
-cancel_url=https://cp-dev.veyl.dessage.xyz/payment/return
+success_url=https://dev.veyl.dessage.xyz/payment/return?session_id={CHECKOUT_SESSION_ID}
+cancel_url=https://dev.veyl.dessage.xyz/payment/return
 customer_email=buyer@example.com
 client_reference_id=top_...
 metadata[topup_id]=top_...

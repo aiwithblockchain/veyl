@@ -82,13 +82,13 @@
 			"vars": {
 				"ENVIRONMENT": "dev",
 				"PUBLIC_SITE_URL": "https://veyl-edge-dev.pages.dev",
-				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
+				"ENROLL_BASE_URL": "https://dev.veyl.dessage.xyz",
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
 				// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
 				"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
 				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
-				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return",
+				"APP_PAYMENT_RETURN_URL": "https://dev.veyl.dessage.xyz/payment/return",
 				// 同生产：发布 agent 时换成当次 release 的真实值（dev 可以先指向 pre-release）。
 				"AGENT_VERSION": "0.1.4",
 				"AGENT_SHA256": "ba9756ae1aee708fb63e92c1cc0e841591407a5a743a263afc1b4d3336b10082",

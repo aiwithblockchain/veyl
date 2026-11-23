@@ -215,7 +215,7 @@ X-Content-Type-Options: nosniff
 ### 2.5 与环境的关系
 
 - 导出令牌与账户绑定，不与环境绑定；但**一个账户在两个环境里各是一条**——dev 库与 prod 库是两套 D1（`wrangler.jsonc`），令牌不会跨库。
-- 同一个 release 账户换到 debug 构建：`env.rs` 让 debug 包连 `cp-dev`，那里没有这条令牌 → 首次打开会新建一条 dev 令牌；prod 的手机链接不受影响。这是构建属性带来的正常结果，不需要额外处理，界面上也不解释。
+- 同一个 release 账户换到 debug 构建：`env.rs` 让 debug 包连 `dev`，那里没有这条令牌 → 首次打开会新建一条 dev 令牌；prod 的手机链接不受影响。这是构建属性带来的正常结果，不需要额外处理，界面上也不解释。
 - 账户合并（匿名设备并入邮箱账户）：令牌只可能建在邮箱账户上（§1.3），合并后 `account_id` 不变，链接继续有效。
 
 ### 2.6 登出、换账号
@@ -765,7 +765,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 #### 3.8.3 时序：为什么这条对「客户端不是我们的」也成立
 
 - **规则集在路由初始化阶段加载，早于隧道建立。** 实测：把 remote rule_set 指向不可达地址，进程直接 `FATAL start service: start router: initialize rule-set[0] …`，不是降级、不是先全局后加载。因此「先全局、连上再加载规则」在 sing-box 里不存在，本设计不采用。
-- **规则源与 profile 同 origin，可达性由导入动作本身证明。** 客户端能拿到 profile，就说明 `veyl.dessage.xyz` / `cp-dev…` 当前可达；规则文件几秒后从同一域名取，失败只可能是瞬时故障。域名不可达时 profile 本身也更新不了——失败是一致的、可见的，不是静默的。
+- **规则源与 profile 同 origin，可达性由导入动作本身证明。** 客户端能拿到 profile，就说明 `veyl.dessage.xyz` / `dev…` 当前可达；规则文件几秒后从同一域名取，失败只可能是瞬时故障。域名不可达时 profile 本身也更新不了——失败是一致的、可见的，不是静默的。
 - **客户端不需要改代码。** `rule_set` 是配置字段，客户端只解析配置；官方 SFA / SFI 内嵌的就是 sing-box 内核（当前 1.14.x），remote rule_set 自 1.8 起支持。本机用随包 `sing-box 1.14.4 check` 验证了整份配置（含两条 remote 规则集、DNS 分流、TUN）通过。客户端版本过旧只会解析报错（可见），不会静默忽略。
 
 #### 3.8.4 硬失败与缓解排序
@@ -1196,7 +1196,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ### 7.4 域名与 TLS
 
-- profile URL 只用 `env.rs` 解析出的 origin；release 固定 `https://veyl.dessage.xyz`，debug 固定 `https://cp-dev.veyl.dessage.xyz`（或 debug 覆盖值）。
+- profile URL 只用 `env.rs` 解析出的 origin；release 固定 `https://veyl.dessage.xyz`，debug 固定 `https://dev.veyl.dessage.xyz`（或 debug 覆盖值）。
 - 禁止 `*.workers.dev`：桌面构造后显式检查，命中即拒绝出图（§4.1）。控制面本身不需要额外判断。
 - TLS 由 Cloudflare 终止；证书链与移动网络可达性由 V7 实测。Worker 不自行改 TLS 设置。
 - 建议（运维项，不在本设计实现）：确认这两条路由不被 Cloudflare Bot Fight / Turnstile 拦截；`Cache-Control` 已由 Worker 给出 `no-store`，不需要额外 Page Rule。
