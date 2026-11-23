@@ -1,13 +1,12 @@
 // 售价与支付配置：全部来自 wrangler 的 vars（非 secret），dev / prod 各一份。
-// 售价必须与 Dodo 产品价逐一对齐；缺配置时视为不可售，不拿成本价兜底。
+// 日价与充值面额都必须与代码里的唯一真源一致；缺配置时视为不可售，不拿成本价兜底。
 
 export interface PaymentConfigEnv {
   ENVIRONMENT?: string;
   /** 日价（USD 分/天）：{"s-1vcpu-1gb":30}。唯一真源，月价由它派生。 */
   PLAN_DAILY_PRICE_CENTS?: string;
-  DODO_PRODUCT_IDS?: string;
-  /** 充值面额 → Dodo 一次性产品 ID：{"1000":"pdt_…"}，键是美分。 */
-  DODO_TOPUP_PRODUCT_IDS?: string;
+  /** 可充值面额（美分）的 JSON 数组："[1200,2400,3600,4800]"。唯一真源。 */
+  TOPUP_DENOMINATIONS_CENTS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
 
@@ -40,34 +39,35 @@ export function monthlyUsdFromDaily(dailyCents: number): number {
   return (dailyCents * 30) / 100;
 }
 
-export function dodoProductId(env: PaymentConfigEnv, plan: string): string | null {
-  const id = parseMap(env.DODO_PRODUCT_IDS)[plan];
-  return id && id.startsWith("pdt_") ? id : null;
-}
-
-export function topupProductId(env: PaymentConfigEnv, cents: number): string | null {
-  const id = parseMap(env.DODO_TOPUP_PRODUCT_IDS)[String(cents)];
-  return id && id.startsWith("pdt_") ? id : null;
-}
-
-/** 可充值面额（美分），只返回配了产品 ID 的档位。 */
-export function topupDenominations(env: PaymentConfigEnv): number[] {
-  const map = parseMap(env.DODO_TOPUP_PRODUCT_IDS);
-  return Object.keys(map)
-    .map((key) => Number(key))
-    .filter((cents) => Number.isInteger(cents) && cents > 0 && topupProductId(env, cents) !== null)
-    .sort((a, b) => a - b);
+export interface TopupDenominationConfig {
+  cents: number[];
+  /** 未配置 / 配置非法；调用方据此返回「充值未就绪」，不要当成用户传错面额。 */
+  problem: "missing" | "invalid" | null;
 }
 
 /**
- * Dodo 收银台基址：**编译期**由 `wrangler define` 定死（`__DODO_API_BASE__`）。
- *
- * 不读 `env.ENVIRONMENT`：运行期变量缺失或拼错会把请求静默送到另一个环境的
- * 收银台。编译期注入后，顶层包只含 live 地址、dev 包只含 test 地址，另一个域名
- * 在产物里根本不存在（`docs/design/login-and-payment.md` §9）。
+ * 读充值面额白名单。只接受非空的正整数 JSON 数组；配置了但解析为空/含非数字
+ * 都算 infrastructure 问题，打 error 让调用方 fail closed。
  */
-export function dodoApiBase(): string {
-  return __DODO_API_BASE__;
+export function readTopupDenominations(env: PaymentConfigEnv): TopupDenominationConfig {
+  const raw = env.TOPUP_DENOMINATIONS_CENTS?.trim();
+  if (!raw) return { cents: [], problem: "missing" };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    console.error("[topup] TOPUP_DENOMINATIONS_CENTS 不是合法 JSON");
+    return { cents: [], problem: "invalid" };
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((entry) => typeof entry === "number" && Number.isInteger(entry) && entry > 0)
+  ) {
+    console.error("[topup] TOPUP_DENOMINATIONS_CENTS 必须是非空正整数数组");
+    return { cents: [], problem: "invalid" };
+  }
+  return { cents: [...new Set(value)].sort((a, b) => a - b), problem: null };
 }
 
 export function paymentReturnUrl(env: PaymentConfigEnv): string | null {

@@ -5,7 +5,7 @@ import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { refundProvision } from "./provision";
 import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
-import { reconciliationDrift, recordLedgerEntry } from "./wallet";
+import { reconciliationDrift, recordLedgerEntry, type WalletEnv } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
 const GRACE_MS = 7 * DAY_MS;
@@ -316,7 +316,7 @@ interface SettleOutcome {
 
 /** 把一台服务器的账补到 now 之后；返回最终状态。 */
 async function settleServer(
-  env: BillingEnv,
+  env: WalletEnv,
   server: BillingRow,
   now: number,
   options: { delinquent?: boolean } = {},
@@ -439,7 +439,7 @@ async function settleServer(
  * **只服务存量行**：新扣费路径不再产生 past_due / expired（窗口内扣不动直接停机销毁），
  * 这里补扣失败时仍会写这两种状态，给界面读老数据用。
  */
-export async function recoverExpiredServers(env: BillingEnv, accountId: string): Promise<number> {
+export async function recoverExpiredServers(env: WalletEnv, accountId: string): Promise<number> {
   const db = env.DB;
   if (!db) return 0;
   const now = Date.now();

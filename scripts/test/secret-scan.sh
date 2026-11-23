@@ -42,7 +42,7 @@ EXCLUDE_RE='(^|/)(\.git|node_modules|target)/|^src-tauri/claurst/|^scripts/test/
 
 # 值以 < 开头的一律视为占位（如 "<ciphertext>"、"<启动时随机生成>"）。
 PASSWORD_RE="(password|passwd|secret|token|api[_-]?key|access[_-]?key)[[:space:]]*[\"']?[[:space:]]*[:=][[:space:]]*[\"'][^\"'<][^\"']{7,}[\"']"
-TOKEN_RE='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}'
+TOKEN_RE='sk-[A-Za-z0-9_-]{20,}|sk_(test|live)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9+/=]{10,}|ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16}'
 FINGERPRINT_RE="(pw_fp|fingerprint)[[:space:]]*[:=][[:space:]]*[\"']?[0-9a-fA-F]{8,}"
 SEEDS_PATH_RE="(/Users|/home|~)[^[:space:]\"']*seeds\\.json"
 NODE_ID_RE='seed-[0-9a-f]{16}'
@@ -193,20 +193,24 @@ selftest() {
   local tmp h c
   tmp="$(mktemp -d)" || return 1
 
-  # 应当命中：公网 IP、密码赋值、真实用户名路径、节点 id
+  # 应当命中：公网 IP、密码赋值、真实用户名路径、节点 id、Stripe key / webhook secret
   printf '%s\n' \
     'password = "Sup3rSecretValue"' \
     '198.18.0.1' \
     '/Users/realperson/notes.txt' \
-    'seed-0123456789abcdef' >"$tmp/hit.txt"
+    'seed-0123456789abcdef' \
+    'sk_test_51SelfTestExampleKey000000000  # check-secrets:allow 自检样例' \
+    'whsec_SelfTestWebhookSecret000000000  # check-secrets:allow 自检样例' >"$tmp/hit.txt"
 
-  # 应当放行：RFC 5737 地址、占位用户名、散文里的字段名、裸种子文件名、Rust 路径
+  # 应当放行：RFC 5737 地址、占位用户名、散文里的字段名、裸种子文件名、Rust 路径、过短的假 key
   printf '%s\n' \
     '203.0.113.10' \
     '/Users/x/notes.txt' \
     '字段 pw_fp 用于指纹比对' \
     'seeds.json' \
-    'runtime::archive::tests' >"$tmp/clean.txt"
+    'runtime::archive::tests' \
+    'sk_test_' \
+    'whsec_' >"$tmp/clean.txt"
 
   h="$(scan_file "$tmp/hit.txt")"
   c="$(scan_file "$tmp/clean.txt")"

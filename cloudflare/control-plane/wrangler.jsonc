@@ -3,11 +3,8 @@
 	"name": "veyl-control-plane",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-11-01",
-	// 支付环境在编译期定死：顶层包只含 live 地址，env.dev 只含 test 地址。
-	// 直接注入地址而不是「环境名 + 运行期分支」——esbuild 在未压缩产物里不会把
-	// `if (true) … else …` 折掉，两个域名会同时留在包里。
+	// 回调样本捕获开关：生产包注入 "0"，dev 包注入 "1"。
 	"define": {
-		"__DODO_API_BASE__": "\"https://live.dodopayments.com\"",
 		"__WEBHOOK_SAMPLE__": "\"0\""
 	},
 	// 压缩产物：未压缩时 esbuild 不会折掉 `if (false)` 这类常量分支，
@@ -46,11 +43,11 @@
 		"ENROLL_BASE_URL": "https://veyl.dessage.xyz",
 		// 生产使用独立的凭据签名密钥（dev 是 cp-2026-11），公钥内置在客户端。
 		"CREDENTIAL_KEY_ID": "cp-2026-12",
-		// Dodo Live 充值产品；键是美分面额。dev 用 Test 产品，两套不混用。
-		"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2WjoaqgohcfZ9r254A\",\"2000\":\"pdt_0Ns2Wjd7xrFjmLr2oZvnL\",\"5000\":\"pdt_0Ns2Wj265kTDA5UA0JmkG\",\"10000\":\"pdt_0Ns2WicUqf6BC786Vv0xG\"}",
+		// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
+		"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
 		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
-		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
-		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/",
+		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
+		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/payment/return",
 		// 节点 agent（node-agent-mcp.md §4）：cloud-init 只下载、校验、安装。
 		// 发布 agent 时把版本、sha256、下载地址换成当次 release 的真实值。
 		// sha256 必须是 64 位十六进制：占位符对不上时建机请求直接失败（agent_unconfigured），
@@ -71,14 +68,13 @@
 	// - CREDENTIAL_SIGNING_JWK / CREDENTIAL_ENC_KEY（节点凭据签名与加密）
 	// - AGENT_TOKEN_SIGNING_JWK（节点 MCP 一次性令牌；独立密钥，不与凭据签名共用）
 	// - MOBILE_TOKEN_ENC_KEY（手机导出令牌加密）
-	// - DODO_API_KEY / DODO_WEBHOOK_SECRET（dev、prod 各一套，test 与 live 不混用）
+	// - STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET（dev、prod 各一套，test 与 live 不混用）
 	// - RESEND_API_KEY / RESEND_FROM_EMAIL（邮箱验证码）
 	"env": {
 		// 开发 / 联调环境。部署：npm run deploy:dev
 		"dev": {
 			"name": "veyl-control-plane-dev",
 			"define": {
-				"__DODO_API_BASE__": "\"https://test.dodopayments.com\"",
 				"__WEBHOOK_SAMPLE__": "\"1\""
 			},
 			// 继承顶层的 cron：每小时第 17 分会用 dev D1 里的真实订单跑续费 / 停机销毁，
@@ -88,10 +84,10 @@
 				"PUBLIC_SITE_URL": "https://veyl-edge-dev.pages.dev",
 				"ENROLL_BASE_URL": "https://cp-dev.veyl.dessage.xyz",
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
-				// Dodo Test Mode 充值产品（Veyl 自己建，不沿用 TweetPilot）；键是美分面额，prod 等验收后再填 Live 产品。
-				"DODO_TOPUP_PRODUCT_IDS": "{\"1000\":\"pdt_0Ns2VqGyVh6DSR7wkyWJo\",\"2000\":\"pdt_0Ns2WKHrFEQIAnDX6lews\",\"5000\":\"pdt_0Ns2WRb8m4NSiW4EqhDIP\",\"10000\":\"pdt_0Ns2WXZbLtBhh0YytV5ud\"}",
+				// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
+				"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
 				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
-				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":20,\"s-1vcpu-1gb\":30,\"s-1vcpu-2gb\":60}",
+				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
 				"APP_PAYMENT_RETURN_URL": "https://cp-dev.veyl.dessage.xyz/payment/return",
 				// 同生产：发布 agent 时换成当次 release 的真实值（dev 可以先指向 pre-release）。
 				"AGENT_VERSION": "0.1.4",

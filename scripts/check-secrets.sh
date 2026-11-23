@@ -29,7 +29,7 @@ NAME_PATTERNS='*.key|*.p12|*.pfx|*.pem|*.cer|*.mobileprovision|*.keystore|notary
 # 这样文档里被引号或反引号包住的示例不会被误判。
 # 证书那条用字符串拼接，避免脚本把自己的正则字面量扫出来。
 CERT_BEGIN="-----BEGIN CE""RTIFICATE-----"
-CONTENT_PATTERNS="(^|\")-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|(^|\")${CERT_BEGIN}|\\b[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}\\b|sk-[A-Za-z0-9_-]{20,}"
+CONTENT_PATTERNS="(^|\")-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|(^|\")${CERT_BEGIN}|\\b[a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4}\\b|sk-[A-Za-z0-9_-]{20,}|sk_(test|live)_[A-Za-z0-9]{10,}|whsec_[A-Za-z0-9+/=]{10,}"
 
 ALLOW_MARKER="check-secrets:allow"
 

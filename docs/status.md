@@ -47,6 +47,7 @@
 | 13 | 节点凭据签发流程讨论 | 记在 `notes/pending-topics.md` #1 | 约一次专门讨论 | 用户 + PM |
 | 14 | 移动端导出（并行进行中） | 文档已回写真机结果并提交（`fa0b73f`）；Shadowrocket / Hiddify 真机通过 | 由该批次自行收尾 | 其它会话 |
 | 15 | AI 可选与统一入口真机验收 | 只有 jsdom 测试；验收 6 条见 `design/ai-optional.md` §6 | 构建后逐条走：跳过首启重启不再弹、未配置右栏显示「配置 AI」、告警层级与取消无残留、配好后恢复输入框并自动展开一次、手动链路照常、动作入口弹同一告警 | 用户 |
+| 16 | 控制面 Stripe 迁移（契约 2.61.0） | 代码与测试完成：Checkout `price_data`、4 事件回调、三层匹配与幂等；typecheck / 308 tests / 契约检查全绿，未 commit、未部署、未做 dev 实测 | review 后 commit；设 dev `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`、部署 dev，用真实测试卡走一次充值 → 余额 → 建机 | 协调会话 |
 
 ---
 

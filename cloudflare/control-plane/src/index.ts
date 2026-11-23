@@ -9,7 +9,7 @@ import { handleMobile } from "./mobile";
 import { handleIssues } from "./issues";
 import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
-import { handleDodoWebhook } from "./webhooks/dodo";
+import { handleStripeWebhook } from "./webhooks/stripe";
 
 export interface Env {
   ENVIRONMENT: string;
@@ -34,14 +34,12 @@ export interface Env {
   AGENT_TOKEN_KEY_ID?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
-  DODO_API_KEY?: string;
-  DODO_WEBHOOK_SECRET?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
   /** 日价表（USD 分/天）：{"s-1vcpu-1gb":"30"}；唯一售价真源，月价由它派生。 */
   PLAN_DAILY_PRICE_CENTS?: string;
-  /** 套餐 → Dodo 产品 ID：{"s-1vcpu-1gb":"pdt_…"}，test / live 各一套。 */
-  DODO_PRODUCT_IDS?: string;
-  /** 充值面额（美分）→ 一次性产品 ID。 */
-  DODO_TOPUP_PRODUCT_IDS?: string;
+  /** 可充值面额（美分）的 JSON 数组；唯一真源。 */
+  TOPUP_DENOMINATIONS_CENTS?: string;
   APP_PAYMENT_RETURN_URL?: string;
   /** 官网站点地址：问题墙帖子链接与允许的跨域来源。 */
   PUBLIC_SITE_URL?: string;
@@ -357,15 +355,15 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     });
   }
 
-  // 支付回跳页：Dodo 支付完成后跳回来，这里只给一句「回到应用」，不做任何写操作。
+  // 支付回跳页：Stripe 支付完成后跳回来，这里只给一句「回到应用」，不做任何写操作。
   if (url.pathname === "/payment/return") {
     const html = `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Veyl</title>
 <style>body{margin:0;background:#FAFAF9;color:#1B1B1A;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
 main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weight:600;margin:0 0 12px}p{font-size:14px;line-height:1.65;color:#5C5C58;margin:0}</style>
 </head><body><main>
-<h1>支付已完成</h1>
-<p>回到 Veyl 应用即可看到余额变化。这个页面可以直接关闭。</p>
+<h1>支付流程已结束</h1>
+<p>支付结果以应用内显示为准，回到 Veyl 应用即可查看。这个页面可以直接关闭。</p>
 </main></body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
@@ -386,8 +384,8 @@ main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weigh
   const emailAuthResponse = await handleEmailAuth(request, env);
   if (emailAuthResponse) return emailAuthResponse;
 
-  // Dodo 回调：公开端点，只认签名（login-and-payment.md §4.5）。
-  const webhookResponse = await handleDodoWebhook(request, env, ctx);
+  // Stripe 回调：公开端点，只认签名（stripe-migration.md §4）。
+  const webhookResponse = await handleStripeWebhook(request, env, ctx);
   if (webhookResponse) return webhookResponse;
 
   // 钱包与充值（login-and-payment.md §4.2–§4.3）。

@@ -16,6 +16,13 @@ export function fromB64u(text: string): Uint8Array {
   return bytes;
 }
 
+/** 小写十六进制；Stripe 的 v1 签名与其它 HMAC 文本用。 */
+export function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
+}
+
 export function randomBytes(size: number): Uint8Array {
   const bytes = new Uint8Array(size);
   crypto.getRandomValues(bytes);

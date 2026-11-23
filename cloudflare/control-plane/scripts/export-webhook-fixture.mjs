@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// 把 dev 环境捕获的 Dodo 回调样本导出成回归 fixture。
+// 把 dev 环境捕获的 Stripe 回调样本导出成回归 fixture。
 //
 //   npm run export:webhook-fixture
 //
 // 只连 dev（--env dev）。样本在捕获时已经脱敏（签名头 ***、id/邮箱/金额/元数据换成占位值），
 // 这里只做搬运，不再接触生产库。没有样本时正常退出，不报错——等下次 dev 充值自然产生。
 //
-// 产出：test/fixtures/dodo-webhook-<captured_at 的 UTC 日期>.json
+// 产出：test/fixtures/stripe-webhook-<captured_at 的 UTC 日期>.json
 //   { captured_at, source, kind, headers, raw_body }
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -48,7 +48,7 @@ try {
 
 const rows = payload?.[0]?.results ?? [];
 if (rows.length === 0) {
-  console.log("dev 还没有捕获到 Dodo 回调样本；等下一次 dev 充值后再跑一次。");
+  console.log("dev 还没有捕获到 Stripe 回调样本；等下一次 dev 充值后再跑一次。");
   process.exit(0);
 }
 
@@ -64,7 +64,7 @@ try {
 
 const capturedAt = new Date(Number(row.received_at)).toISOString();
 const date = capturedAt.slice(0, 10);
-const file = join(fixtures, `dodo-webhook-${date}.json`);
+const file = join(fixtures, `stripe-webhook-${date}.json`);
 mkdirSync(fixtures, { recursive: true });
 writeFileSync(
   file,
@@ -80,4 +80,4 @@ writeFileSync(
     2,
   )}\n`,
 );
-console.log(`已导出 ${join("test", "fixtures", `dodo-webhook-${date}.json`)}（kind=${row.kind}）`);
+console.log(`已导出 ${join("test", "fixtures", `stripe-webhook-${date}.json`)}（kind=${row.kind}）`);

@@ -19,21 +19,21 @@ export type Seed = {
 
 export const SEED: Seed = {
   version: 2,
-  updated_at: "2026-11-18T13:41:32Z",
+  updated_at: "2026-11-23T09:16:24Z",
   nodes: [
     {
-      name: "meshflux69 [美国]",
+      name: "meshflux69 [美国1]",
       server: "64.177.43.69",
-      port: 15235,
+      port: 15733,
       method: "aes-256-gcm",
-      password: "dHFWys2HxrNIMP5I",
+      password: "mQ7K8J92IuLXWeYv",
     },
     {
       name: "meshflux10 [美国2]",
       server: "64.177.57.184",
-      port: 38676,
+      port: 34517,
       method: "aes-256-gcm",
-      password: "VeiTq1NJ8L8UE2Vm",
+      password: "3MnI7ncpkRug7KAJ",
     },
   ],
 };

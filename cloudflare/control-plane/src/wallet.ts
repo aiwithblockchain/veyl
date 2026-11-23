@@ -18,7 +18,7 @@ export interface LedgerInput {
   kind: LedgerKind;
   /** 正数入账（充值）、负数扣费（扣月费）。 */
   amountCents: number;
-  refType: "dodo_payment" | "order" | "server_day" | "server_refund" | "snapshot" | "manual";
+  refType: "dodo_payment" | "stripe_payment" | "order" | "server_day" | "server_refund" | "snapshot" | "manual";
   refId: string;
   note?: string;
   /** 需要和记账同批完成的后续语句（续期、订单置 paid），必须用同一个 ledgerId 守卫。 */

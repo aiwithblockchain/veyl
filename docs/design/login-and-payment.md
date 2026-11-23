@@ -6,6 +6,8 @@
 > 参考实现（只读）：`/Users/wesley/ai/TweetPilot/cloudflare/license-worker/` 的 `auth.ts` / `email.ts` / `dodo-checkout.ts` / `dodo-webhook.ts`
 > 范围：`docs/` 设计稿与契约增量；不含实现代码
 
+> ⚠️ **2026-11-23：支付通道已改为 Stripe。** 本文 §4 的 Dodo 实现细节（充值产品、收银台、webhook、共用商户）**不再作为实现依据**，以 `docs/design/stripe-migration.md` 为准。身份、登录门禁、余额与按天扣费的设计继续有效。
+
 ---
 
 ## 0. 结论先行
@@ -15,11 +17,11 @@
 | 1 | 身份 | 邮箱 6 位验证码登录；设备令牌保留为「这台机器」的身份，邮箱账户是「这个人」的身份；登录即把设备并入邮箱账户 |
 | 2 | 门禁 | 建机、我的服务器、支付、销毁、取凭据都要登录；**已有节点与配置的连接不需要登录**，离线照常可用 |
 | 3 | 令牌 | 复用现有 `TOKEN_SIGNING_JWK`（Ed25519），只加 `kind` / `amr` claim；access 15 分钟、refresh 30 天滑动 |
-| 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；Dodo 一次性充值产品，微信可付；订阅不上线（M2） |
-| 4b | 商户 | 与 TweetPilot **同一个 Dodo 商户账号**；充值产品、webhook、回跳页、API key 都按 Veyl 自己的建（§4.8） |
+| 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；2026-11-23 起用 **Stripe Checkout 一次性付款**（`price_data`），卡 / 支付宝 / 微信按账户资格；订阅不上线（M2） |
+| 4b | 商户 | **美国 LLC 单独开 Stripe 账户**，不与 TweetPilot 共用；余额、订单与账本仍按 Veyl 自己的建（`stripe-migration.md`） |
 | 5 | 建机时机 | 下单 → `checkout` **只确认下单、不扣费**（预检余额 ≥ 日价 × 7，不足返回 `insufficient_balance`，不建机）→ 服务器就绪（enroll 确认 sing-box 起成功）时扣第 0 天，之后由每小时 :17 的 Cron 在到期前续一天（§4.14） |
-| 6 | 幂等 | 充值 webhook 用 `webhook-id` + `payment_id` + 账本 ref 唯一；扣费用账本唯一键 + 原子守卫；同一订单 / 同一期只扣一次 |
-| 7 | 价格 | 目录与扣费都用**售价**（成本 × 1.5），存 USD 分；Dodo 只负责把充值换成 USD 入账 |
+| 6 | 幂等 | 充值 webhook 用 `event.id` 去重 + `payments.id`（payment_intent / session id）+ 账本 `ref_id = topup.id`；扣费用账本唯一键 + 原子守卫；同一订单 / 同一期只扣一次 |
+| 7 | 价格 | 目录与扣费都用**售价**（成本 × 1.5），存 USD 分；Stripe 只负责把充值换成 USD 入账 |
 | 8 | 到期 | 每小时 :17 的 Cron 在到期前 1 小时扣下一天；**扣不动就当场停机销毁**（停隧道、销毁实例、删节点），没有宽限、没有 `expired` 过渡，充值也不能恢复（§4.6、§4.11、§8） |
 
 ---
@@ -297,7 +299,7 @@ type MyServerAccount = {
 
 ---
 
-## 4. 支付（Dodo Payments）
+## 4. 支付（Dodo 时期设计；2026-11-23 起以 `stripe-migration.md` 为准）
 
 ### 4.1 收费模型：预付费余额（M1）
 
@@ -364,7 +366,7 @@ type MyServerAccount = {
 - 余额不足不允许扣成负数：扣费语句永远带 `balance_cents >= ?` 守卫。
 - **充值流水与扣费流水分开记**：不合并成一条「净额」；流水是账，余额是结果。
 
-### 4.3 充值（Dodo 一次性产品）
+### 4.3 充值（Dodo 一次性产品，历史；现为 Stripe `price_data`）
 
 - **固定面额**，一档一个产品：`$10 / $20 / $50 / $100`。**面额不单独配置**——可充值面额直接由 `DODO_TOPUP_PRODUCT_IDS` 的键（美分）推导，没配产品 ID 的档位不可充。与 TweetPilot 的 `token-10/20` 同一套路。
 - 流程：
@@ -414,7 +416,7 @@ checkout
 - **`servers.monthly_usd` 只是展示月估**：`= daily_price_cents × 30 / 100`，不参与任何扣费计算。`servers.hourly_usd` 同理只用于与 DO 成本核对。
 - **rebuild 是一次新的计费生命周期**：新建订单、新的 `order:<new_order_id>` 第 0 天在就绪后结算、`billing_anchor_at` 重置为新机结算时刻、`paid_until = anchor + 1d`、`daily_price_cents` 按当时价格重写。**不复用旧的 `order:<id>`**——否则唯一键会挡住第二次首日扣费，等于重建免费。
 
-### 4.5 Webhook（只处理充值）
+### 4.5 Webhook（只处理充值；Dodo 时期，Stripe 见 `stripe-migration.md` §4）
 
 `POST /v1/webhooks/dodo`（公开端点，无 Bearer）。
 
@@ -627,9 +629,9 @@ WHERE id = :orderId AND state = 'pending_payment'
 
 
 
-### 4.8 商户与产品归属（2026-11-15 拍板）
+### 4.8 商户与产品归属（2026-11-15 拍板；2026-11-23 已改为美国 LLC 的 Stripe 账户）
 
-**Veyl 与 TweetPilot 共用同一个 Dodo 商户账号**，不单开。
+**（已作废）Veyl 与 TweetPilot 共用同一个 Dodo 商户账号，不单开。** 2026-11-23 起改为美国 LLC 单独开 Stripe 账户，不与 TweetPilot 共用；下方共用商户的说明只作历史记录，见 `stripe-migration.md` §1。
 
 | 项 | 共用 | 必须独立 |
 |---|---|---|
@@ -646,6 +648,8 @@ WHERE id = :orderId AND state = 'pending_payment'
 
 ### 4.9 新增表与列（迁移 `0003_wallet.sql`）
 
+> 下面的建表语句是 Dodo 时期的设计草图，与真实基线（`migrations/0001_schema.sql` + 后续迁移）已有差异，**以真实迁移为准**。Stripe 迁移不需要新表：`wallet_ledger.ref_type` 增加 `stripe_payment`，`topups.product_id` 可空、存 `stripe:inline:<cents>` 或不填。
+
 ```sql
 -- 验证码：只存哈希；一个邮箱同时只有一条
 CREATE TABLE email_codes (
@@ -661,8 +665,8 @@ CREATE TABLE email_codes (
 CREATE TABLE topups (
   id                  TEXT PRIMARY KEY,   -- top_...
   account_id          TEXT NOT NULL,
-  denomination_cents  INTEGER NOT NULL,   -- 1000 / 2000 / 5000 / 10000
-  product_id          TEXT NOT NULL,      -- Dodo pdt_…，对账用
+  denomination_cents  INTEGER NOT NULL,   -- 1200 / 2400 / 3600 / 4800
+  product_id          TEXT,               -- Stripe 无商品 ID；可存 stripe:inline:<cents> 或 NULL
   status              TEXT NOT NULL,      -- pending | paid | failed | expired
   checkout_session_id TEXT,
   payment_id          TEXT,
@@ -966,51 +970,41 @@ pending_payment ──checkout──▶ provisioning ──enroll + 结算──
 |---|---|---|
 | `RESEND_API_KEY` | 发验证码邮件 | Worker 运行时 |
 | `RESEND_FROM_EMAIL` | 发件人（如 `Veyl <no-reply@dessage.xyz>`） | Worker |
-| `DODO_API_KEY` | 创建充值 checkout session。**同一个 Dodo 商户账号**（与 TweetPilot 共用结算主体）；优先给 Veyl 单开一把，见下方说明 | Worker |
-| `DODO_WEBHOOK_SECRET` | webhook 验签（`whsec_…`） | Worker |
+| `STRIPE_SECRET_KEY` | 创建 Checkout 充值会话（`sk_test_…` / `sk_live_…`） | Worker |
+| `STRIPE_WEBHOOK_SECRET` | 回调验签（`whsec_…`，每个端点、每种模式各一个） | Worker |
 | `TOKEN_SIGNING_JWK` | 现有 Ed25519 签名密钥 | Worker |
 
-**`DODO_API_KEY` 的单开与共用**（2026-11-15 拍板：同一个商户，不单开账号）：
-
-- **能单开就单开**：Dodo 后台若支持按用途 / 项目建多把 API key，Veyl 单独一把，TweetPilot 用原来的。
-- 单开的好处：泄露或轮换只影响一个项目；后台审计能区分调用来源；权限可以分别收窄。
-- 若后台只允许一把商户级 key，则共用，并接受这些影响（写清楚，不装作没有）：
-  1. 轮换 key 会同时打断两个项目的收款，必须两个项目一起发版 / 改 secret；
-  2. 日志与后台审计里两个项目的调用混在一起，只能靠 product_id 区分；
-  3. 任一项目泄露 key，另一个项目同样暴露。
-- 无论单开还是共用，**test / live 两套 key 不能混用**，dev 环境不得持有 live key。
-- 是否支持多 key 列为待核（§9 第 8 项）。
+**支付密钥归属**（2026-11-23 更新）：美国 LLC 单独开 Stripe 账户，不与 TweetPilot 共用商户。test / live 两套 key 不能混用，dev 环境不得持有 live key。详见 `docs/design/stripe-migration.md` §2。
 
 ### 5.2 非秘密配置（`wrangler.jsonc` 的 `vars`，dev / prod 各一份）
 
 | 名字 | 示例 | 说明 |
 |---|---|---|
-| `DODO_TOPUP_PRODUCT_IDS` | `{"1000":"pdt_…","2000":"pdt_…","5000":"pdt_…","10000":"pdt_…"}` | 充值面额 → Dodo 一次性产品 ID；**键是美分字符串**；可充值面额由这张表的键推导（`topupDenominations`），**不另设面额白名单**；test / live 两套，不沿用 TweetPilot |
-| `PLAN_DAILY_PRICE_CENTS` | `{"s-1vcpu-512mb-10gb":20,"s-1vcpu-1gb":30,"s-1vcpu-2gb":60}` | **日价（USD 分/天），唯一真源**。月价由它派生（`× 30`），只用于展示。**推荐用它替换 `PLAN_PRICES_USD`** |
-| `PLAN_PRICES_USD` | `{"s-1vcpu-512mb-10gb":6,"s-1vcpu-1gb":9,"s-1vcpu-2gb":18}` | 旧口径（月价，美元）。若保留，**必须满足 `月价分 % 30 == 0`**，否则该档不可售（见下）。与 `PLAN_DAILY_PRICE_CENTS` 同时存在时以日价为准 |
-| `__DODO_API_BASE__`（编译期 `wrangler define`） | 顶层 `https://live.dodopayments.com` / `env.dev` `https://test.dodopayments.com` | 构建时写死，运行期不读任何变量；生产包里不存在 test 地址 |
-| `APP_PAYMENT_RETURN_URL` | `https://<control-plane>/payment/return` | 充值完成后的回跳页 |
+| `TOPUP_DENOMINATIONS_CENTS` | `[1200,2400,3600,4800]` | 可充值面额（USD 分，升序），**唯一真源**；键值由控制面下发，界面不维护白名单 |
+| `PLAN_DAILY_PRICE_CENTS` | `{"s-1vcpu-512mb-10gb":30,"s-1vcpu-1gb":40,"s-1vcpu-2gb":80}` | **日价（USD 分/天），唯一真源**。月价由它派生（`× 30`），只用于展示。**推荐用它替换 `PLAN_PRICES_USD`** |
+| `PLAN_PRICES_USD` | `{"s-1vcpu-512mb-10gb":9,"s-1vcpu-1gb":12,"s-1vcpu-2gb":24}` | 旧口径（月价，美元）。若保留，**必须满足 `月价分 % 30 == 0`**，否则该档不可售（见下）。与 `PLAN_DAILY_PRICE_CENTS` 同时存在时以日价为准 |
+| `APP_PAYMENT_RETURN_URL` | `https://<control-plane>/payment/return` | 充值完成后的回跳页；Stripe 的 `success_url` 会追加 `?session_id={CHECKOUT_SESSION_ID}` |
 
 ### 5.3 必须由人手工创建 / 核对
 
 | 项 | 在哪 | 产物 |
 |---|---|---|
 | Resend 域名与发件地址 | Resend 后台 | 已验证的 `RESEND_FROM_EMAIL` |
-| 4 个 Dodo **一次性充值产品**（`$10 / $20 / $50 / $100`，USD，可调） | **同一个 Dodo 商户后台新建 Veyl 自己的产品**（Test 与 Live 各一套） | 8 个 `pdt_…`（不复用 TweetPilot 的） |
-| Dodo webhook 端点 + secret，只订阅 **`payment.succeeded` / `payment.failed`** | Dodo 后台，**Veyl 自己的路径** | `https://<env>/v1/webhooks/dodo` + `whsec_…`（与 TweetPilot 各配各的） |
-| Dodo API Key | Dodo 后台 | **优先 Veyl 单开一把**；不支持再共用商户 key（§5.1） |
-| 微信支付在 Dodo 后台已启用（大陆支付宝不在支持列表） | Dodo 后台 | 国内用户可扫码充值 |
-| `DODO_TOPUP_PRODUCT_IDS` 的键（美分）与 Dodo 充值产品价一致 | 人工核对 | 验收 W1 |
-| `PLAN_PRICES_USD` 与目录展示价一致（成本 × 1.5） | 人工核对 | 验收 W2 |
+| 4 个充值档位（$12 / $24 / $36 / $48） | 控制面 `TOPUP_DENOMINATIONS_CENTS` | 不建 Product / Price；`price_data` 动态传 |
+| Stripe webhook 端点 + secret，订阅 `completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` | Stripe Dashboard | `https://<env>/v1/webhooks/stripe` + `whsec_…`（test / live 各一套） |
+| Stripe API Key（test / live） | Stripe Dashboard | `sk_test_…` / `sk_live_…`，必须与环境前缀匹配 |
+| 支付方式（卡 / Apple Pay / Google Pay / 支付宝 / 微信） | Stripe Dashboard | 支付宝 / 微信需单独申请；代码不传 `payment_method_types` |
+| `TOPUP_DENOMINATIONS_CENTS` 与定价页一致 | 人工核对 | 验收 W1 |
+| `PLAN_DAILY_PRICE_CENTS` 与目录展示价一致（成本 × 1.5） | 人工核对 | 验收 W2 |
 
 - 所有 key **不进仓库**：本地开发从 keychain / `.dev.vars`（gitignored）读，CI 从 secret 读。
-- dev 与 prod 的 Dodo 产品、webhook secret、API key **完全分开**；test 模式支付不得进生产账本。
+- dev 与 prod 的 Stripe secret（`sk_test_…` / `sk_live_…`、`whsec_…`）**完全分开**；test 模式支付不得进生产账本。
 
 **价目表校验（启动即拒，不能等到扣费那天）**
 
 ```ts
 // 首选：日价直接配，月价是派生值
-dailyPriceCents = PLAN_DAILY_PRICE_CENTS[plan.id]        // 20 / 30 / 60
+dailyPriceCents = PLAN_DAILY_PRICE_CENTS[plan.id]        // 30 / 40 / 80
 if (!Number.isInteger(dailyPriceCents) || dailyPriceCents <= 0) reject("invalid_plan")
 monthlyCents = dailyPriceCents * 30                      // 派生，仅展示
 
@@ -1026,9 +1020,8 @@ if (!PLAN_DAILY_PRICE_CENTS[plan.id]) {
 - 若仍用旧口径 `PLAN_PRICES_USD`，**任何一档不满足 `monthlyCents % 30 == 0` 就不可售**：目录不返回它，`my_server_create` 报 `PRECONDITION_FAILED / invalid_plan`。
 - **不允许兜底取整**。`Math.floor` 会让 30 天少收几分，`Math.round` 会让 30 天多收几分；两者都会破坏「连扣 30 天 == 月价」这条对用户的承诺。
 - 校验在**读取配置时**做一次，失败打日志并让该档从目录里消失——不是等到用户点了创建才报错。
-- 现值：`20 / 30 / 60` 分/天，`600 / 900 / 1800` 分/月，两种口径都整。
-- **prod 与 dev 各有一套充值产品键**（均 4 档：`1000 / 2000 / 5000 / 10000`），两套 id 不混用。prod 用的必须是 Dodo **Live** 模式建的产品；test 与 live 的 id 前缀相同（都是 `pdt_`），代码无法分辨，只能去 Dodo 后台核对。
-- 代码里另保留 `DODO_PRODUCT_IDS`（订阅路径用），M1 固定为 `{}`，不参与充值；不要误把它当充值产品表。
+- 现值：`30 / 40 / 80` 分/天，`900 / 1200 / 2400` 分/月，两种口径都整。
+- **prod 与 dev 各有一套 Stripe secret**（`sk_test_…` / `sk_live_…`、`whsec_…`），test 与 live 不混用；面额白名单两套相同（`TOPUP_DENOMINATIONS_CENTS = [1200,2400,3600,4800]`）。
 
 ---
 
@@ -1084,10 +1077,10 @@ type MyServerCharge = {
 | POST | `/v1/auth/email/start` | 无 | 发码；冷却 / IP 限频 |
 | POST | `/v1/auth/email/verify` | 无（带设备证明） | 校验 + 合并 + 发令牌 |
 | POST | `/v1/auth/logout` | Bearer | 解绑设备、作废 refresh |
-| GET | `/v1/wallet` | Bearer | 余额（USD 分）+ `denominations_cents`（由产品键推导） |
-| POST | `/v1/topups` | Bearer（`kind=email`） | 创建 Dodo 充值会话 |
+| GET | `/v1/wallet` | Bearer | 余额（USD 分）+ `denominations_cents`（由 `TOPUP_DENOMINATIONS_CENTS` 推导） |
+| POST | `/v1/topups` | Bearer（`kind=email`） | 创建 Stripe Checkout 会话 |
 | POST | `/v1/orders/{id}/checkout` | Bearer（`kind=email`） | **确认下单、不扣费**，就绪后结算（§4.14） |
-| POST | `/v1/webhooks/dodo` | 签名 | 充值支付结果 |
+| POST | `/v1/webhooks/stripe` | 签名 | 充值支付结果 |
 
 ### 6.3 错误码（沿用通用码 + `details.reason`）
 
@@ -1108,9 +1101,12 @@ type MyServerCharge = {
 | 生产环境用了假充值 | `PRECONDITION_FAILED` | `channel_not_allowed` | 否 |
 | 目录价与配置价不一致 | `PRECONDITION_FAILED` | `price_mismatch` | 否 |
 | 套餐价不能被 30 整除，不可售 | `PRECONDITION_FAILED` | `invalid_plan` | 否 |
-| Dodo 建会话失败 | `UPSTREAM_ERROR` | `checkout_unavailable` | 是 |
+| Stripe 建会话失败 | `UPSTREAM_ERROR` | `checkout_unavailable` | 是 |
+| 充值配置未就绪 / 白名单非法 | `INTERNAL` | `topup_config_unavailable` | 否 |
 | 订单已过期 | `PRECONDITION_FAILED` | `order_expired` | 否 |
-| webhook 验签失败 | —（只回 `401`） | — | 否 |
+| webhook 验签失败 | —（`401`，`details.reason` = `missing_header` / `stale_timestamp` / `no_v1` / `mismatch`） | — | 否 |
+| webhook `event.livemode` 与环境不一致 | —（只回 `400`） | — | 否 |
+| webhook body 超过 256 KiB | —（只回 `413`） | — | 否 |
 
 - **不新造错误码**，只用 `runtime.md` §6.1 的通用码；细分一律放 `details.reason`。
 - 所有 `reason` 都是稳定的 ASCII 标识，前端按它分支，不解析 `message`。
@@ -1133,16 +1129,16 @@ type MyServerCharge = {
 | A2 | 60 秒内重复发码返回 `email_cooldown` 且带剩余秒数；同 IP 第 11 次返回 `email_rate_limited` |
 | A3 | 验证码错 3 次后作废；第 4 次即使输入正确也要求重新发码 |
 | A4 | 登录后 `account_kind = email`；同一设备换第二个邮箱登录被拒绝 `account_conflict`；登出后设备回到匿名账户，原邮箱账户的服务器不再出现在列表 |
-| **W1** | **充值入账**：`my_server_topup` 返回 `checkout_url`；测试支付成功 → webhook 200 → `accounts.balance_cents` 增加面额、`wallet_ledger` 新增一行（`kind=topup`、`ref=dodo_payment:<id>`）、`topups.status=paid`。CNY 结算时账本仍记 USD 面额 |
-| **W2** | **重复 webhook 不加钱**：同一 `webhook-id` / 同一 `payment_id` 重投 10 次，余额只加一次，`wallet_ledger` 与 `payments` 各只有一行 |
+| **W1** | **充值入账**：`my_server_topup` 返回 `checkout_url`；测试支付成功 → webhook 200 → `accounts.balance_cents` 增加面额、`wallet_ledger` 新增一行（`kind=topup`、`ref_type=stripe_payment`、`ref_id=<topup_id>`）、`topups.status=paid`。CNY 结算时账本仍记 USD 面额 |
+| **W2** | **重复 webhook 不加钱**：同一 `event.id` / 同一 `payment_intent` 重投 10 次，余额只加一次，`wallet_ledger` 与 `payments` 各只有一行 |
 | **W3** | **买机：下单不扣费**：余额 ≥ 日价 × 7 → checkout 只写账本 0 行、返回 `provisioning`；服务器行 `billing_state='pending'`、`paid_until=NULL`、`billing_anchor_at=0`、`daily_price_cents=0`；余额不足（包括够 1 天但不足 7 天）→ `insufficient_balance`，`details` 带 `required_cents`（= 日价 × 7）/ `shortfall_cents` / `min_days = 7`，**余额不变、无服务器**，订单仍 `pending_payment`；订单已过期 → 转 `cancelled` 并返回 `order_expired` |
 | **W3-b** | **就绪后结算**：enroll 确认成功后同一 batch 写 `wallet_ledger`（`ref=order:<order_id>`、`-20`）、`orders.state='ready'` / `paid_at` / `paid_via='wallet'`、`servers.state='active'` 且 `billing_state='active'`、`billing_anchor_at = settle_at`、`paid_until = settle_at + 1d`、`daily_price_cents`；守卫失败（余额 < 1 天）→ 不写账本、订单 `failed`、服务器 `error / settle_insufficient`（不写 `destroyed_at`）、DO 实例销毁、审计 `settle_insufficient`；结算进程死掉超过 10 分钟由 Cron `sweepUnsettledSettlements` 同一处置。存量 `charge_mode='upfront'` 订单不进入本流程 |
-| **W4** | **逐日续费与 Cron 幂等**：到期服务器被 Cron 扣当天、`paid_until` 顺延 1 天、账本 `ref=server_day:<id>:<bucket>`；**同一 Cron 重跑 3 次 / 并发执行，只扣一次**；重跑时「扣余额 0、续期 1」按已扣恢复；同一台机器连扣 30 天，账本合计**正好等于月价**（`600 / 900 / 1800` 分） |
+| **W4** | **逐日续费与 Cron 幂等**：到期服务器被 Cron 扣当天、`paid_until` 顺延 1 天、账本 `ref=server_day:<id>:<bucket>`；**同一 Cron 重跑 3 次 / 并发执行，只扣一次**；重跑时「扣余额 0、续期 1」按已扣恢复；同一台机器连扣 30 天，账本合计**正好等于月价**（`900 / 1200 / 2400` 分） |
 | **W5** | **扣费失败即停机销毁**：窗口内扣不动 → 不扣费、停隧道、销毁实例、删控制面节点、`servers.state='destroyed'`；**服务器行保留为墓碑**，余额不变，不写 `past_due` / `expired` |
 | **W6** | **不可恢复**：对墓碑充值不改变任何状态，没有补扣、没有恢复路径；`recoverExpiredServers` 不再被调用 |
 | **W7** | **墓碑与节点处置**：`my-server-changed(state=destroyed)` 到达后，客户端把本地节点行标「停机删除」，不可连接、不可测速；用户删除墓碑后本地节点一并删除；用户主动销毁的行仍然直接消失 |
 | **W8** | **对账断言**：任意时刻逐账户 `balance_cents == 最新一条 ledger.balance_after_cents`（I1）；快照之后逐行链式成立（I3）；并发两笔扣费只有一笔成功、另一笔余额不足 |
-| **W13** | **账本保留期**：构造一台机器跨两个自然月、共 90 天的 `server_day` 明细 → 每日任务跑完后：只剩 `cutoff` 之后的明细；新增一条 `snapshot`（`amount_cents = 0`、`created_at = cutoff`、`balance_after` = cutoff 时刻余额）；**I1 / I2 / I3 全部成立**；`dodo_payment` / `order` / `server_refund` **一行不少**；**同一任务重跑不重复写快照、不再删行**；快照写失败时该轮一行不删 |
+| **W13** | **账本保留期**：构造一台机器跨两个自然月、共 90 天的 `server_day` 明细 → 每日任务跑完后：只剩 `cutoff` 之后的明细；新增一条 `snapshot`（`amount_cents = 0`、`created_at = cutoff`、`balance_after` = cutoff 时刻余额）；**I1 / I2 / I3 全部成立**；`stripe_payment` / `dodo_payment`（历史行）/ `order` / `server_refund` **一行不少**；**同一任务重跑不重复写快照、不再删行**；快照写失败时该轮一行不删 |
 | **W9** | **停摆后一次补齐**：`paid_until = anchor+1.5d`、`now = anchor+4.5d`（落后 3 个整日）、余额足够 → Cron 一次补 **4 天**到 `paid_until = anchor+5.5d`（比 `now` 多 1 天，已超出 1 小时窗口），账本 4 行独立 `bucket`。**是 4 不是 3**：扫描条件是 `paid_until - 1h <= now`（含等号），补到第 3 天时 `paid_until = now` 仍满足条件，必须再补 `now` 所在那一格。余额只够 2 天 → **停机销毁**；补满 30 天仍未让 `paid_until > now + 1h` → 停机销毁并告警 |
 | **W10** | **订单 provisioning 但无服务器**：确认下单后中断（未完成建机），Cron 5 分钟内补建恰好一台；重跑不产生第二台（`unique(servers.order_id)`） |
 | **W11** | **负向调整**：人工 `adjustment` 为负且余额不足 → 账本不写、余额不变；`ref_id` 用 uuid，重复 uuid 被唯一键挡住 |
@@ -1153,8 +1149,8 @@ type MyServerCharge = {
 | **W15** | **跑批游标与饿死防护**：1200 台到期服务器、其中 30 台余额为 0 → 一轮只处理 200 台并写回游标；**余额不足的机器不会永远占队首**，后续轮次能推进到其余机器；游标走到末尾后回到队首；单台抛错不影响同批其它机器 |
 | **W16** | **rebuild 计费**：重建一台机器 → 生成**新订单**、扣新的 `order:<new_order_id>` 第 0 天、`billing_anchor_at` 重置为新创建时刻、`paid_until = anchor + 1d`；**旧 `order:<id>` 不会被重放**，重建不会免费 |
 | A11 | **Host 命令层**：未登录或登录过期时，`runtime_start` / `node_switch` / `node_probe` 以及本地已有配置不受影响；只有 `my_server_*` 管理命令返回 `auth_required`。界面部分留到整体 UI 重构 |
-| A12 | Worker 日志、D1、客户端日志、`chat_messages` 均无验证码明文、无 Dodo key、无令牌 |
-| A13 | 代码与配置里没有 TweetPilot 的 `pdt_…`；Veyl 充值产品在同一个商户后台新建、test / live 各一套；Veyl 的 webhook secret 轮换不影响 TweetPilot |
+| A12 | Worker 日志、D1、客户端日志、`chat_messages` 均无验证码明文、无 Stripe key、无令牌 |
+| A13 | 代码与配置里没有 Dodo 的 `pdt_…` / `DODO_*`；Stripe key 只来自 secret，test / live 各一套；Veyl 的 webhook secret 轮换不影响其它项目 |
 
 ---
 
@@ -1163,12 +1159,12 @@ type MyServerCharge = {
 | 不做 | 说明 |
 |---|---|
 | Turnstile | 参考实现因国内访问不稳定已禁用，本期不启用；靠冷却 + IP 限频 + 每码 3 次 |
-| **现金退款** | 没有出金入口：充值后未消费的余额不退、不能提现（§16 风险），也不走 Dodo 原路退回。**销毁时未用完的整天退回余额**（店内额度，§4.6），这不是退款 |
+| **现金退款** | 没有出金入口：充值后未消费的余额不退、不能提现（§16 风险），本期也不做原路退回。**销毁时未用完的整天退回余额**（店内额度，§4.6），这不是退款 |
 | **按小时计费** | 按天扣（§4.1）。小时粒度的取整、24× 账本量与每小时跑批都不划算 |
 | 账本全量长期保存 | **`server_day` 明细只留 30 天**，更早的由月末 `snapshot` 承接（§4.12）；钱类流水（充值 / 首日扣费 / 退款 / 人工调整）永久保留 |
 | 余额提现 / 转账 / 赠送 | 钱包只用于本人消费，不支持转出 |
 | 订阅（自动续费） | M1 不上线；代码保留，M2 给国际卡用户（§4.10） |
-| 多币种钱包 | 钱包只有 USD 分；CNY 只存在于 Dodo 收银台与结算流水，不入账本 |
+| 多币种钱包 | 钱包只有 USD 分；CNY 只存在于 Stripe 收银台的展示换算，不入账本 |
 | 发票 / 税务 / 对账报表 | M2；本期只做账本自洽（§4.7 W8） |
 | 到期自动回收机器 | **做**：扣费失败即停机销毁（§4.11）；用户主动销毁仍走原流程，不留墓碑 |
 | 真实停用隧道 | **本期做**：停机销毁会停隧道、删实例与节点记录；客户端本地节点行靠「停机删除」墓碑阻止连接与测速 |
@@ -1179,8 +1175,8 @@ type MyServerCharge = {
 **资金与换汇风险**（写清楚，不藏）：
 
 1. 未消费余额是**我们的负债**，用户随时可能要求退款（本期不做，M2 必须给规则）；
-2. 微信充值是 CNY → USD 换汇，Dodo 抽 2–4%，我们按 USD 面额入账，差额由我们承担；
-3. 账本与 Dodo 结算流水的对账（汇率、手续费）留到 M2；本期只保证账本内部自洽。
+2. 微信充值是 CNY → USD 换汇，Stripe 侧的换汇与手续费由我们承担，按 USD 面额入账；
+3. 账本与 Stripe 结算流水的对账（汇率、手续费）留到 M2；本期只保证账本内部自洽。
 
 
 
@@ -1190,16 +1186,16 @@ type MyServerCharge = {
 
 | # | 事项 | 影响 |
 |---|---|---|
-| 1 | Dodo webhook 是否原样回传 `metadata`（`topup_id`） | 决定匹配主路径；不回来就靠 `checkout_session_id`（当前按此设计） |
+| 1 | Stripe Checkout 是否原样回传 `metadata.topup_id` / `client_reference_id` | 决定匹配主路径；不回来就靠 `checkout_session_id`（当前按此设计） |
 | 2 | **D1 `batch()` 是否严格事务**（两步扣费守卫依赖它） | 若否，改用单条 `INSERT … SELECT` 或 DO 串行化 |
-| 3 | 微信支付在 Dodo 下对 **USD 产品**的实际换汇价、手续费与结算币种 | 影响换汇成本核算（2–4%）与 `settlement_amount` 字段 |
-| 4 | `payment.succeeded` 载荷是否稳定包含 `product_id` / `settlement_amount` | 充值入账按产品映射，不依赖金额；但审计与对账需要 |
-| 5 | Dodo 单笔最低金额与 CNY 取整规则 | 决定充值面额是否可行（$10 档最可能受最低额限制） |
-| 6 | Dodo webhook 的重投策略与超时 | 决定是否必须 `waitUntil` 与 Cron 兜底 |
+| 3 | 支付宝 / 微信在 Stripe 下对 **USD 产品**的实际换汇价、手续费与结算币种 | 影响换汇成本核算与对账 |
+| 4 | `checkout.session.*` 载荷是否稳定包含 `payment_intent` / `payment_status` / `metadata` | 充值入账按本地面额，不依赖金额；但匹配与审计需要 |
+| 5 | Stripe 单笔最低金额与支付宝 / 微信限额 | 决定充值面额是否可行 |
+| 6 | Stripe webhook 的重投策略与超时（live 3 天 / sandbox 3 次） | 决定是否必须 `waitUntil` 与 Cron 兜底 |
 | 7 | Resend 发件域名在主要邮箱服务商的送达率 | 验证码到不了 = 登录不可用 |
 | 8 | Workers `waitUntil` 内调用 DigitalOcean 建机的时长上限 | 超过则改为 Workflow / 队列 |
 | 9 | 6 位码 + 3 次上限 + IP 20 次/小时是否足够防刷 | 不够再评估图形验证（不用 Turnstile） |
-| 10 | Dodo 是否支持按用途建多个 API key（Veyl 单开一把） | 决定用单开还是共用商户 key；共用影响见 §5.1 |
+| 10 | Stripe restricted key 的权限与轮换 | 决定生产 key 的最小权限与轮换方式 |
 
 ---
 
@@ -1207,10 +1203,10 @@ type MyServerCharge = {
 
 | 侧 | 改动 |
 |---|---|
-| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每小时续费 + 扣费失败停机销毁 + 销毁退款 + `server_day` 裁剪）、`src/webhooks/dodo.ts`（支付事件 + 三层幂等）、`src/orders.ts`（checkout 只确认下单不扣费；建机门槛日价 × 7；`charge_mode` 区分存量 upfront，§4.14）、`src/servers.ts`（enroll 回调里结算第 0 天、失败收尾与 10 分钟兜底）、`src/index.ts`（路由）、迁移 `0007_at_ready_settlement.sql`（`orders.charge_mode`、`servers.paid_until` 可空、`servers` 重建）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
+| **控制面** | `src/auth_email.ts`（发码 / 校验 / 合并 / 登出）、`src/wallet.ts`（账本、原子扣费、对账自检、月末快照）、`src/topups.ts`（充值会话 + webhook 入账）、`src/billing.ts`（每小时续费 + 扣费失败停机销毁 + 销毁退款 + `server_day` 裁剪）、`src/payments/stripe.ts`（Checkout + 验签）、`src/webhooks/stripe.ts`（支付事件 + 三层幂等）、`src/orders.ts`（checkout 只确认下单不扣费；建机门槛日价 × 7；`charge_mode` 区分存量 upfront，§4.14）、`src/servers.ts`（enroll 回调里结算第 0 天、失败收尾与 10 分钟兜底）、`src/index.ts`（路由）、迁移 `0007_at_ready_settlement.sql`（`orders.charge_mode`、`servers.paid_until` 可空、`servers` 重建）、迁移 `0003_wallet.sql`（`email_codes` / `topups` / `wallet_ledger`（含 `snapshot` 与 `wallet_ledger_prune`）/ `payments` / `webhook_events` / `unmatched_payments` / `accounts.balance_cents` / `orders.amount_cents` / `servers.billing_anchor_at|paid_until|daily_price_cents|billing_state` / `unique(servers.order_id)`） |
 | **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 确认下单并触发建机（返回 `MyServerOrder`，不返回扣费结果）；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与「已停机删除」文案在 UI 重构时接入 |
 | **React UI** | **本轮不做，等整体 UI 重构**：统一登录弹窗、左栏底部账号块（§3.6）、`我的服务器` 未登录空态、余额与充值入口、`insufficient_balance` 与到期提示条。**建机向导的 7 天门槛预检见 §4.13** |
-| **契约** | `commands.md` **2.30.0**（`MyServer` 增 `paid_until`（非空）/ `daily_price_cents` / `billing_state` / `grace_ends_at`（派生）；`my_server_catalog.plans` 增 `daily_price_cents`；`checkout` 语义改成扣 1 天；`MyServerWallet` 保持余额 + 档位，不含可运行天数）；**2.37.1 起 `checkout` 门槛改为日价 × 7、`insufficient_balance` 增 `required_cents` / `min_days`**。`check-contracts.mjs` 已全绿（76 项通过、2 项 advisory），`MyServerPlan.daily_price_cents` 的实现侧补齐后红项消失 |
+| **契约** | `commands.md` **2.61.0**（充值通道由 Dodo 换成 Stripe：`price_data`、面额 `1200/2400/3600/4800`、回调 `/v1/webhooks/stripe`；`MyServer` 增 `paid_until`（非空）/ `daily_price_cents` / `billing_state` / `grace_ends_at`（派生）；`my_server_catalog.plans` 增 `daily_price_cents`；`checkout` 语义改成扣 1 天；`MyServerWallet` 保持余额 + 档位，不含可运行天数）；**2.37.1 起 `checkout` 门槛改为日价 × 7、`insufficient_balance` 增 `required_cents` / `min_days`**。`check-contracts.mjs` 已全绿（91 项通过、2 项 advisory） |
 
 ---
 

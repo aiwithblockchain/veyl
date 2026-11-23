@@ -1,4 +1,4 @@
-// 订单（§19.5）：下单、查询、结账、取消。金额只做展示快照，真钱由 Dodo 收。
+// 订单（§19.5）：下单、查询、结账、取消。金额只做展示快照，真钱由 Stripe 收。
 // 所有写操作都要 Idempotency-Key：同 key 同请求体原样回放，同 key 不同体拒绝。
 
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
@@ -41,10 +41,7 @@ export interface OrdersEnv extends MaybeAuthEnv {
   SING_BOX_DOWNLOAD_URL?: string;
   RESEND_API_KEY?: string;
   RESEND_FROM_EMAIL?: string;
-  DODO_API_KEY?: string;
-  DODO_WEBHOOK_SECRET?: string;
   PLAN_DAILY_PRICE_CENTS?: string;
-  DODO_PRODUCT_IDS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
 

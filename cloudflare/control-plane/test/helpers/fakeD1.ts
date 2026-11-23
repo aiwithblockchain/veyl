@@ -622,7 +622,6 @@ export class FakeD1 {
         row.state = "awaiting_payment";
         row.checkout_session_id = a[0];
         row.checkout_url = a[1];
-        row.paid_via = "dodo";
         row.expires_at = a[2];
       }
       return null;
@@ -683,7 +682,6 @@ export class FakeD1 {
       if (row && allowed.includes(String(row.state))) {
         row.state = "paid";
         row.paid_at = row.paid_at ?? a[0];
-        row.paid_via = "dodo";
       }
       return null;
     }
@@ -1192,7 +1190,10 @@ export class FakeD1 {
       });
       return null;
     }
-    if (sql.startsWith("insert into webhook_events")) {
+    if (
+      sql.startsWith("insert into webhook_events") ||
+      sql.startsWith("insert or ignore into webhook_events")
+    ) {
       if (this.tables.webhook_events.some((e) => e.id === a[0])) return null;
       this.tables.webhook_events.push({
         id: a[0],

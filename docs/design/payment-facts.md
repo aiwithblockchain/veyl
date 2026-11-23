@@ -5,6 +5,8 @@
 > 关联：`docs/design/login-and-payment.md`（§4.3 webhook、§4.4 售价、§5.1 secrets、§9 待核）
 > 来源分级：**[文档]** = Dodo / DigitalOcean 官方文档写明；**[后台]** = 后台界面可见（本次未登录后台验证）；**[推断]** = 文档未写、按行业惯例推断；**[未核实]** = 查不到权威说法。
 
+> ⚠️ **本文是 Dodo 时期的事实核对。** 2026-11-23 起支付通道改为 Stripe（`docs/design/stripe-migration.md`）；下面的 Dodo 事件名、产品价同步与后台入口只作历史参考，不再作为实现依据。
+
 ---
 
 ## 0. 一页结论
