@@ -363,8 +363,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, []);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    // 未登录不发账户命令：事件与慢速兜底都可能在登出后触发。
-    if (accountLoadedRef.current && !loggedInRef.current) {
+    // 账户还没读出来、或已读到且未登录：都不发账户命令（首屏进入服务器页也会调 refresh）。
+    // 登录后的首次加载由账户 effect 自己调 refresh，不依赖这里放行。
+    if (!accountLoadedRef.current || !loggedInRef.current) {
       setLoading(false);
       return false;
     }
@@ -416,6 +417,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
       loggedInRef.current = signedIn;
       setAccount(info);
+      accountLoadedRef.current = true;
       setAccountLoaded(true);
       if (signedIn) {
         setIdentityMissing(false);
@@ -434,6 +436,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         setLoading(false);
       }
     } catch {
+      accountLoadedRef.current = true;
       setAccountLoaded(true);
       setAccountError(true);
     }
@@ -504,6 +507,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
         loggedInRef.current = signedIn;
         setAccount(info);
+        accountLoadedRef.current = true;
         setAccountLoaded(true);
         if (signedIn) {
           setIdentityMissing(false);
@@ -518,6 +522,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       })
       .catch(() => {
         if (!alive) return;
+        accountLoadedRef.current = true;
         setAccountLoaded(true);
         setAccountError(true);
         fallbackToIdentity();
@@ -817,6 +822,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     if (signedIn && next.account_id !== account?.account_id) resetWallet();
     loggedInRef.current = signedIn;
     setAccount(next);
+    accountLoadedRef.current = true;
     setAccountLoaded(true);
     setIdentityLostState(false);
     setIdentityMissing(!signedIn);
@@ -837,6 +843,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     try {
       const next = await source.call(bridge);
       setAccount(next);
+      accountLoadedRef.current = true;
       setAccountLoaded(true);
       setIdentityLostState(false);
       setTopupOpen(false);

@@ -186,7 +186,8 @@ export function MyServersPage({
     );
   }
 
-  if (!accountLoaded) {
+  // 账户没读出来或列表在加载：统一给加载态，别先闪一下登录引导。
+  if ((!accountLoaded && !accountError) || loading) {
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty" role="status" aria-busy="true">
@@ -217,18 +218,6 @@ export function MyServersPage({
           >
             {t("serversPage.loginAction")}
           </button>
-        </section>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="myservers myservers--empty">
-        <section className="myservers__empty" role="status" aria-busy="true">
-          <span className="skeleton skeleton--title" aria-hidden />
-          <span className="skeleton skeleton--line" aria-hidden />
-          <span className="skeleton skeleton--line is-short" aria-hidden />
         </section>
       </div>
     );

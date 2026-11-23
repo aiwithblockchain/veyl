@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, MyServer } from "../agent/bridge";
+import type { AgentBridge, MyServer, MyServerAccount } from "../agent/bridge";
 import { AGENT_EVENTS } from "../agent/protocol";
 import type { AgentEvent } from "../agent/protocol";
 import { uiLog } from "../log/uiLog";
@@ -1493,5 +1493,45 @@ describe("换账户与登出", () => {
       await view.result.current.refreshWallet({ trigger: "retry" });
     });
     expect(wallet.mock.calls.length).toBe(before + 1);
+  });
+});
+
+describe("未登录不发账户命令", () => {
+  it("设备身份：账户读完前后都不发列表请求", async () => {
+    const listRef = { current: [SERVER_A] };
+    const bridge = makeBridge(listRef);
+    let resolveAccount: (value: MyServerAccount) => void = () => {};
+    vi.mocked(bridge.myServerAccount).mockReturnValue(
+      new Promise((resolve) => {
+        resolveAccount = resolve;
+      }),
+    );
+
+    const view = renderHook(() =>
+      useMyServers(bridge as unknown as AgentBridge, {
+        active: true,
+        rootSignal: 0,
+      }),
+    );
+
+    // 首帧：账户还没读回来，也不许发列表请求。
+    await act(async () => {});
+    expect(bridge.myServerList).not.toHaveBeenCalled();
+    expect(view.result.current.accountLoaded).toBe(false);
+
+    await act(async () => {
+      resolveAccount({
+        logged_in: false,
+        email: null,
+        account_id: "acct_1",
+        device_id: "dev_1",
+        account_kind: "device",
+        session_expires_at: null,
+      });
+    });
+
+    await waitFor(() => expect(view.result.current.accountLoaded).toBe(true));
+    expect(view.result.current.loggedIn).toBe(false);
+    expect(bridge.myServerList).not.toHaveBeenCalled();
   });
 });

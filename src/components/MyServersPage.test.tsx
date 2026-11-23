@@ -348,6 +348,31 @@ describe("英文界面", () => {
     ).toBeTruthy();
     expect(screen.queryByText("超过 30 天没有使用，请重新登录。")).toBeNull();
   });
+
+  it("已登录首屏先给加载态，不闪登录引导", async () => {
+    const bridge = makeBridge();
+    let resolveAccount: (value: MyServerAccount) => void = () => {};
+    vi.mocked(bridge.myServerAccount).mockReturnValue(
+      new Promise((resolve) => {
+        resolveAccount = resolve;
+      }),
+    );
+    renderHarness(bridge);
+
+    // 账户还没读回来：没有登录按钮，也没有登录引导标题。
+    expect(screen.queryByRole("button", { name: "登录 / 注册" })).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeNull();
+
+    await act(async () => {
+      resolveAccount({ ...ACCOUNT });
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "新加坡 1 · DigitalOcean" }),
+    ).toBeTruthy();
+  });
 });
 
 describe("我的服务器 destination", () => {
