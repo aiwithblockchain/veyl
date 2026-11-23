@@ -541,7 +541,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.25.1",
+                env["contract_version"], "3.26.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1065,6 +1065,52 @@ async fn set_user_region_is_a_write_tool_with_the_contract_shape() {    let (svc
         )]
     );
     assert_eq!(outcome.display.changed, crate::tools::Changed::None);
+}
+
+/// 设备身份 / 会话过期：MyServers 必须要求登录，不能拿空列表冒充。
+#[tokio::test]
+async fn my_servers_requires_a_logged_in_account() {
+    use crate::control_plane::auth;
+    let _guard = crate::test_support::AUTH_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    crate::test_support::install_test_secrets();
+    auth::clear_tokens_for_test();
+    auth::store_device_for_test("dev_boundary");
+
+    let (svc, _rec) = FakeServices::new();
+    let all = tools(svc);
+
+    // 匿名设备身份不是登录态。
+    let device_tokens = auth::TokenSet {
+        account_id: "acct_dev".into(),
+        device_id: "dev_boundary".into(),
+        access_token: "access".into(),
+        access_expires_at: "2099-01-01T00:00:00Z".into(),
+        refresh_token: "refresh".into(),
+        refresh_expires_at: "2099-01-01T00:00:00Z".into(),
+        account_kind: "device".into(),
+        email: None,
+    };
+    auth::store_tokens_for_test(&device_tokens);
+    let (is_error, env) = run(tool(&all, "MyServers"), json!({})).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "PRECONDITION_FAILED");
+    assert_eq!(env["error"]["details"]["reason"], "auth_required");
+
+    // 邮箱会话过期同样拦。
+    let expired = auth::TokenSet {
+        account_kind: "email".into(),
+        email: Some("a@example.com".into()),
+        refresh_expires_at: "2020-01-01T00:00:00Z".into(),
+        ..device_tokens
+    };
+    auth::store_tokens_for_test(&expired);
+    let (is_error, env) = run(tool(&all, "MyServers"), json!({})).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["details"]["reason"], "auth_required");
+
+    auth::clear_tokens_for_test();
 }
 
 #[tokio::test]

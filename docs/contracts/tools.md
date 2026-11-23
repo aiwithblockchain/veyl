@@ -1,6 +1,6 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.25.1`
+> 契约版本：`3.26.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
@@ -19,7 +19,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.25.1`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.26.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -64,7 +64,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.25.1";
+  contract_version: "3.26.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -883,7 +883,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.25.1";
+  contract_version: "3.26.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1083,7 +1083,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.25.1";
+  contract_version: "3.26.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1820,6 +1820,7 @@ type CoreUpgradeData = {
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
 - **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，可用时追加「可建配置」，已销毁时追加人话原因。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
+- **设备身份 / 会话过期（3.26.0）**：`PRECONDITION_FAILED / auth_required`，**不返回服务器数据**；模型应请用户先登录，不能拿空列表演示成「你没有服务器」。
 - `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态 · IP（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
 
 ---
@@ -2349,6 +2350,12 @@ type SubmitIssueToPublicWallData = {
 ---
 
 ## 8. 变更记录
+
+### 3.26.0（未发布，2026-11-23：登录态与 MyServers 门禁）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `3.26.0`；`MyServers` 在设备身份或邮箱会话过期时返回 `PRECONDITION_FAILED / auth_required`，不返回服务器数据（此前会退回空列表；匿名设备与断网刷新失败仍不得判为登录失效） | 行为约束 | 2026-11-23 产品：登录态设计 |
 
 ### 3.25.1（未发布，2026-11-22：接手 TUN 的身份口径）
 

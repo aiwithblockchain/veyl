@@ -18,6 +18,21 @@ import { t } from "../i18n";
 
 export type ServersView = "detail" | "wizard";
 
+/**
+ * 登录态（login-and-payment.md §11.1）：邮箱账户、服务端认为已登录、且本地会话未过期。
+ * 设备身份与无令牌一律算未登录——设备只是控制面的匿名凭据，不是用户账号。
+ */
+export function isSignedIn(account: MyServerAccount | null): boolean {
+  if (!account || !account.logged_in) return false;
+  if (account.account_kind !== "email") return false;
+  const expiresAt = account.session_expires_at;
+  if (typeof expiresAt === "string" && expiresAt !== "") {
+    const at = Date.parse(expiresAt);
+    if (Number.isFinite(at) && at <= Date.now()) return false;
+  }
+  return true;
+}
+
 interface Options {
   /** 停在「我的服务器」destination 时才听 Esc。 */
   active: boolean;
@@ -180,10 +195,13 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [loginOpen, setLoginOpen] = useState(false);
   const [topupOpen, setTopupOpen] = useState(false);
 
-  const loggedIn = account?.logged_in === true;
+  const loggedIn = isSignedIn(account);
   /** 回调里判断登录态用 ref：把 loggedIn 放进依赖会让 refreshWallet 换身份、连带重跑列表加载。 */
   const loggedInRef = useRef(loggedIn);
   loggedInRef.current = loggedIn;
+  /** 账户命令回过一次之后，未登录就不能再发列表请求。 */
+  const accountLoadedRef = useRef(accountLoaded);
+  accountLoadedRef.current = accountLoaded;
   /** 账户重读后比较用：回调里拿不到最新的 account state。 */
   const accountIdRef = useRef<string | null>(null);
   accountIdRef.current = account?.account_id ?? null;
@@ -345,6 +363,11 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, []);
 
   const refresh = useCallback(async (): Promise<boolean> => {
+    // 未登录不发账户命令：事件与慢速兜底都可能在登出后触发。
+    if (accountLoadedRef.current && !loggedInRef.current) {
+      setLoading(false);
+      return false;
+    }
     try {
       const result = await bridge.myServerList();
       refreshOkRef.current = true;
@@ -385,22 +408,29 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setAccountError(false);
     try {
       const info = await source.call(bridge);
+      const signedIn = isSignedIn(info);
       // 重读也可能换到另一个账户：同 id 不清缓存，id 变了走同一套重置。
-      if (info.logged_in && info.account_id !== accountIdRef.current) {
+      if (signedIn && info.account_id !== accountIdRef.current) {
         resetWallet();
       }
       // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
-      loggedInRef.current = info.logged_in;
+      loggedInRef.current = signedIn;
       setAccount(info);
       setAccountLoaded(true);
-      if (info.logged_in) {
+      if (signedIn) {
         setIdentityMissing(false);
         setIdentityPresent(true);
         void refresh();
         void refreshWallet({ trigger: "login" });
       } else {
+        // 设备身份 / 会话过期：页面上不再保留上一个账户的服务器数据。
+        resetWallet();
         setIdentityMissing(true);
         setIdentityPresent(false);
+        setServers([]);
+        setSelectedId(null);
+        setDetail(null);
+        setError(null);
         setLoading(false);
       }
     } catch {
@@ -470,11 +500,12 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       .call(bridge)
       .then((info) => {
         if (!alive) return;
+        const signedIn = isSignedIn(info);
         // 同一拍里就要刷新：登录态先进 ref，不等下一次 render。
-        loggedInRef.current = info.logged_in;
+        loggedInRef.current = signedIn;
         setAccount(info);
         setAccountLoaded(true);
-        if (info.logged_in) {
+        if (signedIn) {
           setIdentityMissing(false);
           setIdentityPresent(true);
           void refresh();
@@ -731,7 +762,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
 
   /** 点「创建服务器」时确认登录与身份；未登录先弹登录框，原选择不动。 */
   const ensureIdentity = useCallback(async (): Promise<boolean> => {
-    if (account && !account.logged_in) {
+    if (!isSignedIn(account)) {
       setLoginOpen(true);
       return false;
     }
@@ -781,16 +812,17 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       throw { code: "UNSUPPORTED", message: t("myservers.error.loginUnsupported"), retryable: false };
     }
     const next = await source.call(bridge, email, code);
+    const signedIn = isSignedIn(next);
     // 换了账户：上一个账户的余额与门禁时间都不能留；同一账户重登沿用缓存。
-    if (next.logged_in && next.account_id !== account?.account_id) resetWallet();
-    loggedInRef.current = next.logged_in;
+    if (signedIn && next.account_id !== account?.account_id) resetWallet();
+    loggedInRef.current = signedIn;
     setAccount(next);
     setAccountLoaded(true);
     setIdentityLostState(false);
-    setIdentityMissing(!next.logged_in);
-    setIdentityPresent(next.logged_in);
+    setIdentityMissing(!signedIn);
+    setIdentityPresent(signedIn);
     setLoginOpen(false);
-    if (next.logged_in) {
+    if (signedIn) {
       void refresh();
       void refreshWallet({ trigger: "login" });
     }

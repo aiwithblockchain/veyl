@@ -310,11 +310,19 @@ export class FakeD1 {
         created_at: a[3],
         used_at: null,
         revoked_at: null,
+        redeemed_count: 0,
       });
       return null;
     }
     if (sql.startsWith("select * from refresh_tokens where hash")) {
       return this.tables.refresh_tokens.find((r) => r.hash === a[0]) ?? null;
+    }
+    if (sql.startsWith("select hash from refresh_tokens where device_id")) {
+      // 宽限窗口用：同一设备上有没有更晚被用掉的令牌。
+      const row = this.tables.refresh_tokens.find(
+        (r) => r.device_id === a[0] && r.used_at != null && Number(r.used_at) > Number(a[1]),
+      );
+      return row ? { hash: row.hash } : null;
     }
     if (sql.startsWith("delete from refresh_tokens")) {
       const [cutoff, now, limit] = a;
@@ -346,6 +354,22 @@ export class FakeD1 {
     if (sql.startsWith("update refresh_tokens set revoked_at")) {
       for (const row of this.tables.refresh_tokens) {
         if (row.device_id === a[1] && row.revoked_at === null) row.revoked_at = a[0];
+      }
+      return null;
+    }
+    if (sql.startsWith("update refresh_tokens set redeemed_count = redeemed_count + 1")) {
+      // 宽限限次：只有还没兑换过、且没被作废的那一枚能 +1。
+      const row = this.tables.refresh_tokens.find((r) => r.hash === a[0]);
+      if (row && Number(row.redeemed_count ?? 0) < 1 && row.revoked_at == null) {
+        row.redeemed_count = Number(row.redeemed_count ?? 0) + 1;
+      }
+      return null;
+    }
+    if (sql.startsWith("update refresh_tokens set redeemed_count = redeemed_count - 1")) {
+      // 签发失败时退回宽限次数。
+      const row = this.tables.refresh_tokens.find((r) => r.hash === a[0]);
+      if (row && Number(row.redeemed_count ?? 0) > 0) {
+        row.redeemed_count = Number(row.redeemed_count) - 1;
       }
       return null;
     }
@@ -1984,6 +2008,13 @@ export class FakeStatement {
         .rows("refresh_tokens")
         .find((r) => r.hash === this.statement.args[1]);
       changes = row && (!guarded || (row.used_at == null && row.revoked_at == null)) ? 1 : 0;
+    } else if (sql.startsWith("update refresh_tokens set redeemed_count = redeemed_count + 1")) {
+      // 宽限限次：只有还没兑换过、且没被作废的那一枚能 +1。
+      const row = this.db
+        .rows("refresh_tokens")
+        .find((r) => r.hash === this.statement.args[0]);
+      changes =
+        row && Number(row.redeemed_count ?? 0) < 1 && row.revoked_at == null ? 1 : 0;
     } else if (sql.startsWith("delete from email_codes")) {
       const before = this.db.rows("email_codes").length;
       this.db.exec(this.statement);

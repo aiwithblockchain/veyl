@@ -1027,10 +1027,13 @@ export const en: Record<MessageKey, string> = {
   "serversPage.retrying": "Retrying…",
   "serversPage.detailUnavailable": "This server's details are unavailable right now.",
   "serversPage.detailRetry": "Your servers and nodes aren't affected. Try again later.",
-  "serversPage.loginTitle": "Sign in first",
+  "serversPage.loginTitle": "Sign in to manage your servers",
   "serversPage.loginText":
-    "Sign in to buy a server. Once it's set up, its node appears here and can be used to connect.",
+    "Sign in with an email code; your servers and balance follow the account.",
+  "serversPage.loginExpired":
+    "It's been more than 30 days since you last used it. Please sign in again.",
   "serversPage.login": "Sign in",
+  "serversPage.loginAction": "Sign in / Sign up",
   "serversPage.errorTitle": "Can't reach the server. Try again later.",
   "serversPage.errorText": "Your servers and nodes aren't affected.",
   "serversPage.pending":
@@ -1043,6 +1046,7 @@ export const en: Record<MessageKey, string> = {
   "rail.drawerAria": "Server list, {count} servers",
   "rail.drawerAriaOne": "Server list, {count} server",
   "rail.myServers": "My servers",
+  "rail.loginHint": "Sign in to see your servers here.",
   "rail.newNode": "New node",
   "rail.useOnPhone": "Use on phone",
   "rail.loading": "Loading servers",

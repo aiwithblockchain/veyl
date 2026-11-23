@@ -952,6 +952,10 @@ function normalizeMyServerAccount(raw: unknown): MyServerAccount | null {
     account_id: typeof value.account_id === "string" ? value.account_id : null,
     device_id: typeof value.device_id === "string" ? value.device_id : null,
     account_kind: kind,
+    session_expires_at:
+      typeof value.session_expires_at === "string"
+        ? value.session_expires_at
+        : null,
   };
 }
 

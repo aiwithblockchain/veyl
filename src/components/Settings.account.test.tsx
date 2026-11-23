@@ -21,6 +21,7 @@ const ACCOUNT: MyServerAccount = {
   account_id: "acct_1",
   device_id: "dev_1",
   account_kind: "email",
+  session_expires_at: null,
 };
 
 function makeBridge(): AgentBridge {

@@ -92,6 +92,7 @@ beforeEach(() => {
     account_id: "acct_1",
     device_id: "dev_1",
     account_kind: "email",
+    session_expires_at: null,
   });
   vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
     balance_cents: 1000,
@@ -325,6 +326,7 @@ describe("节点配置同步", () => {
       account_id: null,
       device_id: null,
       account_kind: null,
+      session_expires_at: null,
     });
     render(<App />);
     await waitForShell();

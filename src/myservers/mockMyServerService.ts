@@ -152,6 +152,9 @@ function accountView(): MyServerAccount {
     account_id: "acct_mock",
     device_id: "dev_mock",
     account_kind: account.logged_in ? "email" : "device",
+    session_expires_at: account.logged_in
+      ? new Date(Date.now() + 30 * 86_400_000).toISOString()
+      : null,
   };
 }
 

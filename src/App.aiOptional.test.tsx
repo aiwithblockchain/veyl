@@ -215,6 +215,8 @@ describe("未配置 AI 的右栏", () => {
 describe("未配置 AI 的动作入口", () => {
   it("建机向导「让 AI 帮我选」被拦：告警、无消息、面板不展开、向导不前进", async () => {
     seedSkipped();
+    // 建机入口要求登录：先给邮箱账户，未登录会改弹登录层。
+    signInForServers();
     vi.mocked(bridge.configList).mockResolvedValue({
       configs: [],
       active_config_id: null,
@@ -280,6 +282,22 @@ describe("未配置 AI 的动作入口", () => {
 
   it("连接、测速、建机照常可用", async () => {
     seedSkipped();
+    // 建机属于服务器账号：按新门禁用邮箱账户，并给余额桩，避免钱包失败把登录态清掉。
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: true,
+      email: "me@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+      session_expires_at: null,
+    });
+    vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+      balance_cents: 0,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+    vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [] });
     render(<App />);
     await waitForShell();
 
@@ -486,6 +504,14 @@ describe("未配置 AI 的动作入口", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
+    });
+    // 钱包失败会按登录过期处理：这条用例要的是登录态，给一个成功桩。
+    vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+      balance_cents: 0,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
     });
     vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [failed] });
     vi.spyOn(bridge, "myServerGet").mockResolvedValue(failed);
@@ -577,6 +603,7 @@ function useManualUnreachable(): () => void {
     account_id: "acct_1",
     device_id: "dev_1",
     account_kind: "email",
+    session_expires_at: null,
   });
   const server: MyServer = {
     server_id: "srv_tokyo",
@@ -685,14 +712,26 @@ const FAILED_SERVER: MyServer = {
 };
 
 /** 打开一台失败服务器，返回「AI 定位」按钮。 */
-async function openFailedServer() {
+/** 服务器页需要邮箱登录态：必须在 render 之前调用，否则 hook 读到的是默认设备身份。 */
+function signInForServers() {
   vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
     logged_in: true,
     email: "me@example.com",
     account_id: "acct_1",
     device_id: "dev_1",
     account_kind: "email",
+    session_expires_at: null,
   });
+  vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+    balance_cents: 0,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  });
+}
+
+async function openFailedServer() {
+  signInForServers();
   vi.spyOn(bridge, "myServerList").mockResolvedValue({
     servers: [FAILED_SERVER],
   });
@@ -848,6 +887,7 @@ describe("AI 入口双向闸门", () => {
   it("AI 定位：已配置发出定位消息、面板展开", async () => {
     seedSkipped();
     aiConfigured = true;
+    signInForServers();
     render(<App />);
     await waitForShell();
     // 先收起，证明这一步是被入口展开的。

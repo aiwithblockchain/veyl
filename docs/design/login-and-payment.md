@@ -1211,3 +1211,52 @@ type MyServerCharge = {
 | **Rust Host** | `control_plane/auth.rs`（登录 / 登出 / account_kind）、`control_plane/wallet.rs`（余额 / 充值）、`my_server_login_*` / `account` / `logout` / `wallet` / `topup` / `order_get` 命令、`my_server_checkout` 确认下单并触发建机（返回 `MyServerOrder`，不返回扣费结果）；**2.37.1 起 `control_plane/error.rs` 透传 `required_cents` / `min_days`**（§4.13）；充值由 Host 打开系统浏览器（界面未上线前不依赖前端）；余额与「已停机删除」文案在 UI 重构时接入 |
 | **React UI** | **本轮不做，等整体 UI 重构**：统一登录弹窗、左栏底部账号块（§3.6）、`我的服务器` 未登录空态、余额与充值入口、`insufficient_balance` 与到期提示条。**建机向导的 7 天门槛预检见 §4.13** |
 | **契约** | `commands.md` **2.30.0**（`MyServer` 增 `paid_until`（非空）/ `daily_price_cents` / `billing_state` / `grace_ends_at`（派生）；`my_server_catalog.plans` 增 `daily_price_cents`；`checkout` 语义改成扣 1 天；`MyServerWallet` 保持余额 + 档位，不含可运行天数）；**2.37.1 起 `checkout` 门槛改为日价 × 7、`insufficient_balance` 增 `required_cents` / `min_days`**。`check-contracts.mjs` 已全绿（76 项通过、2 项 advisory），`MyServerPlan.daily_price_cents` 的实现侧补齐后红项消失 |
+
+---
+
+## 11. 未登录门禁与登录保持（2026-11-23）
+
+> 2026-11-23 · **已定稿（2026-11-23）**。用户拍板：30 天滑动续期、不做数据迁移、设备身份按未登录处理。
+
+### 11.1 判定口径
+
+`logged_in` := `account_kind === "email"` **且** 本地 `refresh_expires_at` 未过 **且** 未被服务端拒绝。设备身份（`device`）不是登录态；首启无令牌同样算未登录。`MyServerAccount` 只增 `session_expires_at`，**不新增 `logged_out_reason`**：过期与否由 `session_expires_at` 是否已过 + `account_kind` 推导，提示文案由前端按这两项生成；设备停用的提示走错误码路径（`device_revoked` 原样上报）。
+
+### 11.2 页面门禁
+
+未登录时「我的服务器」左右两栏整体换成登录引导：标题「登录后管理你的服务器」，说明「用邮箱验证码登录，服务器与余额跟着账户走」，主按钮「登录 / 注册」。期间**不调 `my_server_list`、不读详情**；左栏「在手机上使用」与 AI `MyServers` 工具同门禁。登录成功留在本页、自动拉列表，不自动选中。
+
+**连接页的建机入口同样受阻**：未登录时连接页的 `TrialExpired` 行动与「新建节点」都不能打开建机向导，统一在 `openNewNode` 内部拦下并拉起登录；登录成功后回到用户原来的入口。
+
+<!-- 2026-11-23 补：Owen 复核指出这是第三个入口，原设计只写了「我的服务器」两栏。 -->
+
+
+### 11.3 设备身份
+
+**设备身份只用于免费节点 / 试用这类匿名能力，不拥有、也不展示任何服务器**；连接、配置与 AI（BYOK）不依赖任何账户身份。它是控制面的匿名凭据，不是用户账号。
+
+### 11.4 登录保持
+
+现状（`auth.ts:7-8`）：access 15 分钟、refresh 30 天、每次刷新轮换并重置 30 天——**机制上已是「在用就静默续期、连续 30 天不用才重新登录」**，与用户要求一致；「每天要登录」是实现缺陷，补三处：
+
+1. 本地状态同时看 `refresh_expires_at`（`auth.rs:359-382` 现只看 `account_kind`）：过期直接引导登录并说明「超过 30 天没用」，不再先显示列表再失败。
+2. 轮换容错：客户端在「服务端已轮换、本地未落盘」窗口崩溃或双开，会使整族作废（`auth.ts:235-256`）→ 下次强制登录。加 **60 秒轮换宽限**：旧 refresh 在轮换后 60 秒内重放，允许再换一次并作废新令牌，**不作废整族**；宽限外仍按重放整族作废。令牌改为原子落盘。此宽限只容忍机械重放，不是 §2.5 拒绝的「3 天过期宽限」。
+3. 只有 `token_invalid` / `refresh_expired` / `refresh_reused` / `device_revoked` / `account_blocked` 才转未登录；网络与 5xx 保留登录态，显示「稍后再试」。
+
+阈值保持 **30 天**：覆盖假期与出差，又把被盗令牌的可续命窗口限制在一个月；7 天会打扰低频用户，90 天窗口过大。
+
+### 11.5 验收
+
+1. 设备身份进「我的服务器」只见引导，network 无 `my_server_list`。
+2. 登录后留在本页、列表自动出现、合并前设备账户的服务器可见。
+3. 连续每日使用 30 天不提示；第 31 天首次请求才引导登录并说明原因。
+4. 刷新中杀进程 / 双开并发不整族作废，最多重试一次成功。
+5. 断网 / 5xx 不掉登录。
+6. device 调 `MyServers` 工具回 `auth_required` 且无服务器数据。
+7. 未登录时左栏「在手机上使用」不可见。
+8. 未登录时连接页的 `TrialExpired` 行动与「新建节点」都拉起登录，不进入建机向导；登录后回到原入口。
+9. 提交前确认没有打印账户对象或令牌的调试日志（Owen 复核发现一处 `console` 打印整个账户对象，已交 Leo 删除）。
+
+### 11.6 改动
+
+控制面 `auth.ts` 宽限（用 `used_at` 判定，不加表）；Host `auth.rs`（过期校验、原子写、错误分类）、`my_server_account` 增字段、`MyServers` 工具门禁；UI `useMyServers` / `App.tsx` / `MyServersPage` / 字典；契约 `commands.md` 2.60.0、`tools.md` 3.26.0。

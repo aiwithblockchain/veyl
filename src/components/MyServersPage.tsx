@@ -15,6 +15,8 @@ interface Props {
   catalog: MyServerCatalog | null;
   selected: MyServer | null;
   account: MyServerAccount | null;
+  /** 登录态：邮箱账户且会话未过期；设备身份与过期会话都算未登录。 */
+  signedIn: boolean;
   accountLoaded: boolean;
   accountError: boolean;
   /** 服务器列表加载中。 */
@@ -69,6 +71,7 @@ export function MyServersPage({
   catalog,
   selected,
   account,
+  signedIn,
   accountLoaded,
   accountError,
   loading,
@@ -96,6 +99,15 @@ export function MyServersPage({
   onDiagnose,
 }: Props) {
   const t = useT();
+  // 会话过期：邮箱账户明确未登录、且本地会话时刻已过；设备身份不走这句。
+  const expiresAt = account?.session_expires_at;
+  const sessionExpired =
+    account?.account_kind === "email" &&
+    account.logged_in === false &&
+    typeof expiresAt === "string" &&
+    expiresAt !== "" &&
+    Number.isFinite(Date.parse(expiresAt)) &&
+    Date.parse(expiresAt) <= Date.now();
   const trialHint = trial
     ? trialEmptyHint(
         trial.state,
@@ -132,7 +144,7 @@ export function MyServersPage({
     );
   }
 
-  if (selected) {
+  if (signedIn && selected) {
     return (
       <div className="myservers">
         {detailError ? (
@@ -186,13 +198,16 @@ export function MyServersPage({
     );
   }
 
-  if (account?.logged_in !== true) {
+  // 未登录：整页只留登录引导，不渲染列表、详情、余额、向导或导出入口。
+  if (!signedIn) {
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty">
           <h1 className="myservers__empty-title">{t("serversPage.loginTitle")}</h1>
           <p className="myservers__empty-text">
-            {t("serversPage.loginText")}
+            {sessionExpired
+              ? t("serversPage.loginExpired")
+              : t("serversPage.loginText")}
           </p>
           {trialNote}
           <button
@@ -200,7 +215,7 @@ export function MyServersPage({
             className="btn btn--primary myservers__empty-cta"
             onClick={onLogin}
           >
-            {t("serversPage.login")}
+            {t("serversPage.loginAction")}
           </button>
         </section>
       </div>

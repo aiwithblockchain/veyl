@@ -423,6 +423,15 @@ export default function App() {
   };
   /** 新建节点沿用入口所在的宿主：servers 留在服务器页，其余留在连接侧。 */
   const openNewNode = (origin: "client" | "servers" | "trial_expired") => {
+    // 建机属于服务器账号：账号读到且未登录时直接弹登录，不打开向导。
+    if (
+      myServers.accountLoaded &&
+      !myServers.loggedIn &&
+      !myServers.accountError
+    ) {
+      myServers.openLogin();
+      return;
+    }
     setNewNodeOpen(true);
     setDestination(origin === "servers" ? "servers" : "client");
   };
@@ -439,11 +448,11 @@ export default function App() {
     rootSignal: serversRootSignal,
   });
   /**
-   * 左栏快捷行：列表可读且至少一台服务器节点已就绪。
-   * 不要求邮箱登录：设备身份账号 logged_in 为 false，但同样有就绪服务器；
-   * 「在手机上使用」对所有用户开放（设置页同一入口一直如此），未登录时弹层引导登录。
+   * 左栏快捷行：已登录（邮箱账户且会话未过期）、列表可读、且至少一台服务器节点已就绪。
+   * 设备身份按未登录处理，不给「在手机上使用」（login-and-payment.md §11.3）。
    */
   const showRailMobileExport =
+    myServers.loggedIn &&
     !myServers.loading &&
     !myServers.error &&
     hasReadyServer(myServers.servers);
@@ -3037,6 +3046,11 @@ export default function App() {
               : null
           }
           onGoConnect={() => changeDestination("client")}
+          signedIn={
+            !myServers.accountLoaded ||
+            myServers.accountError ||
+            myServers.loggedIn
+          }
           showMobile={showRailMobileExport}
           onMobile={openMobileExport}
           onSelect={myServers.select}
@@ -3102,6 +3116,7 @@ export default function App() {
           catalog={myServers.catalog}
           selected={myServers.selected}
           account={myServers.account}
+          signedIn={myServers.loggedIn}
           accountLoaded={myServers.accountLoaded}
           accountError={myServers.accountError}
           loading={myServers.loading}

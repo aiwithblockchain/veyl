@@ -22,6 +22,8 @@ interface Props {
   trialHint?: string | null;
   /** 旁注里的「去控制台」：切到连接页。 */
   onGoConnect?: () => void;
+  /** 登录态：未登录只留标题与一行提示，不渲染服务器行与「在手机上使用」。 */
+  signedIn?: boolean;
   /** 已登录 + 至少一台节点就绪时，底部多一行「在手机上使用」。 */
   showMobile?: boolean;
   onMobile?: (trigger: HTMLElement) => void;
@@ -98,6 +100,7 @@ export function MyServersRail({
   compact = false,
   trialHint = null,
   onGoConnect,
+  signedIn = true,
   showMobile = false,
   onMobile,
   onSync,
@@ -109,6 +112,24 @@ export function MyServersRail({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const regionName = (regionId: string) =>
     catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
+
+  // 未登录：不渲染服务器行、新建、同步与「在手机上使用」；只留标题与一行提示。
+  if (!signedIn) {
+    return (
+      <aside
+        id="config-rail"
+        className={`rail ${compact ? "rail--compact" : ""}`.trim()}
+        aria-label={t("rail.listAria")}
+      >
+        <div className="rail__section">
+          <span className="rail__label">{t("rail.myServers")}</span>
+        </div>
+        <p className="rail__empty-text myservers__rail-hint">
+          {t("rail.loginHint")}
+        </p>
+      </aside>
+    );
+  }
 
   /** 滚动区内容：错误 / 骨架 / 服务器行。 */
   const content = (

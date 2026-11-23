@@ -401,6 +401,7 @@ describe("余额刷新的门禁（App 接线）", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
     vi.spyOn(bridge, "myServerIdentity").mockResolvedValue({
       has_identity: true,

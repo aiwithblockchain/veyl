@@ -46,6 +46,7 @@ function makeBridge(listRef: { current: MyServer[] }) {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     })),
     myServerIdentity: vi.fn(async () => ({ has_identity: true, account_id: "acct_1" })),
     myServerLogout: vi.fn(async () => ({
@@ -54,6 +55,7 @@ function makeBridge(listRef: { current: MyServer[] }) {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "device",
+      session_expires_at: null,
     })),
     myServerLoginVerify: vi.fn(async (email: string) => ({
       logged_in: true,
@@ -61,6 +63,7 @@ function makeBridge(listRef: { current: MyServer[] }) {
       account_id: "acct_2",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     })),
     myServerList: vi.fn(async () => ({ servers: listRef.current })),
     myServerGet: vi.fn(async (id: string) => {
@@ -1405,6 +1408,7 @@ describe("换账户与登出", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
     const view = renderHook(() =>
       useMyServers(bridge, { active: false, rootSignal: 0 }),
@@ -1436,6 +1440,7 @@ describe("换账户与登出", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
 
     const before = wallet.mock.calls.length;
@@ -1457,6 +1462,7 @@ describe("换账户与登出", () => {
       account_id: "acct_2",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
     wallet.mockImplementationOnce(
       () => new Promise((resolve) => (release = resolve)) as never,

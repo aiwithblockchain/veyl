@@ -59,6 +59,8 @@ pub struct AccountState {
     pub device_id: Option<String>,
     /// `device` | `email`；`null` = 还没有设备身份（或旧令牌没有这个字段）。
     pub account_kind: Option<String>,
+    /// refresh 到期时间（ISO 8601）；没有邮箱登录会话时为 `null`。
+    pub session_expires_at: Option<String>,
 }
 
 /// `my_server_login_start` 的返回。
@@ -101,6 +103,16 @@ pub fn access_valid(tokens: &TokenSet, now: i64) -> bool {
     expires_ms(&tokens.access_expires_at)
         .map(|expires| expires - ACCESS_SKEW_MS > now)
         .unwrap_or(false)
+}
+
+impl TokenSet {
+    /// refresh 是否还在有效期内。时间解析失败按已过期处理：宁可让用户重新登录，
+    /// 也不能拿一个读不出到期时间的令牌继续声称「已登录」。
+    pub fn refresh_valid(&self, now: i64) -> bool {
+        expires_ms(&self.refresh_expires_at)
+            .map(|expires| expires > now)
+            .unwrap_or(false)
+    }
 }
 
 fn b64u(bytes: &[u8]) -> String {
@@ -167,6 +179,30 @@ fn store_tokens(tokens: &TokenSet) -> Result<(), CpError> {
     crate::secrets::set_secret(TOKENS_KEY, &raw).map_err(|_| CpError::internal("保存令牌失败"))?;
     remember_account(&tokens.account_id);
     Ok(())
+}
+
+/// 测试用：跨模块摆出登录态（工具门禁用例）。写的是进程级共享凭据库，
+/// 调用方必须持有 `test_support::AUTH_STATE_LOCK`。
+#[cfg(test)]
+pub(crate) fn store_tokens_for_test(tokens: &TokenSet) {
+    store_tokens(tokens).expect("测试里写令牌不该失败");
+}
+
+/// 测试用：清掉本地令牌，回到未登录态。
+#[cfg(test)]
+pub(crate) fn clear_tokens_for_test() {
+    clear_tokens();
+}
+
+/// 测试用：造一个可用的设备身份（`account_kind` 需要设备 id 才成立）。
+#[cfg(test)]
+pub(crate) fn store_device_for_test(device_id: &str) {
+    store_device(&StoredDevice {
+        device_id: device_id.to_string(),
+        device_secret: "test-device-secret".to_string(),
+        account_id: String::new(),
+    })
+    .expect("测试里写设备身份不该失败");
 }
 
 /// SQLite 只镜像 `account_id`，不含任何可用于认证的材料。
@@ -314,6 +350,44 @@ pub fn classify_refresh_failure(status: u16, body: &str) -> RefreshAction {
     }
 }
 
+/// 刷新失败是否意味着「登录真的没了」。
+///
+/// 网络错误、5xx、429 都不是：断网一次不能把用户踢下线。只有服务端明确的认证失效
+/// （`UNAUTHENTICATED`：`token_invalid` / `auth_required` / `refresh_unknown` /
+/// 重放检测 `refresh_reused`）与设备 / 账户被停用（`device_revoked` / `account_blocked`）
+/// 才算。
+fn session_is_dead(error: &CpError) -> bool {
+    if error.code == "UNAUTHENTICATED" {
+        return true;
+    }
+    if error.code == "PERMISSION_DENIED" {
+        return matches!(
+            error.reason(),
+            Some("device_revoked") | Some("account_blocked")
+        );
+    }
+    // 上游 UNAUTHENTICATED 的非登录 reason（`refresh_unknown` / 重放 `refresh_reused`）
+    // 由 `from_response` 映射成 `PRECONDITION_FAILED / auth_required`，同样算掉登录。
+    error.reason() == Some("auth_required")
+}
+
+/// 邮箱账户刷新失败后对外报什么。
+///
+/// 设备 / 账户被停用要保留原错误：邮箱登录本身也会拒绝已停用设备（403
+/// `device_revoked`），改写成「登录已过期」只会让用户反复重登失败。只有真正的
+/// 认证失效才合成为 `token_invalid`，提示重新登录。
+fn email_refresh_error(error: CpError) -> CpError {
+    if error.code == "PERMISSION_DENIED" {
+        return error;
+    }
+    CpError::new(
+        "UNAUTHENTICATED",
+        "登录已过期，请重新登录",
+        true,
+        json!({ "reason": "token_invalid" }),
+    )
+}
+
 /// 显式重新注册（§19.2.4 的「重新注册设备」）：
 /// 丢弃当前 device_id / device_secret / 令牌，生成新身份并静默注册。
 /// 旧服务器的本地记录保留为只读；新账户从空列表开始。
@@ -366,7 +440,21 @@ fn account_state_from(tokens: Option<TokenSet>, device_id: Option<String>) -> Ac
         (Some(_), Some("device")) => Some("device".to_string()),
         _ => None,
     };
-    let logged_in = account_kind.as_deref() == Some("email");
+    let logged_in = account_kind.as_deref() == Some("email")
+        && tokens
+            .as_ref()
+            .map(|tokens| tokens.refresh_valid(now_ms()))
+            .unwrap_or(false);
+    // 会话到期时间给界面显示；过期的也照给（界面才能说「已过期」），
+    // 但解析不出来的字符串不下发，否则界面算出无效日期。
+    let session_expires_at = match (tokens.as_ref(), account_kind.as_deref()) {
+        (Some(tokens), Some("email"))
+            if expires_ms(&tokens.refresh_expires_at).is_some() =>
+        {
+            Some(tokens.refresh_expires_at.clone())
+        }
+        _ => None,
+    };
     let (account_id, email) = match tokens {
         Some(tokens) if logged_in => (Some(tokens.account_id), tokens.email),
         _ => (None, None),
@@ -377,6 +465,7 @@ fn account_state_from(tokens: Option<TokenSet>, device_id: Option<String>) -> Ac
         account_id,
         device_id,
         account_kind,
+        session_expires_at,
     }
 }
 
@@ -588,37 +677,37 @@ pub async fn ensure_access(
                     );
                     tokens
                 }
-                Err(error)
-                    if error.reason() == Some("auth_required")
-                        || error.reason() == Some("token_invalid") =>
-                {
+                Err(error) if session_is_dead(&error) => {
                     clear_tokens();
                     if was_email {
                         // 邮箱账户的 refresh 失效不重新注册设备：设备行还绑着账户，
                         // 重新注册会换出匿名账户。按 §3.3 回到未登录态，让用户重新登录。
                         log::debug!(
-                            "鉴权：刷新被拒（401），邮箱账户需要重新登录 account={}",
+                            "鉴权：会话失效 code={} reason={}，邮箱账户需要重新登录 account={}",
+                            error.code,
+                            error.reason().unwrap_or("-"),
                             account_label(&tokens)
                         );
-                        return Err(CpError::new(
-                            "UNAUTHENTICATED",
-                            "登录已过期，请重新登录",
-                            true,
-                            json!({ "reason": "token_invalid" }),
-                        ));
+                        return Err(email_refresh_error(error));
                     }
-                    // 匿名设备：用长期秘密重新注册（§19.2.4）。
-                    log::debug!(
-                        "鉴权：刷新被拒（401），用设备身份重新注册 device={}",
-                        device.device_id
-                    );
-                    let tokens = register(base_url, http, &device).await?;
-                    log::debug!(
-                        "鉴权：重新注册成功 account={} device={}",
-                        account_label(&tokens),
-                        tokens.device_id
-                    );
-                    tokens
+                    if error.code != "PERMISSION_DENIED" {
+                        // 匿名设备的 401 类（含 refresh_unknown 与重放检测）：
+                        // 用长期秘密重新注册（§19.2.4）。
+                        log::debug!(
+                            "鉴权：刷新被拒（401），用设备身份重新注册 device={}",
+                            device.device_id
+                        );
+                        let tokens = register(base_url, http, &device).await?;
+                        log::debug!(
+                            "鉴权：重新注册成功 account={} device={}",
+                            account_label(&tokens),
+                            tokens.device_id
+                        );
+                        tokens
+                    } else {
+                        // 403 设备停用 / 账户停用：不能靠重注册绕过；本地令牌已清掉。
+                        return Err(error);
+                    }
                 }
                 Err(error) => {
                     log::debug!(
@@ -754,6 +843,106 @@ mod tests {
         let value = serde_json::to_value(account_state_from(None, None)).unwrap();
         assert_eq!(value["account_kind"], serde_json::Value::Null);
         assert_eq!(value["logged_in"], false);
+        assert_eq!(value["session_expires_at"], serde_json::Value::Null);
+    }
+
+    /// refresh 过期 = 登录态结束；到期时间仍要交给界面，方便显示「已过期」。
+    #[test]
+    fn an_expired_refresh_token_ends_the_login_session() {
+        let mut expired = tokens("2026-11-14T08:00:31Z");
+        expired.account_kind = "email".into();
+        expired.email = Some("a@example.com".into());
+        expired.refresh_expires_at = "2020-01-01T00:00:00Z".into();
+        let state = account_state_from(Some(expired.clone()), Some("dev_1".into()));
+        assert!(!state.logged_in);
+        assert_eq!(state.email, None);
+        assert_eq!(state.account_id, None);
+        assert_eq!(state.account_kind.as_deref(), Some("email"));
+        assert_eq!(
+            state.session_expires_at.as_deref(),
+            Some("2020-01-01T00:00:00Z")
+        );
+
+        // 到期时间解析不出来同样按过期处理，不能假装还登录着；
+        // 解析不出的字符串也不下发给界面。
+        expired.refresh_expires_at = "not-a-time".into();
+        let state = account_state_from(Some(expired), Some("dev_1".into()));
+        assert!(!state.logged_in);
+        assert_eq!(state.session_expires_at, None);
+
+        // 没过期的会话照常登录。
+        let mut live = tokens("2026-11-14T08:00:31Z");
+        live.account_kind = "email".into();
+        live.email = Some("a@example.com".into());
+        live.refresh_expires_at = "2099-01-01T00:00:00Z".into();
+        let state = account_state_from(Some(live), Some("dev_1".into()));
+        assert!(state.logged_in);
+        assert_eq!(
+            state.session_expires_at.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+    }
+
+    /// 设备被停用：邮箱账户刷新失败要保留原错误，不能改写成「登录已过期」。
+    #[test]
+    fn a_blocked_device_keeps_its_own_error() {
+        let blocked = error::from_response(
+            403,
+            r#"{"code":"FORBIDDEN","details":{"reason":"device_revoked"}}"#,
+        );
+        let mapped = email_refresh_error(blocked);
+        assert_eq!(mapped.code, "PERMISSION_DENIED");
+        assert_eq!(mapped.reason(), Some("device_revoked"));
+
+        let blocked = error::from_response(
+            403,
+            r#"{"code":"FORBIDDEN","details":{"reason":"account_blocked"}}"#,
+        );
+        assert_eq!(
+            email_refresh_error(blocked).reason(),
+            Some("account_blocked")
+        );
+
+        // 真正的认证失效才合成 token_invalid。
+        let expired = error::from_response(
+            401,
+            r#"{"code":"UNAUTHENTICATED","details":{"reason":"refresh_unknown"}}"#,
+        );
+        let mapped = email_refresh_error(expired);
+        assert_eq!(mapped.code, "UNAUTHENTICATED");
+        assert_eq!(mapped.reason(), Some("token_invalid"));
+    }
+
+    /// 断网、5xx、限流不能把用户踢下线；只有认证失效与设备停用算掉登录。
+    #[test]
+    fn only_authentication_failures_end_the_session() {
+        assert!(!session_is_dead(&CpError::network(false)));
+        assert!(!session_is_dead(&CpError::network(true)));
+        assert!(!session_is_dead(&error::from_response(503, "")));
+        assert!(!session_is_dead(&error::from_response(
+            429,
+            r#"{"code":"RATE_LIMITED"}"#
+        )));
+
+        for reason in [
+            "token_invalid",
+            "auth_required",
+            "refresh_unknown",
+            "refresh_reused",
+        ] {
+            let body = format!(r#"{{"code":"UNAUTHENTICATED","details":{{"reason":"{reason}"}}}}"#);
+            assert!(
+                session_is_dead(&error::from_response(401, &body)),
+                "{reason} 应当是掉登录"
+            );
+        }
+        for reason in ["device_revoked", "account_blocked"] {
+            let body = format!(r#"{{"code":"FORBIDDEN","details":{{"reason":"{reason}"}}}}"#);
+            assert!(
+                session_is_dead(&error::from_response(403, &body)),
+                "{reason} 应当是掉登录"
+            );
+        }
     }
 
     #[test]

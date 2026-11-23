@@ -11,7 +11,7 @@ import type {
 } from "../agent/bridge";
 import type { AgentEvent } from "../agent/protocol";
 import { AGENT_EVENTS } from "../agent/protocol";
-import { useMyServers } from "../myservers/useMyServers";
+import { isSignedIn, useMyServers } from "../myservers/useMyServers";
 import { setLanguage } from "../i18n";
 import { MyServersPage } from "./MyServersPage";
 import { MyServersRail } from "./MyServersRail";
@@ -100,6 +100,7 @@ const ACCOUNT: MyServerAccount = {
   account_id: "acct_1",
   device_id: "dev_1",
   account_kind: "email",
+  session_expires_at: null,
 };
 
 const LOGGED_OUT: MyServerAccount = {
@@ -108,6 +109,7 @@ const LOGGED_OUT: MyServerAccount = {
   account_id: null,
   device_id: "dev_1",
   account_kind: "device",
+  session_expires_at: null,
 };
 
 const WALLET: MyServerWallet = {
@@ -231,6 +233,7 @@ function Harness({
         error={state.error}
         retryNotice={state.retryNotice}
         disabled={state.identityLost}
+        signedIn={!state.accountLoaded || isSignedIn(state.account)}
         onSelect={state.select}
         onNew={state.openWizard}
       />
@@ -239,6 +242,7 @@ function Harness({
         catalog={state.catalog}
         selected={state.selected}
         account={state.account}
+        signedIn={isSignedIn(state.account)}
         accountLoaded={state.accountLoaded}
         accountError={state.accountError}
         loading={state.loading}
@@ -311,8 +315,38 @@ describe("英文界面", () => {
     const bridge = makeBridge([]);
     bridge.setAccount(LOGGED_OUT);
     renderHarness(bridge);
-    expect(await screen.findByText("Sign in first")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(
+      await screen.findByText("Sign in to manage your servers"),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Sign in / Sign up" }),
+    ).toBeTruthy();
+  });
+
+  it("会话过期：登录引导写明超过 30 天没用过", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount({
+      logged_in: false,
+      email: "me@example.com",
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "email",
+      session_expires_at: "2020-01-01T00:00:00Z",
+    });
+    renderHarness(bridge);
+    expect(
+      await screen.findByText("超过 30 天没有使用，请重新登录。"),
+    ).toBeTruthy();
+  });
+
+  it("设备身份：用通用登录说明，不误报过期", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    renderHarness(bridge);
+    expect(
+      await screen.findByText("用邮箱验证码登录，服务器与余额跟着账户走。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("超过 30 天没有使用，请重新登录。")).toBeNull();
   });
 });
 
@@ -339,25 +373,22 @@ describe("我的服务器 destination", () => {
     bridge.setAccount(LOGGED_OUT);
     renderHarness(bridge);
 
-    expect(await screen.findByRole("heading", { name: "先登录" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "登录后管理你的服务器" })).toBeTruthy();
     // 空态在舞台可用高度内垂直居中：容器带 --empty 修饰类。
     expect(document.querySelector(".myservers--empty")).not.toBeNull();
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
     expect(within(rail).getByText("我的服务器")).toBeTruthy();
-    expect(within(rail).getByText("0")).toBeTruthy();
-    // 空态与 CTA 只在中间，左栏不再给同义入口。
-    expect(within(rail).queryByText("登录后查看你的服务器")).toBeNull();
+    // 未登录左栏只留标题与一行提示，不渲染行、计数与任何按钮。
     expect(
-      within(rail).queryByRole("button", { name: "登录" }),
-    ).toBeNull();
+      within(rail).getByText("登录后这里会列出你的服务器。"),
+    ).toBeTruthy();
+    expect(within(rail).queryByRole("button")).toBeNull();
     expect(bridge.myServerList).not.toHaveBeenCalled();
 
     expect(
-      screen.getByText(
-        "登录后可以买服务器；装好后节点会出现在这里，也能直接用来连接。",
-      ),
+      screen.getByText("用邮箱验证码登录，服务器与余额跟着账户走。"),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录 / 注册" }));
     const dialog = await screen.findByRole("dialog", { name: "登录我的服务器" });
     fireEvent.change(within(dialog).getByLabelText("邮箱"), {
       target: { value: "me@example.com" },
@@ -457,6 +488,7 @@ describe("我的服务器 destination", () => {
         catalog={CATALOG}
         selected={server()}
         account={ACCOUNT}
+        signedIn={true}
         accountLoaded={true}
         accountError={false}
         loading={false}
@@ -684,9 +716,11 @@ describe("空态里的免费节点说明", () => {
       trial: { state: "active", seedNodeCount: 2, expiresAt: daysFromNow(6.5) },
     });
 
-    await screen.findByRole("heading", { name: "先登录" });
+    await screen.findByRole("heading", { name: "登录后管理你的服务器" });
     expect(screen.getByText("还有 2 个免费节点，6 天后到期。")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "登录 / 注册" }),
+    ).toBeTruthy();
   });
 
   it("空态旁注「去控制台」只切目的地：不发起连接", async () => {

@@ -7,6 +7,12 @@ import { randomId, sha256B64u, signAccessToken, verifyAccessToken, b64u, randomB
 const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_SECONDS = 30 * 24 * 3600;
 const REGISTER_LIMIT_PER_HOUR = 10;
+/**
+ * 轮换宽限：服务端已换发、客户端还没来得及落盘（崩溃、双开、响应丢失）时，
+ * 旧 refresh 在宽限内再出现一次不算重放。超出宽限、或出现比它更早的令牌，
+ * 仍然整族作废——宽限只覆盖「最近一次轮换」，不是关掉重放检测。
+ */
+const REFRESH_ROTATION_GRACE_MS = 60_000;
 
 export interface AuthEnv {
   DB: D1Database;
@@ -39,6 +45,15 @@ interface TokenBundle {
   /** 登录态：device = 匿名设备账户，email = 邮箱账户。 */
   account_kind: string;
   email: string | null;
+}
+
+interface RefreshRow {
+  hash: string;
+  device_id: string;
+  expires_at: number;
+  used_at: number | null;
+  revoked_at: number | null;
+  redeemed_count: number;
 }
 
 function isBase64Url(value: unknown, min = 20, max = 128): value is string {
@@ -191,6 +206,71 @@ async function register(request: Request, env: AuthEnv): Promise<Response> {
   }
 }
 
+/** 同一设备上是否有比 `usedAt` 更晚被用掉的令牌：有就说明这一枚是更早的旧令牌。 */
+async function hasNewerUsedToken(env: AuthEnv, deviceId: string, usedAt: number): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT hash FROM refresh_tokens WHERE device_id = ? AND used_at IS NOT NULL AND used_at > ? LIMIT 1",
+  )
+    .bind(deviceId, usedAt)
+    .first<{ hash: string }>();
+  return row !== null;
+}
+
+/**
+ * 宽限期赎回：刚被轮换掉、但客户端可能没落盘的旧令牌再出现时，补发一套令牌，
+ * 不再整族作废。只认「最近一次轮换」且在 `REFRESH_ROTATION_GRACE_MS` 内；
+ * 不满足条件返回 `null`，由调用方按重放处理。
+ *
+ * **一枚旧令牌只兑现一次**（`redeemed_count`）。双开时两路请求各补发一套等价于
+ * 两枚各自用掉一次，但同一枚令牌被第三次拿来兑换就必须整族作废——否则宽限
+ * 会变成「60 秒内无限续命」，重放检测等于关掉。
+ *
+ * 只存哈希，拿不回上一次签发的那串明文，所以这里补发的是新的一套；
+ * 同族在宽限内可能短暂存在两条有效链。
+ */
+async function redeemWithinGrace(
+  env: AuthEnv,
+  row: RefreshRow,
+  device: Device,
+): Promise<Response | null> {
+  if (row.revoked_at !== null || row.used_at === null) return null;
+  const now = Date.now();
+  if (now - row.used_at > REFRESH_ROTATION_GRACE_MS) return null;
+  if (row.expires_at <= now) return null;
+  if (await hasNewerUsedToken(env, row.device_id, row.used_at)) return null;
+
+  // 条件更新就是限次的锁：并发两路只有一路能把计数从 0 加到 1，另一路拿到 0 行。
+  const claimed = await env.DB.prepare(
+    "UPDATE refresh_tokens SET redeemed_count = redeemed_count + 1 WHERE hash = ? AND redeemed_count < 1 AND revoked_at IS NULL",
+  )
+    .bind(row.hash)
+    .run();
+  if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) return null;
+
+  try {
+    return json(await issueTokens(env, device.id, device.account_id));
+  } catch {
+    // 签发失败不该吃掉这一次宽限：退回计数，下次还能再试。
+    await env.DB.prepare(
+      "UPDATE refresh_tokens SET redeemed_count = redeemed_count - 1 WHERE hash = ? AND redeemed_count > 0",
+    )
+      .bind(row.hash)
+      .run()
+      .catch(() => undefined);
+    return apiError("INTERNAL", "签发令牌失败", { reason: "signing_unavailable" });
+  }
+}
+
+/** 重放处理：整族作废，用户必须重新验证设备。 */
+async function revokeFamily(env: AuthEnv, deviceId: string): Promise<Response> {
+  await env.DB.prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL")
+    .bind(Date.now(), deviceId)
+    .run();
+  return apiError("UNAUTHENTICATED", "刷新令牌已失效，请重新验证设备", {
+    reason: "refresh_reused",
+  });
+}
+
 async function refresh(request: Request, env: AuthEnv): Promise<Response> {
   let body: { refresh_token?: unknown };
   try {
@@ -205,7 +285,7 @@ async function refresh(request: Request, env: AuthEnv): Promise<Response> {
   const hash = await sha256B64u(body.refresh_token);
   const row = await env.DB.prepare("SELECT * FROM refresh_tokens WHERE hash = ?")
     .bind(hash)
-    .first<{ device_id: string; expires_at: number; used_at: number | null; revoked_at: number | null }>();
+    .first<RefreshRow>();
 
   if (!row) return apiError("UNAUTHENTICATED", "刷新令牌无效", { reason: "refresh_unknown" });
 
@@ -216,14 +296,14 @@ async function refresh(request: Request, env: AuthEnv): Promise<Response> {
     return apiError("FORBIDDEN", "这台设备已被停用", { reason: "device_revoked" });
   }
 
-  // 已用过或已作废的令牌再次出现，只可能是被复制出去：整族作废。
-  if (row.used_at !== null || row.revoked_at !== null) {
-    await env.DB.prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL")
-      .bind(Date.now(), row.device_id)
-      .run();
-    return apiError("UNAUTHENTICATED", "刷新令牌已失效，请重新验证设备", {
-      reason: "refresh_reused",
-    });
+  // 已作废的令牌永不放行：只可能是被复制出去，整族作废。
+  if (row.revoked_at !== null) return revokeFamily(env, row.device_id);
+
+  // 已被轮换掉、但客户端没落盘（崩溃 / 双开 / 响应丢失）：宽限内补发一套，
+  // 不把用户踢下线；超出宽限或更早的令牌仍按重放处理。
+  if (row.used_at !== null) {
+    const redeemed = await redeemWithinGrace(env, row, device);
+    return redeemed ?? revokeFamily(env, row.device_id);
   }
 
   if (row.expires_at <= Date.now()) {
@@ -232,19 +312,19 @@ async function refresh(request: Request, env: AuthEnv): Promise<Response> {
 
   const usedAt = Date.now();
   // 条件更新就是这次轮换的锁：两个并发请求只有一个能把 used_at 从 NULL 改掉，
-  // 另一个拿到 0 行、按重放处理。先读后无条件写会让并发两路各签发一套新令牌。
+  // 另一个拿到 0 行。抢不到不代表一定是攻击——双开就是两个实例同时用同一枚
+  // 令牌——所以先看宽限，抢不到且不满足宽限才按重放处理。
   const claimed = await env.DB.prepare(
     "UPDATE refresh_tokens SET used_at = ? WHERE hash = ? AND used_at IS NULL AND revoked_at IS NULL",
   )
     .bind(usedAt, hash)
     .run();
   if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
-    await env.DB.prepare("UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL")
-      .bind(usedAt, row.device_id)
-      .run();
-    return apiError("UNAUTHENTICATED", "刷新令牌已失效，请重新验证设备", {
-      reason: "refresh_reused",
-    });
+    const current = await env.DB.prepare("SELECT * FROM refresh_tokens WHERE hash = ?")
+      .bind(hash)
+      .first<RefreshRow>();
+    const redeemed = current ? await redeemWithinGrace(env, current, device) : null;
+    return redeemed ?? revokeFamily(env, row.device_id);
   }
 
   try {

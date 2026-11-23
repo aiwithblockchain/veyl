@@ -171,6 +171,16 @@ impl Tool for MyServersTool {
     }
 
     async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        // 设备身份 / 会话过期时没有「我的服务器」：要求用户先登录，不拿空列表冒充。
+        if !crate::control_plane::auth::account_state().logged_in {
+            let error = AivpnError::new("PRECONDITION_FAILED", "需要先登录才能查看自己的服务器")
+                .with_details(json!({ "reason": "auth_required" }));
+            return envelope::finish(
+                ctx,
+                "MyServers",
+                ToolOutcome::fail(error).with_changed(Changed::None),
+            );
+        }
         let outcome = match self.services.my_servers().await {
             Ok(data) => {
                 let original: Vec<Value> = data

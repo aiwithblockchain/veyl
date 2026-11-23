@@ -821,6 +821,8 @@ export interface MyServerAccount {
   account_id: string | null;
   device_id: string | null;
   account_kind: "device" | "email" | null;
+  /** 本地 refresh 会话到期时刻（ISO 8601，2.60.0）；未登录为 null。 */
+  session_expires_at: string | null;
 }
 
 /** 发验证码的结果（2.27.0）。 */

@@ -12,8 +12,9 @@ import tombstoneDismissSql from "../../migrations/0008_tombstone_dismiss.sql?raw
 import mobileTokensSql from "../../migrations/0009_mobile_tokens.sql?raw";
 import nodeAgentSql from "../../migrations/0010_node_agent.sql?raw";
 import issuesSql from "../../migrations/0011_issues.sql?raw";
+import refreshGraceSql from "../../migrations/0012_refresh_grace.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}\n${refreshGraceSql}`;
 
 interface TableShape {
   columns: Set<string>;

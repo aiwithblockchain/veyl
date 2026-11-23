@@ -207,6 +207,7 @@ function prepare(servers: MyServer[] = []) {
     account_id: "acct_1",
     device_id: "dev_1",
     account_kind: "email",
+    session_expires_at: null,
   });
   vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
     balance_cents: 1000,
@@ -652,6 +653,7 @@ describe("设备 / 账户被停用的出路", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "device",
+      session_expires_at: null,
     });
 
     render(<App />);
@@ -741,6 +743,7 @@ describe("设备 / 账户被停用的出路", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "device",
+      session_expires_at: null,
     });
 
     render(<App />);
@@ -775,6 +778,7 @@ describe("设备 / 账户被停用的出路", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "device",
+      session_expires_at: null,
     });
     vi.spyOn(bridge, "myServerLoginStart").mockResolvedValue({
       sent: true,
@@ -786,6 +790,7 @@ describe("设备 / 账户被停用的出路", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
 
     render(<App />);
@@ -1339,13 +1344,14 @@ describe("节点诊断入口", () => {
   });
 });
 
-describe("左栏「在手机上使用」入口", () => {
+describe("左栏门禁", () => {
   const DEVICE_ACCOUNT = {
     logged_in: false,
     email: null,
     account_id: "acct_1",
     device_id: "dev_1",
     account_kind: "device" as const,
+    session_expires_at: null,
   };
 
   async function openServers() {
@@ -1355,34 +1361,83 @@ describe("左栏「在手机上使用」入口", () => {
     return screen.findByRole("complementary", { name: "服务器列表" });
   }
 
-  it("设备身份账号（logged_in=false）有就绪服务器时仍出现入口，打开后引导登录", async () => {
+  it("已登录且有就绪服务器：左栏有服务器行与「在手机上使用」", async () => {
+    prepare([SERVER]);
+
+    const rail = await openServers();
+    expect(
+      within(rail).getByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    ).toBeTruthy();
+    expect(rail.querySelector(".rail__action-row")).toBeTruthy();
+  }, 15_000);
+
+  it("设备身份（未登录）：左栏只留标题与提示，没有服务器行与手机入口", async () => {
     prepare([SERVER]);
     vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
-    vi.spyOn(bridge, "mobileExportGet").mockResolvedValue({
-      state: "login_required",
+
+    const rail = await openServers();
+    expect(await screen.findByText("登录后这里会列出你的服务器。")).toBeTruthy();
+    expect(within(rail).queryByRole("button")).toBeNull();
+    expect(rail.querySelector(".rail__action-row")).toBeNull();
+    // 中间是登录引导，不是服务器详情。
+    expect(
+      await screen.findByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeTruthy();
+    // 未登录不发账户命令。
+    expect(bridge.myServerList).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("会话已过期：即便 logged_in=true 也按未登录处理", async () => {
+    prepare([SERVER]);
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      ...DEVICE_ACCOUNT,
+      logged_in: true,
+      email: "me@example.com",
+      account_kind: "email",
+      session_expires_at: "2020-01-01T00:00:00Z",
     });
 
     const rail = await openServers();
-    const row = rail.querySelector<HTMLButtonElement>(".rail__action-row");
-    expect(row).toBeTruthy();
-    expect(row?.textContent).toContain("在手机上使用");
-
-    fireEvent.click(row as HTMLButtonElement);
-    const dialog = await screen.findByRole("dialog", { name: "在手机上使用" });
-    // 未登录不是空白弹层：展开一行后走 login_required 的引导。
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: /^sing-box/ }),
-    );
-    expect(await within(dialog).findByText("先登录。")).toBeTruthy();
+    expect(await screen.findByText("登录后这里会列出你的服务器。")).toBeTruthy();
+    expect(rail.querySelector(".rail__action-row")).toBeNull();
+    expect(bridge.myServerList).not.toHaveBeenCalled();
   }, 15_000);
 
-  it("没有就绪服务器时不出现入口", async () => {
+  it("已登录但没有就绪服务器：不出现手机入口", async () => {
     prepare([
       { ...SERVER, state: "creating", node_id: null, local_node_id: null },
     ]);
-    vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
 
     const rail = await openServers();
     expect(rail.querySelector(".rail__action-row")).toBeNull();
+  }, 15_000);
+});
+
+describe("建机入口的登录门禁", () => {
+  it("设备身份点「新建节点」：弹登录层，不打开向导", async () => {
+    prepare([]);
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+      logged_in: false,
+      email: null,
+      account_id: "acct_1",
+      device_id: "dev_1",
+      account_kind: "device",
+      session_expires_at: null,
+    });
+    vi.spyOn(bridge, "configList").mockResolvedValue({
+      configs: [],
+      active_config_id: null,
+    });
+
+    render(<App />);
+    // 账户读完（导航显示未登录）再点，才走得到门禁分支。
+    await screen.findByRole("button", { name: "账户，未登录" });
+    fireEvent.click(await screen.findByRole("button", { name: /新建节点/ }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "登录我的服务器" }),
+    ).toBeTruthy();
+    // 建机向导的 <main aria-label="新建节点"> 不存在。
+    expect(document.querySelector('main[aria-label="新建节点"]')).toBeNull();
   }, 15_000);
 });

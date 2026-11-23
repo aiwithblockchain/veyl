@@ -31,6 +31,24 @@ async function renderApp(): Promise<HTMLElement> {
   return container;
 }
 
+/** 建机入口要求登录：在 render 之前把账户读成邮箱登录，并给钱包成功桩。 */
+function signInForWizard() {
+  vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+    logged_in: true,
+    email: "buyer@example.com",
+    account_id: "acct_1",
+    device_id: "dev_1",
+    account_kind: "email",
+    session_expires_at: null,
+  });
+  vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+    balance_cents: 5000,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  });
+}
+
 function seedCardConfig() {
   const config = {
     config_id: "cfg_stage",
@@ -673,6 +691,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("新建节点进入 new_node 舞台", async () => {
+    signInForWizard();
     await renderApp();
 
     fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
@@ -683,6 +702,18 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
   });
+
+  it("未登录点新建节点：弹登录，不打开向导", async () => {
+    await renderApp();
+    // 等账户读完（默认设备身份 = 未登录），再点建机入口。
+    await screen.findByRole("button", { name: "账户，未登录" });
+    fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "登录我的服务器" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
+  }, 15_000);
 
   it("切换 destination 不重置连接", async () => {
     const container = await renderApp();
@@ -818,6 +849,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("新建节点入口：无节点屏进入舞台，且不叠加我的服务器外壳", async () => {
+    signInForWizard();
     await renderApp();
     fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
 
@@ -836,6 +868,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("client 宿主：导航高亮仍在连接，Esc 与返回相同", async () => {
+    signInForWizard();
     await renderApp();
     fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
     await screen.findByRole("heading", { name: "新建节点" });
@@ -853,6 +886,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("试用到期屏也能进入新建节点舞台", async () => {
+    signInForWizard();
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);
     await screen.findByRole("main", { name: "试用已到期" });
@@ -864,6 +898,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("新建节点返回原处，再进来保留已选", async () => {
+    signInForWizard();
     await renderApp();
     fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
     await screen.findByRole("heading", { name: "新建节点" });
@@ -896,6 +931,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("新建节点返回后，从到期屏进入也回到到期屏", async () => {
+    signInForWizard();
     localStorage.setItem("veyl.mock.trial", "expired");
     render(<App />);
     await screen.findByRole("main", { name: "试用已到期" });
@@ -907,6 +943,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("创建前余额不足：就地给去充值，不发起下单", async () => {
+    signInForWizard();
     await renderApp();
     const create = vi.spyOn(bridge, "myServerCreate");
     vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
@@ -926,6 +963,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("让 AI 帮我选只发消息，不建机", async () => {
+    signInForWizard();
     await renderApp();
     const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
       requestId: "req_ai_pick",
@@ -1132,6 +1170,7 @@ describe("三区外壳与连接舞台", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
     vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
       balance_cents: 1230,
@@ -1166,6 +1205,7 @@ describe("三区外壳与连接舞台", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
     vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
       balance_cents: 1230,
@@ -1180,6 +1220,7 @@ describe("三区外壳与连接舞台", () => {
       account_id: null,
       device_id: "dev_1",
       account_kind: "device",
+      session_expires_at: null,
     });
 
     await renderApp();
@@ -1192,6 +1233,7 @@ describe("三区外壳与连接舞台", () => {
   }, 15_000);
 
   it("stage-select：舞台没开忽略；开了只覆盖非 null 字段并压过手动选择", async () => {
+    signInForWizard();
     await renderApp();
     const emitSelect = (region: string | null, plan: string | null) => {
       act(() => {
@@ -1255,6 +1297,7 @@ describe("无节点时连接屏的登录提示", () => {
       account_id: "acct_1",
       device_id: "dev_1",
       account_kind: "email",
+      session_expires_at: null,
     });
 
     await renderApp();
