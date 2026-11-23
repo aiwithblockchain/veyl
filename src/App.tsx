@@ -438,9 +438,12 @@ export default function App() {
     active: destination === "servers",
     rootSignal: serversRootSignal,
   });
-  /** 左栏快捷行：已登录、列表可读、且至少一台服务器节点已就绪。 */
+  /**
+   * 左栏快捷行：列表可读且至少一台服务器节点已就绪。
+   * 不要求邮箱登录：设备身份账号 logged_in 为 false，但同样有就绪服务器；
+   * 「在手机上使用」对所有用户开放（设置页同一入口一直如此），未登录时弹层引导登录。
+   */
   const showRailMobileExport =
-    myServers.loggedIn &&
     !myServers.loading &&
     !myServers.error &&
     hasReadyServer(myServers.servers);

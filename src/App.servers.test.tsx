@@ -1338,3 +1338,51 @@ describe("节点诊断入口", () => {
     expect(screen.queryByText("配置已更新，重新连接后生效")).toBeNull();
   });
 });
+
+describe("左栏「在手机上使用」入口", () => {
+  const DEVICE_ACCOUNT = {
+    logged_in: false,
+    email: null,
+    account_id: "acct_1",
+    device_id: "dev_1",
+    account_kind: "device" as const,
+  };
+
+  async function openServers() {
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    return screen.findByRole("complementary", { name: "服务器列表" });
+  }
+
+  it("设备身份账号（logged_in=false）有就绪服务器时仍出现入口，打开后引导登录", async () => {
+    prepare([SERVER]);
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
+    vi.spyOn(bridge, "mobileExportGet").mockResolvedValue({
+      state: "login_required",
+    });
+
+    const rail = await openServers();
+    const row = rail.querySelector<HTMLButtonElement>(".rail__action-row");
+    expect(row).toBeTruthy();
+    expect(row?.textContent).toContain("在手机上使用");
+
+    fireEvent.click(row as HTMLButtonElement);
+    const dialog = await screen.findByRole("dialog", { name: "在手机上使用" });
+    // 未登录不是空白弹层：展开一行后走 login_required 的引导。
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^sing-box/ }),
+    );
+    expect(await within(dialog).findByText("先登录。")).toBeTruthy();
+  }, 15_000);
+
+  it("没有就绪服务器时不出现入口", async () => {
+    prepare([
+      { ...SERVER, state: "creating", node_id: null, local_node_id: null },
+    ]);
+    vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
+
+    const rail = await openServers();
+    expect(rail.querySelector(".rail__action-row")).toBeNull();
+  }, 15_000);
+});
