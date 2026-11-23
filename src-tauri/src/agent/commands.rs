@@ -671,8 +671,14 @@ pub async fn my_server_login_verify(email: String, code: String) -> Result<Value
 }
 
 /// 只读本地登录态（仅 UI）：不联网、不刷新令牌。
+///
+/// 如果最近 60 秒内有控制面请求在传输层失败（DNS / 连接 / 超时），返回错误而不是
+/// 「未登录」：界面据此显示「控制面不可达 / 检查网络」，不能把用户推回登录引导。
 #[tauri::command]
 pub async fn my_server_account() -> Result<Value, Value> {
+    if let Some(error) = crate::control_plane::auth::control_plane_unreachable() {
+        return Err(error.envelope());
+    }
     Ok(json!(crate::control_plane::auth::account_state()))
 }
 

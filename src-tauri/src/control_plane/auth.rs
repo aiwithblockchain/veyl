@@ -13,6 +13,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use super::error::{self, CpError};
@@ -265,9 +266,13 @@ async fn send_json(
         .await
         .map_err(|error| {
             super::client::warn_transport("auth", "POST", path, &error);
+            // 登录 / 刷新 / 注册同样会反映控制面可达性：传输失败记不可达。
+            note_control_plane_unreachable(error.is_timeout());
             CpError::network(error.is_timeout())
         })?;
     let status = response.status().as_u16();
+    // 拿到 HTTP 响应（含 401 / 5xx）就说明控制面可达。
+    note_control_plane_reachable();
     let text = response.text().await.unwrap_or_default();
     Ok((status, text))
 }
@@ -475,6 +480,62 @@ pub fn account_state() -> AccountState {
         load_tokens(),
         existing_device().map(|device| device.device_id),
     )
+}
+
+/// 控制面可达性结论：0 = 可达 / 未知，1 = 网络类失败，2 = 超时。
+///
+/// 只用于把「连不上」和「未登录」分开（`my_server_account`）。它不参与登录态
+/// 推导：网络错误永远不改 `logged_in`，也不清本地令牌。
+static CONTROL_PLANE_STATE: AtomicU8 = AtomicU8::new(STATE_REACHABLE);
+static CONTROL_PLANE_STATE_AT: AtomicI64 = AtomicI64::new(0);
+const STATE_REACHABLE: u8 = 0;
+const STATE_NETWORK: u8 = 1;
+const STATE_TIMEOUT: u8 = 2;
+/// 超过这个时间没有新请求，就不再拿旧的失败结论吓用户。
+const UNREACHABLE_TTL_MS: i64 = 60_000;
+
+pub(crate) fn note_control_plane_reachable() {
+    CONTROL_PLANE_STATE.store(STATE_REACHABLE, Ordering::Relaxed);
+    CONTROL_PLANE_STATE_AT.store(now_ms(), Ordering::Relaxed);
+}
+
+pub(crate) fn note_control_plane_unreachable(timeout: bool) {
+    CONTROL_PLANE_STATE.store(
+        if timeout {
+            STATE_TIMEOUT
+        } else {
+            STATE_NETWORK
+        },
+        Ordering::Relaxed,
+    );
+    CONTROL_PLANE_STATE_AT.store(now_ms(), Ordering::Relaxed);
+}
+
+/// 最近一次请求的「不可达」结论（60 秒内有效）。`None` = 可达或还没请求过。
+pub fn control_plane_unreachable() -> Option<CpError> {
+    unreachable_error(
+        CONTROL_PLANE_STATE.load(Ordering::Relaxed),
+        CONTROL_PLANE_STATE_AT.load(Ordering::Relaxed),
+        now_ms(),
+    )
+}
+
+/// 测试用：清掉进程级可达性结论，避免与并行用例互相影响。
+#[cfg(test)]
+pub(crate) fn reset_control_plane_state_for_test() {
+    CONTROL_PLANE_STATE.store(STATE_REACHABLE, Ordering::Relaxed);
+    CONTROL_PLANE_STATE_AT.store(0, Ordering::Relaxed);
+}
+
+/// 测试用：串起所有读写上面两个原子量的用例（auth 与 client 的测试共用）。
+#[cfg(test)]
+pub(crate) static CONTROL_PLANE_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn unreachable_error(state: u8, at: i64, now: i64) -> Option<CpError> {
+    if state == STATE_REACHABLE || now - at > UNREACHABLE_TTL_MS {
+        return None;
+    }
+    Some(CpError::network(state == STATE_TIMEOUT))
 }
 
 /// 发邮箱验证码（`POST /v1/auth/email/start`）。是否注册过同一返回，防枚举。
@@ -710,8 +771,10 @@ pub async fn ensure_access(
                     }
                 }
                 Err(error) => {
+                    // 网络错误 / 5xx / 429：本地令牌与登录态都保留，只把错误上报。
                     log::debug!(
-                        "鉴权：刷新失败（致命） reason={} retryable={}",
+                        "鉴权：刷新失败，保留本地令牌 code={} reason={} retryable={}",
+                        error.code,
                         error.reason().unwrap_or("-"),
                         error.retryable
                     );
@@ -880,6 +943,77 @@ mod tests {
         assert_eq!(
             state.session_expires_at.as_deref(),
             Some("2099-01-01T00:00:00Z")
+        );
+    }
+
+    /// 控制面不可达只影响「显示成什么错误」，不参与登录态推导。
+    #[test]
+    fn an_unreachable_control_plane_is_reported_as_an_error() {
+        let now = now_ms();
+        assert!(unreachable_error(STATE_REACHABLE, now, now).is_none());
+
+        let network = unreachable_error(STATE_NETWORK, now, now).unwrap();
+        assert_eq!(network.code, "UPSTREAM_ERROR");
+        assert_eq!(network.reason(), Some("provider_unavailable"));
+        assert!(network.retryable);
+
+        let timeout = unreachable_error(STATE_TIMEOUT, now, now).unwrap();
+        assert_eq!(timeout.code, "TIMEOUT");
+        assert_eq!(timeout.reason(), Some("timeout"));
+        assert!(timeout.retryable);
+
+        // 过了 TTL 的旧结论不再把界面顶成错误态。
+        assert!(unreachable_error(STATE_NETWORK, now - UNREACHABLE_TTL_MS - 1, now).is_none());
+    }
+
+    /// 本地桩：读到请求头结束就回 200 `{}`。
+    fn spawn_json_stub() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                let body = "{}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    /// 登录 / 刷新 / 注册通道也要更新可达性：成功一次就清掉「不可达」。
+    #[test]
+    fn a_successful_auth_request_clears_the_unreachable_state() {
+        let _guard = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let addr = spawn_json_stub();
+        note_control_plane_unreachable(false);
+        assert!(control_plane_unreachable().is_some());
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (status, _) = runtime
+            .block_on(send_json(
+                &http,
+                &format!("http://{addr}/v1/auth/refresh"),
+                "/v1/auth/refresh",
+                &json!({}),
+            ))
+            .unwrap();
+        assert_eq!(status, 200);
+        assert!(
+            control_plane_unreachable().is_none(),
+            "成功的 auth 请求必须清掉「不可达」"
         );
     }
 

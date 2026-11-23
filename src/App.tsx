@@ -3032,6 +3032,8 @@ export default function App() {
           loading={myServers.loading}
           catalog={myServers.catalog}
           error={myServers.error}
+          accountError={myServers.accountError}
+          catalogError={myServers.catalogError}
           retryNotice={myServers.retryNotice}
           disabled={myServers.identityProblem !== null || newNodeOpen}
           compact={shell.mode === "drawer"}
@@ -3047,9 +3049,7 @@ export default function App() {
           }
           onGoConnect={() => changeDestination("client")}
           signedIn={
-            !myServers.accountLoaded ||
-            myServers.accountError ||
-            myServers.loggedIn
+            !myServers.accountLoaded || myServers.loggedIn
           }
           showMobile={showRailMobileExport}
           onMobile={openMobileExport}
@@ -3119,6 +3119,7 @@ export default function App() {
           signedIn={myServers.loggedIn}
           accountLoaded={myServers.accountLoaded}
           accountError={myServers.accountError}
+          catalogError={myServers.catalogError}
           loading={myServers.loading}
           error={myServers.error}
           retrying={myServers.retrying}
@@ -3398,6 +3399,8 @@ export default function App() {
         onSyncNow={() => void serverSync.syncNow()}
         syncBusy={serverSync.busy}
         lastSyncedAt={serverSync.lastSyncedAt}
+        syncResult={serverSync.lastResult}
+        syncResultAt={serverSync.lastResultAt}
         onOpenMobileExport={openMobileExport}
       />
 

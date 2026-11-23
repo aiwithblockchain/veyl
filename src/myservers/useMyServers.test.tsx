@@ -1535,3 +1535,188 @@ describe("未登录不发账户命令", () => {
     expect(bridge.myServerList).not.toHaveBeenCalled();
   });
 });
+
+describe("进入服务器页的静默重读", () => {
+  const LOGGED_OUT: MyServerAccount = {
+    logged_in: false,
+    email: null,
+    account_id: null,
+    device_id: null,
+    account_kind: null,
+    session_expires_at: null,
+  };
+
+  it("进入页面时网络失败：未登录态翻成错误态，且不落骨架", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    vi.mocked(bridge.myServerAccount).mockResolvedValueOnce(LOGGED_OUT);
+
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await waitFor(() => expect(view.result.current.accountLoaded).toBe(true));
+    expect(view.result.current.loggedIn).toBe(false);
+
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    view.rerender({ active: true });
+
+    await waitFor(() => expect(view.result.current.accountError).toBe(true));
+    expect(view.result.current.catalogError).toBe(true);
+    // 静默：accountLoaded 不能被打回 false，否则页面会闪骨架。
+    expect(view.result.current.accountLoaded).toBe(true);
+  });
+
+  it("重试成功后回到登录引导", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    vi.mocked(bridge.myServerAccount).mockResolvedValueOnce(LOGGED_OUT);
+
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await waitFor(() => expect(view.result.current.accountLoaded).toBe(true));
+
+    vi.mocked(bridge.myServerAccount)
+      .mockRejectedValueOnce({ code: "NETWORK", message: "" })
+      .mockResolvedValueOnce(LOGGED_OUT);
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    view.rerender({ active: true });
+    await waitFor(() => expect(view.result.current.accountError).toBe(true));
+
+    await act(async () => {
+      await view.result.current.refreshAccount();
+    });
+
+    expect(view.result.current.accountError).toBe(false);
+    expect(view.result.current.catalogError).toBe(false);
+    expect(view.result.current.loggedIn).toBe(false);
+    expect(view.result.current.accountLoaded).toBe(true);
+  });
+
+  it("已登录进入页面：重读失败不闪骨架，列表保留", async () => {
+    const list = { current: [SERVER_A] };
+    const bridge = makeBridge(list);
+
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await waitFor(() => expect(view.result.current.loading).toBe(false));
+    expect(view.result.current.servers).toHaveLength(1);
+
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    view.rerender({ active: true });
+
+    await waitFor(() => expect(view.result.current.accountError).toBe(true));
+    expect(view.result.current.accountLoaded).toBe(true);
+    expect(view.result.current.servers).toHaveLength(1);
+  });
+
+  it("登录成功后清掉账户与目录的错误标记", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    vi.mocked(bridge.myServerAccount).mockResolvedValueOnce(LOGGED_OUT);
+
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await waitFor(() => expect(view.result.current.accountLoaded).toBe(true));
+
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    view.rerender({ active: true });
+    await waitFor(() => expect(view.result.current.accountError).toBe(true));
+    await waitFor(() => expect(view.result.current.catalogError).toBe(true));
+
+    await act(async () => {
+      await view.result.current.loginVerify("me@example.com", "123456");
+    });
+
+    expect(view.result.current.loggedIn).toBe(true);
+    expect(view.result.current.accountError).toBe(false);
+    expect(view.result.current.catalogError).toBe(false);
+  });
+
+  it("登出成功后清掉账户与目录的错误标记", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+
+    const view = renderHook(
+      ({ active }: { active: boolean }) =>
+        useMyServers(bridge, { active, rootSignal: 0 }),
+      { initialProps: { active: false } },
+    );
+    await waitFor(() => expect(view.result.current.loggedIn).toBe(true));
+
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    view.rerender({ active: true });
+    await waitFor(() => expect(view.result.current.accountError).toBe(true));
+    await waitFor(() => expect(view.result.current.catalogError).toBe(true));
+
+    await act(async () => {
+      await view.result.current.logout();
+    });
+
+    expect(view.result.current.loggedIn).toBe(false);
+    expect(view.result.current.accountError).toBe(false);
+    expect(view.result.current.catalogError).toBe(false);
+  });
+
+  it("目录请求乱序：迟到的失败不把已到手的新目录翻成错误", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    let rejectFirst: (error: unknown) => void = () => {};
+    vi.mocked(bridge.myServerCatalog).mockImplementationOnce(
+      () => new Promise((_, reject) => (rejectFirst = reject)) as never,
+    );
+
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: false, rootSignal: 0 }),
+    );
+    // 挂载时第一次目录请求挂住；第二次（重读账户）正常返回。
+    await act(async () => {
+      await view.result.current.refreshAccount();
+    });
+    expect(view.result.current.catalog).not.toBeNull();
+
+    await act(async () => {
+      rejectFirst({ code: "UPSTREAM_ERROR", details: { reason: "network" } });
+      await Promise.resolve();
+    });
+    expect(view.result.current.catalog).not.toBeNull();
+    expect(view.result.current.catalogError).toBe(false);
+  });
+});

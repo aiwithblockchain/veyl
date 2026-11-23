@@ -152,6 +152,15 @@ impl ControlPlane {
         })
     }
 
+    /// 测试用：指向本地桩，不读环境变量。
+    #[cfg(test)]
+    fn with_base_url(base_url: String) -> Self {
+        Self {
+            base_url,
+            http: http_client(Duration::from_secs(2)).unwrap(),
+        }
+    }
+
     pub async fn request(
         &self,
         method: Method,
@@ -268,6 +277,8 @@ impl ControlPlane {
             .await
             .map_err(|error| {
                 warn_transport("api", &method_label, path, &error);
+                // 只有传输层失败（DNS / 连接 / 超时）才算「控制面不可达」。
+                auth::note_control_plane_unreachable(error.is_timeout());
                 transport_error(error)
             })?;
         if let Some(length) = response.content_length() {
@@ -276,15 +287,19 @@ impl ControlPlane {
             }
         }
         let status = response.status().as_u16();
+        // 拿到 HTTP 响应就说明控制面可达——5xx 也是「可达但服务出错」，
+        // 不能判成「连不上 / 检查网络」。
+        auth::note_control_plane_reachable();
         log::debug!(
             "控制面响应 method={method_label} path={} status={status} elapsed_ms={}",
             log_path(path),
             started.elapsed().as_millis()
         );
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| transport_error(error))?;
+        let bytes = response.bytes().await.map_err(|error| {
+            // 读体失败是传输层问题，回到不可达。
+            auth::note_control_plane_unreachable(error.is_timeout());
+            transport_error(error)
+        })?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(CpError::invalid_response("控制面响应过大"));
         }
@@ -342,6 +357,36 @@ mod tests {
         assert_eq!(decode(204, "").unwrap(), Value::Null);
         assert_eq!(decode(204, "  ").unwrap(), Value::Null);
         assert!(decode(500, "").is_err());
+    }
+
+    /// 5xx 说明控制面可达、只是服务出错；只有传输层失败才算不可达。
+    #[test]
+    fn a_server_error_is_reachable_but_a_transport_failure_is_not() {
+        // 可达性是进程级状态：与 auth 侧读写它的用例串行，避免互相翻转。
+        let _guard = crate::control_plane::auth::CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        const SERVER_ERROR: &[u8] =
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let stub = Stub::spawn(SERVER_ERROR);
+        stub.wait_ready();
+        let runtime = runtime();
+        crate::control_plane::auth::reset_control_plane_state_for_test();
+        let client = ControlPlane::with_base_url(format!("http://{}", stub.addr));
+        let _ = runtime.block_on(client.get_public("/v1/catalog"));
+        assert!(
+            crate::control_plane::auth::control_plane_unreachable().is_none(),
+            "5xx 不能判成控制面不可达"
+        );
+
+        // 传输层失败：连一个没人监听的端口。
+        crate::control_plane::auth::reset_control_plane_state_for_test();
+        let dead = ControlPlane::with_base_url("http://127.0.0.1:9".into());
+        let _ = runtime.block_on(dead.get_public("/v1/catalog"));
+        let error = crate::control_plane::auth::control_plane_unreachable()
+            .expect("传输层失败应当判成不可达");
+        assert_eq!(error.code, "UPSTREAM_ERROR");
+        assert_eq!(error.reason(), Some("provider_unavailable"));
     }
 
     #[test]

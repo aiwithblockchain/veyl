@@ -19,6 +19,8 @@ interface Props {
   signedIn: boolean;
   accountLoaded: boolean;
   accountError: boolean;
+  /** 目录请求失败（控制面可达性探针）；null 不算失败，用显式标记。 */
+  catalogError?: boolean;
   /** 服务器列表加载中。 */
   loading: boolean;
   /** 列表读取失败说明。 */
@@ -74,6 +76,7 @@ export function MyServersPage({
   signedIn,
   accountLoaded,
   accountError,
+  catalogError = false,
   loading,
   error,
   retrying,
@@ -130,7 +133,11 @@ export function MyServersPage({
       </button>
     </p>
   ) : null;
-  if (accountError && !account) {
+  // 控制面不可达时整页报错只在未登录时接管；已登录且账户还在，详情与缓存内容优先，
+  // 列表自己的读取失败交给列表错误态。否则「中间新建节点、整页却说连不上」会互相矛盾。
+  const unreachable =
+    (accountError || catalogError) && (!signedIn || account === null);
+  if (unreachable) {
     return (
       <div className="myservers myservers--empty">
         <section className="myservers__empty" role="alert">

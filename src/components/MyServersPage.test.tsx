@@ -234,6 +234,8 @@ function Harness({
         retryNotice={state.retryNotice}
         disabled={state.identityLost}
         signedIn={!state.accountLoaded || isSignedIn(state.account)}
+        accountError={state.accountError}
+        catalogError={state.catalogError}
         onSelect={state.select}
         onNew={state.openWizard}
       />
@@ -245,6 +247,7 @@ function Harness({
         signedIn={isSignedIn(state.account)}
         accountLoaded={state.accountLoaded}
         accountError={state.accountError}
+        catalogError={state.catalogError}
         loading={state.loading}
         error={state.error}
         retrying={state.retrying}
@@ -428,6 +431,194 @@ describe("我的服务器 destination", () => {
       await screen.findByRole("heading", { name: "新加坡 1 · DigitalOcean" }),
     ).toBeTruthy();
     expect(bridge.myServerList).toHaveBeenCalled();
+  });
+
+  it("账户读失败时优先显示错误态，不显示登录引导", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+
+    await screen.findByRole("heading", { name: "登录后管理你的服务器" });
+
+    // 控制面不可达：account 命令失败，本地还留着 logged_in=false 的旧账户。
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    await act(async () => {
+      await stateRef.current?.refreshAccount();
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    // 左栏同样给「连不上」，不写成登录提示。
+    expect(screen.getByText("连不上服务器，稍后再试")).toBeTruthy();
+    expect(screen.queryByText("登录后这里会列出你的服务器。")).toBeNull();
+
+    // 重试成功：清掉错误，回到原来的登录前空态。
+    await act(async () => {
+      await stateRef.current?.refreshAccount();
+    });
+    expect(
+      await screen.findByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeNull();
+  });
+
+  it("目录探针失败且未登录：显示控制面不可达，恢复后回到登录引导", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeNull();
+    expect(screen.getByText("连不上服务器，稍后再试")).toBeTruthy();
+    expect(stateRef.current?.catalogError).toBe(true);
+
+    // 重试同时重拉目录：目录恢复但确实未登录，回到登录引导。
+    await act(async () => {
+      await stateRef.current?.refreshAccount();
+    });
+    expect(
+      await screen.findByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeTruthy();
+    expect(stateRef.current?.catalogError).toBe(false);
+  });
+
+  it("目录 5xx（upstream_status）：控制面可达，未登录仍显示登录引导", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "upstream_status", status: 502 },
+    });
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeNull();
+    // 服务端错误不算「控制面不可达」，只记日志。
+    expect(stateRef.current?.catalogError).toBe(false);
+  });
+
+  it("已登录后账户重读失败：中间保留详情，左栏保留列表，不整页报错", async () => {
+    const bridge = makeBridge([
+      server({ server_id: "srv_1", name: "新加坡 1 · DigitalOcean" }),
+    ]);
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+    await screen.findByRole("heading", { name: "新加坡 1 · DigitalOcean" });
+
+    // 已登录，随后账户重读失败（断网）：不能把整页翻成错误态。
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    await act(async () => {
+      await stateRef.current?.refreshAccount();
+    });
+
+    expect(stateRef.current?.accountError).toBe(true);
+    expect(
+      screen.getByRole("heading", { name: "新加坡 1 · DigitalOcean" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeNull();
+    const rail = screen.getByRole("complementary", { name: "服务器列表" });
+    expect(
+      within(rail).getByRole("button", { name: /新加坡 1 · DigitalOcean/ }),
+    ).toBeTruthy();
+    expect(screen.queryByText("连不上服务器，稍后再试")).toBeNull();
+  });
+
+  it("断网错误态之后登录成功：错误态消失，进入已登录界面", async () => {
+    const bridge = makeBridge([]);
+    bridge.setAccount(LOGGED_OUT);
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeTruthy();
+    expect(stateRef.current?.accountError).toBe(true);
+    expect(stateRef.current?.catalogError).toBe(true);
+
+    await act(async () => {
+      await stateRef.current?.loginVerify("me@example.com", "123456");
+    });
+
+    expect(
+      screen.queryByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeNull();
+    expect(stateRef.current?.accountError).toBe(false);
+    expect(stateRef.current?.catalogError).toBe(false);
+    expect(
+      await screen.findByRole("heading", { name: "还没有服务器" }),
+    ).toBeTruthy();
+  });
+
+  it("断网错误态之后登出：回到登录引导，不残留错误态", async () => {
+    const bridge = makeBridge();
+    const stateRef: { current: ServersState | null } = { current: null };
+    render(<Harness bridge={bridge} stateRef={stateRef} />);
+    await screen.findByRole("heading", { name: "新加坡 1 · DigitalOcean" });
+
+    vi.mocked(bridge.myServerAccount).mockRejectedValueOnce({
+      code: "NETWORK",
+      message: "",
+    });
+    vi.mocked(bridge.myServerCatalog).mockRejectedValueOnce({
+      code: "UPSTREAM_ERROR",
+      details: { reason: "network" },
+    });
+    await act(async () => {
+      await stateRef.current?.refreshAccount();
+    });
+    expect(stateRef.current?.accountError).toBe(true);
+    expect(stateRef.current?.catalogError).toBe(true);
+
+    await act(async () => {
+      await stateRef.current?.logout();
+    });
+
+    expect(stateRef.current?.accountError).toBe(false);
+    expect(stateRef.current?.catalogError).toBe(false);
+    expect(
+      await screen.findByRole("heading", { name: "登录后管理你的服务器" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: "账户暂时读不到" }),
+    ).toBeNull();
   });
 
   it("已登录零台：左栏只留标题行，中间空态与新建入口", async () => {

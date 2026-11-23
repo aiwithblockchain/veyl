@@ -28,6 +28,7 @@ import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import type { MessageKey } from "../i18n";
 import { formatUsdCents } from "../myservers/labels";
+import { isSignedIn } from "../myservers/useMyServers";
 import type { WalletTrigger } from "../myservers/useMyServers";
 import { settingsConsultPrompt } from "../ai/settingsConsult";
 import { useFocusTrap } from "../ui/focus";
@@ -112,6 +113,9 @@ interface Props {
   onSyncIntervalChange?: (minutes: SyncIntervalMinutes) => void;
   onSyncNow?: () => void;
   syncBusy?: boolean;
+  /** 最近一次真正跑完的同步结果；换号后 App 会清空。 */
+  syncResult?: "ok" | "error" | null;
+  syncResultAt?: number | null;
   /** 间隔写库失败：在行内标一句「未保存」，不拦交互。 */
   syncIntervalUnsaved?: boolean;
   /** 最近一次成功同步的时刻（Unix 毫秒）；null = 尚未同步。 */
@@ -753,6 +757,8 @@ export function Settings({
   onSyncIntervalChange,
   onSyncNow,
   syncBusy = false,
+  syncResult = null,
+  syncResultAt = null,
   syncIntervalUnsaved = false,
   lastSyncedAt = null,
 }: Props) {
@@ -785,6 +791,12 @@ export function Settings({
   const [modeBusy, setModeBusy] = useState(false);
   const [modeError, setModeError] = useState<string | null>(null);
   const [scopeError, setScopeError] = useState<string | null>(null);
+  // 节点配置同步：未登录不发账户命令（§11）；手动同步的失败要留在行内。
+  // 账户还没读回来（null）不算未登录：按钮禁用、状态保持「尚未同步」。
+  const syncSignedOut = account !== null && !isSignedIn(account);
+  const syncAccountUnknown = account === null;
+  // 「刚刚同步」满一分钟后要自己变回时间：成功后按拍重算，分钟过了就不再排。
+  const [syncClock, setSyncClock] = useState(() => Date.now());
   const [seedInfo, setSeedInfo] = useState<SeedRefreshInfo | null>(defaultProfile);
   const coreUpgrade = useRuntimeUpgrade({
     bridge,
@@ -792,6 +804,12 @@ export function Settings({
     connected,
   });
   const tunHelper = useTunHelper({ bridge, enabled: open && section === "advanced" });
+  // 刚同步成功的一分钟内显示「刚刚同步」，之后退回准确时间。
+  useEffect(() => {
+    if (lastSyncedAt === null || syncClock - lastSyncedAt >= 60_000) return;
+    const timer = window.setTimeout(() => setSyncClock(Date.now()), 15_000);
+    return () => window.clearTimeout(timer);
+  }, [lastSyncedAt, syncClock]);
   const [providers, setProviders] = useState<LlmProvider[]>([]);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [providersLoading, setProvidersLoading] = useState(false);
@@ -1831,6 +1849,26 @@ export function Settings({
       })
     : null;
 
+  const startServerSync = () => {
+    if (!onSyncNow || syncSignedOut || syncAccountUnknown) return;
+    onSyncNow();
+  };
+
+  const syncFresh = lastSyncedAt !== null && syncClock - lastSyncedAt < 60_000;
+  // 进行中不改值槽：只有按钮写「同步中…」，值槽仍显示上一次成功的时间。
+  const syncStatusText = syncSignedOut
+    ? t("settings.sync.needLogin")
+    : lastSyncedAt === null
+      ? t("settings.sync.never")
+      : syncFresh
+        ? t("settings.sync.justNow")
+        : t("settings.sync.lastSynced", {
+            time: new Date(lastSyncedAt).toLocaleTimeString(
+              getLanguage() === "en" ? "en-US" : "zh-CN",
+              { hour: "2-digit", minute: "2-digit" },
+            ),
+          });
+
   if (!open) return null;
 
   return (
@@ -2327,17 +2365,18 @@ export function Settings({
                     {t("settings.sync.unsaved")}
                   </div>
                 ) : null}
+                {syncResult === "error" &&
+                syncResultAt !== null &&
+                !syncSignedOut &&
+                !syncBusy ? (
+                  <p className="settings-feedback settings-feedback--error" role="alert">
+                    {t("settings.sync.failed")}
+                  </p>
+                ) : null}
               </div>
               <div className="settings-row__aside">
-                <span className="settings-row__value">
-                  {lastSyncedAt === null
-                    ? t("settings.sync.never")
-                    : t("settings.sync.lastSynced", {
-                        time: new Date(lastSyncedAt).toLocaleTimeString(
-                          getLanguage() === "en" ? "en-US" : "zh-CN",
-                          { hour: "2-digit", minute: "2-digit" },
-                        ),
-                      })}
+                <span className="settings-row__value" aria-live="polite">
+                  {syncStatusText}
                 </span>
                 <select
                   className="settings-sync__select"
@@ -2363,10 +2402,11 @@ export function Settings({
                 <button
                   type="button"
                   className="btn btn--ghost"
-                  disabled={syncBusy || !onSyncNow}
-                  onClick={onSyncNow}
+                  disabled={syncBusy || !onSyncNow || syncSignedOut || syncAccountUnknown}
+                  aria-busy={syncBusy || undefined}
+                  onClick={startServerSync}
                 >
-                  {t("settings.sync.now")}
+                  {syncBusy ? t("settings.sync.busy") : t("settings.sync.now")}
                 </button>
               </div>
             </div>

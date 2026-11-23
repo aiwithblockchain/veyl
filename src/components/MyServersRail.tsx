@@ -24,6 +24,10 @@ interface Props {
   onGoConnect?: () => void;
   /** 登录态：未登录只留标题与一行提示，不渲染服务器行与「在手机上使用」。 */
   signedIn?: boolean;
+  /** 账户读失败（DNS / 网络 / 5xx）：左栏给「连不上」，不要写成登录提示。 */
+  accountError?: boolean;
+  /** 目录探针失败：未登录时同样按「控制面不可达」显示。 */
+  catalogError?: boolean;
   /** 已登录 + 至少一台节点就绪时，底部多一行「在手机上使用」。 */
   showMobile?: boolean;
   onMobile?: (trigger: HTMLElement) => void;
@@ -101,6 +105,8 @@ export function MyServersRail({
   trialHint = null,
   onGoConnect,
   signedIn = true,
+  accountError = false,
+  catalogError = false,
   showMobile = false,
   onMobile,
   onSync,
@@ -115,6 +121,7 @@ export function MyServersRail({
 
   // 未登录：不渲染服务器行、新建、同步与「在手机上使用」；只留标题与一行提示。
   if (!signedIn) {
+    const unreachable = Boolean(error) || accountError || catalogError;
     return (
       <aside
         id="config-rail"
@@ -124,17 +131,23 @@ export function MyServersRail({
         <div className="rail__section">
           <span className="rail__label">{t("rail.myServers")}</span>
         </div>
-        <p className="rail__empty-text myservers__rail-hint">
-          {t("rail.loginHint")}
+        <p
+          className="rail__empty-text myservers__rail-hint"
+          role={unreachable ? "alert" : undefined}
+        >
+          {unreachable ? t("rail.error") : t("rail.loginHint")}
         </p>
       </aside>
     );
   }
 
   /** 滚动区内容：错误 / 骨架 / 服务器行。 */
+  // 已登录时只认列表自己的读取失败；控制面不可达的整页错误留给中间区，
+  // 左栏有缓存行就保留，别和中间的错误页各说各话。
+  const listUnreachable = Boolean(error);
   const content = (
     <>
-      {error ? (
+      {listUnreachable ? (
         <>
           <div className="rail__placeholders" aria-hidden>
             {[0, 1, 2].map((row) => (

@@ -49,6 +49,60 @@ function renderRail(servers: MyServer[]) {
 }
 
 describe("服务器列表左栏", () => {
+  it("未登录且控制面不可达（账户或目录）：给「连不上」而不是登录提示", () => {
+    for (const props of [{ accountError: true }, { catalogError: true }]) {
+      const { container, unmount } = render(
+        <MyServersRail
+          servers={[]}
+          selectedId={null}
+          loading={false}
+          signedIn={false}
+          {...props}
+          onSelect={() => {}}
+          onNew={() => {}}
+        />,
+      );
+      expect(container.textContent).toContain("连不上服务器，稍后再试");
+      expect(container.textContent).not.toContain("登录后这里会列出你的服务器。");
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      unmount();
+    }
+  });
+
+  it("已登录但控制面不可达：仍显示已有服务器行", () => {
+    const { container } = render(
+      <MyServersRail
+        servers={[server()]}
+        selectedId={null}
+        loading={false}
+        accountError
+        catalogError
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+    expect(container.querySelector(".rail-server")).not.toBeNull();
+    expect(container.textContent).not.toContain("连不上服务器，稍后再试");
+  });
+
+  it("已登录零台且控制面不可达：左栏不写「连不上」，留给中间区", () => {
+    const { container } = render(
+      <MyServersRail
+        servers={[]}
+        selectedId={null}
+        loading={false}
+        accountError
+        catalogError
+        onSelect={() => {}}
+        onNew={() => {}}
+      />,
+    );
+    expect(container.textContent).not.toContain("连不上服务器，稍后再试");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // 仍保留标题行：左栏不是空白。
+    expect(container.textContent).toContain("我的服务器");
+  });
+
   it("日价用等宽数字：金额套 .num，「/天」在数字之外", () => {
     const { container } = render(
       <MyServersRail

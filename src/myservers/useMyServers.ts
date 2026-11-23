@@ -136,6 +136,8 @@ export interface LogoutResult {
 export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Options) {
   const [servers, setServers] = useState<MyServer[]>([]);
   const [catalog, setCatalog] = useState<MyServerCatalog | null>(null);
+  /** 目录请求失败：首屏也拿不到，用它区分「控制面不可达」与「未登录」。 */
+  const [catalogError, setCatalogError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [identityLostState, setIdentityLostState] = useState(false);
@@ -205,6 +207,10 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   /** 账户重读后比较用：回调里拿不到最新的 account state。 */
   const accountIdRef = useRef<string | null>(null);
   accountIdRef.current = account?.account_id ?? null;
+  /** 进入服务器页的静默重读：并发进入只发一轮。 */
+  const recheckInFlightRef = useRef(false);
+  /** 目录请求序号：只采信最新一次的结果，迟到的响应不能翻转已到手的目录。 */
+  const catalogSeqRef = useRef(0);
 
   /** 账户变了：余额、门禁时间、在途标记都属于上一个账户，整份清掉。 */
   const resetWallet = useCallback(() => {
@@ -233,6 +239,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setSelectedId(null);
     setDetail(null);
     setError(null);
+    // 登出是新的起点：上一次断网留下的错误标记不能带到登录引导上。
+    setAccountError(false);
+    setCatalogError(false);
     setLoading(false);
   }, [resetWallet]);
 
@@ -401,12 +410,44 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     }
   }, [bridge, markLoggedOut, applyServers]);
 
+  /** 目录请求同时充当控制面可达性探针：首屏与每次重试都重拉。 */
+  const readCatalog = useCallback(async (): Promise<boolean> => {
+    const seq = (catalogSeqRef.current += 1);
+    try {
+      const value = await bridge.myServerCatalog();
+      // 更晚的请求已经发出：这份结果无论成败都过期了。
+      if (seq !== catalogSeqRef.current) return false;
+      setCatalog(value);
+      setCatalogError(false);
+      return true;
+    } catch (err) {
+      if (seq !== catalogSeqRef.current) return false;
+      // 只有传输层失败才算「控制面不可达」；5xx / 429 说明控制面可达，
+      // 未登录就该走登录引导，别把服务端错误显示成「检查网络」。
+      const problem = toBridgeError(err);
+      const reason =
+        typeof problem.details?.reason === "string" ? problem.details.reason : "";
+      const unreachable =
+        problem.code === "TIMEOUT" ||
+        (problem.code === "UPSTREAM_ERROR" && reason === "network");
+      setCatalogError(unreachable);
+      if (!unreachable) {
+        uiLog(
+          "warn",
+          `catalog failed code=${problem.code} reason=${reason || "none"}`,
+        );
+      }
+      return false;
+    }
+  }, [bridge]);
+
   /** 账户读取失败后重试：只重读身份，不重登。 */
   const refreshAccount = useCallback(async () => {
     const source = (bridge as AccountCapable).myServerAccount;
     if (!source) return;
     setAccountLoaded(false);
     setAccountError(false);
+    void readCatalog();
     try {
       const info = await source.call(bridge);
       const signedIn = isSignedIn(info);
@@ -440,28 +481,68 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       setAccountLoaded(true);
       setAccountError(true);
     }
-  }, [bridge, refresh, refreshWallet, resetWallet]);
+  }, [bridge, readCatalog, refresh, refreshWallet, resetWallet]);
+
+  /** 进入服务器页的静默重读：不落骨架，只更新登录态与可达性。 */
+  const recheckAccount = useCallback(async () => {
+    if (recheckInFlightRef.current) return;
+    recheckInFlightRef.current = true;
+    void readCatalog();
+    const source = (bridge as AccountCapable).myServerAccount;
+    if (!source) {
+      recheckInFlightRef.current = false;
+      return;
+    }
+    try {
+      const info = await source.call(bridge);
+      const signedIn = isSignedIn(info);
+      const switched = info.account_id !== accountIdRef.current;
+      if (signedIn && switched) resetWallet();
+      loggedInRef.current = signedIn;
+      accountLoadedRef.current = true;
+      setAccountLoaded(true);
+      setAccount(info);
+      setAccountError(false);
+      if (signedIn) {
+        setIdentityMissing(false);
+        setIdentityPresent(true);
+        if (switched) {
+          void refresh();
+          void refreshWallet({ trigger: "login" });
+        }
+      } else {
+        resetWallet();
+        setIdentityMissing(true);
+        setIdentityPresent(false);
+        setServers([]);
+        setSelectedId(null);
+        setDetail(null);
+        setError(null);
+        setLoading(false);
+      }
+    } catch {
+      accountLoadedRef.current = true;
+      setAccountLoaded(true);
+      setAccountError(true);
+    } finally {
+      recheckInFlightRef.current = false;
+    }
+  }, [bridge, readCatalog, refresh, refreshWallet, resetWallet]);
 
   /** 列表失败后的手动重试；成功就地恢复列表，不跳页。 */
   const retry = useCallback(async () => {
     setRetrying(true);
     setRetryNotice(null);
+    void readCatalog();
     const ok = await refresh();
     setRetrying(false);
     if (ok) setRetryNotice(t("myservers.notice.relisted"));
-  }, [refresh]);
+  }, [readCatalog, refresh]);
 
   // 打开页面先读公开目录与本地登录态；已登录才拉服务器列表。
   useEffect(() => {
     let alive = true;
-    void bridge
-      .myServerCatalog()
-      .then((value) => {
-        if (alive) setCatalog(value);
-      })
-      .catch(() => {
-        // 目录失败由向导处理，列表不受影响。
-      });
+    void readCatalog();
 
     const fallbackToIdentity = () => {
       const source = (bridge as IdentityCapable).myServerIdentity;
@@ -531,7 +612,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     return () => {
       alive = false;
     };
-  }, [bridge, refresh, refreshWallet]);
+  }, [bridge, readCatalog, refresh, refreshWallet]);
 
   // 建机状态变化走事件；事件不可用时才用慢速兜底。
   useEffect(() => {
@@ -824,6 +905,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setAccount(next);
     accountLoadedRef.current = true;
     setAccountLoaded(true);
+    // 登录已经成功：断网时留下的错误标记到此为止。
+    setAccountError(false);
+    setCatalogError(false);
     setIdentityLostState(false);
     setIdentityMissing(!signedIn);
     setIdentityPresent(signedIn);
@@ -1053,6 +1137,18 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     setView("wizard");
   }, [rootSignal]);
 
+  // 进入服务器页（false→true）静默重读账户与目录：启动后网络才断的情况靠它翻成错误态。
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    if (!active) {
+      wasActiveRef.current = false;
+      return;
+    }
+    if (wasActiveRef.current) return;
+    wasActiveRef.current = true;
+    void recheckAccount();
+  }, [active, recheckAccount]);
+
   const identityProblem: "lost" | "device_revoked" | "account_blocked" | null =
     blockedState ?? (identityLostState ? "lost" : null);
   /** 显示的是旧值：刷新失败且手上还有上次的余额（从没取到值走 walletError）。 */
@@ -1076,6 +1172,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   return {
     servers,
     catalog,
+    catalogError,
     loading,
     error,
     refresh,

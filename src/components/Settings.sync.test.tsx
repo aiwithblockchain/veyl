@@ -1,12 +1,30 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, SyncIntervalMinutes } from "../agent/bridge";
+import type { AgentBridge, MyServerAccount, SyncIntervalMinutes } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
 import { setLanguage } from "../i18n";
 import { Settings } from "./Settings";
 
 afterEach(cleanup);
+
+const signedInAccount: MyServerAccount = {
+  logged_in: true,
+  email: "me@example.com",
+  account_id: "acc_1",
+  device_id: "dev_1",
+  account_kind: "email",
+  session_expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+};
+
+const deviceAccount: MyServerAccount = {
+  logged_in: false,
+  email: null,
+  account_id: null,
+  device_id: "dev_1",
+  account_kind: "device",
+  session_expires_at: null,
+};
 
 function makeBridge(): AgentBridge {
   return {
@@ -34,22 +52,30 @@ function makeBridge(): AgentBridge {
   } as unknown as AgentBridge;
 }
 
-function renderSettings({
-  syncInterval = 240 as SyncIntervalMinutes,
-  onSyncIntervalChange,
-  onSyncNow,
-  syncBusy = false,
-  syncIntervalUnsaved = false,
-  lastSyncedAt = null,
-}: {
+interface SyncProps {
   syncInterval?: SyncIntervalMinutes;
   onSyncIntervalChange?: (minutes: SyncIntervalMinutes) => void;
   onSyncNow?: () => void;
   syncBusy?: boolean;
+  syncResult?: "ok" | "error" | null;
+  syncResultAt?: number | null;
   syncIntervalUnsaved?: boolean;
   lastSyncedAt?: number | null;
-} = {}) {
-  return render(
+  account?: MyServerAccount | null;
+}
+
+function settingsElement({
+  syncInterval = 240 as SyncIntervalMinutes,
+  onSyncIntervalChange,
+  onSyncNow,
+  syncBusy = false,
+  syncResult = null,
+  syncResultAt = null,
+  syncIntervalUnsaved = false,
+  lastSyncedAt = null,
+  account = signedInAccount,
+}: SyncProps = {}) {
+  return (
     <Settings
       open
       bridge={makeBridge()}
@@ -63,14 +89,30 @@ function renderSettings({
       onRestoreNetwork={() => {}}
       onAskAi={() => {}}
       initialSection="network"
+      account={account}
       syncInterval={syncInterval}
       onSyncIntervalChange={onSyncIntervalChange}
       onSyncNow={onSyncNow}
       syncBusy={syncBusy}
+      syncResult={syncResult}
+      syncResultAt={syncResultAt}
       syncIntervalUnsaved={syncIntervalUnsaved}
       lastSyncedAt={lastSyncedAt}
-    />,
+    />
   );
+}
+
+function renderSettings(props: SyncProps = {}) {
+  return render(settingsElement(props));
+}
+
+/** 同步行的状态文字：与「未保存」等左栏说明区分，只取右侧那一格。 */
+function syncStatus(): string {
+  const row = screen.getByText("节点配置同步").closest(".settings-row");
+  return row
+    ? (row.querySelector(".settings-row__aside .settings-row__value")?.textContent ??
+        "")
+    : "";
 }
 
 describe("设置 › 节点配置同步", () => {
@@ -98,15 +140,31 @@ describe("设置 › 节点配置同步", () => {
     expect(onSyncIntervalChange).toHaveBeenCalledWith(60);
   });
 
-  it("同步中禁用「立即同步」", () => {
+  it("同步中只按钮写「同步中…」，值槽保留上一次的时间", () => {
     renderSettings({
       onSyncIntervalChange: () => {},
       onSyncNow: () => {},
       syncBusy: true,
     });
 
+    expect(syncStatus()).toBe("尚未同步");
     expect(
-      (screen.getByRole("button", { name: "立即同步" }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: "同步中…" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("同步中不覆盖已有的成功时间", () => {
+    renderSettings({
+      onSyncIntervalChange: () => {},
+      onSyncNow: () => {},
+      syncBusy: true,
+      lastSyncedAt: Date.now(),
+    });
+
+    expect(syncStatus()).toBe("刚刚同步");
+    expect(
+      (screen.getByRole("button", { name: "同步中…" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
   });
@@ -118,6 +176,101 @@ describe("设置 › 节点配置同步", () => {
     fireEvent.click(screen.getByRole("button", { name: "立即同步" }));
 
     expect(onSyncNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("账户还没读回来：按钮禁用，值槽保持「尚未同步」", () => {
+    const onSyncNow = vi.fn();
+    renderSettings({
+      account: null,
+      onSyncIntervalChange: () => {},
+      onSyncNow,
+    });
+
+    expect(syncStatus()).toBe("尚未同步");
+    const button = screen.getByRole("button", {
+      name: "立即同步",
+    }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onSyncNow).not.toHaveBeenCalled();
+  });
+
+  it("未登录：行内说明登录后才会同步，点按钮不发请求", () => {
+    const onSyncNow = vi.fn();
+    renderSettings({
+      account: deviceAccount,
+      onSyncIntervalChange: () => {},
+      onSyncNow,
+    });
+
+    expect(syncStatus()).toBe("登录后才会同步");
+    const button = screen.getByRole("button", {
+      name: "立即同步",
+    }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onSyncNow).not.toHaveBeenCalled();
+  });
+
+  it("同步成功：结果 ok 且时间推进后显示「刚刚同步」", () => {
+    const onSyncNow = vi.fn();
+    const { rerender } = renderSettings({
+      onSyncIntervalChange: () => {},
+      onSyncNow,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "立即同步" }));
+    rerender(
+      settingsElement({ onSyncIntervalChange: () => {}, onSyncNow, syncBusy: true }),
+    );
+    expect(syncStatus()).toBe("尚未同步");
+
+    rerender(
+      settingsElement({
+        onSyncIntervalChange: () => {},
+        onSyncNow,
+        lastSyncedAt: Date.now(),
+        syncResult: "ok",
+        syncResultAt: Date.now(),
+      }),
+    );
+    expect(syncStatus()).toBe("刚刚同步");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("同步失败：结果 error 时给一行可读错误，成功后清掉", () => {
+    const onSyncNow = vi.fn();
+    const { rerender } = renderSettings({
+      onSyncIntervalChange: () => {},
+      onSyncNow,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "立即同步" }));
+    rerender(
+      settingsElement({ onSyncIntervalChange: () => {}, onSyncNow, syncBusy: true }),
+    );
+    rerender(
+      settingsElement({
+        onSyncIntervalChange: () => {},
+        onSyncNow,
+        syncResult: "error",
+        syncResultAt: Date.now(),
+      }),
+    );
+
+    expect(screen.getByRole("alert").textContent).toBe("同步失败，稍后再试");
+    expect(syncStatus()).toBe("尚未同步");
+
+    rerender(
+      settingsElement({
+        onSyncIntervalChange: () => {},
+        onSyncNow,
+        lastSyncedAt: Date.now(),
+        syncResult: "ok",
+        syncResultAt: Date.now(),
+      }),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("间隔写库失败时行内标「未保存」", () => {
