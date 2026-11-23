@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>退款政策 — Veyl</title>
+<meta name="description" content="Veyl 退款政策：购买的服务额度通常不可退款，说明例外情形、EEA/英国订单、12 个月有效期与拒付流程。">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/refunds.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/refunds.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/refunds.html">
+<link rel="icon" href="../favicon.png" type="image/png">
+<link rel="stylesheet" href="legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Veyl</a>
+    <nav aria-label="法务文档">
+      <a href="pricing.html">定价</a>
+      <a href="terms.html">服务条款</a>
+      <a href="privacy.html">隐私</a>
+      <a href="refunds.html">退款</a>
+      <a href="/issues.html">问题墙</a>
+    </nav>
+    <div class="lang" aria-label="语言">
+      <span aria-current="true">中文</span>
+      <span class="sep" aria-hidden="true">/</span>
+      <a href="/en/legal/refunds.html" lang="en" hreflang="en" onclick="try{localStorage.setItem('veyl.lang','en')}catch(e){}">English</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>退款政策</h1>
+    <p class="updated">最后更新：2026 年 11 月 23 日</p>
+
+    <h2>1. 全部最终交易</h2>
+    <p>
+      通过 Veyl 购买的服务额度是本服务的预付款。除第 2 节与第 3 节所述情形外，
+      购买均为最终交易，不予退款。服务额度不是存款，没有现金价值，不可提现、转让或兑换现金。
+    </p>
+    <p>
+      未使用的服务额度自购买之日起 <strong>12 个月</strong>内有效；到期后失效，且不予退款。
+    </p>
+
+    <h2>2. 我们会退款的情形</h2>
+    <p>出现以下情形时，我们会退款，或将金额补记为服务额度：</p>
+    <ul>
+      <li>同一笔购买被重复扣款；</li>
+      <li>适用法律要求退款。</li>
+    </ul>
+    <p>
+      请发邮件至 <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>，
+      附上交易邮件与大致时间。我们力争在五个工作日内回复。
+    </p>
+    <p>
+      如果你完全没有消耗任何服务额度，也没有部署过任何服务器，可以联系我们；
+      我们会依据适用于你的强制性消费者保护规则，对你的情况做一次审查。
+    </p>
+
+    <h2>3. 来自 EEA 与英国的订单</h2>
+    <p>
+      我们目前不面向欧洲经济区（EEA）与英国的消费者提供服务。
+      我们可以拒绝或取消来自 EEA 或英国的订单；如果已付款，我们会按原支付方式全额退还。
+    </p>
+
+    <h2>4. 违规与没收</h2>
+    <p>
+      如果我们合理认定你违反<a href="terms.html">服务条款</a>，
+      可以在法律允许的范围内暂停或终止你的账户、销毁通过本服务创建的服务器，
+      并没收未使用的服务额度且不予退款。
+    </p>
+    <!-- 律师确认：没收未使用服务额度在美国怀俄明州及主要销售地区的可执行性。 -->
+
+    <h2>5. 拒付</h2>
+    <p>
+      如果你认为某笔扣款有误，请先联系我们，再联系银行或支付服务商。
+      未联系我们而发起的拒付，可能导致账户在争议审核期间被暂停。
+    </p>
+
+    <h2>6. 联系我们</h2>
+    <p>
+      退款请求请联系 <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>。
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/">Veyl</a>
+    <a href="pricing.html">定价</a>
+    <a href="terms.html">服务条款</a>
+    <a href="privacy.html">隐私</a>
+    <a href="refunds.html">退款</a>
+    <a href="/issues.html">问题墙</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+    <p class="lang-note">本中文译本仅为阅读方便，以英文版本为准。</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veyl — A server of your own, paid by the day</title>
+<meta name="description" content="Veyl is an open-source desktop client for macOS and Windows. It sets up your own server on DigitalOcean in minutes, billed by the day, with a 7-day free trial and mobile export.">
+<meta name="theme-color" content="#FAFAF8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181B" media="(prefers-color-scheme: dark)">
+<meta property="og:title" content="Veyl — A server of your own, paid by the day">
+<meta property="og:description" content="Open-source desktop client. The server is yours, billed by the day, direct with no relay; try it free for 7 days.">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="en_US">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/">
+<link rel="icon" href="/favicon.png" type="image/png">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #FAFAF8;
+    --paper: #FFFFFF;
+    --ink: #1B1B1A;
+    --ink-2: #5C5C58;
+    --ink-3: #6E6A62;
+    --hair: rgba(27, 27, 26, .10);
+    --hair-2: rgba(27, 27, 26, .22);
+    --accent: #F6537B;
+    --accent-soft: rgba(246, 83, 123, .07);
+    --link: #C2185B;
+    --link-hover: #9C1249;
+    --focus: #E03A66;
+    --green: #1C8A57;
+    --btn: #1B1B1A;
+    --btn-ink: #FAFAF8;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+            "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #16181B;
+      --paper: #1C1F23;
+      --ink: #E9E9EA;
+      --ink-2: #A5A5A0;
+      --ink-3: #90908A;
+      --hair: rgba(255, 255, 255, .10);
+      --hair-2: rgba(255, 255, 255, .24);
+      --accent: #F6537B;
+      --accent-soft: rgba(246, 83, 123, .12);
+      --link: #F48FB1;
+      --link-hover: #F7A8C2;
+      --focus: #F06B92;
+      --green: #5FBF8A;
+      --btn: #E9E9EA;
+      --btn-ink: #16181B;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.7 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 32px; }
+  @media (max-width: 720px) { .wrap { padding: 0 20px; } }
+
+  a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { color: var(--link-hover); text-decoration: underline; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+
+  .skip {
+    position: absolute; left: -9999px; top: 0;
+    background: var(--paper); color: var(--ink);
+    padding: 10px 16px; border: 1px solid var(--hair-2); border-radius: 6px; z-index: 10;
+  }
+  .skip:focus { left: 20px; top: 12px; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+
+  /* header */
+  .site-head { padding: 28px 0 0; }
+  .site-head .wrap { display: flex; align-items: center; gap: 12px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; }
+  .brand img { width: 24px; height: 24px; border-radius: 6px; display: block; }
+  .brand span { font-size: 16px; font-weight: 600; letter-spacing: .01em; }
+  .site-nav { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 26px; }
+  .site-nav a { color: var(--ink-2); font-size: 14px; text-decoration: none; white-space: nowrap; }
+  .site-nav a:hover { color: var(--ink); }
+  .lang { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; font-size: 13px; color: var(--ink-3); }
+  .lang a { font-size: 13px; }
+  .lang [aria-current] { color: var(--ink); font-weight: 600; }
+  @media (max-width: 700px) {
+    .site-head .wrap { flex-wrap: wrap; row-gap: 14px; }
+    .site-nav { width: 100%; margin-left: 0; gap: 8px 20px; font-size: 13px; }
+  }
+  @media (max-width: 420px) {
+    .site-nav { gap: 8px 16px; }
+    .site-nav a { font-size: 13px; }
+  }
+
+  /* hero */
+  .hero { padding: 84px 0 96px; }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, .88fr); gap: 64px; align-items: center; }
+  @media (max-width: 900px) {
+    .hero { padding: 56px 0 64px; }
+    .hero .wrap { grid-template-columns: 1fr; gap: 40px; }
+  }
+  .eyebrow {
+    display: flex; flex-wrap: wrap; gap: 4px 18px;
+    margin: 0 0 22px; font: 500 11.5px/1.4 var(--mono);
+    letter-spacing: .12em; color: var(--ink-3);
+  }
+  .eyebrow span { white-space: nowrap; }
+  h1 {
+    margin: 0 0 22px;
+    font-size: clamp(32px, 4.6vw, 50px);
+    line-height: 1.16;
+    font-weight: 600;
+    letter-spacing: -.03em;
+    text-wrap: balance;
+  }
+  @media (max-width: 440px) {
+    h1 { font-size: clamp(28px, 7.8vw, 34px); }
+  }
+  h1 em { font-style: normal; color: var(--link); }
+  .lede {
+    margin: 0 0 30px; max-width: 46ch;
+    font-size: 17px; line-height: 1.75; color: var(--ink-2);
+    text-wrap: pretty;
+  }
+  @media (max-width: 720px) { .lede { font-size: 16px; } }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--btn); color: var(--btn-ink);
+    padding: 11px 18px; border-radius: 6px;
+    font-size: 15px; font-weight: 500; text-decoration: none;
+    transition: opacity .12s ease;
+  }
+  .btn:hover { text-decoration: none; opacity: .86; }
+  .btn .arrow { font-size: 13px; opacity: .7; }
+  .link-quiet { font-size: 14px; }
+
+  .facts {
+    display: flex; flex-wrap: wrap; gap: 6px 20px;
+    margin: 34px 0 0; padding: 18px 0 0;
+    border-top: 1px solid var(--hair);
+    list-style: none; font-size: 13px; color: var(--ink-2);
+  }
+  .facts b { font: 500 13px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+
+  /* route diagram */
+  .route {
+    margin: 0; padding: 24px 24px 22px;
+    background: var(--paper);
+    border: 1px solid var(--hair);
+    border-radius: 12px;
+  }
+  .route__label {
+    display: block; margin-bottom: 22px;
+    font: 500 10.5px/1 var(--mono); letter-spacing: .16em; color: var(--ink-3);
+  }
+  .route__list { list-style: none; margin: 0; padding: 0; }
+  .route__list li { display: flex; align-items: center; gap: 12px; min-height: 26px; }
+  .route__dot {
+    flex: none; width: 7px; height: 7px; border-radius: 2px;
+    border: 1px solid var(--hair-2); background: var(--paper);
+  }
+  .route__dot--own { background: var(--accent); border-color: var(--accent); }
+  .route__name { font-size: 14.5px; line-height: 1.4; color: var(--ink-2); }
+  .route__name--own { color: var(--ink); font-weight: 500; }
+  .route__seg { padding: 0 0 0 3px; min-height: 30px; }
+  .route__line { width: 1px; height: 30px; background: var(--accent); }
+  .route__tag { margin-left: 11px; font: 500 10.5px/1 var(--mono); color: var(--link); }
+  .route__note {
+    margin: 20px 0 0; padding-top: 16px; border-top: 1px dashed var(--hair-2);
+    font-size: 12.5px; line-height: 1.65; color: var(--ink-3);
+  }
+  @media (max-width: 560px) {
+    .route { padding: 18px 16px; }
+    .route__name { font-size: 13.5px; }
+  }
+
+  /* sections */
+  .sec { padding: 72px 0; border-top: 1px solid var(--hair); }
+  .sec:first-of-type { border-top: 0; }
+  .sec__title {
+    margin: 0 0 36px; font-size: clamp(24px, 3.2vw, 30px);
+    line-height: 1.3; font-weight: 600; letter-spacing: -.02em;
+    text-wrap: balance;
+  }
+  .sec__title::before {
+    content: ""; display: block; width: 32px; height: 1px;
+    margin-bottom: 20px; background: var(--ink-3);
+  }
+  .sec__intro { margin: -16px 0 36px; max-width: 620px; color: var(--ink-2); font-size: 15px; line-height: 1.75; text-wrap: pretty; }
+  @media (max-width: 720px) { .sec { padding: 56px 0; } }
+
+  /* difference rows */
+  .diff { margin: 0; }
+  .diff__row {
+    display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 40px;
+    padding: 30px 0; border-top: 1px solid var(--hair);
+  }
+  .diff__row:last-child { border-bottom: 1px solid var(--hair); }
+  .diff__row dt {
+    font: 500 11px/1.5 var(--mono); letter-spacing: .12em; color: var(--ink-3);
+    padding-top: 4px;
+  }
+  .diff__row dd { margin: 0; max-width: 62ch; }
+  .diff__row h3 { margin: 0 0 8px; font-size: 19px; line-height: 1.45; font-weight: 600; letter-spacing: -.01em; }
+  .diff__row p { margin: 0; color: var(--ink-2); font-size: 15px; line-height: 1.75; text-wrap: pretty; }
+  @media (max-width: 640px) {
+    .diff__row { grid-template-columns: 1fr; gap: 10px; padding: 24px 0; }
+    .diff__row dt { padding-top: 0; }
+  }
+
+  /* capabilities */
+  .caps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
+  .cap { display: flex; flex-direction: column; padding: 0 32px; border-left: 1px solid var(--hair); }
+  .cap:first-child { padding-left: 0; border-left: 0; }
+  .cap:last-child { padding-right: 0; }
+  .cap__index {
+    display: block; margin-bottom: 14px;
+    font: 500 12px/1 var(--mono); letter-spacing: .12em; color: var(--link);
+  }
+  .cap h3 { margin: 0 0 10px; font-size: 20px; line-height: 1.4; font-weight: 600; letter-spacing: -.01em; }
+  .cap p { flex: 1; margin: 0; color: var(--ink-2); font-size: 15px; line-height: 1.75; text-wrap: pretty; }
+  .cap__meta {
+    display: block; margin-top: 18px; padding-top: 18px;
+    border-top: 1px solid var(--hair);
+    font: 500 11.5px/1.5 var(--mono); color: var(--ink-3);
+  }
+  @media (max-width: 820px) {
+    .caps { grid-template-columns: 1fr; }
+    .cap { padding: 26px 0; border-left: 0; border-top: 1px solid var(--hair); }
+    .cap:first-child { padding-top: 0; border-top: 0; }
+    .cap:last-child { padding-bottom: 0; }
+  }
+
+  /* mobile */
+  .mobile-grid {
+    display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr);
+    gap: 16px 64px; align-items: start;
+  }
+  @media (max-width: 860px) { .mobile-grid { grid-template-columns: 1fr; gap: 28px; } }
+  .block-title {
+    margin: 0 0 4px; padding-bottom: 12px; border-bottom: 1px solid var(--hair-2);
+    font: 500 11px/1.4 var(--mono); letter-spacing: .12em; color: var(--ink-3);
+  }
+  .clients { list-style: none; margin: 0; padding: 0; }
+  .clients li {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+    padding: 12px 0; border-bottom: 1px solid var(--hair);
+  }
+  .client__id { display: flex; flex-direction: column; gap: 1px; }
+  .client__name { font-size: 15px; font-weight: 500; }
+  .client__tag {
+    margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+    background: var(--accent-soft); color: var(--link);
+    font: 500 10.5px/1.6 var(--mono); letter-spacing: .06em;
+  }
+  .client__os { font: 500 11.5px/1.6 var(--mono); color: var(--ink-3); }
+  .client__link { margin-left: auto; font-size: 13px; white-space: nowrap; }
+  .fineprint { margin: 14px 0 0; font-size: 12.5px; line-height: 1.65; color: var(--ink-3); }
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .steps li {
+    display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px;
+    padding: 14px 0; border-bottom: 1px solid var(--hair);
+  }
+  .steps li:last-child { border-bottom: 0; }
+  .step__n { font: 500 12px/1.7 var(--mono); color: var(--link); }
+  .steps b { display: block; font-size: 15px; font-weight: 500; }
+  .steps p { margin: 3px 0 0; font-size: 13.5px; line-height: 1.65; color: var(--ink-2); }
+  .mobile-note {
+    margin: 26px 0 0; padding-top: 16px; border-top: 1px solid var(--hair);
+    max-width: 68ch; font-size: 13.5px; line-height: 1.75; color: var(--ink-3);
+  }
+
+  /* key */
+  .key-steps {
+    list-style: none; margin: 0; padding: 0;
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-top: 1px solid var(--hair-2);
+  }
+  .key-steps li { padding: 18px 26px 0 0; }
+  .key-steps li + li { padding-left: 24px; border-left: 1px solid var(--hair); }
+  .key-steps li:last-child { padding-right: 0; }
+  .key__n { display: block; margin-bottom: 10px; font: 500 12px/1 var(--mono); color: var(--link); }
+  .key-steps b { display: block; margin-bottom: 4px; font-size: 15px; font-weight: 500; }
+  .key-steps p { margin: 0; font-size: 13.5px; line-height: 1.65; color: var(--ink-2); }
+  .key-note {
+    margin: 26px 0 0; max-width: 68ch;
+    font-size: 13.5px; line-height: 1.75; color: var(--ink-3);
+  }
+  @media (max-width: 820px) {
+    .key-steps { grid-template-columns: 1fr 1fr; border-top: 0; }
+    .key-steps li { padding: 18px 20px 0 0; border-top: 1px solid var(--hair); }
+    .key-steps li + li { padding-left: 0; border-left: 0; }
+    .key-steps li:nth-child(even) { padding-left: 20px; border-left: 1px solid var(--hair); padding-right: 0; }
+  }
+  @media (max-width: 520px) {
+    .key-steps { grid-template-columns: 1fr; }
+    .key-steps li, .key-steps li + li, .key-steps li:nth-child(even) {
+      padding: 14px 0; border-left: 0;
+    }
+    .key-steps li:first-child { border-top: 0; padding-top: 0; }
+  }
+  .br-narrow { display: none; }
+  @media (max-width: 520px) { .br-narrow { display: inline; } }
+  @media (max-width: 360px) { .sec__title { font-size: 22px; } }
+  .nowrap { white-space: nowrap; }
+
+  /* pricing */
+  .trial {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+    margin: 0 0 32px; padding: 16px 18px;
+    background: var(--accent-soft); border-radius: 10px;
+    font-size: 14px; color: var(--ink-2);
+  }
+  .trial b { font-weight: 600; color: var(--ink); }
+  .trial .num { font: 500 14px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 2px; margin-right: 7px; vertical-align: 1px; }
+  .dot--green { background: var(--green); }
+
+  .pricing-grid {
+    display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr);
+    gap: 16px 64px; align-items: start;
+  }
+  @media (max-width: 860px) {
+    .pricing-grid { grid-template-columns: 1fr; gap: 26px; }
+  }
+
+  .plans { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .plans th {
+    padding: 0 0 12px; border-bottom: 1px solid var(--hair-2);
+    font: 500 11px/1.4 var(--mono); letter-spacing: .12em; color: var(--ink-3);
+    text-align: left; font-weight: 500;
+  }
+  .plans th.num, .plans td.num { text-align: right; }
+  .plans td { padding: 18px 0; border-bottom: 1px solid var(--hair); font-size: 15px; }
+  .plans td.mem { font-weight: 500; }
+  .plans td.day { font: 500 20px/1.2 var(--mono); letter-spacing: -.01em; }
+  .plans td.day i { font-style: normal; font-size: 12px; color: var(--ink-3); margin-left: 2px; }
+  .plans td.month { color: var(--ink-2); font-size: 14px; }
+  .plans tr:last-child td { border-bottom: 1px solid var(--hair-2); }
+
+  .rules { list-style: none; margin: 0; padding: 0; max-width: 66ch; }
+  .rules li {
+    position: relative; padding-left: 18px; margin: 10px 0;
+    font-size: 14px; line-height: 1.75; color: var(--ink-2);
+  }
+  .rules li::before {
+    content: ""; position: absolute; left: 0; top: .72em;
+    width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3);
+  }
+  .rules b { color: var(--ink); font-weight: 500; }
+
+  /* download */
+  .dl { margin: 0; }
+  .dl__row {
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+    padding: 26px 0; border-top: 1px solid var(--hair);
+  }
+  .dl__row:last-of-type { border-bottom: 1px solid var(--hair); }
+  .dl__name { font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+  .dl__meta { margin-top: 4px; font-size: 13.5px; color: var(--ink-2); }
+  .dl__action { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .dl__alt { font-size: 12.5px; color: var(--ink-3); text-decoration: none; }
+  .dl__alt:hover { color: var(--ink); text-decoration: underline; }
+  @media (max-width: 560px) {
+    .dl__row { flex-direction: column; align-items: flex-start; gap: 16px; }
+    .dl__name { font-size: 19px; }
+    .dl__action { align-items: flex-start; }
+  }
+
+  /* footer */
+  .site-foot { padding: 40px 0 64px; border-top: 1px solid var(--hair); }
+  .site-foot .wrap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 28px; font-size: 13px; color: var(--ink-3); }
+  .site-foot a { color: var(--ink-2); text-decoration: none; }
+  .site-foot a:hover { color: var(--ink); text-decoration: underline; }
+  .site-foot .copy { margin-left: auto; }
+  @media (max-width: 640px) { .site-foot .copy { margin-left: 0; width: 100%; } }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="/en/" aria-label="Veyl home">
+      <img src="/favicon.png" alt="" width="24" height="24">
+      <span>Veyl</span>
+    </a>
+    <nav class="site-nav" aria-label="Page navigation">
+      <a href="#difference">What is different</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#download">Download</a>
+      <a href="/en/issues.html">Issues</a>
+      <a href="https://github.com/aiwithblockchain/veyl">GitHub<span aria-hidden="true"> ↗</span></a>
+      <span class="lang" aria-label="Language">
+        <a href="/index.html" lang="zh-CN" hreflang="zh-CN" onclick="try{localStorage.setItem('veyl.lang','zh')}catch(e){}">中文</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="true">English</span>
+      </span>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap">
+      <div>
+        <p class="eyebrow"><span>Open-source desktop client</span><span>macOS / Windows</span><span>Chinese interface</span></p>
+        <h1 id="hero-title">Veyl keeps<br>your line open.</h1>
+        <p class="lede">
+          Private by design. Dedicated to you alone. Create it in the region you choose, destroy it when you are done.
+        </p>
+        <div class="actions">
+          <a class="btn" href="https://github.com/aiwithblockchain/veyl/releases/latest">
+            Download the app <span class="arrow" aria-hidden="true">↓</span>
+          </a>
+          <a class="link-quiet" href="#pricing">See pricing first</a>
+        </div>
+        <ul class="facts">
+          <li><b>2</b> free nodes</li>
+          <li><b>7</b>-day trial</li>
+          <li>from <b>$0.30</b>/day</li>
+          <li>Open-source client</li>
+        </ul>
+      </div>
+
+      <figure class="route">
+        <span class="route__label">Route</span>
+        <ol class="route__list" role="img" aria-label="Your computer connects directly to your server, then to the internet. The Veyl platform is not on this path.">
+          <li><span class="route__dot" aria-hidden="true"></span><span class="route__name">Your computer</span></li>
+          <li class="route__seg" aria-hidden="true"><span class="route__line"></span><span class="route__tag">Direct, no relay</span></li>
+          <li><span class="route__dot route__dot--own" aria-hidden="true"></span><span class="route__name route__name--own">Your server</span></li>
+          <li class="route__seg" aria-hidden="true"><span class="route__line"></span></li>
+          <li><span class="route__dot" aria-hidden="true"></span><span class="route__name">The internet</span></li>
+        </ol>
+        <p class="route__note">The Veyl platform is not on this path. It only handles your account, your payment, and setting the server up.</p>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="difference" aria-labelledby="difference-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="difference-title">Not the same as renting a shared node</h2>
+      <dl class="diff">
+        <div class="diff__row">
+          <dt>Server</dt>
+          <dd>
+            <h3>Every server is yours, not shared</h3>
+            <p>A shared node hands the same IP to many people. Veyl creates a dedicated server for you; its node lives only in your account and is shared with no one. No device limit and no limit on concurrent logins.</p>
+          </dd>
+        </div>
+        <div class="diff__row">
+          <dt>AI</dt>
+          <dd>
+            <h3>The assistant can see your connection, not just chat</h3>
+            <p>It reads your nodes, latency, and current configuration. Say “switch to Japan” and it picks a node, edits the config, and reconnects. It runs on your own DeepSeek key, kept in the system keychain; we do not relay or store your calls.</p>
+          </dd>
+        </div>
+        <div class="diff__row">
+          <dt>Trial</dt>
+          <dd>
+            <h3>Connect for 7 days before you decide</h3>
+            <p>Once installed you can join 2 free nodes, 7 days per device, counted from your first connection. When the trial ends the nodes drop out of the pool automatically, and no payment is required first.</p>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="sec" id="capabilities" aria-labelledby="capabilities-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="capabilities-title">It does three things</h2>
+      <div class="caps">
+        <article class="cap">
+          <span class="cap__index">01</span>
+          <h3>Connect and switch</h3>
+          <p>One button to start. The console shows connection time, traffic, latency, and exit IP. Smart mode is the default: sites in China go direct, everything else through your node. Switch to global to send all traffic through it.</p>
+          <span class="cap__meta">Proxy mode · Tun mode</span>
+        </article>
+        <article class="cap">
+          <span class="cap__index">02</span>
+          <h3>Your own server</h3>
+          <p>Pick a region and a size in the app. A few minutes after you order, the server is provisioned and its node joins your pool, ready to use. Destroy it whenever you want; billing is by the day and starts only once it is running.</p>
+          <span class="cap__meta">512 MB · 1 GB · 2 GB</span>
+        </article>
+        <article class="cap">
+          <span class="cap__index">03</span>
+          <h3>Export to phone</h3>
+          <p>Export a node you paid for as an import code. Scan it with a third-party client on your phone and it is ready to use.</p>
+          <span class="cap__meta">Settings › Account · Use on phone</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="mobile" aria-labelledby="mobile-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="mobile-title">It works on your phone too</h2>
+      <p class="sec__intro">Veyl does not offer a mobile app. Export an<span class="nowrap"> import code</span> from the desktop app and scan it with a third-party client on your phone.</p>
+
+      <div class="mobile-grid">
+        <div>
+          <h3 class="block-title">Clients</h3>
+          <ul class="clients">
+            <li>
+              <span class="client__id"><span class="client__name">sing-box<span class="client__tag">Recommended</span></span><span class="client__os">iOS / Android</span></span>
+              <a class="client__link" href="https://sing-box.sagernet.org/clients/">Official download ↗</a>
+            </li>
+            <li>
+              <span class="client__id"><span class="client__name">Shadowrocket</span><span class="client__os">iOS</span></span>
+              <a class="client__link" href="https://apps.apple.com/us/app/shadowrocket/id932747118">Official download ↗</a>
+            </li>
+            <li>
+              <span class="client__id"><span class="client__name">Clash Meta for Android</span><span class="client__os">Android</span></span>
+              <a class="client__link" href="https://github.com/MetaCubeX/ClashMetaForAndroid/releases">Official download ↗</a>
+            </li>
+            <li>
+              <span class="client__id"><span class="client__name">Hiddify</span><span class="client__os">iOS / Android</span></span>
+              <a class="client__link" href="https://github.com/hiddify/hiddify-app">Official download ↗</a>
+            </li>
+          </ul>
+          <p class="fineprint">sing-box on iPhone needs an Apple account outside mainland China.</p>
+        </div>
+
+        <div>
+          <h3 class="block-title">Import</h3>
+          <ol class="steps">
+            <li>
+              <span class="step__n">01</span>
+              <div><b>Export on the desktop</b><p>Settings › Account → “Use on phone”, then pick the client you use.</p></div>
+            </li>
+            <li>
+              <span class="step__n">02</span>
+              <div><b>Scan to install the client</b><p>In the dialog, scan the install code first to put the client on your phone.</p></div>
+            </li>
+            <li>
+              <span class="step__n">03</span>
+              <div><b>Scan to import</b><p>Scan once more with the import code and the configuration lands on your phone.</p></div>
+            </li>
+          </ol>
+        </div>
+      </div>
+
+      <p class="mobile-note">Only nodes you created and paid for are exported; free trial nodes are excluded.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="pricing" aria-labelledby="pricing-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="pricing-title">Billed by the day</h2>
+      <p class="sec__intro">Servers are billed by the day, with no monthly or yearly plans. The first day is charged only once the server is running; destroy it and nothing more is billed.</p>
+
+      <p class="trial">
+        <span class="dot dot--green" aria-hidden="true"></span>
+        <b>Free trial</b>
+        <span>2 nodes · 7 days · <span class="num">$0</span></span>
+        <span>Removed automatically when it ends</span>
+      </p>
+
+      <div class="pricing-grid">
+        <table class="plans">
+          <caption class="sr-only">Server sizes and prices</caption>
+          <thead>
+            <tr>
+              <th scope="col">Memory</th>
+              <th scope="col" class="num">Per day</th>
+              <th scope="col" class="num">Approx. per month</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="mem">512 MB</td>
+              <td class="num day">$0.30<i>/day</i></td>
+              <td class="num month">about $9 / month</td>
+            </tr>
+            <tr>
+              <td class="mem">1 GB</td>
+              <td class="num day">$0.40<i>/day</i></td>
+              <td class="num month">about $12 / month</td>
+            </tr>
+            <tr>
+              <td class="mem">2 GB</td>
+              <td class="num day">$0.80<i>/day</i></td>
+              <td class="num month">about $24 / month</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <ul class="rules">
+          <li><b>Charged only once it is running.</b> Nothing is billed before the server is provisioned.</li>
+          <li><b>You need 7 days of Service Credits to order.</b> For the 512 MB size, $0.30 × 7 days = $2.10; only the current day is charged.</li>
+          <li><b>No Service Credits, no server.</b> If your Service Credits cannot cover the next day, the server is suspended and destroyed, and nothing further is charged.</li>
+          <li><b>Destroy it whenever you like.</b> Nothing is charged afterward; the day already charged is not refunded.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="key" aria-labelledby="key-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="key-title">Before you start:<br class="br-narrow"> have a DeepSeek API key ready</h2>
+      <p class="sec__intro">The AI assistant runs on your own DeepSeek key. You can use Veyl without one; you just pick nodes yourself.</p>
+
+      <ol class="key-steps">
+        <li>
+          <span class="key__n">01</span>
+          <b>Sign up</b>
+          <p>Open <a href="https://platform.deepseek.com">platform.deepseek.com</a> and create an account.</p>
+        </li>
+        <li>
+          <span class="key__n">02</span>
+          <b>Add credit</b>
+          <p>Top up your account so it has enough balance.</p>
+        </li>
+        <li>
+          <span class="key__n">03</span>
+          <b>Create an API key</b>
+          <p>Create a key. It is shown only once; if you lose it, create a new one.</p>
+        </li>
+        <li>
+          <span class="key__n">04</span>
+          <b>Paste it into Veyl</b>
+          <p>On first launch, or under Settings → “AI”, paste the key.</p>
+        </li>
+      </ol>
+
+      <p class="key-note">The key is stored only in your machine's system keychain; we do not relay or store your calls. AI usage is billed by DeepSeek at its official rates.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="download" aria-labelledby="download-title">
+    <div class="wrap">
+      <h2 class="sec__title" id="download-title">Download</h2>
+      <div class="dl">
+        <!-- releases:start -->
+        <div class="dl__row">
+          <div>
+            <div class="dl__name">macOS</div>
+            <div class="dl__meta">v1.0.0 · Universal (Apple Silicon &amp; Intel) · DMG</div>
+          </div>
+          <div class="dl__action">
+            <a class="btn" href="https://github.com/aiwithblockchain/veyl/releases/download/v1.0.0/Veyl-1.0.0.dmg" aria-label="Download for macOS">
+              Download <span class="arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="dl__alt" href="https://github.com/aiwithblockchain/veyl/releases">All releases ↗</a>
+          </div>
+        </div>
+        <div class="dl__row">
+          <div>
+            <div class="dl__name">Windows</div>
+            <div class="dl__meta">v1.0.0 · Windows 10 / 11 · x64 · MSI</div>
+          </div>
+          <div class="dl__action">
+            <a class="btn" href="https://github.com/aiwithblockchain/veyl/releases/download/v1.0.0/Veyl-1.0.0.msi" aria-label="Download for Windows">
+              Download <span class="arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="dl__alt" href="https://github.com/aiwithblockchain/veyl/releases">All releases ↗</a>
+          </div>
+        </div>
+        <!-- releases:end -->
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span>Veyl</span>
+    <a href="legal/pricing.html">Pricing</a>
+    <a href="legal/terms.html">Terms</a>
+    <a href="legal/privacy.html">Privacy</a>
+    <a href="legal/refunds.html">Refunds</a>
+    <a href="/en/issues.html">Issues</a>
+    <a href="https://github.com/aiwithblockchain/veyl">Source</a>
+    <a href="https://github.com/aiwithblockchain/veyl/releases">Releases</a>
+    <a href="https://github.com/SagerNet/sing-box">sing-box (GPL-3.0)</a>
+    <span>Client Apache-2.0</span>
+    <span class="copy">© 2026 OmniWin Technologies LLC</span>
+  </div>
+</footer>
+
+</body>
+</html>

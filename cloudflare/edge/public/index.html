@@ -10,7 +10,34 @@
 <meta property="og:title" content="Veyl — 一台属于自己的服务器，按天用">
 <meta property="og:description" content="开源桌面客户端。服务器是自己的，按天计费，流量直连不中转；先试用 7 天。">
 <meta property="og:type" content="website">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/">
 <link rel="icon" href="favicon.png" type="image/png">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
 <style>
   :root {
     color-scheme: light;
@@ -93,6 +120,9 @@
   .site-nav { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 26px; }
   .site-nav a { color: var(--ink-2); font-size: 14px; text-decoration: none; white-space: nowrap; }
   .site-nav a:hover { color: var(--ink); }
+  .lang { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; font-size: 13px; color: var(--ink-3); }
+  .lang a { font-size: 13px; }
+  .lang [aria-current] { color: var(--ink); font-weight: 600; }
   @media (max-width: 700px) {
     .site-head .wrap { flex-wrap: wrap; row-gap: 14px; }
     .site-nav { width: 100%; margin-left: 0; gap: 8px 20px; font-size: 13px; }
@@ -404,6 +434,11 @@
       <a href="#download">下载</a>
       <a href="issues.html">问题墙</a>
       <a href="https://github.com/aiwithblockchain/veyl">GitHub<span aria-hidden="true"> ↗</span></a>
+      <span class="lang" aria-label="语言">
+        <span aria-current="true">中文</span>
+        <span aria-hidden="true">/</span>
+        <a href="/en/index.html" lang="en" hreflang="en" onclick="try{localStorage.setItem('veyl.lang','en')}catch(e){}">English</a>
+      </span>
     </nav>
   </div>
 </header>
@@ -427,7 +462,7 @@
         <ul class="facts">
           <li><b>2</b> 个免费节点</li>
           <li><b>7</b> 天试用</li>
-          <li><b>$0.20</b>/天起</li>
+          <li><b>$0.30</b>/天起</li>
           <li>客户端开源</li>
         </ul>
       </div>
@@ -549,7 +584,7 @@
         </div>
       </div>
 
-      <p class="mobile-note">只导出你自己创建的付费节点，免费试用节点不包含。导入码可以随时重新生成，旧码立即失效。</p>
+      <p class="mobile-note">只导出你自己创建的付费节点，免费试用节点不包含。</p>
     </div>
   </section>
 
@@ -578,26 +613,26 @@
           <tbody>
             <tr>
               <td class="mem">512 MB</td>
-              <td class="num day">$0.20<i>/天</i></td>
-              <td class="num month">约 $6 / 月</td>
-            </tr>
-            <tr>
-              <td class="mem">1 GB</td>
               <td class="num day">$0.30<i>/天</i></td>
               <td class="num month">约 $9 / 月</td>
             </tr>
             <tr>
+              <td class="mem">1 GB</td>
+              <td class="num day">$0.40<i>/天</i></td>
+              <td class="num month">约 $12 / 月</td>
+            </tr>
+            <tr>
               <td class="mem">2 GB</td>
-              <td class="num day">$0.60<i>/天</i></td>
-              <td class="num month">约 $18 / 月</td>
+              <td class="num day">$0.80<i>/天</i></td>
+              <td class="num month">约 $24 / 月</td>
             </tr>
           </tbody>
         </table>
 
         <ul class="rules">
           <li><b>装好才扣钱。</b>服务器没装好之前不计费。</li>
-          <li><b>下单时余额要够 7 天。</b>$0.30 档是 $2.10，实际只扣当天费用。</li>
-          <li><b>余额不足先给 7 天宽限。</b>仍未充值就停用；停机期间不再计费，充值后自动补扣恢复。</li>
+          <li><b>下单时服务额度要够 7 天。</b>以 512 MB 档为例，$0.30 × 7 天 = $2.10；实际只扣当天费用。</li>
+          <li><b>服务额度扣不动就停机。</b>服务额度不足以支付下一天时，服务器停机并被销毁，之后不再扣费。</li>
           <li><b>随时销毁。</b>销毁后不再产生费用；当天已扣的费用不退。</li>
         </ul>
       </div>
@@ -675,11 +710,16 @@
 <footer class="site-foot">
   <div class="wrap">
     <span>Veyl</span>
+    <a href="legal/pricing.html">定价</a>
+    <a href="legal/terms.html">服务条款</a>
+    <a href="legal/privacy.html">隐私</a>
+    <a href="legal/refunds.html">退款</a>
+    <a href="issues.html">问题墙</a>
     <a href="https://github.com/aiwithblockchain/veyl">源码</a>
     <a href="https://github.com/aiwithblockchain/veyl/releases">发布记录</a>
     <a href="https://github.com/SagerNet/sing-box">sing-box（GPL-3.0）</a>
     <span>客户端 Apache-2.0</span>
-    <span class="copy">© 2026 Veyl</span>
+    <span class="copy">© 2026 OmniWin Technologies LLC</span>
   </div>
 </footer>
 

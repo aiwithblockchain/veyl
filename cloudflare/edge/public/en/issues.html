@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>Issues · Veyl</title>
+<meta name="description" content="Issues reported by Veyl users and our responses.">
+<meta name="theme-color" content="#FAFAF8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16181B" media="(prefers-color-scheme: dark)">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/issues.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/issues.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/issues.html">
+<link rel="icon" href="/favicon.png" type="image/png">
+<script src="/site-lang.js"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #FAFAF8;
+    --paper: #FFFFFF;
+    --ink: #1B1B1A;
+    --ink-2: #5C5C58;
+    --ink-3: #6E6A62;
+    --hair: rgba(27, 27, 26, .10);
+    --hair-2: rgba(27, 27, 26, .22);
+    --accent: #F6537B;
+    --accent-soft: rgba(246, 83, 123, .07);
+    --link: #C2185B;
+    --link-hover: #9C1249;
+    --focus: #E03A66;
+    --green: #1C8A57;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+            "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #16181B;
+      --paper: #1C1F23;
+      --ink: #E9E9EA;
+      --ink-2: #A5A5A0;
+      --ink-3: #90908A;
+      --hair: rgba(255, 255, 255, .10);
+      --hair-2: rgba(255, 255, 255, .24);
+      --accent: #F6537B;
+      --accent-soft: rgba(246, 83, 123, .12);
+      --link: #F48FB1;
+      --link-hover: #F7A8C2;
+      --focus: #F06B92;
+      --green: #5FBF8A;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.7 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 32px; }
+  @media (max-width: 720px) { .wrap { padding: 0 20px; } }
+
+  a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:hover { color: var(--link-hover); }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+
+  .skip {
+    position: absolute; left: -9999px; top: 0;
+    background: var(--paper); color: var(--ink);
+    padding: 10px 16px; border: 1px solid var(--hair-2); border-radius: 6px; z-index: 10;
+  }
+  .skip:focus { left: 20px; top: 12px; }
+
+  .site-head { padding: 28px 0 0; }
+  .site-head .wrap { display: flex; align-items: center; gap: 12px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; }
+  .brand img { width: 24px; height: 24px; border-radius: 6px; display: block; }
+  .brand span { font-size: 16px; font-weight: 600; letter-spacing: .01em; }
+  .site-nav { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 26px; }
+  .site-nav a { color: var(--ink-2); font-size: 14px; text-decoration: none; white-space: nowrap; }
+  .site-nav a:hover { color: var(--ink); }
+  .site-nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+  .lang { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; font-size: 13px; color: var(--ink-3); }
+  .lang a { font-size: 13px; }
+  .lang [aria-current] { color: var(--ink); font-weight: 600; }
+  @media (max-width: 700px) {
+    .site-head .wrap { flex-wrap: wrap; row-gap: 14px; }
+    .site-nav { width: 100%; margin-left: 0; gap: 8px 20px; font-size: 13px; }
+  }
+  @media (max-width: 420px) {
+    .site-nav { gap: 8px 16px; }
+    .site-nav a { font-size: 13px; }
+  }
+
+  .page { padding: 44px 0 72px; }
+  .page-head h1 { font-size: 32px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -.01em; }
+  .page-head p { margin: 0; color: var(--ink-2); }
+
+  .state { color: var(--ink-2); padding: 24px 0; }
+  .state p { margin: 0 0 10px; }
+  .state__retry {
+    font: inherit; font-size: 14px; padding: 6px 14px;
+    border: 1px solid var(--hair-2); border-radius: 8px;
+    background: var(--paper); color: var(--ink); cursor: pointer;
+  }
+  .state__retry:hover { border-color: var(--ink-3); }
+
+  .issue-list { list-style: none; margin: 26px 0 0; padding: 0; display: grid; gap: 12px; }
+  .issue-card {
+    background: var(--paper); border: 1px solid var(--hair);
+    border-radius: 12px; padding: 18px 20px;
+    transition: border-color .15s ease;
+  }
+  .issue-card:hover { border-color: var(--hair-2); }
+  .issue-card__top { display: flex; align-items: flex-start; gap: 12px; }
+  .issue-card__title { flex: 1 1 auto; font-size: 17px; line-height: 1.45; font-weight: 600; margin: 0; }
+  .issue-card__title a { color: var(--ink); text-decoration: none; }
+  .issue-card__title a:hover { color: var(--link); }
+  .issue-card__summary {
+    margin: 8px 0 10px; color: var(--ink-2);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .issue-card__meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-3); font-size: 13px; }
+  .issue-card__meta span { white-space: nowrap; }
+
+  .badge {
+    flex: 0 0 auto; display: inline-block;
+    font-size: 12px; line-height: 1.7; padding: 0 8px;
+    border: 1px solid var(--hair-2); border-radius: 999px;
+    color: var(--ink-3); white-space: nowrap;
+  }
+  .badge--answered { color: var(--green); border-color: var(--green); }
+
+  .thread { margin-top: 18px; }
+  .thread__back { display: inline-block; font-size: 14px; margin-bottom: 14px; }
+  .thread h1 { font-size: 30px; line-height: 1.3; margin: 0 0 8px; letter-spacing: -.01em; }
+  .thread__meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-3); font-size: 13px; }
+  .thread__summary {
+    margin: 20px 0 0; padding: 12px 16px;
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0; white-space: pre-wrap;
+  }
+  .thread__section h2 { font-size: 14px; color: var(--ink-3); margin: 24px 0 4px; font-weight: 600; }
+  .thread__section p { margin: 0; white-space: pre-wrap; }
+  .replies { margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--hair); }
+  .replies h2 { font-size: 17px; margin: 0; }
+  .reply {
+    margin-top: 12px; padding: 14px 16px;
+    background: var(--paper); border: 1px solid var(--hair); border-radius: 10px;
+  }
+  .reply__head { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-3); font-size: 13px; margin-bottom: 6px; }
+  .reply__body { margin: 0; white-space: pre-wrap; }
+
+  .site-foot { padding: 24px 0 48px; color: var(--ink-3); font-size: 13px; border-top: 1px solid var(--hair); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="/en/" aria-label="Veyl home">
+      <img src="/favicon.png" alt="" width="24" height="24">
+      <span>Veyl</span>
+    </a>
+    <nav class="site-nav" aria-label="Page navigation">
+      <a href="/en/#difference">What is different</a>
+      <a href="/en/#capabilities">Capabilities</a>
+      <a href="/en/#pricing">Pricing</a>
+      <a href="/en/#download">Download</a>
+      <a href="/en/issues.html" aria-current="page">Issues</a>
+      <a href="https://github.com/aiwithblockchain/veyl">GitHub<span aria-hidden="true"> ↗</span></a>
+      <span class="lang" aria-label="Language">
+        <a href="/issues.html" lang="zh-CN" hreflang="zh-CN" data-set-lang="zh">中文</a>
+        <span aria-hidden="true">/</span>
+        <span aria-current="true">English</span>
+      </span>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="wrap page" aria-live="polite">
+    <div id="view"></div>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">Issues are reported by users; their content does not represent Veyl's position.</div>
+  <div class="wrap">
+    <a href="/en/legal/pricing.html">Pricing</a> ·
+    <a href="/en/legal/terms.html">Terms</a> ·
+    <a href="/en/legal/privacy.html">Privacy</a> ·
+    <a href="/en/legal/refunds.html">Refunds</a>
+  </div>
+</footer>
+
+<script src="/issues.js"></script>
+</body>
+</html>

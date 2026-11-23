@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>定价 — Veyl</title>
+<meta name="description" content="Veyl 按天计费：512 MB $0.30/天、1 GB $0.40/天、2 GB $0.80/天，预付费服务额度分 $12 / $24 / $36 / $48 四档。">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/pricing.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/pricing.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/pricing.html">
+<link rel="icon" href="../favicon.png" type="image/png">
+<link rel="stylesheet" href="legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Veyl</a>
+    <nav aria-label="法务文档">
+      <a href="pricing.html">定价</a>
+      <a href="terms.html">服务条款</a>
+      <a href="privacy.html">隐私</a>
+      <a href="refunds.html">退款</a>
+      <a href="/issues.html">问题墙</a>
+    </nav>
+    <div class="lang" aria-label="语言">
+      <span aria-current="true">中文</span>
+      <span class="sep" aria-hidden="true">/</span>
+      <a href="/en/legal/pricing.html" lang="en" hreflang="en" onclick="try{localStorage.setItem('veyl.lang','en')}catch(e){}">English</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>定价</h1>
+    <p class="updated">最后更新：2026 年 11 月 23 日</p>
+
+    <h2>计费方式</h2>
+    <p>
+      Veyl 采用预付费的<strong>服务额度</strong>。你按下面的固定档位一次性购买服务额度，
+      每台运行中的服务器每天从服务额度中扣除其档位的日价。没有订阅，也没有自动续费；
+      销毁服务器后，该服务器不再产生费用。
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>服务器规格</th>
+          <th class="num">每日扣费</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>512 MB</td><td class="num">$0.30</td></tr>
+        <tr><td>1 GB</td><td class="num">$0.40</td></tr>
+        <tr><td>2 GB</td><td class="num">$0.80</td></tr>
+      </tbody>
+    </table>
+    <p>
+      扣费按「每台运行中的服务器 × 每个自然日」计算，与实际流量、带宽或用量无关。
+    </p>
+
+    <h2>充值档位</h2>
+    <p>每次付款全额转为服务额度，没有手续费，也没有赠送额度。</p>
+    <table>
+      <thead>
+        <tr>
+          <th>支付金额</th>
+          <th class="num">到账服务额度</th>
+          <th class="num">512 MB</th>
+          <th class="num">1 GB</th>
+          <th class="num">2 GB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>$12</td><td class="num">$12.00</td><td class="num">40 天</td><td class="num">30 天</td><td class="num">15 天</td></tr>
+        <tr><td>$24</td><td class="num">$24.00</td><td class="num">80 天</td><td class="num">60 天</td><td class="num">30 天</td></tr>
+        <tr><td>$36</td><td class="num">$36.00</td><td class="num">120 天</td><td class="num">90 天</td><td class="num">45 天</td></tr>
+        <tr><td>$48</td><td class="num">$48.00</td><td class="num">160 天</td><td class="num">120 天</td><td class="num">60 天</td></tr>
+      </tbody>
+    </table>
+    <p class="note">可用天数是按日价换算出的参考值：服务额度足够时多台服务器可同时扣费，因此实际可用天数取决于你同时运行的服务器。</p>
+
+    <h2>扣费规则</h2>
+    <ul>
+      <li>每台运行中的服务器，每天扣除一次其档位的日价。</li>
+      <li>多台服务器可以共用同一笔服务额度。</li>
+      <li>服务额度不足以支付下一天时，服务器停机，随后被销毁。</li>
+      <li>停机或销毁的服务器不再扣费。</li>
+    </ul>
+
+    <h2>服务额度有效期</h2>
+    <ul>
+      <li>服务额度自购买之日起 <strong>12 个月</strong>内有效；未使用的部分到期后失效，不予退款。</li>
+      <li>服务额度仅用于支付本服务，不可提现、转让或兑换现金。</li>
+    </ul>
+
+    <h2>适用地区</h2>
+    <p>
+      我们目前不面向欧洲经济区（EEA）与英国的消费者提供服务。
+      来自 EEA 或英国的订单可能被拒绝或取消；如果已付款，我们会按原支付方式全额退还。
+    </p>
+
+    <h2>支付方式</h2>
+    <p>
+      支持银行卡；在结账页面可用的地区，还支持本地钱包（目前为支付宝与微信支付）。
+      所有付款均为一次性付款，不会保存银行卡用于后续自动扣款。
+    </p>
+
+    <h2>税费</h2>
+    <p>
+      价格以美元计价，除结账时另有说明外不含税费。适用的税费由我们的支付服务商计算并代收。
+    </p>
+
+    <h2>价格调整</h2>
+    <p>
+      我们可能调整价格。调整仅适用于生效之后发生的购买，不减少你已经持有的服务额度。
+    </p>
+
+    <h2>联系我们</h2>
+    <p>
+      计费问题请联系 <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>。
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/">Veyl</a>
+    <a href="pricing.html">定价</a>
+    <a href="terms.html">服务条款</a>
+    <a href="privacy.html">隐私</a>
+    <a href="refunds.html">退款</a>
+    <a href="/issues.html">问题墙</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+    <p class="lang-note">本中文译本仅为阅读方便，以英文版本为准。</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>服务条款 — Veyl</title>
+<meta name="description" content="Veyl 服务条款：账户、预付费服务额度、第三方服务、责任限制与适用法律。">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/terms.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/terms.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/terms.html">
+<link rel="icon" href="../favicon.png" type="image/png">
+<link rel="stylesheet" href="legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/">Veyl</a>
+    <nav aria-label="法务文档">
+      <a href="pricing.html">定价</a>
+      <a href="terms.html">服务条款</a>
+      <a href="privacy.html">隐私</a>
+      <a href="refunds.html">退款</a>
+      <a href="/issues.html">问题墙</a>
+    </nav>
+    <div class="lang" aria-label="语言">
+      <span aria-current="true">中文</span>
+      <span class="sep" aria-hidden="true">/</span>
+      <a href="/en/legal/terms.html" lang="en" hreflang="en" onclick="try{localStorage.setItem('veyl.lang','en')}catch(e){}">English</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>服务条款</h1>
+    <p class="updated">最后更新：2026 年 11 月 23 日</p>
+
+    <h2>1. 我们是谁</h2>
+    <p>
+      Veyl 由 <strong>OmniWin Technologies LLC</strong> 运营（下称「我们」），
+      一家注册地址为 <strong>30 N Gould St, STE R, Sheridan, WY 82801, USA</strong> 的有限责任公司。
+      联系方式：<a href="mailto:support@dessage.xyz">support@dessage.xyz</a>。
+    </p>
+    <p>
+      本条款约束你对 Veyl 桌面应用及相关在线服务（合称「服务」）的使用。
+    </p>
+
+    <h2>2. 服务内容</h2>
+    <p>
+      Veyl 是面向 macOS 与 Windows 的桌面应用。我们不提供手机客户端。通过服务，你可以
+      委托我们以你的名义在第三方云服务商处创建并配置一台服务器，并让你的设备连接该服务器。
+      你可以随时在应用中销毁服务器。
+    </p>
+    <p>
+      在手机上使用的方式是：桌面端将你自己付费服务器的连接配置导出为导入码，由你在
+      第三方客户端中导入使用。这些第三方客户端不属于本服务，由其各自的提供者运营，
+      并受其自身条款约束。
+    </p>
+    <p>
+      服务器本身由云服务商运营。我们不控制、不监控、不检查经过你服务器的流量内容。
+    </p>
+
+    <h2>3. 账户</h2>
+    <p>
+      购买服务额度或创建服务器需要账户。你应提供准确的信息，并妥善保管登录凭据。
+      你对自己账户下的活动负责。使用本服务须年满 18 周岁，或达到你所在司法辖区的法定成年年龄。
+    </p>
+    <p>
+      我们目前不面向欧洲经济区（EEA）与英国的消费者提供服务。
+      如果你位于 EEA 或英国，请不要下单。我们可以拒绝或取消来自 EEA 或英国的订单；
+      如果已付款，我们会按原支付方式退款。
+    </p>
+
+    <h2>4. 服务额度</h2>
+    <p>
+      本服务以预付费的<strong>服务额度</strong>支付。你按固定档位购买服务额度，
+      服务额度按你所运行的每台服务器的日价每日扣除，直至服务器被销毁或服务额度不足。
+    </p>
+    <ul>
+      <li>服务额度以美元计价，不属于银行存款或电子货币。</li>
+      <li>服务额度没有现金价值，不可提现、转让或兑换现金。</li>
+      <li>服务额度只能用于支付本服务。</li>
+      <li>未使用的服务额度自购买之日起 <strong>12 个月</strong>后失效。</li>
+    </ul>
+    <p>
+      退款适用我们的<a href="refunds.html">退款政策</a>。
+    </p>
+
+    <h2>5. 第三方服务</h2>
+    <p>
+      本服务依赖第三方，包括云基础设施提供商与支付处理商，你在手机上使用的第三方客户端亦然。
+      这些第三方的条款与可用性同样适用。我们不对这些提供商的故障、暂停或决定负责，
+      包括因你的使用而导致服务器被暂停。
+    </p>
+
+    <h2>6. 可用性与变更</h2>
+    <p>
+      我们可能变更、暂停或停止服务的部分功能。当变更实质性减少已付费功能时，我们会提供合理通知。
+      我们不保证服务不中断。
+    </p>
+
+    <h2>7. 暂停与终止</h2>
+    <p>
+      你可以随时停止使用本服务。若你违反本条款或适用法律，或未付款，
+      我们可以暂停或终止你的账户。终止时，通过本服务创建的服务器将被销毁。
+    </p>
+
+    <h2>8. 免责声明</h2>
+    <p>
+      本服务按「现状」和「可用」提供。在适用法律允许的范围内，我们否认一切默示担保，
+      包括适销性、特定用途适用性和不侵权担保。我们不保证服务不中断、无错误，
+      也不保证任何服务器能从任何特定网络或地区访问。
+    </p>
+
+    <h2>9. 责任限制</h2>
+    <p>
+      在适用法律允许的范围内，我们因本服务产生或与之相关的全部责任，以你在引起索赔的事件
+      发生前 12 个月内向我们支付的金额为上限。我们不对间接、附带、特殊、后果性或惩罚性损害，
+      以及利润、数据或商誉损失承担责任。
+    </p>
+    <p>
+      本条款不排除依适用法律不能排除的责任。
+    </p>
+    <!-- 律师确认：责任上限（12 个月已付金额）与排除项是否适用于怀俄明州及主要销售地区。 -->
+
+    <h2>10. 适用法律与管辖</h2>
+    <p>
+      本条款适用美国怀俄明州法律，不考虑其冲突法规则。因本条款或本服务产生的争议，
+      由怀俄明州的州法院与联邦法院<strong>专属管辖</strong>。
+    </p>
+    <!-- 律师确认：专属管辖条款（怀俄明州州/联邦法院）的可执行性，以及是否需要补充仲裁条款。 -->
+
+    <h2>11. 联系我们</h2>
+    <p>
+      关于本条款的问题请联系 <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>。
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/">Veyl</a>
+    <a href="pricing.html">定价</a>
+    <a href="terms.html">服务条款</a>
+    <a href="privacy.html">隐私</a>
+    <a href="refunds.html">退款</a>
+    <a href="/issues.html">问题墙</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+    <p class="lang-note">本中文译本仅为阅读方便，以英文版本为准。</p>
+  </div>
+</footer>
+
+</body>
+</html>

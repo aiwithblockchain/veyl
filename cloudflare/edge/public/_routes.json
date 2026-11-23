@@ -1,5 +1,5 @@
 {
   "version": 1,
   "include": ["/*"],
-  "exclude": ["/", "/index.html", "/favicon.png", "/issues", "/issues/", "/issues.html", "/issues.js"]
+  "exclude": ["/", "/index.html", "/favicon.png", "/issues", "/issues/", "/issues.html", "/issues.js", "/site-lang.js", "/legal", "/legal/*", "/en", "/en/*"]
 }

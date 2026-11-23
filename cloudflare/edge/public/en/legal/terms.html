@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>Terms of Service — Veyl</title>
+<meta name="description" content="Veyl Terms of Service: accounts, prepaid Service Credits, third-party services, limitation of liability, and governing law.">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/terms.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/terms.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/terms.html">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="stylesheet" href="/legal/legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/en/">Veyl</a>
+    <nav aria-label="Legal">
+      <a href="pricing.html">Pricing</a>
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="refunds.html">Refunds</a>
+      <a href="/en/issues.html">Issues</a>
+    </nav>
+    <div class="lang" aria-label="Language">
+      <a href="/legal/terms.html" lang="zh-CN" hreflang="zh-CN" onclick="try{localStorage.setItem('veyl.lang','zh')}catch(e){}">中文</a>
+      <span class="sep" aria-hidden="true">/</span>
+      <span aria-current="true">English</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Terms of Service</h1>
+    <p class="updated">Last updated: November 23, 2026</p>
+
+    <h2>1. Who we are</h2>
+    <p>
+      Veyl is operated by <strong>OmniWin Technologies LLC</strong>, a limited liability company
+      registered at <strong>30 N Gould St, STE R, Sheridan, WY 82801, USA</strong>
+      ("we", "us", "our"). You can reach us at
+      <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+    <p>
+      These Terms govern your use of the Veyl desktop application and the related
+      online services we provide (together, the "Service").
+    </p>
+
+    <h2>2. The Service</h2>
+    <p>
+      Veyl is a desktop application for macOS and Windows. We do not offer a mobile app.
+      Through the Service, you can ask us to create and configure a server with a third-party
+      cloud provider on your behalf, and connect your devices to that server. You can destroy
+      a server at any time from the application.
+    </p>
+    <p>
+      To use your server on a phone, you export its connection configuration from the desktop
+      app as an import code and add it to a third-party client of your choice. Those clients
+      are not part of the Service; they are operated by their own providers and governed by
+      their own terms.
+    </p>
+    <p>
+      The server itself is operated by the cloud provider. We do not control, monitor, or
+      inspect the content of the traffic that passes through your server.
+    </p>
+
+    <h2>3. Accounts</h2>
+    <p>
+      You need an account to purchase Service Credits or create servers. You must provide
+      accurate information and keep your login credentials secure. You are responsible for
+      activity under your account. You must be at least 18 years old, or the age of majority
+      in your jurisdiction, to use the Service.
+    </p>
+    <p>
+      We do not currently offer the Service to consumers in the European Economic Area (EEA)
+      or the United Kingdom. If you are in the EEA or the UK, please do not place an order.
+      We may refuse or cancel orders from the EEA or the UK; if a payment was made, we will
+      refund it to the original payment method.
+    </p>
+
+    <h2>4. Service Credits</h2>
+    <p>
+      The Service is paid for with prepaid <strong>Service Credits</strong>. You purchase
+      Service Credits in fixed amounts. Credits are deducted at the daily rate of each server
+      you run, until the server is destroyed or your Credits are insufficient.
+    </p>
+    <ul>
+      <li>Service Credits are denominated in US dollars and are not a bank deposit or electronic money.</li>
+      <li>Service Credits have no cash value. They cannot be withdrawn, transferred, or redeemed for cash.</li>
+      <li>Service Credits can only be used to pay for the Service.</li>
+      <li>Unused Service Credits expire <strong>12 months</strong> after the date of purchase.</li>
+    </ul>
+    <p>
+      Refunds are governed by our <a href="refunds.html">Refund Policy</a>.
+    </p>
+
+    <h2>5. Third-party services</h2>
+    <p>
+      The Service relies on third parties, including cloud infrastructure providers and payment
+      processors, as does any third-party client you use on a phone. Their terms and availability
+      also apply. We are not responsible for outages, suspensions, or decisions made by those
+      providers, including suspension of a server for reasons attributable to your use.
+    </p>
+
+    <h2>6. Availability and changes</h2>
+    <p>
+      We may change, suspend, or discontinue features of the Service. Where a change
+      materially reduces paid functionality, we will provide reasonable notice. We do not
+      guarantee uninterrupted availability.
+    </p>
+
+    <h2>7. Suspension and termination</h2>
+    <p>
+      You may stop using the Service at any time. We may suspend or terminate your account if
+      you breach these Terms or applicable law, or do not pay. On termination, servers created
+      through the Service are destroyed.
+    </p>
+
+    <h2>8. Disclaimers</h2>
+    <p>
+      The Service is provided "as is" and "as available". To the extent permitted by law, we
+      disclaim all implied warranties, including merchantability, fitness for a particular
+      purpose, and non-infringement. We do not warrant that the Service will be
+      uninterrupted, error-free, or that any server will be reachable from any particular
+      network or location.
+    </p>
+
+    <h2>9. Limitation of liability</h2>
+    <p>
+      To the extent permitted by law, our total liability arising out of or relating to the
+      Service is limited to the amount you paid us in the twelve months before the event
+      giving rise to the claim. We are not liable for indirect, incidental, special,
+      consequential, or punitive damages, or for lost profits, data, or goodwill.
+    </p>
+    <p>
+      Nothing in these Terms excludes liability that cannot be excluded under applicable law.
+    </p>
+    <!-- 律师确认（Counsel review）: confirm the 12-month cap and the exclusions in this section for Wyoming and our main sales regions. -->
+
+    <h2>10. Governing law and venue</h2>
+    <p>
+      These Terms are governed by the laws of the State of Wyoming, United States, without
+      regard to its conflict-of-law rules. Any dispute arising out of or relating to these
+      Terms or the Service is subject to the <strong>exclusive jurisdiction</strong> of the
+      state and federal courts located in Wyoming.
+    </p>
+    <!-- 律师确认（Counsel review）: confirm enforceability of the exclusive-jurisdiction clause and whether an arbitration clause should be added. -->
+
+    <h2>11. Contact</h2>
+    <p>
+      Questions about these Terms: <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/en/">Veyl</a>
+    <a href="pricing.html">Pricing</a>
+    <a href="terms.html">Terms</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="refunds.html">Refunds</a>
+    <a href="/en/issues.html">Issues</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+  </div>
+</footer>
+
+</body>
+</html>

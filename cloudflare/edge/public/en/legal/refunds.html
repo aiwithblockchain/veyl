@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>Refund Policy — Veyl</title>
+<meta name="description" content="Veyl Refund Policy: purchased Service Credits are generally non-refundable; the exceptions, EEA/UK orders, 12-month expiry, and chargebacks.">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/refunds.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/refunds.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/refunds.html">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="stylesheet" href="/legal/legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/en/">Veyl</a>
+    <nav aria-label="Legal">
+      <a href="pricing.html">Pricing</a>
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="refunds.html">Refunds</a>
+      <a href="/en/issues.html">Issues</a>
+    </nav>
+    <div class="lang" aria-label="Language">
+      <a href="/legal/refunds.html" lang="zh-CN" hreflang="zh-CN" onclick="try{localStorage.setItem('veyl.lang','zh')}catch(e){}">中文</a>
+      <span class="sep" aria-hidden="true">/</span>
+      <span aria-current="true">English</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Refund Policy</h1>
+    <p class="updated">Last updated: November 23, 2026</p>
+
+    <h2>1. All purchases are final</h2>
+    <p>
+      Service Credits purchased through Veyl are prepaid credit for the Service. Except as
+      described in sections 2 and 3, purchases are final and non-refundable. Service Credits are
+      not a deposit, have no cash value, and cannot be withdrawn, transferred, or redeemed for cash.
+    </p>
+    <p>
+      Unused Service Credits are valid for <strong>12 months</strong> from the date of purchase;
+      they expire afterward and are not refunded.
+    </p>
+
+    <h2>2. When we do refund</h2>
+    <p>We will refund a payment, or add the Service Credits, if:</p>
+    <ul>
+      <li>you were charged twice for the same purchase; or</li>
+      <li>a refund is required by applicable law.</li>
+    </ul>
+    <p>
+      Contact us at <a href="mailto:support@dessage.xyz">support@dessage.xyz</a> with the
+      transaction email and approximate time. We aim to respond within five business days.
+    </p>
+    <p>
+      If you have not consumed any Service Credits and have not deployed any server, contact us;
+      we will review your case under the mandatory consumer-protection rules that apply to you.
+    </p>
+
+    <h2>3. Orders from the EEA and the UK</h2>
+    <p>
+      We do not currently offer the Service to consumers in the European Economic Area (EEA)
+      or the United Kingdom. We may refuse or cancel orders from the EEA or the UK;
+      if a payment was made, we will refund it in full to the original payment method.
+    </p>
+
+    <h2>4. Violation and forfeiture</h2>
+    <p>
+      If we reasonably determine that you have violated the
+      <a href="terms.html">Terms of Service</a>, we may, to the extent permitted by law,
+      suspend or terminate your account, destroy servers created through the Service, and forfeit
+      unused Service Credits without refund.
+    </p>
+    <!-- 律师确认（Counsel review）: enforceability of forfeiting unused Service Credits under Wyoming law and the law of our main sales regions. -->
+
+    <h2>5. Chargebacks</h2>
+    <p>
+      If you believe a charge is wrong, please contact us before contacting your bank or
+      payment provider. A chargeback opened without contacting us may result in suspension
+      of the account while the dispute is reviewed.
+    </p>
+
+    <h2>6. Contact</h2>
+    <p>
+      Refund requests: <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/en/">Veyl</a>
+    <a href="pricing.html">Pricing</a>
+    <a href="terms.html">Terms</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="refunds.html">Refunds</a>
+    <a href="/en/issues.html">Issues</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>Privacy Policy — Veyl</title>
+<meta name="description" content="Veyl Privacy Policy: what data we collect, how we use and share it, retention, local storage, and your rights.">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/privacy.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/privacy.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/privacy.html">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="stylesheet" href="/legal/legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/en/">Veyl</a>
+    <nav aria-label="Legal">
+      <a href="pricing.html">Pricing</a>
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="refunds.html">Refunds</a>
+      <a href="/en/issues.html">Issues</a>
+    </nav>
+    <div class="lang" aria-label="Language">
+      <a href="/legal/privacy.html" lang="zh-CN" hreflang="zh-CN" onclick="try{localStorage.setItem('veyl.lang','zh')}catch(e){}">中文</a>
+      <span class="sep" aria-hidden="true">/</span>
+      <span aria-current="true">English</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Privacy Policy</h1>
+    <p class="updated">Last updated: November 23, 2026</p>
+
+    <h2>1. Who is responsible</h2>
+    <p>
+      <strong>OmniWin Technologies LLC</strong>, <strong>30 N Gould St, STE R, Sheridan, WY 82801, USA</strong>,
+      is the controller of the personal data described in this policy.
+      Contact: <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+    <p>
+      This policy should be read together with our <a href="terms.html">Terms of Service</a>.
+    </p>
+
+    <h2>2. What we collect</h2>
+    <table>
+      <thead>
+        <tr><th>Category</th><th>Examples</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Account data</td>
+          <td>Email address, verification method, device identifier, session token</td>
+          <td>To create and secure your account and keep you signed in</td>
+        </tr>
+        <tr>
+          <td>Service data</td>
+          <td>Server size, region, creation and expiry times, connection status</td>
+          <td>To provision, bill, and display your servers</td>
+        </tr>
+        <tr>
+          <td>Payment data</td>
+          <td>Payment status, amount, currency, transaction identifier</td>
+          <td>To add Service Credits, screen for fraud, and handle disputes</td>
+        </tr>
+        <tr>
+          <td>Technical data</td>
+          <td>IP address, device platform, app version, error logs</td>
+          <td>To operate the Service, diagnose faults, and prevent abuse</td>
+        </tr>
+        <tr>
+          <td>Support data</td>
+          <td>Messages you send us and the files you attach</td>
+          <td>To answer your requests</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      We do not receive or store your card number. Card payments are processed by our
+      payment provider, which receives the payment details directly.
+    </p>
+
+    <h2>3. Server credentials</h2>
+    <p>
+      When we create a server for you, we generate access credentials and store what is
+      needed to operate and reconnect that server. These credentials are used only to
+      provide the Service.
+    </p>
+    <p>
+      We do not inspect or log the content of traffic that passes through your server.
+    </p>
+    <p>
+      If you export a configuration to a third-party client on a phone, that client and your
+      use of it are not part of the Service. They are handled by the client's provider under
+      its own privacy policy.
+    </p>
+
+    <h2>4. AI assistant</h2>
+    <p>
+      The AI assistant uses an API key that you provide. The key is stored only in the operating
+      system keychain on your device and is not uploaded to our servers. Requests made by the
+      assistant go directly from your device to the AI provider you configured, and are governed
+      by that provider's terms and privacy policy.
+    </p>
+
+    <h2>5. Cookies and local storage</h2>
+    <p>
+      Our website does not use advertising cookies or cross-site tracking, and we do not run any
+      analytics. The site stores only your language preference in your browser's local storage
+      (key <code>veyl.lang</code>). The desktop client keeps the login session token and your own
+      configuration on your device.
+    </p>
+
+    <h2>6. How we use data</h2>
+    <ul>
+      <li>to provide, secure, and improve the Service;</li>
+      <li>to calculate charges and maintain your Service Credits;</li>
+      <li>to detect abuse, fraud, and unauthorized access;</li>
+      <li>to comply with legal, tax, and accounting obligations;</li>
+      <li>to respond to support requests.</li>
+    </ul>
+    <p>
+      We do not sell personal data, and we do not use it for advertising.
+    </p>
+
+    <h2>7. Sharing</h2>
+    <p>We share data only with providers that help us run the Service, including:</p>
+    <ul>
+      <li>payment processors (including Stripe), to take payments, screen for fraud, and handle disputes;</li>
+      <li>cloud infrastructure providers, to create and operate servers;</li>
+      <li>email and hosting providers, to deliver login codes and operate the website;</li>
+      <li>authorities, where required by law.</li>
+    </ul>
+
+    <h2>8. Retention</h2>
+    <p>
+      Account, top-up, and charge records are kept for 30 days. Payment and billing details are
+      retained by Stripe; you can find them in your Stripe receipts. Technical logs are kept
+      for a limited period and then deleted or aggregated. Support messages are kept for as long
+      as needed to resolve the request.
+    </p>
+
+    <h2>9. Your rights</h2>
+    <p>
+      Depending on where you live, you may have the right to access, correct, delete, or
+      export your personal data, or to object to certain processing. To exercise these
+      rights, email <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>. We may need to
+      verify your identity before acting.
+    </p>
+    <p>
+      If you are a California resident, you have the right to request access to, deletion of, or
+      correction of your personal data, and to exercise these rights without discrimination. We
+      do not sell personal data.
+    </p>
+
+    <h2>10. International transfers</h2>
+    <p>
+      We and our providers may process data in countries other than yours, including the
+      United States. We apply appropriate safeguards as required by applicable law.
+    </p>
+
+    <h2>11. Children</h2>
+    <p>
+      The Service is not intended for anyone under 18, and we do not knowingly collect data
+      from children.
+    </p>
+
+    <h2>12. Changes</h2>
+    <p>
+      We may update this policy. Material changes will be announced on this page with a new
+      effective date.
+    </p>
+
+    <h2>13. Contact</h2>
+    <p>
+      Privacy questions: <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/en/">Veyl</a>
+    <a href="pricing.html">Pricing</a>
+    <a href="terms.html">Terms</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="refunds.html">Refunds</a>
+    <a href="/en/issues.html">Issues</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+  </div>
+</footer>
+
+</body>
+</html>

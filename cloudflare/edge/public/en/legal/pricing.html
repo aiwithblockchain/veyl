@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  var KEY = "veyl.lang";
+  if (location.protocol !== "http:" && location.protocol !== "https:") return;
+  var p = location.pathname, isEn = p === "/en" || p.indexOf("/en/") === 0;
+  var alt;
+  if (isEn) {
+    alt = p.replace(/^\/en(\/|$)/, "$1");
+    if (!alt) alt = "/";
+    if (alt.charAt(0) !== "/") alt = "/" + alt;
+  } else {
+    alt = "/en" + (p === "/" ? "/" : p);
+  }
+  var link = document.createElement("link");
+  link.rel = "prefetch";
+  link.href = alt;
+  document.head.appendChild(link);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+  var want = stored || ((navigator.language || "").toLowerCase().indexOf("zh") === 0 ? "zh" : "en");
+  if (want === (isEn ? "en" : "zh")) return;
+  location.replace(alt + location.search + location.hash);
+})();
+</script>
+<title>Pricing — Veyl</title>
+<meta name="description" content="Veyl is billed by the day: $0.30/day for 512 MB, $0.40/day for 1 GB, $0.80/day for 2 GB, paid in prepaid Service Credits of $12, $24, $36 or $48.">
+<link rel="alternate" hreflang="zh-CN" href="https://veyl.dessage.xyz/legal/pricing.html">
+<link rel="alternate" hreflang="en" href="https://veyl.dessage.xyz/en/legal/pricing.html">
+<link rel="alternate" hreflang="x-default" href="https://veyl.dessage.xyz/en/legal/pricing.html">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="stylesheet" href="/legal/legal.css">
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="/en/">Veyl</a>
+    <nav aria-label="Legal">
+      <a href="pricing.html">Pricing</a>
+      <a href="terms.html">Terms</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="refunds.html">Refunds</a>
+      <a href="/en/issues.html">Issues</a>
+    </nav>
+    <div class="lang" aria-label="Language">
+      <a href="/legal/pricing.html" lang="zh-CN" hreflang="zh-CN" onclick="try{localStorage.setItem('veyl.lang','zh')}catch(e){}">中文</a>
+      <span class="sep" aria-hidden="true">/</span>
+      <span aria-current="true">English</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <h1>Pricing</h1>
+    <p class="updated">Last updated: November 23, 2026</p>
+
+    <h2>How billing works</h2>
+    <p>
+      Veyl uses prepaid <strong>Service Credits</strong>. You buy Service Credits in one of the
+      fixed amounts below, and each running server deducts its daily rate from them. There is no
+      subscription and no automatic renewal. Destroying a server ends its charges.
+    </p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Server size</th>
+          <th class="num">Daily charge</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>512 MB</td><td class="num">$0.30</td></tr>
+        <tr><td>1 GB</td><td class="num">$0.40</td></tr>
+        <tr><td>2 GB</td><td class="num">$0.80</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Charges are calculated per running server per calendar day. They do not depend on traffic,
+      bandwidth, or usage.
+    </p>
+
+    <h2>Credit amounts</h2>
+    <p>Every payment converts in full into Service Credits. There are no fees and no bonus credits.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Payment</th>
+          <th class="num">Service Credits</th>
+          <th class="num">512 MB</th>
+          <th class="num">1 GB</th>
+          <th class="num">2 GB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>$12</td><td class="num">$12.00</td><td class="num">40 days</td><td class="num">30 days</td><td class="num">15 days</td></tr>
+        <tr><td>$24</td><td class="num">$24.00</td><td class="num">80 days</td><td class="num">60 days</td><td class="num">30 days</td></tr>
+        <tr><td>$36</td><td class="num">$36.00</td><td class="num">120 days</td><td class="num">90 days</td><td class="num">45 days</td></tr>
+        <tr><td>$48</td><td class="num">$48.00</td><td class="num">160 days</td><td class="num">120 days</td><td class="num">60 days</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Day counts are a reference conversion at the daily rate. Several servers can draw from the same Service Credits, so how long they last depends on how many servers you run.</p>
+
+    <h2>Deductions</h2>
+    <ul>
+      <li>The daily rate is deducted once per running server per day.</li>
+      <li>Several servers can draw from the same Service Credits.</li>
+      <li>If your Service Credits cannot cover the next day, the server is suspended and then destroyed.</li>
+      <li>Suspended or destroyed servers are not charged.</li>
+    </ul>
+
+    <h2>Expiry</h2>
+    <ul>
+      <li>Service Credits are valid for <strong>12 months</strong> from the date of purchase. Unused Credits expire and are not refunded.</li>
+      <li>Service Credits can only be used to pay for the Service. They cannot be withdrawn, transferred, or redeemed for cash.</li>
+    </ul>
+
+    <h2>Availability</h2>
+    <p>
+      We do not currently offer the Service to consumers in the European Economic Area (EEA)
+      or the United Kingdom. We may refuse or cancel orders from the EEA or the UK; if a
+      payment was made, we will refund it in full to the original payment method.
+    </p>
+
+    <h2>Payment methods</h2>
+    <p>
+      Card payments are supported, together with local wallets where available at checkout
+      (currently Alipay and WeChat Pay). All payments are one-time; no card is stored for
+      recurring charges.
+    </p>
+
+    <h2>Taxes</h2>
+    <p>
+      Prices are shown in US dollars and exclude taxes unless stated otherwise at checkout.
+      Where tax applies, it is calculated and collected by our payment provider.
+    </p>
+
+    <h2>Changes</h2>
+    <p>
+      We may change prices in the future. Changes apply to purchases made after the new
+      price takes effect and do not reduce Service Credits you already hold.
+    </p>
+
+    <h2>Contact</h2>
+    <p>
+      Billing questions: <a href="mailto:support@dessage.xyz">support@dessage.xyz</a>.
+    </p>
+  </div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <a href="/en/">Veyl</a>
+    <a href="pricing.html">Pricing</a>
+    <a href="terms.html">Terms</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="refunds.html">Refunds</a>
+    <a href="/en/issues.html">Issues</a>
+    <span>© 2026 OmniWin Technologies LLC</span>
+  </div>
+</footer>
+
+</body>
+</html>
