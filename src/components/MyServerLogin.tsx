@@ -165,14 +165,15 @@ export function MyServerLogin({ onStart, onVerify, onReRegister, onCancel }: Pro
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onCancel]);
 
+  // 两个步骤共用同一个倒数：退回邮箱步骤后数字也要继续走，别冻在旧值上。
   useEffect(() => {
-    if (step !== "code" || cooldown <= 0) return;
+    if (cooldown <= 0) return;
     const timer = window.setTimeout(
       () => setCooldown((value) => Math.max(0, value - 1)),
       1000,
     );
     return () => window.clearTimeout(timer);
-  }, [step, cooldown]);
+  }, [cooldown]);
 
   const requestCode = async () => {
     if (busyRef.current) return;

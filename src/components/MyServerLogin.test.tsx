@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerLoginTicket } from "../agent/bridge";
 import { MyServerLogin } from "./MyServerLogin";
@@ -64,6 +64,50 @@ describe("登录弹窗", () => {
     expect(within(dialog).getByLabelText("验证码")).toBeTruthy();
     expect(within(dialog).queryByLabelText("邮箱")).toBeNull();
     expect(within(dialog).getByRole("button", { name: /后可重发/ })).toBeTruthy();
+  });
+
+  it("退回邮箱步骤后倒数继续，归零后可再次发送", async () => {
+    vi.useFakeTimers();
+    try {
+      const onStart = vi.fn<StartFn>().mockResolvedValue({
+        sent: true,
+        cooldown_seconds: 19,
+      });
+      const { dialog } = setup(onStart);
+
+      await act(async () => {
+        fireEvent.click(
+          within(dialog).getByRole("button", { name: "发送验证码" }),
+        );
+      });
+      expect(within(dialog).getByLabelText("验证码")).toBeTruthy();
+
+      // 退回邮箱步骤：倒数不该冻住。
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "换一个邮箱" }),
+      );
+      expect(
+        within(dialog).getByRole("button", { name: "19 秒后可重发" }),
+      ).toBeTruthy();
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(
+        within(dialog).getByRole("button", { name: "18 秒后可重发" }),
+      ).toBeTruthy();
+
+      // 每一拍更新一次状态，链上的新定时器才会继续排进来。
+      for (let i = 0; i < 18; i += 1) {
+        act(() => {
+          vi.advanceTimersByTime(1000);
+        });
+      }
+      const send = within(dialog).getByRole("button", { name: "发送验证码" });
+      expect((send as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
