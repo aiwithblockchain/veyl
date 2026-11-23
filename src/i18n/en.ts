@@ -842,10 +842,6 @@ export const en: Record<MessageKey, string> = {
   "myservers.tombstone.text":
     "This server was stopped and destroyed because the balance ran out; its node can no longer connect. It disappears after you delete it.",
   "myservers.nodeTombstone": "Deleted",
-  "myservers.stepDone.creating": "Server created",
-  "myservers.stepDone.booting": "Booted",
-  "myservers.stepDone.installing": "Service installed",
-  "myservers.stepDone.verifying": "Availability checked",
   "myservers.rail.creating": "Creating",
   "myservers.rail.booting": "Booting",
   "myservers.rail.installing": "Installing",
@@ -868,7 +864,6 @@ export const en: Record<MessageKey, string> = {
   "myservers.duration.minutes": "{minutes} min {seconds} s",
   "myservers.duration.seconds": "{seconds} s",
   "myservers.paid.expired": "Current period ended; service is running normally",
-  "myservers.paid.pending": "Creating; billing starts when it's ready",
   "myservers.billing.daily": "{price} per day",
   "myservers.billing.dailyExpired": "{price} per day · {word}",
   "myservers.billing.pastDueNoGrace":
@@ -945,6 +940,7 @@ export const en: Record<MessageKey, string> = {
   "progress.processing": "Working",
   "progress.waited": "Waited {duration}",
   "progress.buildTimeout": "Setup timed out — you can destroy and rebuild. It won't be destroyed automatically.",
+  "progress.stepOf": "Step {n} of 4",
 
   // Sign in to my servers
   "login.title": "Sign in to My servers",
@@ -1085,7 +1081,6 @@ export const en: Record<MessageKey, string> = {
   "detail.copy": "Copy",
   "detail.node": "Node",
   "detail.nodeReady": "Ready",
-  "detail.nodeNotReady": "Not ready",
   "detail.cost": "Cost",
   "detail.traffic": "Traffic",
   "detail.trafficMonthly": "{gib} GB outbound per month",

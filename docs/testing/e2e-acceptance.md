@@ -3934,7 +3934,7 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 
 **可判定预期**：
 
-1. 阶段条 `.myservers__steps` 依次高亮 `创建中 → 启动中 → 安装中 → 验证中`，完成后变 `可用`；`aria-current="step"` 只落在当前阶段，已完成项带 `is-done`；进度区没有 `%` 文案。
+1. 四段进度条 `.myservers__bar` 固定 4 段：已完成段 `is-done`、当前段 `is-current`、未开始段无类；不再渲染阶段词列表；完成后进度条消失，只留 `已开通` 一行；进度区没有 `%` 文案。
 2. `installing_at` < `verifying_at` < `ready_at` 且都非空；「已等待」每秒递增；阶段超过 180 秒后 note 变为「这一步已经 N 分钟，还在继续。」
 3. 超时：该服务器被销毁或标失败，`failure_stage` 等于卡住的阶段，失败原因码为 `install_timeout` / `verify_timeout` / `enrollment_timeout`；界面显示失败阶段而不是编造的阶段；`wallet_ledger` 有对应退款。
 4. 旧机器三个时间为 NULL：界面显示「用时未知」，不拿 `created_at` 顶替。

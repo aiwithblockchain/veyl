@@ -62,12 +62,11 @@ afterEach(() => {
 });
 
 describe("服务器详情", () => {
-  it("健康检查失败但 node_id 还在：节点写「未就绪」", () => {
+  it("健康检查失败但 node_id 还在：节点不进事实区，没有「未就绪」", () => {
     renderDetail({ state: "error", node_id: "nd_control_1" });
 
-    const term = screen.getByText("节点");
-    const value = term.parentElement?.querySelector("dd");
-    expect(value?.textContent).toBe("未就绪");
+    expect(screen.queryByText("节点")).toBeNull();
+    expect(screen.queryByText("未就绪")).toBeNull();
   });
 
   it("费用只按日价展示，不写本期有效期", () => {
@@ -213,7 +212,7 @@ describe("服务器详情", () => {
     expect(screen.getByText("流量")).toBeTruthy();
   });
 
-  it("待开通（billing_state=pending）：费用行写开通后开始计费，流量照常", () => {
+  it("待开通（billing_state=pending）：事实区只有地区与流量，不写费用行", () => {
     renderDetail({
       state: "verifying",
       billing_state: "pending",
@@ -222,9 +221,41 @@ describe("服务器详情", () => {
     });
 
     const facts = document.querySelector(".myservers__facts");
-    expect(facts?.textContent).toContain("创建中，开通后开始计费");
-    expect(facts?.textContent).not.toContain("本期有效至");
+    expect(facts?.textContent).not.toContain("创建中，开通后开始计费");
+    expect(facts?.textContent).not.toContain("费用");
+    expect(screen.queryByText("节点")).toBeNull();
     expect(screen.getByText("流量")).toBeTruthy();
+  });
+
+  it("就绪且已计费：节点与费用两行同时出现", () => {
+    renderDetail({
+      state: "healthy",
+      billing_state: "active",
+      daily_price_cents: 20,
+      transfer_gib: 1000,
+    });
+
+    const labels = [...document.querySelectorAll(".myservers__facts dt")].map(
+      (dt) => dt.textContent,
+    );
+    expect(labels).toContain("节点");
+    expect(labels).toContain("费用");
+    const facts = document.querySelector(".myservers__facts");
+    expect(facts?.textContent).toContain("已就绪");
+    expect(facts?.textContent).toContain("每天 $0.20");
+  });
+
+  it("分区顺序固定：状态块 → 事实块 → 危险块", () => {
+    for (const state of ["healthy", "installing", "error"] as const) {
+      renderDetail({ state });
+      const children = [
+        ...(document.querySelector(".myservers__detail")?.children ?? []),
+      ].map((node) => node.className);
+      expect(children[0]).toContain("myservers__block");
+      expect(children[1]).toContain("myservers__facts");
+      expect(children[2]).toContain("myservers__footer");
+      cleanup();
+    }
   });
 
   it("就绪后扣费余额不够：写明没开通没扣费，给去充值与重新建一台", () => {
@@ -258,6 +289,113 @@ describe("服务器详情", () => {
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
     expect(onTopUp).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "重新建一台" })).toBeTruthy();
+  });
+
+  it("结算失败：重新建一台为次、去充值为主，且不给 AI 定位", () => {
+    const onTopUp = vi.fn();
+    const onAiLocate = vi.fn();
+    renderDetail(
+      {
+        state: "error",
+        billing_state: "pending",
+        paid_until: null,
+        charged_cents: 30,
+        refunded_cents: 0,
+        failure: {
+          stage: "verifying",
+          code: "settle_insufficient",
+          message: "余额不足。",
+          retryable: true,
+        },
+      },
+      vi.fn(),
+      onAiLocate,
+      onTopUp,
+    );
+
+    const group = document.querySelector(
+      ".myservers__footer .myservers__actions",
+    ) as HTMLElement;
+    const buttons = [...group.querySelectorAll("button")].map(
+      (button) => button.textContent,
+    );
+    expect(buttons).toEqual(["重新建一台", "去充值"]);
+    expect(group.querySelector(".btn--primary")?.textContent).toBe("去充值");
+    expect(
+      group.querySelector(".btn--ghost")?.classList.contains("btn--danger-ghost"),
+    ).toBe(false);
+    // AI 定位只属于建机失败，结算失败不给。
+    expect(screen.queryByRole("button", { name: "AI 定位" })).toBeNull();
+    expect(onAiLocate).not.toHaveBeenCalled();
+  });
+
+  it("已销毁：不给销毁，右侧只保留重新购买", () => {
+    renderDetail({ state: "gone" });
+
+    expect(screen.queryByRole("button", { name: /销毁/ })).toBeNull();
+    const rebuy = screen.getByRole("button", { name: "重新购买" });
+    expect(rebuy.classList.contains("btn--primary")).toBe(true);
+  });
+
+  it("已销毁且已停用：右侧只有重新购买一个主按钮，不给去充值", () => {
+    const onTopUp = vi.fn();
+    renderDetail(
+      { state: "gone", billing_state: "expired" },
+      vi.fn(),
+      undefined,
+      onTopUp,
+    );
+
+    const footer = document.querySelector(".myservers__footer") as HTMLElement;
+    const primaries = footer.querySelectorAll(".btn--primary");
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].textContent).toBe("重新购买");
+    expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
+  });
+
+  it("停机中与已销毁：事实区只剩地区", () => {
+    for (const state of ["destroying", "gone"] as const) {
+      renderDetail({ state });
+      const labels = [
+        ...document.querySelectorAll(".myservers__facts dt"),
+      ].map((dt) => dt.textContent);
+      expect(labels).toEqual(["地区"]);
+      cleanup();
+    }
+  });
+
+  it("欠费 / 停用：右侧给去充值主按钮，销毁仍在左", () => {
+    const onTopUp = vi.fn();
+    renderDetail(
+      {
+        billing_state: "past_due",
+        grace_ends_at: new Date(Date.now() + 2.5 * 86_400_000).toISOString(),
+      },
+      vi.fn(),
+      undefined,
+      onTopUp,
+    );
+
+    const footer = document.querySelector(".myservers__footer") as HTMLElement;
+    expect(
+      footer.querySelector(".myservers__danger .btn--danger-ghost"),
+    ).not.toBeNull();
+    expect(
+      footer.querySelector(".myservers__actions .btn--primary")?.textContent,
+    ).toBe("去充值");
+    fireEvent.click(screen.getByRole("button", { name: "去充值" }));
+    expect(onTopUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("进度条报步骤：1–4 与阶段名，另有 sr-only 第 N 步", () => {
+    renderDetail({ state: "installing" });
+
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuemin")).toBe("1");
+    expect(bar.getAttribute("aria-valuemax")).toBe("4");
+    expect(bar.getAttribute("aria-valuenow")).toBe("3");
+    expect(bar.getAttribute("aria-label")).toContain("安装");
+    expect(screen.getByText("第 3 步，共 4 步")).toBeTruthy();
   });
 
   it("其它建机失败仍走退款文案，不给去充值", () => {
@@ -350,8 +488,9 @@ describe("服务器详情", () => {
     });
     expect(screen.queryByText(/已等待/)).toBeNull();
     expect(screen.getByRole("group", { name: "建机进度" })).toBeTruthy();
-    // 完成态只留一行，不再是四段步骤。
-    expect(document.querySelectorAll(".myservers__steps li")).toHaveLength(0);
+    // 完成态只留一行：进度条与阶段词都不再出现。
+    expect(document.querySelector(".myservers__steps")).toBeNull();
+    expect(document.querySelector(".myservers__bar")).toBeNull();
     const doneLine = document.querySelector(".myservers__created-in");
     expect(doneLine?.textContent).toContain("已开通");
     expect(doneLine?.textContent).toContain("用时未记录");
@@ -490,7 +629,7 @@ describe("服务器详情", () => {
     expect(screen.queryByText(/创建用时/)).toBeNull();
   });
 
-  it("建机进度不显示百分比，秒数每秒更新，当前阶段用 aria-current", () => {
+  it("建机进度不显示百分比，秒数每秒更新，当前阶段在第 1 段", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
     renderDetail({
       state: "creating",
@@ -502,9 +641,11 @@ describe("服务器详情", () => {
       document.querySelector(".myservers__progress-head")?.textContent,
     ).toContain("正在建机器");
     expect(screen.getByText("已等待 0 秒")).toBeTruthy();
-    const steps = [...document.querySelectorAll(".myservers__steps li")];
-    expect(steps[0].getAttribute("aria-current")).toBe("step");
-    expect(steps[1].getAttribute("aria-current")).toBeNull();
+    expect(document.querySelector(".myservers__steps")).toBeNull();
+    const segments = [...document.querySelectorAll(".myservers__bar span")];
+    expect(segments).toHaveLength(4);
+    expect(segments[0].classList.contains("is-current")).toBe(true);
+    expect(segments[1].className).toBe("");
 
     act(() => {
       vi.advanceTimersByTime(1000);

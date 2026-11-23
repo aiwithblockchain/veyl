@@ -163,7 +163,14 @@ export function ServerProgress({ server }: { server: MyServer }) {
           })}
         </span>
       </div>
-      <div className="myservers__bar">
+      <div
+        className="myservers__bar"
+        role="progressbar"
+        aria-valuemin={1}
+        aria-valuemax={STAGES.length}
+        aria-valuenow={shown + 1}
+        aria-label={serverStateLabel(server.state) || t("progress.processing")}
+      >
         {STAGES.map((stage, stageIndex) => (
           <span
             key={stage}
@@ -177,6 +184,9 @@ export function ServerProgress({ server }: { server: MyServer }) {
           />
         ))}
       </div>
+      <span className="sr-only">
+        {t("progress.stepOf", { n: shown + 1 })}
+      </span>
       <p className="myservers__progress-note">{note}</p>
       {buildTimedOut ? (
         <p
@@ -186,23 +196,6 @@ export function ServerProgress({ server }: { server: MyServer }) {
           {t("progress.buildTimeout")}
         </p>
       ) : null}
-      <ol className="myservers__steps">
-        {STAGES.map((stage, stageIndex) => (
-          <li
-            key={stage}
-            aria-current={stageIndex === shown ? "step" : undefined}
-            className={
-              stageIndex < shown
-                ? "is-done"
-                : stageIndex === shown
-                  ? "is-current"
-                  : ""
-            }
-          >
-            {serverStateLabel(stage)}
-          </li>
-        ))}
-      </ol>
     </div>
   );
 }

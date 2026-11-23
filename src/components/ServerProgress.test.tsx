@@ -33,11 +33,25 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function currentStep(container: HTMLElement): string | null {
-  return container.querySelector(".myservers__steps li.is-current")?.textContent ?? null;
+function currentSegment(container: HTMLElement): number {
+  const segments = [
+    ...container.querySelectorAll(".myservers__bar span"),
+  ];
+  return segments.findIndex((segment) =>
+    segment.classList.contains("is-current"),
+  );
 }
 
 describe("四段进度条", () => {
+  it("不再渲染四段阶段词列表，进度条仍是 4 段", () => {
+    const { container } = render(
+      <ServerProgress server={server({ state: "installing" })} />,
+    );
+
+    expect(container.querySelector(".myservers__steps")).toBeNull();
+    expect(container.querySelectorAll(".myservers__bar span")).toHaveLength(4);
+  });
+
   it("installing 时四段与阶段一一对应：前两段已完成，第三段当前，第四段未到", () => {
     const { container } = render(
       <ServerProgress server={server({ state: "installing" })} />,
@@ -73,13 +87,13 @@ describe("四段进度条", () => {
     const { container, rerender } = render(
       <ServerProgress server={server({ state: "creating" })} />,
     );
-    expect(currentStep(container)).toBe("正在建机器");
+    expect(currentSegment(container)).toBe(0);
 
     rerender(<ServerProgress server={server({ state: "booting" })} />);
     act(() => {
       vi.advanceTimersByTime(800);
     });
-    expect(currentStep(container)).toBe("等待开机");
+    expect(currentSegment(container)).toBe(1);
     expect(container.querySelector(".myservers__progress")).not.toBeNull();
   });
 
@@ -88,7 +102,7 @@ describe("四段进度条", () => {
     const { container, rerender } = render(
       <ServerProgress server={server({ state: "booting" })} />,
     );
-    expect(currentStep(container)).toBe("等待开机");
+    expect(currentSegment(container)).toBe(1);
 
     // 真机上安装 + 验证可能只有几秒：一次跨两格也只能一格一格亮。
     rerender(
@@ -103,23 +117,22 @@ describe("四段进度条", () => {
     act(() => {
       vi.advanceTimersByTime(799);
     });
-    expect(currentStep(container)).toBe("等待开机");
+    expect(currentSegment(container)).toBe(1);
 
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(currentStep(container)).toBe("安装服务端");
-    expect(currentStep(container)).not.toBe("检查是否可用");
+    expect(currentSegment(container)).toBe(2);
 
     act(() => {
       vi.advanceTimersByTime(799);
     });
-    expect(currentStep(container)).toBe("安装服务端");
+    expect(currentSegment(container)).toBe(2);
 
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(currentStep(container)).toBe("检查是否可用");
+    expect(currentSegment(container)).toBe(3);
     // 最后一格先亮过，完成态不在同一帧出现。
     expect(container.querySelector(".myservers__progress.is-done")).toBeNull();
 
@@ -127,8 +140,8 @@ describe("四段进度条", () => {
       vi.advanceTimersByTime(1);
     });
     expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
-    // 已开通只留一行，不再列四段步骤。
-    expect(container.querySelectorAll(".myservers__steps li")).toHaveLength(0);
+    // 已开通只留一行，进度条与说明行都不再渲染。
+    expect(container.querySelector(".myservers__bar")).toBeNull();
     expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
       "已开通 · 用了 4 秒",
     );
@@ -139,17 +152,17 @@ describe("四段进度条", () => {
     const { container, rerender } = render(
       <ServerProgress server={server({ server_id: "srv_a", state: "installing" })} />,
     );
-    expect(currentStep(container)).toBe("安装服务端");
+    expect(currentSegment(container)).toBe(2);
 
     // 换到一台刚创建的：直接落在第一格，不补动画。
     rerender(
       <ServerProgress server={server({ server_id: "srv_b", state: "creating" })} />,
     );
-    expect(currentStep(container)).toBe("正在建机器");
+    expect(currentSegment(container)).toBe(0);
     act(() => {
       vi.advanceTimersByTime(5000);
     });
-    expect(currentStep(container)).toBe("正在建机器");
+    expect(currentSegment(container)).toBe(0);
 
     // 换到一台已就绪的：直接完成态，不逐格补。
     rerender(
@@ -166,7 +179,7 @@ describe("四段进度条", () => {
     expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
       "已开通 · 用了 2 秒",
     );
-    expect(currentStep(container)).toBeNull();
+    expect(currentSegment(container)).toBe(-1);
   });
 
   it("状态回退：游标不倒退、不重放", () => {
@@ -174,15 +187,15 @@ describe("四段进度条", () => {
     const { container, rerender } = render(
       <ServerProgress server={server({ state: "installing" })} />,
     );
-    expect(currentStep(container)).toBe("安装服务端");
+    expect(currentSegment(container)).toBe(2);
 
     // 迟到的旧快照：画面停在这一格，也不排任何补格动画。
     rerender(<ServerProgress server={server({ state: "booting" })} />);
-    expect(currentStep(container)).toBe("安装服务端");
+    expect(currentSegment(container)).toBe(2);
     act(() => {
       vi.advanceTimersByTime(5000);
     });
-    expect(currentStep(container)).toBe("安装服务端");
+    expect(currentSegment(container)).toBe(2);
 
     // 已经完成后再收到旧快照：完成态不撤回。
     rerender(

@@ -236,25 +236,27 @@ export function MyServerDetail({
     const tone = serverTone(server);
     return (
       <div className="myservers__detail">
-        <div className="myservers__detail-head">
-          <div className="myservers__detail-heading">
-            <h2 className="myservers__detail-name">{server.name}</h2>
+        <div className="myservers__block">
+          <div className="myservers__detail-head">
+            <div className="myservers__detail-heading">
+              <h2 className="myservers__detail-name">{server.name}</h2>
+            </div>
+            <span className={`myservers__state is-${tone}`}>
+              <span className={`led is-${tone}`} aria-hidden />
+              {serverDetailState(server)}
+            </span>
           </div>
-          <span className={`myservers__state is-${tone}`}>
-            <span className={`led is-${tone}`} aria-hidden />
-            {serverDetailState(server)}
-          </span>
-        </div>
 
-        <p className="myservers__billing is-expired" role="status">
-          {serverTombstoneText()}
-        </p>
-
-        {error ? (
-          <p className="myservers__error" role="alert">
-            {error}
+          <p className="myservers__billing is-expired" role="status">
+            {serverTombstoneText()}
           </p>
-        ) : null}
+
+          {error ? (
+            <p className="myservers__error" role="alert">
+              {error}
+            </p>
+          ) : null}
+        </div>
 
         <div className="myservers__footer">
           <div className="myservers__danger">
@@ -309,6 +311,13 @@ export function MyServerDetail({
 
   /** 没建成的机器不存在「本期有效至」：费用行只说退款结论。 */
   const failed = server.state === "error";
+  // 停机中 / 已销毁：对象已不在，事实区只留地区；危险块也不再有销毁。
+  const halted = destroying || server.state === "gone";
+  /** 欠费 / 停用：右侧给「去充值」主按钮，销毁仍在左；停机/已销毁与失败态不掺和。 */
+  const deficient =
+    (server.billing_state === "past_due" || server.billing_state === "expired") &&
+    !halted &&
+    !failed;
   // 建好之后进度块原地换成完成态（含创建用时），不再另起一段。
   const ready = server.state === "healthy" || server.state === "active";
   const chargedCents = server.charged_cents;
@@ -316,6 +325,8 @@ export function MyServerDetail({
   /** 就绪后扣费时余额不够：机器没开通，这笔根本没扣。 */
   const settleFailed =
     server.state === "error" && server.failure?.code === "settle_insufficient";
+  // 结算失败：主按钮是去充值，重新建一台降为次按钮，且不再给 AI 定位。
+  const settleTopUp = settleFailed && onTopUp !== undefined && !readOnly;
   const failedBilling = settleFailed
     ? tr("detail.billing.noCharge")
     : chargedCents === undefined || refundedCents === undefined
@@ -330,184 +341,164 @@ export function MyServerDetail({
 
   return (
     <div className="myservers__detail">
-      <div className="myservers__detail-head">
-        <div className="myservers__detail-heading">
-          {renaming ? (
-            <div className="myservers__rename-box">
-              <input
-                ref={nameInputRef}
-                className={`myservers__rename-input${
-                  savingName ? " is-saving" : ""
-                }`}
-                aria-label={tr("detail.renameAria")}
-                aria-invalid={renameError ? true : undefined}
-                aria-describedby={renameError ? "server-name-error" : undefined}
-                value={nameDraft}
-                readOnly={savingName}
-                aria-busy={savingName || undefined}
-                onChange={(event) => {
-                  setNameDraft(event.target.value);
-                  if (renameError) setRenameError(null);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    const native = event.nativeEvent as KeyboardEvent;
-                    if (native.isComposing || native.keyCode === 229) return;
-                    event.preventDefault();
-                    void submitRename();
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    cancelRename();
-                  }
-                }}
-              />
-              {renameError ? (
-                <p
-                  id="server-name-error"
-                  className="myservers__rename-error"
-                  role="alert"
-                >
-                  {renameError}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <h2 className="myservers__detail-name">{server.name}</h2>
-          )}
-          {!renaming && !readOnly && !destroying && server.state !== "gone" ? (
-            <button
-              ref={renameButtonRef}
-              type="button"
-              className="myservers__rename"
-              aria-label={tr("detail.rename", { name: server.name })}
-              onClick={startRename}
-            >
-              <IconPencil size={14} />
-            </button>
-          ) : null}
+      <div className="myservers__block">
+        <div className="myservers__detail-head">
+          <div className="myservers__detail-heading">
+            {renaming ? (
+              <div className="myservers__rename-box">
+                <input
+                  ref={nameInputRef}
+                  className={`myservers__rename-input${
+                    savingName ? " is-saving" : ""
+                  }`}
+                  aria-label={tr("detail.renameAria")}
+                  aria-invalid={renameError ? true : undefined}
+                  aria-describedby={renameError ? "server-name-error" : undefined}
+                  value={nameDraft}
+                  readOnly={savingName}
+                  aria-busy={savingName || undefined}
+                  onChange={(event) => {
+                    setNameDraft(event.target.value);
+                    if (renameError) setRenameError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      const native = event.nativeEvent as KeyboardEvent;
+                      if (native.isComposing || native.keyCode === 229) return;
+                      event.preventDefault();
+                      void submitRename();
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelRename();
+                    }
+                  }}
+                />
+                {renameError ? (
+                  <p
+                    id="server-name-error"
+                    className="myservers__rename-error"
+                    role="alert"
+                  >
+                    {renameError}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <h2 className="myservers__detail-name">{server.name}</h2>
+            )}
+            {!renaming && !readOnly && !destroying && server.state !== "gone" ? (
+              <button
+                ref={renameButtonRef}
+                type="button"
+                className="myservers__rename"
+                aria-label={tr("detail.rename", { name: server.name })}
+                onClick={startRename}
+              >
+                <IconPencil size={14} />
+              </button>
+            ) : null}
+          </div>
+          <span className={`myservers__state is-${serverTone(server)}`}>
+            <span className={`led is-${serverTone(server)}`} aria-hidden />
+            {serverDetailState(server)}
+          </span>
         </div>
-        <span className={`myservers__state is-${serverTone(server)}`}>
-          <span className={`led is-${serverTone(server)}`} aria-hidden />
-          {serverDetailState(server)}
-        </span>
+
+        {isProvisioning(server.state) || ready ? (
+          <ServerProgress server={server} />
+        ) : null}
+
+        {server.billing_state === "past_due" || server.billing_state === "expired" ? (
+          <p
+            className={`myservers__billing ${
+              server.billing_state === "expired" ? "is-expired" : ""
+            }`}
+            role="status"
+          >
+            {billingNoticeText(server)}
+          </p>
+        ) : null}
+
+        {server.failure ? (
+          <div className="myservers__failure" role="alert">
+            <p>
+              {settleFailed
+                ? tr("detail.settleFailed")
+                : failureText(server.failure, t("error.failure.generic"))}
+            </p>
+          </div>
+        ) : null}
+
+        {error ? (
+          <p className="myservers__error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
 
-      {isProvisioning(server.state) || ready ? (
-        <ServerProgress server={server} />
-      ) : null}
-
-      <dl className="myservers__facts">
-        <div>
-          <dt>{tr("detail.region")}</dt>
-          <dd>{regionLabel}</dd>
-        </div>
-        {ready && (server.ip ?? "").trim() !== "" ? (
+      <div className="myservers__facts-wrap">
+        <dl className="myservers__facts">
           <div>
-            <dt>IP</dt>
-            <dd className="myservers__ip">
-              <span className="num">{server.ip}</span>
-              <button
-                type="button"
-                className="copy-btn"
-                onClick={() => void copyIp()}
-                aria-label={tr("detail.copyIp")}
-              >
-                {ipCopy === "copied"
-                  ? tr("chat.copy.copied")
-                  : ipCopy === "failed"
-                    ? tr("chat.copy.failed")
-                    : tr("detail.copy")}
-              </button>
-              <span className="sr-only" role="status">
-                {ipCopy === "copied"
-                  ? tr("chat.copy.copied")
-                  : ipCopy === "failed"
-                    ? tr("chat.copy.failed")
-                    : ""}
-              </span>
-            </dd>
+            <dt>{tr("detail.region")}</dt>
+            <dd>{regionLabel}</dd>
           </div>
-        ) : null}
-        <div>
-          <dt>{tr("detail.node")}</dt>
-          <dd>{isServerNodeReady(server) ? tr("detail.nodeReady") : tr("detail.nodeNotReady")}</dd>
-        </div>
-        <div>
-          <dt>{tr("detail.cost")}</dt>
-          <dd className="num">{failed ? failedBilling : serverBillingText(server)}</dd>
-        </div>
-        {!failed && server.transfer_gib > 0 ? (
-          <div>
-            <dt>{tr("detail.traffic")}</dt>
-            <dd>{tr("detail.trafficMonthly", { gib: server.transfer_gib })}</dd>
-          </div>
-        ) : null}
-      </dl>
-
-      {server.billing_state === "past_due" || server.billing_state === "expired" ? (
-        <p
-          className={`myservers__billing ${
-            server.billing_state === "expired" ? "is-expired" : ""
-          }`}
-          role="status"
-        >
-          {billingNoticeText(server)}
-        </p>
-      ) : null}
-
-      {server.failure ? (
-        <div className="myservers__failure" role="alert">
-          <p>
-            {settleFailed
-              ? tr("detail.settleFailed")
-              : failureText(server.failure, t("error.failure.generic"))}
-          </p>
-          {settleFailed && onTopUp && !readOnly ? (
-            <button type="button" className="btn btn--ghost" onClick={onTopUp}>
-              {tr("detail.topUp")}
-            </button>
+          {ready && (server.ip ?? "").trim() !== "" ? (
+            <div>
+              <dt>IP</dt>
+              <dd className="myservers__ip">
+                <span className="num">{server.ip}</span>
+                <button
+                  type="button"
+                  className="copy-btn"
+                  onClick={() => void copyIp()}
+                  aria-label={tr("detail.copyIp")}
+                >
+                  {ipCopy === "copied"
+                    ? tr("chat.copy.copied")
+                    : ipCopy === "failed"
+                      ? tr("chat.copy.failed")
+                      : tr("detail.copy")}
+                </button>
+                <span className="sr-only" role="status">
+                  {ipCopy === "copied"
+                    ? tr("chat.copy.copied")
+                    : ipCopy === "failed"
+                      ? tr("chat.copy.failed")
+                      : ""}
+                </span>
+              </dd>
+            </div>
           ) : null}
-          {onAiLocate ? (
-            <button
-              type="button"
-              className="btn btn--ghost"
-              onClick={() => onAiLocate(server.server_id)}
-            >
-              {tr("controls.aiLocate")}
-            </button>
+          {isServerNodeReady(server) ? (
+            <div>
+              <dt>{tr("detail.node")}</dt>
+              <dd>{tr("detail.nodeReady")}</dd>
+            </div>
           ) : null}
-        </div>
-      ) : null}
-
-      {error ? (
-        <p className="myservers__error" role="alert">
-          {error}
-        </p>
-      ) : null}
+          {failed || (ready && server.billing_state !== "pending") ? (
+            <div>
+              <dt>{tr("detail.cost")}</dt>
+              <dd className="num">
+                {failed ? failedBilling : serverBillingText(server)}
+              </dd>
+            </div>
+          ) : null}
+          {!failed && !halted && server.transfer_gib > 0 ? (
+            <div>
+              <dt>{tr("detail.traffic")}</dt>
+              <dd>{tr("detail.trafficMonthly", { gib: server.transfer_gib })}</dd>
+            </div>
+          ) : null}
+        </dl>
+      </div>
 
       {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
       {void rebuild}
 
       <div className="myservers__footer">
         <div className="myservers__danger">
-          {ready && !readOnly && repairAvailable && onDiagnose ? (
-            <div className="myservers__repair">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                disabled={locked || confirming}
-                onClick={() =>
-                  onDiagnose({
-                    serverId: server.server_id,
-                    nodeName: server.name,
-                  })
-                }
-              >
-                {tr("diagnosis.entry")}
-              </button>
-            </div>
-          ) : null}
-          {destroying && !destroyRetryAllowed ? (
+          {/* 已销毁：对象已不存在，不给「销毁」；右侧仍可「重新购买」。 */}
+          {server.state === "gone" ? null : destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
               {tr("detail.destroying")}
             </p>
@@ -550,16 +541,74 @@ export function MyServerDetail({
             </button>
           )}
         </div>
-        {primary ? (
-          <button
-            type="button"
-            className="btn btn--primary myservers__primary"
-            disabled={primary.disabled}
-            onClick={primary.onClick}
-          >
-            {primary.label}
-          </button>
-        ) : null}
+        {/* 右侧动作组：次按钮挨主按钮左侧；没有主按钮时整组不出现，销毁仍靠左。 */}
+        <div className="myservers__actions">
+          {settleTopUp ? (
+            <>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={locked}
+                onClick={onCreateAnother}
+              >
+                {tr("detail.primary.rebuild")}
+              </button>
+              <button
+                type="button"
+                className="btn btn--primary myservers__primary"
+                onClick={onTopUp}
+              >
+                {tr("detail.topUp")}
+              </button>
+            </>
+          ) : (
+            <>
+              {ready && !readOnly && repairAvailable && onDiagnose ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={locked || confirming}
+                  onClick={() =>
+                    onDiagnose({
+                      serverId: server.server_id,
+                      nodeName: server.name,
+                    })
+                  }
+                >
+                  {tr("diagnosis.entry")}
+                </button>
+              ) : null}
+              {deficient && onTopUp && !readOnly ? (
+                <button
+                  type="button"
+                  className="btn btn--primary myservers__primary"
+                  onClick={onTopUp}
+                >
+                  {tr("detail.topUp")}
+                </button>
+              ) : null}
+              {server.failure && onAiLocate ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => onAiLocate(server.server_id)}
+                >
+                  {tr("controls.aiLocate")}
+                </button>
+              ) : null}
+              {primary ? (
+                <button
+                  type="button"
+                  className="btn btn--primary myservers__primary"
+                  disabled={primary.disabled}
+                  onClick={primary.onClick}
+                >
+                  {primary.label}
+                </button>
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

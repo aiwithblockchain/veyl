@@ -803,10 +803,6 @@ export const zh = {
   "myservers.tombstone.text":
     "这台机器因余额不足已停机销毁，节点不能再连接。删除后不再显示。",
   "myservers.nodeTombstone": "停机删除",
-  "myservers.stepDone.creating": "已建机器",
-  "myservers.stepDone.booting": "已开机",
-  "myservers.stepDone.installing": "已安装服务端",
-  "myservers.stepDone.verifying": "已检查可用",
   "myservers.rail.creating": "建机器中",
   "myservers.rail.booting": "开机中",
   "myservers.rail.installing": "安装中",
@@ -826,7 +822,6 @@ export const zh = {
   "myservers.duration.minutes": "{minutes} 分 {seconds} 秒",
   "myservers.duration.seconds": "{seconds} 秒",
   "myservers.paid.expired": "本期已过，服务正常",
-  "myservers.paid.pending": "创建中，开通后开始计费",
   "myservers.billing.daily": "每天 {price}",
   "myservers.billing.dailyExpired": "每天 {price} · {word}",
   "myservers.billing.pastDueNoGrace": "余额不足，最近一次扣费没成功。7 天内充值可继续使用。",
@@ -899,6 +894,7 @@ export const zh = {
   "progress.processing": "正在处理",
   "progress.waited": "已等待 {duration}",
   "progress.buildTimeout": "安装超时，可以销毁重建；不会自动销毁。",
+  "progress.stepOf": "第 {n} 步，共 4 步",
 
   // 登录我的服务器
   "login.title": "登录我的服务器",
@@ -1029,7 +1025,6 @@ export const zh = {
   "detail.copy": "复制",
   "detail.node": "节点",
   "detail.nodeReady": "已就绪",
-  "detail.nodeNotReady": "未就绪",
   "detail.cost": "费用",
   "detail.traffic": "流量",
   "detail.trafficMonthly": "每月 {gib} GB 出站",

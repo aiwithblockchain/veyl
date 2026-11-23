@@ -528,8 +528,11 @@ describe("下单成功后回到详情", () => {
       await screen.findByRole("heading", { name: "新加坡 1 · 新建" }),
     ).toBeTruthy();
     expect(checkout).toHaveBeenCalledWith("ord_1");
-    // 没有真实百分比，也就不再有 progressbar 角色与 15% 这种假数字。
-    expect(screen.queryByRole("progressbar")).toBeNull();
+    // 不显示百分比：进度条只报「第几步 / 共 4 步」。
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuemin")).toBe("1");
+    expect(bar.getAttribute("aria-valuemax")).toBe("4");
+    expect(Number(bar.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/%/)).toBeNull();
     expect(
       document.querySelector(".myservers__progress-head")?.textContent,
@@ -537,10 +540,8 @@ describe("下单成功后回到详情", () => {
     expect(
       document.querySelector(".myservers__progress-head")?.textContent,
     ).toMatch(/已等待 \d+ 秒/);
-    const steps = [...document.querySelectorAll(".myservers__steps li")].map(
-      (node) => node.textContent,
-    );
-    expect(steps).toEqual(["正在建机器", "等待开机", "安装服务端", "检查是否可用"]);
+    expect(document.querySelector(".myservers__steps")).toBeNull();
+    expect(document.querySelectorAll(".myservers__bar span")).toHaveLength(4);
     expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
   }, 15_000);
 

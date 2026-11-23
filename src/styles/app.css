@@ -3049,30 +3049,6 @@ body[data-resizing] {
   color: var(--amber);
 }
 
-.myservers__steps {
-  display: flex;
-  gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.myservers__steps li.is-done {
-  color: var(--ink-2);
-}
-
-/* 完成态的勾是真实元素，读屏跳过；状态词本身已说明「已…」。 */
-.myservers__steps .myservers__step-tick {
-  margin-right: 4px;
-}
-
-.myservers__steps li.is-current {
-  color: var(--ink);
-  font-weight: 600;
-}
-
 /* 完成态与进度块同高（实测进度支 88.8px），就绪那一刻下方的行不位移。 */
 .myservers__progress.is-done {
   justify-content: center;
@@ -3251,6 +3227,14 @@ body[data-resizing] {
 }
 
 .myservers__detail {
+  display: flex;
+  flex-direction: column;
+  /* 三块（状态 / 事实 / 危险）只靠 48 留白分区，块内 ≤ 24。 */
+  gap: 48px;
+}
+
+/* 状态块：标题行、进度、状态说明；块内间距不超过 24。 */
+.myservers__block {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -3528,29 +3512,46 @@ body[data-resizing] {
   gap: 8px;
 }
 
+/* 事实区容器：只用来测量可用宽度，窄窗格据此退单列。 */
+.myservers__facts-wrap {
+  container-type: inline-size;
+}
+
+/* 事实区：钉死两列（避免宽屏变三列打散「地区|IP」配对），内容宽 < 480 退单列。 */
 .myservers__facts {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 48px;
+  row-gap: 12px;
+  max-width: 760px;
   margin: 0;
+}
+
+@container (max-width: 479px) {
+  .myservers__facts {
+    grid-template-columns: 1fr;
+  }
 }
 
 .myservers__facts > div {
   display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 48px minmax(0, 1fr);
+  column-gap: 12px;
   align-items: baseline;
+  min-height: 24px;
 }
 
 .myservers__facts dt {
   font-size: 12px;
   color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .myservers__facts dd {
   margin: 0;
   font-size: 14px;
   color: var(--ink);
+  overflow-wrap: anywhere;
 }
 
 /* IP 等事实行里的就地复制按钮（MyServerDetail）。 */
@@ -3669,8 +3670,6 @@ body[data-resizing] {
   align-items: flex-end;
   justify-content: space-between;
   gap: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--hair);
 }
 
 .myservers__primary {
@@ -3791,20 +3790,6 @@ body[data-resizing] {
 
 .skeleton--line.is-short {
   width: 60%;
-}
-
-.myservers__danger {
-  padding-top: 12px;
-  border-top: 1px solid var(--hair);
-}
-
-/* 详情页的智能修复：入口、确认与结果都排在销毁上方。 */
-.myservers__repair {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 12px;
 }
 
 .myservers__confirm {

@@ -55,22 +55,6 @@ export function nodeTombstoneWord(): string {
   return t("myservers.nodeTombstone");
 }
 
-const STEP_DONE_KEYS: Record<
-  "creating" | "booting" | "installing" | "verifying",
-  MessageKey
-> = {
-  creating: "myservers.stepDone.creating",
-  booting: "myservers.stepDone.booting",
-  installing: "myservers.stepDone.installing",
-  verifying: "myservers.stepDone.verifying",
-};
-
-export function serverStepDoneLabel(
-  stage: "creating" | "booting" | "installing" | "verifying",
-): string {
-  return t(STEP_DONE_KEYS[stage]);
-}
-
 const RAIL_PHASE_KEYS: Partial<Record<MyServerState, MessageKey>> = {
   creating: "myservers.rail.creating",
   booting: "myservers.rail.booting",
@@ -265,9 +249,6 @@ export function serverBillingText(
   server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
   now = Date.now(),
 ): string {
-  if (server.billing_state === "pending") {
-    return t("myservers.paid.pending");
-  }
   const price = formatDailyPrice(server.daily_price_cents);
   const ends = server.paid_until ? new Date(server.paid_until).getTime() : NaN;
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。
