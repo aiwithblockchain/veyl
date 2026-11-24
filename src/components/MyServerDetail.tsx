@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
@@ -51,7 +51,7 @@ interface Props {
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
 export const DESTROY_RETRY_MS = 60_000;
 
-/** 重置凭据的确认态无操作收回时间。 */
+/** 重置凭据的确认态：这么久没有块内交互就收回。 */
 export const ROTATE_CONFIRM_MS = 8_000;
 
 function errorText(error: unknown): string {
@@ -102,6 +102,8 @@ export function MyServerDetail({
   const restoreRotateFocus = useRef(false);
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  const rotateTimer = useRef(0);
+  const lastRotateArm = useRef(0);
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
 
@@ -243,15 +245,27 @@ export function MyServerDetail({
     if (!canRotate) setRotatePhase("idle");
   }, [canRotate]);
 
-  // 确认态：默认聚焦「取消」，Esc 取消，8 秒无操作收回。
-  useEffect(() => {
-    if (rotatePhase !== "confirming") return;
-    rotateCancelRef.current?.focus();
-    const timer = window.setTimeout(() => {
-      // 请求在途时保留确认块：它是进行中文案唯一的住处。
+  /** 确认态的收回倒计时：块内交互重新计时，请求在途时不收。 */
+  const armRotateTimer = useCallback(() => {
+    lastRotateArm.current = Date.now();
+    window.clearTimeout(rotateTimer.current);
+    rotateTimer.current = window.setTimeout(() => {
       if (busyRef.current) return;
       setRotatePhase("idle");
     }, ROTATE_CONFIRM_MS);
+  }, []);
+
+  /** 指针移动很密：1 秒内只续一次。 */
+  const armRotateTimerThrottled = useCallback(() => {
+    if (Date.now() - lastRotateArm.current < 1000) return;
+    armRotateTimer();
+  }, [armRotateTimer]);
+
+  // 确认态：默认聚焦「取消」，Esc 取消，8 秒无交互自动收回（块内交互续时）。
+  useEffect(() => {
+    if (rotatePhase !== "confirming") return;
+    rotateCancelRef.current?.focus();
+    armRotateTimer();
     const onKeyDown = (event: KeyboardEvent) => {
       // 重命名输入框已经处理过 Esc：这里不再叠加一次。
       if (event.defaultPrevented) return;
@@ -264,10 +278,10 @@ export function MyServerDetail({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(rotateTimer.current);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [rotatePhase]);
+  }, [rotatePhase, armRotateTimer]);
 
   // 确认块卸载后把焦点送回入口；超时收回不动焦点（用户可能已经在别处操作）。
   useEffect(() => {
@@ -583,7 +597,13 @@ export function MyServerDetail({
         <div className="myservers__danger">
           {/* 重置凭据：就地确认；危险块同时只开一个确认。 */}
           {rotatePhase === "confirming" && canRotate ? (
-            <div className="myservers__confirm" role="alert">
+            <div
+              className="myservers__confirm"
+              role="alert"
+              onPointerDown={armRotateTimer}
+              onPointerMove={armRotateTimerThrottled}
+              onKeyDown={armRotateTimer}
+            >
               <p>{tr("detail.rotateConfirm")}</p>
               <div className="myservers__actions">
                 <button

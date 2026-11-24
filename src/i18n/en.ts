@@ -1121,16 +1121,16 @@ export const en: Record<MessageKey, string> = {
   "detail.confirmDestroy": "Confirm destroy",
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
-  "detail.rotate": "Reset connection credentials",
+  "detail.rotate": "Change connection password",
   "detail.rotateConfirm":
-    "After resetting, the old port and password stop working immediately. Configurations already imported on your phone must be imported again; the desktop client refreshes automatically. The node will briefly disconnect.",
-  "detail.confirmRotate": "Confirm reset",
-  "detail.rotating": "Resetting…",
-  "detail.rotateDone": "Reset. Re-import the profile on your phone.",
+    "Changing it invalidates the old password. Re-import the profile on your phone; the desktop app refreshes on its own.",
+  "detail.confirmRotate": "Confirm change",
+  "detail.rotating": "Changing…",
+  "detail.rotateDone": "Changed. Re-import the profile on your phone.",
   "detail.rotateRefreshFailed":
-    "Reset, but this device still has the old credentials. Reconnect, or refresh the server data.",
+    "Changed, but this device still has the old details. Reconnect, or refresh the server data.",
   "detail.rotateFailed":
-    "Couldn't reset. The node may be temporarily unreachable; try again later.",
+    "Couldn't change it. The node may be temporarily unreachable; try again later.",
   "detail.repair": "Smart repair",
 
   // New node wizard
