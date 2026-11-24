@@ -1,6 +1,6 @@
 # 支付迁移：Dodo → Stripe
 
-> 日期：2026-11-23（定稿）
+> 日期：2026-11-23（定稿）；2026-11-24 补支付方式资格核实（§10.1）
 > 状态：已实现，待 dev 实测
 > 关联：`docs/design/billing-notes.md`（计费模型）、`docs/design/login-and-payment.md`（Dodo 时期的历史设计）、`docs/design/payment-facts.md`（Dodo 时期的事实记录）、`docs/design/us-entity-payment-setup.md`（主体与账户）
 > 范围：只换支付适配层。业务模型、数据库形状、客户端计费逻辑都不变。
@@ -23,7 +23,7 @@
 | 4 | 收款主体 | **美国 LLC 的 Stripe 账户**（test 模式已可用） |
 | 5 | 金额来源 | 控制面代码里的档位白名单 + `price_data`，**不建 Product / Price ID** |
 | 6 | 商品目录 | Stripe 后台不手工建商品；Dashboard 的 `Setup guide` 浮窗忽略 |
-| 7 | 支付方式 | 卡、Apple Pay / Google Pay 默认；支付宝 / 微信按账户资格单独申请 |
+| 7 | 支付方式 | 卡、Apple Pay / Google Pay 默认；**支付宝**可申请（「Cloud Service」与「Prepaid cards and top-ups」属 Alipay 受限类目）；**微信支付**的禁用类目明确包含 VPS / 云服务器，不作为可依赖通道（§10.1） |
 | 8 | 回跳 | 控制面 `GET /payment/return?session_id={CHECKOUT_SESSION_ID}`；只做提示，不写库 |
 | 9 | 入账依据 | 本地 `topups.denomination_cents`；**不看** `amount_total` |
 | 10 | 对账 | `metadata.topup_id` → `client_reference_id` → `topups.checkout_session_id` |
@@ -108,9 +108,12 @@ line_items[0][price_data][unit_amount]=1200
 line_items[0][price_data][product_data][name]=Veyl SAAS服务额度
 line_items[0][price_data][product_data][description]=Veyl 云服务器管理服务的预付额度，仅限本服务消费，不退不转让。
 consent_collection[terms_of_service]=required
+payment_method_options[wechat_pay][client]=web
 ```
 
 **不要传 `payment_method_types`。** 省略时 Stripe 按 Dashboard 里已启用的支付方式和客户地区动态给出；写死列表会漏掉后来在后台新开的方式。要收窄时用 `allowed_payment_method_types`（过滤器），不要用 `payment_method_types`（静态列表）。
+
+**微信支付走 Checkout 时必须传 `payment_method_options[wechat_pay][client]=web`。** 代码对每次建会话都带上该字段；支付宝与卡不需要额外参数。**[待验证]** 未启用微信的账户是否接受该字段——若不接受，需要改成按环境开关。
 
 ### 3.2 结账同意
 
@@ -141,7 +144,7 @@ EIN 未到，Stripe 账户未完成 Activate Payments，Dashboard 的 Public det
 
 条款暂不受理 EEA/UK 订单，支付侧要做两层：
 
-- **支付方式层**：支付宝 / 微信只对中国大陆客户可用（Stripe 侧限制），卡则是全球可用。
+- **支付方式层**：支付宝 / 微信只对中国大陆客户可用（Stripe 侧限制），卡则是全球可用。微信支付还受其自有类目规则限制：VPS 与云服务器服务在禁用清单内，见 §10.1。
 - **Radar 层**：按账单国家 / 卡国家阻断 EEA / UK。规则字段、优先级与误杀处理以 Radar 文档和实际测试为准，本文件不写死表达式。
 - 先在 Test 模式验证「命中拒绝」与「正常放行」两个方向，再启用 Live 规则。
 - 被拒订单不入账；资金仍到账的，按退款政策 §3 原路全额退款，不发放额度。
@@ -154,7 +157,14 @@ Stripe 返回 `id`（`cs_…`）与 `url`（收银台地址）。现有代码里
 
 `success_url` 的占位符在表单编码后可能变成 `%7BCHECKOUT_SESSION_ID%7D`，Stripe 会按解码后的值替换；实现后必须用真实测试会话确认回跳 URL 里带上了 `session_id`，不能只看代码。
 
-`/payment/return` 页面只做提示，按查询参数分三态：带 `session_id` 显示「支付完成」；带 `canceled=1` 显示「支付未完成」（取消回跳，优先于 `session_id`）；两者都没有显示中性的「支付流程已结束」。三种状态都不做任何写操作，也不根据 `session_id` 宣称已到账。入账只认 webhook（Stripe 官方也明确要求不能只靠成功页履约）。
+`/payment/return` 页面只做提示，不做任何写操作。入账只认 webhook（Stripe 官方也明确要求不能只靠成功页履约）。页面按四种状态展示：
+
+- `canceled=1`：「支付未完成」，优先于 `session_id`；
+- 有 `session_id` 且 Stripe 查询返回 `status=complete` 且 `payment_status=paid`：「支付完成」；
+- 有 `session_id` 且 `status=complete` 但 `payment_status=unpaid`：「支付处理中」（微信 / 支付宝等异步方式，授权完成但尚未结算）；
+- 没有 `session_id`，或 Stripe 查询失败 / 会话仍 `open` / 已 `expired` / 字段缺失 / 异常组合（如 `open`+`paid`）：中性的「支付流程已结束」。
+
+回跳页只读查询 Stripe（`GET /v1/checkout/sessions/{id}`，5 秒超时），不写库、不回显 `session_id`、不打印 key。异步方式下 Stripe 会在授权完成后立即回跳，此时钱可能还没到账；页面必须如实显示处理中，不能仅凭 `session_id` 宣称完成。
 
 ---
 
@@ -338,7 +348,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 
 - **ToS URL**：Settings → Public details 填好；否则 `consent_collection[terms_of_service] = required` 建会话会失败（当前临时状态与 EIN 后的补做步骤见 §3.2.1）。
 - **Radar**：按账单国家 / 卡国家拦截 EEA/UK 的规则，先在 test 验证「命中拒绝」与「正常放行」两个方向，再启用 live。
-- **支付方式**：Dashboard 启用卡、Apple Pay / Google Pay；支付宝 / 微信按账户资格单独申请。代码不传 `payment_method_types`，不要写死列表。
+- **支付方式**：Dashboard 启用卡、Apple Pay / Google Pay；支付宝可申请（受限类目，审核可能要求补充材料）；微信支付可打开做技术验证，但其类目禁止 VPS / 云服务器，不作为可依赖通道（§10.1）。代码不传 `payment_method_types`，不要写死列表；启用微信时另传 `payment_method_options[wechat_pay][client]=web`。
 - **Webhook 端点**：`https://<prod>/v1/webhooks/stripe`，只订阅 `checkout.session.completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` 四个事件；每个端点用自己的 `whsec_`。
 - **Live secret**：`STRIPE_SECRET_KEY` 必须是 `sk_live_`，`STRIPE_WEBHOOK_SECRET` 必须是 live 端点的 `whsec_`；`ENVIRONMENT=production` 时两者缺一不可（代码 fail closed，不建单）。
 - **回跳 URL**：`APP_PAYMENT_RETURN_URL` 指向控制面 `/payment/return`，不是站点根。
@@ -354,7 +364,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 
 ---
 
-## 10. 未核实 / 待确认
+## 10. 支付方式资格与待确认
 
 日价已在 2026-11-23 定为 **30 / 40 / 80** 美分/天，`wrangler.jsonc` 已同步。$12 / $24 / $36 / $48 在 512MB / 1GB / 2GB 上分别对应整天数：
 
@@ -365,10 +375,27 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 | $36 | 120 天 | 90 天 | 45 天 |
 | $48 | 160 天 | 120 天 | 60 天 |
 
+### 10.1 支付方式资格（2026-11-24 对照官方文档核实）
+
+| 项 | 结论 | 来源 |
+|---|---|---|
+| 支付宝 · 账户资格 | 美国在支持国家列表；B2B / B2C 均可；仅一次性付款，不支持订阅 | [Stripe Alipay](https://docs.stripe.com/payments/alipay) |
+| 支付宝 · 类目 | 「VPN and other illegal proxy services」禁止；「Cloud Service（含域名销售）」「Prepaid cards and top-ups」受限 | [Alipay 禁用与受限清单](https://stripe.com/legal/alipay) |
+| 支付宝 · 币种与限额 | USD 计价可用，客户须在中国大陆；单笔 0.50–999,999.99 USD；退款 90 天内、异步、无拒付 | 同上 |
+| 微信支付 · 账户资格 | 美国在支持国家列表；**仅 B2C**；仅一次性付款 | [Stripe WeChat Pay](https://docs.stripe.com/payments/wechat-pay) |
+| 微信支付 · 类目 | 禁止清单明确包含「Virtual Private Network, Virtual Private Server」与「Cloud server service」；闭环预付 / 充值需预审 | [微信支付 Proper Use Rules](https://pay.weixin.qq.com/index.php/public/wechatpay_en/proper_rule) |
+| 启用方式 | 两者都是 **Instant provisional access**：Dashboard 打开即临时可用，之后可能被审核调整 | Stripe 文档 |
+| 费率 | 2.9% + 30¢；需要换汇时 +1%；$12 档约 6.4% | [本地支付方式费率](https://stripe.com/en-us/pricing/local-payment-methods) |
+| 测试 | test 模式可模拟；微信扫码后跳到 Stripe 页面模拟授权 | [Checkout 接入](https://docs.stripe.com/payments/wechat-pay/accept-a-payment?payment-ui=checkout) |
+
+**结论**：支付宝可申请，按「云服务 + 储值」受限类目准备补充材料；**微信支付与 Veyl 的交付物（VPS / 云服务器）直接冲突，不应作为可依赖的国内通道**。若微信是硬需求，只能走中国大陆主体 + 微信支付直连或服务商模式 + 对应类目资质，与美国 LLC 是另一套方案。
+
+### 10.2 仍待确认
+
 | # | 项 | 说明 |
 |---|---|---|
-| 1 | 微信支付 | 美国账户可开，但 Stripe 明确写 **B2C only**；Veyl 是 B2C，理论上符合。仍需看账户审核与网站要求；test 模式能模拟到哪一步未实测 |
-| 2 | 支付宝 / 微信审核 | 都要求可公开访问、无需登录、明示商品 / 价格 / 交付条款的网站；美国账户在支持列表内。申请前先把官网英文页补齐 |
+| 1 | 支付宝审核结果 | 受限类目能否通过、需要哪些补充材料，以 Stripe / Alipay 实际答复为准 |
+| 2 | 换汇成本 | 客户用 CNY 支付时的实际换汇价与费用，以首笔结算账单为准 |
 | 3 | 预付额度与「转售基础设施」 | Stripe 把「卖家自发的虚拟额度 / 预付价值」列为受限类；「无增值的服务转售」列为禁止类。现在的模型是「充值 → 我们代建并卖机器天数」，Live 审核可能追问。如实描述，不要为了过审改写产品 |
 | 4 | Radar 规则 | 按账单国家 / 卡国家拦截的具体字段、优先级、误杀处理，以 Radar 文档与实测为准 |
 | 5 | 卡账单描述词 | 账户级 statement descriptor 在 Dashboard 设置，最多 22 字符，建议 `VEYL`；`product_data.name` 不影响这里 |

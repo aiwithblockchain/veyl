@@ -100,8 +100,9 @@ npx wrangler secret list --env dev
 Settings → Payments → Payment methods：
 
 - 卡、Apple Pay / Google Pay 默认开；
-- 支付宝 / 微信支付只有审核通过才开，且只对中国大陆客户、只支持一次性付款；
-- **不要**在代码里传 `payment_method_types`；当前实现也没传，保持后台动态。
+- 支付宝：Dashboard 打开即 **Instant provisional access**，仅中国大陆客户、仅一次性付款；「Cloud Service」与「储值」属 Alipay 受限类目，审核可能要求补充材料；
+- 微信支付：Dashboard 也能打开，但其禁用清单明确含 VPS / 云服务器服务，与 Veyl 交付物冲突，不作为可依赖通道（`stripe-migration.md` §10.1）；
+- **不要**在代码里传 `payment_method_types`；当前实现也没传，保持后台动态。启用微信时另传 `payment_method_options[wechat_pay][client]=web`。
 
 ### 2.5 Radar
 

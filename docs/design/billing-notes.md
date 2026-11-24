@@ -8,7 +8,7 @@
 - 用 **Stripe**，收款主体是**美国 LLC**（test 模式已可用）。
 - 一次性付款，不订阅；四档 `$12 / $24 / $36 / $48` 全额转余额，服务器按日价每天扣减。
 - Checkout 用 `price_data` 动态传金额，**不在后台预建 Product / Price**；金额白名单在控制面（`TOPUP_DENOMINATIONS_CENTS`）。实现见 `docs/design/stripe-migration.md`。
-- 卡、Apple Pay / Google Pay 默认可用；支付宝 / 微信支付需在美国账户下单独申请，且**只对中国大陆客户、只支持一次性付款**。微信支付在 Stripe 侧要求 **B2C**。
+- 卡、Apple Pay / Google Pay 默认可用；支付宝 / 微信支付只对中国大陆客户、只支持一次性付款。支付宝的「Cloud Service」与「储值」属受限类目，需补充材料；微信支付要求 **B2C**，且其禁用类目明确包含 **VPS 与云服务器服务**，与 Veyl 的交付物冲突，不作为可依赖通道。费率 2.9% + 30¢，换汇另加 1%（2026-11-24 核实，详见 `stripe-migration.md` §10.1）。
 - VPN / VPS / 托管：Stripe 受限类目清单里没有独立的 VPN 条目，但「无增值的服务转售」属禁止类，Live 审核可能追问；如实描述产品，不为了过审改写。
 - 卖家自发的预付额度：Stripe 列为受限类（stored value / virtual credits），可做但可能被限额。
 

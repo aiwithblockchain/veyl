@@ -17,7 +17,7 @@
 | 1 | 身份 | 邮箱 6 位验证码登录；设备令牌保留为「这台机器」的身份，邮箱账户是「这个人」的身份；登录即把设备并入邮箱账户 |
 | 2 | 门禁 | 建机、我的服务器、支付、销毁、取凭据都要登录；**已有节点与配置的连接不需要登录**，离线照常可用 |
 | 3 | 令牌 | 复用现有 `TOKEN_SIGNING_JWK`（Ed25519），只加 `kind` / `amr` claim；access 15 分钟、refresh 30 天滑动 |
-| 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；2026-11-23 起用 **Stripe Checkout 一次性付款**（`price_data`），卡 / 支付宝 / 微信按账户资格；订阅不上线（M2） |
+| 4 | 收费 | **M1 只做预付费余额**（USD 分记整数）；2026-11-23 起用 **Stripe Checkout 一次性付款**（`price_data`），卡默认；支付宝按账户资格（受限类目）；微信因禁用类目含 VPS / 云服务器，不作为可依赖通道；订阅不上线（M2） |
 | 4b | 商户 | **美国 LLC 单独开 Stripe 账户**，不与 TweetPilot 共用；余额、订单与账本仍按 Veyl 自己的建（`stripe-migration.md`） |
 | 5 | 建机时机 | 下单 → `checkout` **只确认下单、不扣费**（预检余额 ≥ 日价 × 7，不足返回 `insufficient_balance`，不建机）→ 服务器就绪（enroll 确认 sing-box 起成功）时扣第 0 天，之后由每小时 :17 的 Cron 在到期前续一天（§4.14） |
 | 6 | 幂等 | 充值 webhook 用 `event.id` 去重 + `payments.id`（payment_intent / session id）+ 账本 `ref_id = topup.id`；扣费用账本唯一键 + 原子守卫；同一订单 / 同一期只扣一次 |
@@ -301,6 +301,8 @@ type MyServerAccount = {
 
 ## 4. 支付（Dodo 时期设计；2026-11-23 起以 `stripe-migration.md` 为准）
 
+> 2026-11-24 补：下表是 Dodo 时期的通道结论，Stripe 下的资格与类目已重核，见 `stripe-migration.md` §10.1。微信支付在 Stripe 侧同样只支持一次性付款，但其禁用类目含 VPS / 云服务器，已不作为可依赖通道；「国内用户走预付费」的理由仍然成立，通道换成支付宝。
+
 ### 4.1 收费模型：预付费余额（M1）
 
 **M1 只做预付费余额，订阅不上线。**（2026-11-16 拍板；订阅代码保留，M2 给国际卡用户。）
@@ -313,7 +315,7 @@ type MyServerAccount = {
 | 大陆支付宝 | ❌ 不在 Dodo 支持列表 | ❌ |
 | 国际卡 | ✅ | ✅ |
 
-国内用户想用微信，就只能走预付费：**先充值、再扣费**。
+国内用户想用国内钱包（支付宝），就只能走预付费：**先充值、再扣费**。
 
 **定价与换汇**：
 
@@ -993,7 +995,7 @@ pending_payment ──checkout──▶ provisioning ──enroll + 结算──
 | 4 个充值档位（$12 / $24 / $36 / $48） | 控制面 `TOPUP_DENOMINATIONS_CENTS` | 不建 Product / Price；`price_data` 动态传 |
 | Stripe webhook 端点 + secret，订阅 `completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` | Stripe Dashboard | `https://<env>/v1/webhooks/stripe` + `whsec_…`（test / live 各一套） |
 | Stripe API Key（test / live） | Stripe Dashboard | `sk_test_…` / `sk_live_…`，必须与环境前缀匹配 |
-| 支付方式（卡 / Apple Pay / Google Pay / 支付宝 / 微信） | Stripe Dashboard | 支付宝 / 微信需单独申请；代码不传 `payment_method_types` |
+| 支付方式（卡 / Apple Pay / Google Pay / 支付宝 / 微信） | Stripe Dashboard | 支付宝申请后启用（云服务 / 储值属受限类目，需补充材料）；微信可做技术验证但类目不允许 VPS / 云服务器；代码不传 `payment_method_types`，启用微信时另传 `payment_method_options[wechat_pay][client]=web` |
 | `TOPUP_DENOMINATIONS_CENTS` 与定价页一致 | 人工核对 | 验收 W1 |
 | `PLAN_DAILY_PRICE_CENTS` 与目录展示价一致（成本 × 1.5） | 人工核对 | 验收 W2 |
 
@@ -1175,7 +1177,7 @@ type MyServerCharge = {
 **资金与换汇风险**（写清楚，不藏）：
 
 1. 未消费余额是**我们的负债**，用户随时可能要求退款（本期不做，M2 必须给规则）；
-2. 微信充值是 CNY → USD 换汇，Stripe 侧的换汇与手续费由我们承担，按 USD 面额入账；
+2. 支付宝充值是 CNY → USD 换汇，Stripe 侧的换汇与手续费由我们承担，按 USD 面额入账；
 3. 账本与 Stripe 结算流水的对账（汇率、手续费）留到 M2；本期只保证账本内部自洽。
 
 
@@ -1188,9 +1190,9 @@ type MyServerCharge = {
 |---|---|---|
 | 1 | Stripe Checkout 是否原样回传 `metadata.topup_id` / `client_reference_id` | 决定匹配主路径；不回来就靠 `checkout_session_id`（当前按此设计） |
 | 2 | **D1 `batch()` 是否严格事务**（两步扣费守卫依赖它） | 若否，改用单条 `INSERT … SELECT` 或 DO 串行化 |
-| 3 | 支付宝 / 微信在 Stripe 下对 **USD 产品**的实际换汇价、手续费与结算币种 | 影响换汇成本核算与对账 |
+| 3 | 支付宝在 Stripe 下对 **USD 产品**的实际换汇价、手续费与结算币种 | 影响换汇成本核算与对账 |
 | 4 | `checkout.session.*` 载荷是否稳定包含 `payment_intent` / `payment_status` / `metadata` | 充值入账按本地面额，不依赖金额；但匹配与审计需要 |
-| 5 | Stripe 单笔最低金额与支付宝 / 微信限额 | 决定充值面额是否可行 |
+| 5 | Stripe 单笔最低金额与支付宝 / 微信限额 | 已核实（2026-11-24）：支付宝 0.50–999,999.99 USD；微信最低 0.50 USD；$12–$48 档不受限 |
 | 6 | Stripe webhook 的重投策略与超时（live 3 天 / sandbox 3 次） | 决定是否必须 `waitUntil` 与 Cron 兜底 |
 | 7 | Resend 发件域名在主要邮箱服务商的送达率 | 验证码到不了 = 登录不可用 |
 | 8 | Workers `waitUntil` 内调用 DigitalOcean 建机的时长上限 | 超过则改为 Workflow / 队列 |
