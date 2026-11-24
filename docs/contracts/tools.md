@@ -211,7 +211,7 @@ type CallSource = "ui" | "agent";
 实现要求：
 
 1. `source` 由 Host 在构造 `ToolContext` 时写入，工具实现只读不改。
-2. 工具 schema 里**没有** `source` 字段；如果模型传了，按 `INVALID_ARGUMENT` 拒绝（`additionalProperties: false` 已保证）。
+2. **调用来源（`ui` / `agent`）不得作为工具入参**：工具 schema 里没有这个字段；如果模型传了，按 `INVALID_ARGUMENT` 拒绝（`additionalProperties: false` 已保证）。注意与 `NodeImport.source` 区分：后者是**节点来源**（`url` / `text` / `manual`），是正常入参，不在此约束内。
 3. P1 **不区分来源的业务后果** —— 两种来源走同一条执行路径，都不需要确认。
 4. `source` 仍写入 `tool_calls` 审计表，用于事后排查「这个删除是 UI 点的还是 Agent 发起的」。
 
@@ -396,7 +396,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 2.0：配置与节点（3.28.0：三条写节点路径合并为 NodeImport）
     Box::new(ConfigDetailTool::new(store.clone())),
     Box::new(ConfigUpdateTool::new(store.clone())),
-    Box::new(NodeImportTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeImportTool::new(services.clone())),
     Box::new(NodeSwitchTool::new(rt.clone(), store.clone())),
     Box::new(NodeProbeTool::new(rt.clone(), store.clone())),
     Box::new(VpnConnectTool::new(rt.clone(), store.clone(), proxy.clone())),
@@ -2396,7 +2396,7 @@ type AiProvidersData = {
 | ~~`ConfigDelete`~~ | **3.18.0 起无此工具**；全局配置不可删（命令层 `only_config`） |
 | `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
 | `SetUserRegion` | 地区与当前 `user_region` 一致 → `ok: true`，不发事件 |
-| `NodeImport` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
+| `NodeImport` | `source = "url"` / `"text"`：同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`），`data` 仍返回已有节点；`source = "manual"` 走 `node_create`，**不去重**（同名 / 同地址可重复创建） |
 | `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
 | `CoreUpgrade` | 同目标版本已有任务 → `BUSY`，`details.job_id`；无新版本 → 成功且 `changed: false`，不建任务 |
 | `VpnConnect` | 已连同一配置同一节点 → `ok: true`，不重复设置代理 |

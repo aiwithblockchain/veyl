@@ -112,7 +112,7 @@
 ### 2.4 验收
 
 - 工具数 40 → 38；`tools.md` §3 与 `TOOL_COPY` 逐名相等（自动）。
-- 三种来源各有一条用例：正常导入、缺字段报 `INVALID_ARGUMENT` 且指明字段、`additionalProperties` 仍然拒绝多余字段。
+- 三种来源各有一条正常导入用例；缺字段报 `INVALID_ARGUMENT` 并指明缺哪个字段；另有代码侧本轮补的用例覆盖 `config_id` 透传与未知 `source` 拒绝。`additionalProperties` 由 schema 保证，当前**没有**单独发多余字段的用例。
 - `grep -rn "NodeImportUrl\|NodeImportText\|NodeCreate" resources/prompts/` 为空。
 
 ---

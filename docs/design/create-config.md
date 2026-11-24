@@ -3,6 +3,7 @@
 > 日期：2026-11-07
 > 状态：**已被 `docs/design/simplified-config-create.md` 取代**（2026-11-12）。旧内容保留作历史，不再作为实现依据；
 > 「只有我指定的服务」与旧节点来源选项均已下线，以两问 / 两档的现行设计为准。
+> **后续变更**：文中的 `NodeImportText` / `NodeImportUrl` / `NodeCreate` 已在 `tools.md` 3.28.0 合并为 `NodeImport`（按 `source` 区分）；本文保留当时的设计记录。
 > 上游：`docs/contracts/commands.md` §3.2（`config_create`）、§4.1（`node_import_url`）、§4.2（`node_create`）、
 > `docs/user-flows.md` §364、`docs/configs-and-nav.md` §4
 > 涉及：`src/components/NewConfigDialog.tsx`、`src/App.tsx`、`src/agent/bridge.ts`、`src-tauri/src/nodes.rs`、
@@ -21,7 +22,7 @@
 | 弹窗只有两个字段：名字 + 接管方式，选完就直接建 | `NewConfigDialog.tsx:14-152` |
 | 前端建配置固定带 `routingMode: "proxy_all"`、`source: "seed"` | `useVpnSession.ts:314-319` |
 | `config_create` **不支持内联节点**，只能 `nodeIds` 或 `source: "seed"` | `commands.md` §3.2 |
-| `node_create` / `node_import_url` 命令**都在**，AI 侧也分别有 `NodeCreate` / `NodeImportUrl` 工具（`tools/mod.rs:163-164`）；**只有前端 bridge 一条都没接** | `bridge.ts:441-449` 只有 `nodeSwitch` / `nodeProbe*` |
+| `node_create` / `node_import_url` 命令**都在**，AI 侧当时也分别有 `NodeCreate` / `NodeImportUrl` 工具（`tools/mod.rs:163-164`；3.28.0 起已合并为 `NodeImport`）；**只有前端 bridge 一条都没接** | `bridge.ts:441-449` 只有 `nodeSwitch` / `nodeProbe*` |
 | 节点模型只有 5 个字段：`name` / `server` / `port` / `method` / `password` | `store/configs.rs:53`、`commands.md` §4.2 |
 | **没有传输方式、SNI、伪装、插件字段**，只支持 Shadowsocks | `nodes.rs:19` 的 `SUPPORTED_METHODS` |
 | 路由三档本来就存在，只是界面从没暴露 | `rules/plan.rs:184` |

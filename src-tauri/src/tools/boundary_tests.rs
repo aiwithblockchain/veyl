@@ -286,8 +286,8 @@ impl VpnToolServices for FakeServices {
     }
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value> {
         self.rec.record(format!(
-            "node_create(name={},server={},port={})",
-            input.name, input.server, input.port
+            "node_create({:?},name={},server={},port={})",
+            input.config_id, input.name, input.server, input.port
         ));
         Ok(self.data.clone())
     }
@@ -1144,7 +1144,10 @@ async fn node_import_text_reports_imported_and_skipped() {
             { "name": "B", "reason": "unsupported_method" },
             { "name": null, "reason": "malformed" }
         ],
-        "nodes": [{ "name": "A" }, { "name": "C" }]
+        "nodes": [
+            { "name": "A", "server": "203.0.113.10", "port": 8388, "method": "aes-256-gcm" },
+            { "name": "C", "server": "203.0.113.12", "port": 8388, "method": "chacha20-ietf-poly1305" }
+        ]
     }));
     let all = tools(svc);
     let text = "ss://aes-256-gcm:pw@203.0.113.10:8388#A\n\
@@ -1160,12 +1163,20 @@ async fn node_import_text_reports_imported_and_skipped() {
     assert!(!is_error, "{env}");
     assert_eq!(env["ok"], true);
     assert_eq!(env["data"]["imported"], 2);
+    let content = env["summary"].as_str().unwrap_or_default();
+    assert!(content.contains("导入 2 个节点，跳过 2 个"), "{env}");
+    // content 必须自足：模型只看得到它，逐节点一行 + 跳过原因汇总。
     assert!(
-        env["summary"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("导入 2 个节点，跳过 2 个"),
-        "{env}"
+        content.contains("- A | 203.0.113.10:8388 | aes-256-gcm"),
+        "content 缺逐节点行：{content}"
+    );
+    assert!(
+        content.contains("- C | 203.0.113.12:8388 | chacha20-ietf-poly1305"),
+        "content 缺逐节点行：{content}"
+    );
+    assert!(
+        content.contains("跳过原因：malformed × 1、unsupported_method × 1。"),
+        "content 缺跳过原因汇总：{content}"
     );
     assert_eq!(
         rec.take(),
@@ -1218,9 +1229,16 @@ async fn node_import_manual_passes_parsed_fields() {
     )
     .await;
     assert!(!is_error, "{env}");
+    // 手动来源给一行节点摘要；密码永不出现在 content。
+    let content = env["summary"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("节点「东京」已创建：198.51.100.20:8388 | aes-256-gcm"),
+        "{content}"
+    );
+    assert!(!content.contains("pw"), "content 不能带密码：{content}");
     assert_eq!(
         rec.take(),
-        vec!["node_create(name=东京,server=198.51.100.20,port=8388)"]
+        vec!["node_create(None,name=东京,server=198.51.100.20,port=8388)"]
     );
 }
 
@@ -1247,7 +1265,7 @@ async fn node_import_dispatches_by_source() {
                 "name": "东京", "server": "198.51.100.20", "port": 8388,
                 "password": "pw", "method": "aes-256-gcm"
             }),
-            "node_create(name=东京,server=198.51.100.20,port=8388)".to_string(),
+            "node_create(None,name=东京,server=198.51.100.20,port=8388)".to_string(),
         ),
     ];
     for (input, expected) in cases {
@@ -1272,6 +1290,7 @@ async fn node_import_dispatches_by_source() {
         ),
     ] {
         rec.take();
+        let source = input["source"].as_str().unwrap_or_default();
         let env = expect_rejected(
             tool(&all, "NodeImport"),
             input.clone(),
@@ -1286,13 +1305,106 @@ async fn node_import_dispatches_by_source() {
                 .contains(field),
             "错误信息要点名缺的字段 {field}：{env}"
         );
+        assert_eq!(
+            env["error"]["details"],
+            json!({ "reason": "missing_source_field", "source": source, "field": field }),
+            "{env}"
+        );
         assert!(rec.take().is_empty(), "缺 {field} 时不应调用服务层");
     }
+
+    // 来源专属字段串了来源：按 unknown_argument 拒绝，不静默忽略。
+    for input in [
+        json!({ "source": "url", "url": "https://example.com/sub", "password": "pw" }),
+        json!({ "source": "text", "text": text, "name": "东京" }),
+        json!({
+            "source": "manual",
+            "name": "东京", "server": "198.51.100.20", "port": 8388,
+            "password": "pw", "method": "aes-256-gcm", "url": "https://example.com/sub"
+        }),
+    ] {
+        rec.take();
+        let env = expect_rejected(tool(&all, "NodeImport"), input.clone(), "串来源字段").await;
+        assert_eq!(
+            env["error"]["details"]["reason"], "unknown_argument",
+            "{env}"
+        );
+        assert!(rec.take().is_empty(), "串来源字段时不应调用服务层");
+    }
+
+    // 未知 source：拒绝，不调用服务层。
+    rec.take();
+    let env = expect_rejected(
+        tool(&all, "NodeImport"),
+        json!({ "source": "ftp" }),
+        "未知 source",
+    )
+    .await;
+    assert_eq!(
+        env["error"]["details"]["reason"], "invalid_argument",
+        "{env}"
+    );
+    assert!(rec.take().is_empty(), "未知 source 不应调用服务层");
+
+    // source 类型错：说「必须是字符串」，不能和「缺少 source」混为一谈。
+    let env = expect_rejected(
+        tool(&all, "NodeImport"),
+        json!({ "source": 42 }),
+        "source 类型错",
+    )
+    .await;
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("字符串"),
+        "{env}"
+    );
 
     // schema：只有 source 必填，多余字段仍然被拒。
     let schema = tool(&all, "NodeImport").input_schema();
     assert_eq!(schema["required"], json!(["source"]));
     assert_eq!(schema["additionalProperties"], false);
+}
+
+/// `config_id` 在三种来源下都要透传给服务层。
+#[tokio::test]
+async fn node_import_passes_config_id_for_every_source() {
+    let (svc, rec) = FakeServices::new();
+    let all = tools(svc);
+    let text = "ss://aes-256-gcm:pw@203.0.113.10:8388#A";
+
+    let cases: &[(Value, String)] = &[
+        (
+            json!({ "source": "url", "url": "https://example.com/sub", "config_id": "cfg_1" }),
+            "node_import_url(Some(\"cfg_1\"),23chars)".to_string(),
+        ),
+        (
+            json!({ "source": "text", "text": text, "config_id": "cfg_1" }),
+            format!(
+                "node_import_text(Some(\"cfg_1\"),{}chars)",
+                text.chars().count()
+            ),
+        ),
+        (
+            json!({
+                "source": "manual",
+                "name": "东京", "server": "198.51.100.20", "port": 8388,
+                "password": "pw", "method": "aes-256-gcm", "config_id": "cfg_1"
+            }),
+            "node_create(Some(\"cfg_1\"),name=东京,server=198.51.100.20,port=8388)".to_string(),
+        ),
+    ];
+    for (input, expected) in cases {
+        rec.take();
+        let (is_error, env) = run(tool(&all, "NodeImport"), input.clone()).await;
+        assert!(!is_error, "{input} 应当成功，实际 {env}");
+        assert_eq!(
+            rec.take(),
+            vec![expected.clone()],
+            "{input} 没有把 config_id 透传给服务层"
+        );
+    }
 }
 
 /// 无参数工具也要能正常跑通，并且**不接受**多余参数导致崩。

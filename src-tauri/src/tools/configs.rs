@@ -452,14 +452,16 @@ impl Tool for NodeProbeTool {
     }
 }
 
-/// 三种来源共用的导入结果：成功文案与 added / skipped 事实一致。
+/// 逐节点一行 + 跳过原因汇总 + 末尾计数：模型只看得到 content（`tools.md` §4.10）。
 fn import_outcome(data: Value) -> ToolOutcome {
     let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
-    let skipped = data
+    let skipped_items = data
         .get("skipped")
         .and_then(Value::as_array)
-        .map(|items| items.len())
-        .unwrap_or(0);
+        .cloned()
+        .unwrap_or_default();
+    let skipped = skipped_items.len() as i64;
+
     let mut facts = Vec::new();
     if imported > 0 {
         facts.push(Fact::with_params(
@@ -473,11 +475,60 @@ fn import_outcome(data: Value) -> ToolOutcome {
             json!({ "count": skipped }),
         ));
     }
-    ToolOutcome::ok(
-        format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
-        data,
-    )
-    .with_display(facts, Changed::None)
+
+    let mut lines = Vec::new();
+    if let Some(nodes) = data.get("nodes").and_then(Value::as_array) {
+        for node in nodes {
+            lines.push(imported_node_line(node));
+        }
+    }
+    if skipped > 0 {
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for item in &skipped_items {
+            let reason = item
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            *counts.entry(reason.to_string()).or_default() += 1;
+        }
+        let summary = counts
+            .iter()
+            .map(|(reason, count)| format!("{reason} × {count}"))
+            .collect::<Vec<_>>()
+            .join("、");
+        lines.push(format!("跳过原因：{summary}。"));
+    }
+    lines.push(format!("共导入 {imported} 个节点，跳过 {skipped} 个。"));
+    ToolOutcome::ok(lines.join("\n"), data).with_display(facts, Changed::None)
+}
+
+/// 新节点一行：名称 | server:port | 加密方式（不含密码）。
+fn imported_node_line(node: &Value) -> String {
+    let name = node.get("name").and_then(Value::as_str).unwrap_or("-");
+    let server = node.get("server").and_then(Value::as_str).unwrap_or("-");
+    let port = node
+        .get("port")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let method = node.get("method").and_then(Value::as_str).unwrap_or("-");
+    format!("- {name} | {server}:{port} | {method}")
+}
+
+fn invalid(reason: &str, message: &str) -> AivpnError {
+    AivpnError::new("INVALID_ARGUMENT", message).with_details(json!({ "reason": reason }))
+}
+
+/// 缺来源必填字段：指名道姓，并把来源带上（`tools.md` §4.10）。
+fn missing_source_field(source: Option<&str>, field: &str) -> AivpnError {
+    let details = match source {
+        Some(source) => {
+            json!({ "reason": "missing_source_field", "source": source, "field": field })
+        }
+        None => json!({ "reason": "missing_source_field", "field": field }),
+    };
+    AivpnError::new("INVALID_ARGUMENT", format!("缺少 {field}")).with_details(details)
 }
 
 /// 节点写入的三条路径合成一个工具（tools.md 3.28.0）：`source` 决定节点从哪来。
@@ -498,9 +549,10 @@ impl Tool for NodeImportTool {
     }
 
     fn description(&self) -> &str {
-        "把节点导入节点池，用 source 区分来源：url = HTTPS 订阅（base64 的 ss:// 列表，必填 url）；\
-         text = 粘贴的 ss:// 多行文本（必填 text，最多 64 KiB）；\
-         manual = 逐项填写（必填 name / server / port / method / password）。\
+        "把节点导入节点池，用 source 区分来源：\
+         url = HTTPS 订阅（base64 的 ss:// 列表，必填 url）；\
+         text = 粘贴的 ss:// 多行文本（必填 text，最多 64 KiB），坏行只跳过、不影响其余，重复节点会标出来；\
+         manual = 逐项填写一个节点（必填 name / server / port / method / password），密码只进本地加密文件。\
          只解析、不连接；config_id 省略时只进节点池。返回值不含密码；\
          导入成功后要复述节点名、地址、端口与加密方式。"
     }
@@ -529,45 +581,76 @@ impl Tool for NodeImportTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let reject = |message: String| {
+        let reject = |error: AivpnError| {
             envelope::finish(
                 ctx,
                 "NodeImport",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", message))
-                    .with_changed(Changed::None),
+                ToolOutcome::fail(error).with_changed(Changed::None),
             )
         };
+        let Some(object) = input.as_object() else {
+            return reject(invalid("invalid_argument", "参数必须是一个对象"));
+        };
 
-        // 错类型不能被当成「没给」：所有已知字符串字段先做一次类型校验。
-        for field in ["url", "text", "name", "server", "method", "password"] {
-            if input.get(field).is_some() {
+        // source 单独判类型：数字 / null / 数组都要和「没给」区分开。
+        let source = match object.get("source") {
+            None | Some(Value::Null) => {
+                return reject(missing_source_field(None, "source"));
+            }
+            Some(Value::String(value))
+                if matches!(value.as_str(), "url" | "text" | "manual") =>
+            {
+                value.clone()
+            }
+            Some(Value::String(_)) => {
+                return reject(invalid(
+                    "invalid_argument",
+                    "source 只能是 url / text / manual",
+                ));
+            }
+            Some(_) => return reject(invalid("invalid_argument", "source 必须是字符串")),
+        };
+
+        // schema 里这些字段都是合法属性，additionalProperties 管不到：
+        // 按来源白名单拒绝不属于当前来源的字段（`tools.md` §4.10）。
+        let allowed: &[&str] = match source.as_str() {
+            "url" => &["source", "url", "config_id"],
+            "text" => &["source", "text", "config_id"],
+            _ => &[
+                "source",
+                "name",
+                "server",
+                "port",
+                "method",
+                "password",
+                "config_id",
+            ],
+        };
+        for key in object.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return reject(invalid("unknown_argument", &format!("不支持的参数 {key}")));
+            }
+        }
+
+        // 错类型不能被当成「没给」：本来源的字符串字段先做一次类型校验。
+        for field in allowed.iter().copied().filter(|field| {
+            *field != "source" && *field != "config_id" && *field != "port"
+        }) {
+            if object.get(field).is_some() {
                 if let Err(error) = super::optional_string(&input, field) {
-                    return envelope::finish(
-                        ctx,
-                        "NodeImport",
-                        ToolOutcome::fail(error).with_changed(Changed::None),
-                    );
+                    return reject(error);
                 }
             }
         }
         let config_id = match super::optional_string(&input, "config_id") {
             Ok(value) => value,
-            Err(error) => {
-                return envelope::finish(
-                    ctx,
-                    "NodeImport",
-                    ToolOutcome::fail(error).with_changed(Changed::None),
-                )
-            }
+            Err(error) => return reject(error),
         };
 
-        let Some(source) = input.get("source").and_then(Value::as_str) else {
-            return reject("缺少 source".to_string());
-        };
-        let outcome = match source {
+        let outcome = match source.as_str() {
             "url" => {
                 let Some(url) = input.get("url").and_then(Value::as_str) else {
-                    return reject("缺少 url".to_string());
+                    return reject(missing_source_field(Some("url"), "url"));
                 };
                 match self.services.node_import_url(config_id, url).await {
                     Ok(data) => import_outcome(data),
@@ -576,17 +659,17 @@ impl Tool for NodeImportTool {
             }
             "text" => {
                 let Some(text) = input.get("text").and_then(Value::as_str) else {
-                    return reject("缺少 text".to_string());
+                    return reject(missing_source_field(Some("text"), "text"));
                 };
                 match self.services.node_import_text(config_id, text).await {
                     Ok(data) => import_outcome(data),
                     Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
                 }
             }
-            "manual" => {
+            _ => {
                 for field in ["name", "server", "method", "password"] {
                     if input.get(field).and_then(Value::as_str).is_none() {
-                        return reject(format!("缺少 {field}"));
+                        return reject(missing_source_field(Some("manual"), field));
                     }
                 }
                 let Some(port) = input
@@ -595,42 +678,38 @@ impl Tool for NodeImportTool {
                     .and_then(|port| u16::try_from(port).ok())
                 else {
                     return reject(if input.get("port").is_none() {
-                        "缺少 port".to_string()
+                        missing_source_field(Some("manual"), "port")
                     } else {
-                        "port 不合法".to_string()
+                        invalid("invalid_argument", "port 不合法")
                     });
                 };
+                let name = input["name"].as_str().unwrap_or_default().to_string();
+                let server = input["server"].as_str().unwrap_or_default().to_string();
+                let method = input["method"].as_str().unwrap_or_default().to_string();
                 match self
                     .services
                     .node_create(NodeCreateInput {
                         config_id,
-                        name: input["name"].as_str().unwrap_or_default().to_string(),
-                        server: input["server"].as_str().unwrap_or_default().to_string(),
+                        name: name.clone(),
+                        server: server.clone(),
                         port,
                         password: input["password"].as_str().unwrap_or_default().to_string(),
-                        method: input["method"].as_str().unwrap_or_default().to_string(),
+                        method: method.clone(),
                     })
                     .await
                 {
-                    Ok(data) => {
-                        let name = data
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("-")
-                            .to_string();
-                        ToolOutcome::ok(format!("节点「{name}」已创建。"), data).with_facts(vec![
-                            Fact::with_params(FactKey::NodeName, json!({ "name": name })),
-                        ])
-                    }
+                    Ok(data) => ToolOutcome::ok(
+                        format!("节点「{name}」已创建：{server}:{port} | {method}。密码只进本地加密文件，未回显。"),
+                        data,
+                    )
+                    .with_facts(vec![Fact::with_params(
+                        FactKey::NodeName,
+                        json!({ "name": name }),
+                    )]),
                     Err(error) => {
                         ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown)
                     }
                 }
-            }
-            other => {
-                return reject(format!(
-                    "source 不合法：{other}，只能是 url / text / manual"
-                ))
             }
         };
         envelope::finish(ctx, "NodeImport", outcome)

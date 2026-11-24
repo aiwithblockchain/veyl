@@ -310,7 +310,7 @@ type NodeGroupChangedData = {
   用途：AI 回答「我有哪些节点组 / 这组里有什么」，以及在建议换组前确认组存在。**不返回节点密码、`password_ref`、KMS 标识或任何账户字段。**
 - `ConfigCreate` / `ConfigUpdate` 工具参数同步改为 `groupId`，删除 `source` / `nodeIds`；`ConfigList` / `ConfigDetail` 输出增加组字段（随 commands 3.0.0 类型）。
 - **免费节点同意门禁必须跟着搬家（硬规则）**：现在 `ConfigCreate(source: "seed")` 承担「用户必须逐字选过 `Veyl 免费节点（仅供试用）`」的门禁（`agent/questions.rs`、`tools/configs.rs`、`resources/prompts/zh/first-run.md`）。删掉 `source` 后，门禁改为 **`groupId == 免费组` 时同样要求本轮对话里用户明确选过该选项**，否则 `PRECONDITION_FAILED / free_group_consent_required`；`ConfigUpdate` 把组切到免费组时同样适用。不能因为换了个字段就让模型绕过。
-- **AI 的导入路径不接触组**：`NodeImportUrl` / `NodeImportText` / `ConfigCreate` 里模型都不传 `groupId`；导入的节点只进池并自动进 `我的节点`。用户要把它们放进别的组，由界面操作。
+- **AI 的导入路径不接触组**：`NodeImport` 里模型不传 `groupId`；导入的节点只进池并自动进 `我的节点`。用户要把它们放进别的组，由界面操作。
 - **不提供任何组写工具**（创建、改名、增删成员、删除、换组都不给模型）。理由与 `MyServers` 一致：这些动作改的是用户的远端资产边界，必须由用户在界面上点。将来若要开放，走确认卡，风险等级 `Execute`。
 - `MyServers` 工具保持只读；其返回的 `MyServer` 增加 `group_ids: string[]`（这台服务器对应的节点在哪些组里），只读展示。
 

@@ -5252,7 +5252,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(resu
 1. AI 如实说「现在取不到 Veyl 免费节点」，并给出两个出口（改用「其它节点」（贴链接 / 订阅地址 / 自己填） / 稍后再试）；不编造节点、不建空配置。
 2. 本请求内 `CatalogRefresh` **最多 1 次**；仍失败后不再自动重试。
 3. 消息里**不出现**错误码（`seed_unavailable`）、种子地址或节点密码；`configs` 数量不变。
-4. 没有偷偷换来源：`tool_calls` 里没有 `NodeCreate` / `NodeImportText` / `NodeImportUrl`。
+4. 没有偷偷换来源：用户选的是免费节点时，本请求的 `tool_calls` 里不应出现 `NodeImport`；若出现，它的 `source` 必须与用户当时给的来源一致（分享链接 → `text`，订阅地址 → `url`，逐项填写 → `manual`）。
 5. 恢复网络后再走一遍，能正常添加节点。
 
 **不合格时记录什么**：AI 回复全文、`tool_calls` 最近 8 条、`configs` 行数前后、重试次数；若池空是人为清空，记录清空方式。

@@ -441,7 +441,7 @@ AI 服务
 node_import_file { path, configId? } → NodeImportResult
 ```
 
-- **仅 UI**，不注册为 AI 工具。AI 侧继续走 `NodeImportText`（粘贴文本），不给模型读本地文件的能力。
+- **仅 UI**，不注册为 AI 工具。AI 侧继续走 `NodeImport` 的 `source = "text"`（粘贴文本），不给模型读本地文件的能力。
 - 读文件（≤1 MiB，按 UTF-8 解码、非法字节替换，不做编码猜测），把文本交给与 `node_import_text` **同一个解析实现**；行为、返回形状、错误码、事件与 `commands.md` §4.1.1 一致。
 - `path` 只用于读取，**不返回、不落日志**；回显的只有节点摘要，不含密码与文件内容。
 - 错误：`invalid_path`（空 / 非绝对）、`file_unreadable`、`file_too_large`、`not_node_text`；其余沿用 `NOT_FOUND` / `SECRET_STORE` / `INTERNAL`。

@@ -83,7 +83,7 @@
 - **不可用节点**：说清是停机删除还是线路不通；建议销毁重建；销毁当天已用掉的不退，未用完的整天退回余额；AI 不能代销毁或代建。
 - **探测**只认真实延迟，不认裸 TCP。
 
-工具：`ConfigDetail`、`ConfigUpdate`、`NodeImportText`、`NodeImportUrl`、`NodeCreate`、`NodeSwitch`、`NodeProbe`、`CatalogRefresh`、`CatalogSearch`、`DefaultProfileStatus`、`CategoryList`。
+工具：`ConfigDetail`、`ConfigUpdate`、`NodeImport`、`NodeSwitch`、`NodeProbe`、`CatalogRefresh`、`CatalogSearch`、`DefaultProfileStatus`。
 
 ### 2.3 我的服务器与计费
 
@@ -335,7 +335,7 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
 目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `CategoryList` `StageSelect` `CatalogOptions`
-配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImportUrl` `NodeImportText` `NodeCreate` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
+配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImport` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
 路由：`RouteGet` `RouteSetMode` `RouteTargetsSet` `RulesStatus`
 连接：`VpnConnect` `VpnDisconnect`
 诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `SubmitIssueToPublicWall` `ReadPublicIssueWall` `NetRepair` `NetConfigGet`
