@@ -562,7 +562,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.27.0",
+                env["contract_version"], "3.28.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -585,7 +585,7 @@ async fn required_fields_must_be_present_and_strings() {
         ("ConfigUpdate", "config_id", json!({})),
         ("NodeSwitch", "config_id", json!({ "node_id": "nod_1" })),
         ("NodeProbe", "node_id", json!({})),
-        ("NodeImportUrl", "url", json!({})),
+        ("NodeImport", "source", json!({})),
         ("JobGet", "job_id", json!({})),
     ];
 
@@ -619,11 +619,12 @@ async fn required_fields_must_be_present_and_strings() {
 }
 
 #[tokio::test]
-async fn node_create_requires_all_five_fields() {
+async fn node_import_manual_requires_all_five_fields() {
     let (svc, rec) = FakeServices::new();
     let all = tools(svc);
 
     let valid = json!({
+        "source": "manual",
         "name": "东京", "server": "198.51.100.20", "port": 8388,
         "password": "pw", "method": "aes-256-gcm"
     });
@@ -632,9 +633,9 @@ async fn node_create_requires_all_five_fields() {
         missing.as_object_mut().unwrap().remove(field);
         rec.take();
         expect_rejected(
-            tool(&all, "NodeCreate"),
+            tool(&all, "NodeImport"),
             missing,
-            &format!("NodeCreate 缺 {field}"),
+            &format!("NodeImport 缺 {field}"),
         )
         .await;
         assert!(rec.take().is_empty(), "缺 {field} 时不应调用服务层");
@@ -644,7 +645,12 @@ async fn node_create_requires_all_five_fields() {
     let mut wrong_port = valid.clone();
     wrong_port["port"] = json!("8388");
     rec.take();
-    expect_rejected(tool(&all, "NodeCreate"), wrong_port, "NodeCreate 的 port 是字符串").await;
+    expect_rejected(
+        tool(&all, "NodeImport"),
+        wrong_port,
+        "NodeImport 的 port 是字符串",
+    )
+    .await;
     assert!(rec.take().is_empty(), "port 类型错时不应调用服务层");
 }
 
@@ -682,7 +688,7 @@ async fn oversized_strings_do_not_break_the_envelope() {
     let cases: &[(&str, Value)] = &[
         ("ConfigDetail", json!({ "config_id": huge })),
         ("ConfigUpdate", json!({ "config_id": huge })),
-        ("NodeImportUrl", json!({ "url": huge })),
+        ("NodeImport", json!({ "source": "url", "url": huge })),
         ("JobGet", json!({ "job_id": huge })),
         ("RouteGet", json!({ "config_id": huge })),
     ];
@@ -718,10 +724,11 @@ async fn path_traversal_and_control_characters_do_not_panic() {
     for value in nasty {
         {
             let input = json!({
+                "source": "manual",
                 "name": value, "server": "198.51.100.20", "port": 8388,
                 "password": "pw", "method": "aes-256-gcm"
             });
-            let name = "NodeCreate";
+            let name = "NodeImport";
             let result = tool(&all, name).execute(input, &context()).await;
             let env = envelope(&result);
             assert!(
@@ -779,7 +786,7 @@ async fn wrong_typed_optional_strings_are_not_silently_ignored() {
 
     assert!(
         covered >= 5,
-        "可选字符串参数至少覆盖 VpnConnect / NodeImportUrl / NodeCreate / RouteGet / RouteSetMode，实际 {covered} 个"
+        "可选字符串参数至少覆盖 VpnConnect / NodeImport / RouteGet / RouteSetMode，实际 {covered} 个"
     );
 }
 
@@ -815,15 +822,10 @@ fn base_input(name: &str) -> Option<Value> {
         "OpenSettings" => json!({ "section": "connection" }),
         "StageSelect" => json!({ "region": "tyo" }),
         "RouteSetMode" => json!({ "mode": "proxy_all" }),
-        "NodeImportUrl" => json!({ "url": "https://example.com/sub" }),
-        "NodeImportText" => json!({ "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
+        "NodeImport" => json!({ "source": "url", "url": "https://example.com/sub" }),
         "ConfigUpdate" => json!({ "config_id": "cfg_1" }),
         // config_id 可选（3.21.4）：最小输入就是空对象。
         "ConfigDetail" => json!({}),
-        "NodeCreate" => json!({
-            "name": "东京", "server": "198.51.100.20", "port": 8388,
-            "password": "pw", "method": "aes-256-gcm"
-        }),
         _ => return None,
     };
     Some(value)
@@ -842,7 +844,7 @@ async fn valid_input_reaches_the_service_and_succeeds() {
         ("ConfigDetail", json!({}), "config_detail(active)"),
         ("NodeSwitch", json!({ "config_id": "cfg_1", "node_id": "nod_1" }), "node_switch(cfg_1,nod_1)"),
         ("NodeProbe", json!({ "node_id": "nod_1" }), "node_probe(nod_1)"),
-        ("NodeImportUrl", json!({ "url": "https://example.com/sub" }), "node_import_url(None,23chars)"),
+        ("NodeImport", json!({ "source": "url", "url": "https://example.com/sub" }), "node_import_url(None,23chars)"),
         ("JobGet", json!({ "job_id": "job_1" }), "job_get(job_1)"),
         ("VpnConnect", json!({ "config_id": "cfg_1" }), "vpn_connect(Some(\"cfg_1\"))"),
     ];
@@ -1150,7 +1152,11 @@ async fn node_import_text_reports_imported_and_skipped() {
                 ss://chacha20-ietf-poly1305:pw@203.0.113.12:8388#C";
 
     rec.take();
-    let (is_error, env) = run(tool(&all, "NodeImportText"), json!({ "text": text })).await;
+    let (is_error, env) = run(
+        tool(&all, "NodeImport"),
+        json!({ "source": "text", "text": text }),
+    )
+    .await;
     assert!(!is_error, "{env}");
     assert_eq!(env["ok"], true);
     assert_eq!(env["data"]["imported"], 2);
@@ -1174,7 +1180,11 @@ async fn node_import_text_rejects_unusable_text() {
     let all = tools(svc);
 
     rec.take();
-    let (is_error, env) = run(tool(&all, "NodeImportText"), json!({ "text": "hello" })).await;
+    let (is_error, env) = run(
+        tool(&all, "NodeImport"),
+        json!({ "source": "text", "text": "hello" }),
+    )
+    .await;
     assert!(is_error, "{env}");
     assert_eq!(env["error"]["code"], "INVALID_ARGUMENT");
     assert_eq!(
@@ -1184,27 +1194,24 @@ async fn node_import_text_rejects_unusable_text() {
     assert_eq!(rec.take(), vec!["node_import_text(None,5chars)".to_string()]);
 }
 
-/// 写操作：与 `NodeCreate` 同档，不能是只读。
+/// 写操作：不能是只读。
 #[test]
-fn node_import_text_is_a_write_tool() {
+fn node_import_is_a_write_tool() {
     let (svc, _) = FakeServices::new();
     let all = tools(svc);
-    assert_eq!(
-        permission_level_of(&all, "NodeImportText"),
-        permission_level_of(&all, "NodeCreate")
-    );
-    assert_eq!(permission_level_of(&all, "NodeImportText"), "write");
+    assert_eq!(permission_level_of(&all, "NodeImport"), "write");
 }
 
 #[tokio::test]
-async fn node_create_passes_parsed_fields() {
+async fn node_import_manual_passes_parsed_fields() {
     let (svc, rec) = FakeServices::new();
     let all = tools(svc);
 
     rec.take();
     let (is_error, env) = run(
-        tool(&all, "NodeCreate"),
+        tool(&all, "NodeImport"),
         json!({
+            "source": "manual",
             "name": "东京", "server": "198.51.100.20", "port": 8388,
             "password": "pw", "method": "aes-256-gcm"
         }),
@@ -1215,6 +1222,77 @@ async fn node_create_passes_parsed_fields() {
         rec.take(),
         vec!["node_create(name=东京,server=198.51.100.20,port=8388)"]
     );
+}
+
+/// `NodeImport` 按 `source` 路由到三条既有服务路径；缺来源专属字段要指名报错；
+/// schema 仍只要求 `source` 且拒绝多余字段。
+#[tokio::test]
+async fn node_import_dispatches_by_source() {
+    let (svc, rec) = FakeServices::new();
+    let all = tools(svc);
+    let text = "ss://aes-256-gcm:pw@203.0.113.10:8388#A";
+
+    let cases: &[(Value, String)] = &[
+        (
+            json!({ "source": "url", "url": "https://example.com/sub" }),
+            "node_import_url(None,23chars)".to_string(),
+        ),
+        (
+            json!({ "source": "text", "text": text }),
+            format!("node_import_text(None,{}chars)", text.chars().count()),
+        ),
+        (
+            json!({
+                "source": "manual",
+                "name": "东京", "server": "198.51.100.20", "port": 8388,
+                "password": "pw", "method": "aes-256-gcm"
+            }),
+            "node_create(name=东京,server=198.51.100.20,port=8388)".to_string(),
+        ),
+    ];
+    for (input, expected) in cases {
+        rec.take();
+        let (is_error, env) = run(tool(&all, "NodeImport"), input.clone()).await;
+        assert!(!is_error, "{input} 应当成功，实际 {env}");
+        assert_eq!(env["ok"], true, "{input}：{env}");
+        assert_eq!(rec.take(), vec![expected.clone()], "{input} 没有走到对应服务");
+    }
+
+    // 缺来源专属字段：指名道姓地拒绝，不调用服务层。
+    for (input, field) in [
+        (json!({ "source": "url" }), "url"),
+        (json!({ "source": "text" }), "text"),
+        (
+            json!({
+                "source": "manual",
+                "name": "东京", "server": "198.51.100.20", "port": 8388,
+                "password": "pw"
+            }),
+            "method",
+        ),
+    ] {
+        rec.take();
+        let env = expect_rejected(
+            tool(&all, "NodeImport"),
+            input.clone(),
+            &format!("NodeImport 缺 {field}"),
+        )
+        .await;
+        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(field),
+            "错误信息要点名缺的字段 {field}：{env}"
+        );
+        assert!(rec.take().is_empty(), "缺 {field} 时不应调用服务层");
+    }
+
+    // schema：只有 source 必填，多余字段仍然被拒。
+    let schema = tool(&all, "NodeImport").input_schema();
+    assert_eq!(schema["required"], json!(["source"]));
+    assert_eq!(schema["additionalProperties"], false);
 }
 
 /// 无参数工具也要能正常跑通，并且**不接受**多余参数导致崩。

@@ -154,25 +154,11 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.unchangedRetry",
     false,
   ),
-  NodeImportUrl: entry(
-    "tool.NodeImportUrl.running",
-    "tool.NodeImportUrl.done",
-    "tool.NodeImportUrl.failed",
-    "tool.advice.subscription",
-    false,
-  ),
-  NodeImportText: entry(
-    "tool.NodeImportText.running",
-    "tool.NodeImportText.done",
-    "tool.NodeImportText.failed",
-    "tool.advice.pasted",
-    false,
-  ),
-  NodeCreate: entry(
-    "tool.NodeCreate.running",
-    "tool.NodeCreate.done",
-    "tool.NodeCreate.failed",
-    "tool.advice.address",
+  NodeImport: entry(
+    "tool.NodeImport.running",
+    "tool.NodeImport.done",
+    "tool.NodeImport.failed",
+    "tool.advice.retryLater",
     false,
   ),
   NodeSwitch: entry(

@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.65.0`
+> 契约版本：`2.66.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -257,7 +257,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 64 | `node_probe_snapshot` | `{ configId? }` | `NodeProbeSnapshotData` | **2.8.0 新增（仅 UI）** |
 | 65 | `proxy_port_get` | `{}` | `{ port, default_port }` | **2.12.0 新增（仅 UI）** |
 | 66 | `proxy_port_set` | `{ port }` | `{ port, availability }` | **2.12.0 新增（仅 UI）；可用性三态，保存始终成功** |
-| 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImportText` 工具，共用实现）** |
+| 67 | `node_import_text` | `{ text, configId? }` | `NodeImportResult` | **2.14.0 新增（仅 UI；AI 走 `NodeImport` 的 `source = "text"`，共用实现）** |
 | 68 | `system_region` | `{}` | `{ region: string \| null, source: "system" \| "ai" }` | **2.15.0 新增（仅 UI）；2.18.0 增 `source`** |
 | 69 | `node_import_file` | `{ path, configId? }` | `NodeImportResult` | **2.16.14 新增（仅 UI）；与 `node_import_text` 共用解析；批 B 实现** |
 | 70 | `issue_report_reveal` | `{ reportId }` | `ReportActionData` | **2.17.0 新增（仅 UI）；只认 Host 登记过的报告目录** |
@@ -396,7 +396,7 @@ type ConfigListData = {
 > - `config_create` 的 **UI 路径退场**：界面不再调用；唯一建行路径是 `node_attach` / 导入命令在空库时的懒创建（§3.2 / §4.0）。已有配置时 `config_create` 一律 `CONFLICT / config_exists`。
 > - `config_activate` / `config_delete` **UI 退休**：前者只允许指向唯一配置（幂等成功），其它 id → `CONFLICT / single_config`；后者恒 `PRECONDITION_FAILED / only_config`。
 > - **老库多行**：启动时合并成一行（保留 active / 最近使用那套，其余节点按相对顺序并入，`issues` 按 `merge_key` 合并），详见 `global-config-merge.md` §3.6。2.36.0 的「不删、不迁移」口径作废。
-> - AI 工具侧：`ConfigCreate` / `ConfigActivate` / `ConfigDelete` / `ConfigList` 全部退出（`tools.md` 3.18.0）；AI 往池子里加节点走 `NodeCreate` / `NodeImportUrl` / `NodeImportText`，绑定由服务层完成。
+> - AI 工具侧：`ConfigCreate` / `ConfigActivate` / `ConfigDelete` / `ConfigList` 全部退出（`tools.md` 3.18.0）；AI 往池子里加节点走 `NodeImport`（按 `source` 区分 URL / 粘贴文本 / 手动填写），绑定由服务层完成。
 
 ### 3.2 `config_create { name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` → `ConfigDetail`
 
@@ -713,7 +713,7 @@ type ImportSkipReason =
 
 用户粘贴的节点文本（手工流程的「粘贴分享链接」）。**不发任何网络请求**——这是它与 §4.1 分成两条命令的原因：URL 那条的 SSRF / https 限制是为「我们替用户去拉」设计的，混用会把口子开大。
 
-> AI 通道走 `NodeImportText` 工具（`tools.md` §4.10.1），与本命令**共用同一个服务层实现**；行为、返回形状、错误码一致，只是通道不同。
+> AI 通道走 `NodeImport` 的 `source = "text"`（`tools.md` §4.10 / §4.10.1），与本命令**共用同一个服务层实现**；行为、返回形状、错误码一致，只是通道不同。
 
 | 边界 | 要求 |
 |---|---|
@@ -734,7 +734,7 @@ type ImportSkipReason =
 
 ### 4.1.2 `node_import_file { path, configId? }` → `NodeImportResult`
 
-用户从本地文件导入节点（设置 › 连接 ›「添加节点」的文件入口）。**仅 UI，不注册为 AI 工具**——AI 侧继续走 `NodeImportText`，不给模型读本地文件的能力。
+用户从本地文件导入节点（设置 › 连接 ›「添加节点」的文件入口）。**仅 UI，不注册为 AI 工具**——AI 侧继续走 `NodeImport`（`source = "text"`），不给模型读本地文件的能力。
 
 > **窗口级拖放不走本命令。** 它只收种子文件，当前仍由 `import_seed_file`（#24）承担，本批不迁移——理由见下方「为什么窗口拖放不迁移」。
 
@@ -2727,7 +2727,7 @@ Host 必须在发给模型的两处写入**同一套**表达规则（全文见 `
 UI 侧不依赖模型的措辞：
 
 - `tool-call-end.display`（`events.md` §3.4）是完成 / 失败的唯一用户文案；缺失时回落到前端映射表，不报错、不丢事件。
-- 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 40 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
+- 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 38 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
 - **不做输出正则改写**：静默替换模型正文（例如抹掉 `cfg_` 开头的串）比漏一句更难排查；拦截放在渲染层，不改写生成内容。
 - 工具 description 的表达约束放 `\n` 之后的末尾：第一行是模型挑工具时看到的摘要，第一行出现约束句会让摘要把约束当成用途。
 - running 状态文案来自映射表，不得拼工具名；未知工具固定「正在处理…」（`events.md` §3.5）。
@@ -3003,9 +3003,9 @@ type RulesStatus = {
 | `node_probe_all` / `node_probe_cancel` / `node_probe_snapshot` | **无**（UI 专用，见 §4.6–§4.8） | — |
 | `probe_run` | **无**（3.15.0 起无 AI 工具：探测由运行时内部完成，结果经 `DiagRun` 读） | — |
 | `proxy_params` | **无**（3.15.0 起无 AI 工具：AI 读本机代理用 `NetConfigGet`） | — |
-| `node_import_url` | `NodeImportUrl`（2.0 新增，取代 `ProfileImport`） | **必须** |
-| `node_import_text` | `NodeImportText`（3.8.0 新增，与 UI 命令共用实现） | **必须共用** |
-| `node_create` | `NodeCreate`（2.0 新增） | **必须** |
+| `node_import_url` | `NodeImport`（3.28.0 合并；工具侧 `source = "url"`） | **必须** |
+| `node_import_text` | `NodeImport`（3.28.0 合并；`source = "text"`，与 UI 命令共用实现） | **必须共用** |
+| `node_create` | `NodeImport`（3.28.0 合并；`source = "manual"`） | **必须** |
 | `config_delete` | `ConfigDelete`（2.0 改名） | **必须** |
 | `issue_list` | **无**（3.15.0 起无 AI 工具：新设计没有 issue 列表界面） | — |
 | `issue_get` | **无**（3.15.0 起无 AI 工具） | — |
@@ -3104,10 +3104,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.65.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** |
+| `contracts/commands.md` | **2.66.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** |
 | `contracts/events.md` | **2.24.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.27.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐 + `NodeImportText` + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** |
+| `contracts/tools.md` | **3.28.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐、`NodeImportText`（两者已于 3.28.0 并入 `NodeImport`） + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions` 建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** + **节点写入三工具合并为 `NodeImport`，总数 40 → 38（3.28.0）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.5.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 + 控制通道直连（route 与 DNS 各一条，1.5.0） |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -3122,6 +3122,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.66.0（未发布，2026-11-24：AI 工具第 3 组，节点导入合并）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.66.0`；§13 命令 → AI 工具映射中 `node_import_url` / `node_import_text` / `node_create` 的工具列改指 `NodeImport`（工具侧按 `source = "url"` / `"text"` / `"manual"` 区分）。三条命令本身、参数与返回类型不变，界面继续调用 | 映射同步 | `tools.md` 3.28.0（工具总数 40 → 38）；`docs/design/ai-tools-decisions.md` §2 |
+| 2 | 相关命令说明中的「AI 走 `NodeImportText` / `NodeImportUrl` / `NodeCreate`」统一改为 `NodeImport` 对应 `source`；§9.8 中 `TOOL_COPY` 键集合的数量由 40 改为 38 | 文案同步 | 同上 |
 
 ### 2.65.0（未发布，2026-11-24：AI 工具第 2 组，命令映射同步）
 
@@ -3904,7 +3911,7 @@ type RulesStatus = {
 | 4 | §4.2 更正为实际行为：不再承诺 `invalid_name` / `invalid_server` / `invalid_port` / `invalid_password`，Host 统一 `invalid_argument`（method 白名单除外）；写明 `port` 是 `u16`，越界在反序列化阶段失败、返回不了结构化错误 | 更正 | 契约与实现不一致，且这些细分原因前端用不上；`tools.md` 同步 3.7.1 |
 | 5 | `RouteState` 新增 `applied_region`（运行配置实际使用的地区）；`local_direct_basis` 增加 `"none"`（未知地区） | 字段/枚举新增 | 用户中途改时区时，界面不能把实时地区当成正在生效的地区；未知地区报 `ip_only` 与事实不符 |
 | 6 | `RuntimeSnapshot.route_region` 同步进 `runtime.md` 2.5.0 | 元数据 | — |
-| 7 | `node_import_text` 增加 AI 通道：`NodeImportText` 工具（`tools.md` 3.8.0）与本命令共用实现；命令本身仍是 UI 专用 | 工具新增 | 用户从「AI 协助」贴链接时不能被踢回手工表单 |
+| 7 | `node_import_text` 增加 AI 通道：`NodeImportText` 工具（`tools.md` 3.8.0；3.28.0 起并入 `NodeImport` 的 `source = "text"`）与本命令共用实现；命令本身仍是 UI 专用 | 工具新增 | 用户从「AI 协助」贴链接时不能被踢回手工表单 |
 
 ### 2.14.0（2026-11-07，粘贴文本导入节点）
 

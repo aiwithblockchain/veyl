@@ -452,26 +452,57 @@ impl Tool for NodeProbeTool {
     }
 }
 
-pub struct NodeImportUrlTool {
+/// 三种来源共用的导入结果：成功文案与 added / skipped 事实一致。
+fn import_outcome(data: Value) -> ToolOutcome {
+    let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
+    let skipped = data
+        .get("skipped")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let mut facts = Vec::new();
+    if imported > 0 {
+        facts.push(Fact::with_params(
+            FactKey::ImportAdded,
+            json!({ "count": imported }),
+        ));
+    }
+    if skipped > 0 {
+        facts.push(Fact::with_params(
+            FactKey::ImportSkipped,
+            json!({ "count": skipped }),
+        ));
+    }
+    ToolOutcome::ok(
+        format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
+        data,
+    )
+    .with_display(facts, Changed::None)
+}
+
+/// 节点写入的三条路径合成一个工具（tools.md 3.28.0）：`source` 决定节点从哪来。
+pub struct NodeImportTool {
     services: Arc<dyn VpnToolServices>,
 }
 
-impl NodeImportUrlTool {
+impl NodeImportTool {
     pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
         Self { services }
     }
 }
 
 #[async_trait]
-impl Tool for NodeImportUrlTool {
+impl Tool for NodeImportTool {
     fn name(&self) -> &str {
-        "NodeImportUrl"
+        "NodeImport"
     }
 
     fn description(&self) -> &str {
-        "从 HTTPS 订阅 URL 解析 base64 编码的 ss:// 多节点列表并导入。\
-         只解析、不连接；config_id 省略时只进节点池。\
-         返回值不含密码；解析结果要复述给用户确认 method 与 port。"
+        "把节点导入节点池，用 source 区分来源：url = HTTPS 订阅（base64 的 ss:// 列表，必填 url）；\
+         text = 粘贴的 ss:// 多行文本（必填 text，最多 64 KiB）；\
+         manual = 逐项填写（必填 name / server / port / method / password）。\
+         只解析、不连接；config_id 省略时只进节点池。返回值不含密码；\
+         导入成功后要复述节点名、地址、端口与加密方式。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -482,188 +513,9 @@ impl Tool for NodeImportUrlTool {
         json!({
             "type": "object",
             "properties": {
+                "source": { "type": "string", "enum": ["url", "text", "manual"] },
                 "url": { "type": "string", "format": "uri" },
-                "config_id": { "type": "string" }
-            },
-            "required": ["url"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(url) = input.get("url").and_then(Value::as_str) else {
-            return envelope::finish(
-                ctx,
-                "NodeImportUrl",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 url"))
-                    .with_changed(Changed::None),
-            );
-        };
-        let config_id = match super::optional_string(&input, "config_id") {
-            Ok(value) => value,
-            Err(error) => {
-                return envelope::finish(
-                    ctx,
-                    "NodeImportUrl",
-                    ToolOutcome::fail(error).with_changed(Changed::None),
-                )
-            }
-        };
-
-        let outcome = match self.services.node_import_url(config_id, url).await {
-            Ok(data) => {
-                let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
-                let skipped = data
-                    .get("skipped")
-                    .and_then(Value::as_array)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                let mut facts = Vec::new();
-                if imported > 0 {
-                    facts.push(Fact::with_params(
-                        FactKey::ImportAdded,
-                        json!({ "count": imported }),
-                    ));
-                }
-                if skipped > 0 {
-                    facts.push(Fact::with_params(
-                        FactKey::ImportSkipped,
-                        json!({ "count": skipped }),
-                    ));
-                }
-                ToolOutcome::ok(
-                    format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
-                    data,
-                )
-                .with_display(facts, Changed::None)
-            }
-            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
-        };
-        envelope::finish(ctx, "NodeImportUrl", outcome)
-    }
-}
-
-/// 用户直接粘贴的 `ss://` 分享链接。与 UI 的 `node_import_text` 共用服务层实现。
-pub struct NodeImportTextTool {
-    services: Arc<dyn VpnToolServices>,
-}
-
-impl NodeImportTextTool {
-    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
-        Self { services }
-    }
-}
-
-#[async_trait]
-impl Tool for NodeImportTextTool {
-    fn name(&self) -> &str {
-        "NodeImportText"
-    }
-
-    fn description(&self) -> &str {
-        "解析用户直接粘贴的 Shadowsocks 分享链接（一行或多行 ss://），导入节点池。\
-         逐条解析：坏行只跳过，不影响其余；重复节点会标出来。只解析、不联网。\
-         config_id 省略时只进节点池。返回值不含密码；导入成功后要复述节点名、地址、端口与加密方式。"
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Write
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
                 "text": { "type": "string", "maxLength": 65536 },
-                "config_id": { "type": "string" }
-            },
-            "required": ["text"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(text) = input.get("text").and_then(Value::as_str) else {
-            return envelope::finish(
-                ctx,
-                "NodeImportText",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "缺少 text"))
-                    .with_changed(Changed::None),
-            );
-        };
-        let config_id = match super::optional_string(&input, "config_id") {
-            Ok(value) => value,
-            Err(error) => {
-                return envelope::finish(
-                    ctx,
-                    "NodeImportText",
-                    ToolOutcome::fail(error).with_changed(Changed::None),
-                )
-            }
-        };
-
-        let outcome = match self.services.node_import_text(config_id, text).await {
-            Ok(data) => {
-                let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
-                let skipped = data
-                    .get("skipped")
-                    .and_then(Value::as_array)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                let mut facts = Vec::new();
-                if imported > 0 {
-                    facts.push(Fact::with_params(
-                        FactKey::ImportAdded,
-                        json!({ "count": imported }),
-                    ));
-                }
-                if skipped > 0 {
-                    facts.push(Fact::with_params(
-                        FactKey::ImportSkipped,
-                        json!({ "count": skipped }),
-                    ));
-                }
-                ToolOutcome::ok(
-                    format!("导入 {imported} 个节点，跳过 {skipped} 个。请复述节点名、地址、端口与加密方式给用户确认。"),
-                    data,
-                )
-                .with_display(facts, Changed::None)
-            }
-            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
-        };
-        envelope::finish(ctx, "NodeImportText", outcome)
-    }
-}
-
-pub struct NodeCreateTool {
-    services: Arc<dyn VpnToolServices>,
-}
-
-impl NodeCreateTool {
-    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
-        Self { services }
-    }
-}
-
-#[async_trait]
-impl Tool for NodeCreateTool {
-    fn name(&self) -> &str {
-        "NodeCreate"
-    }
-
-    fn description(&self) -> &str {
-        "手动创建一个 Shadowsocks 节点。密码只进本地加密文件，返回值不含密码。\
-         config_id 指定时追加到该配置；不指定只进节点池。不自动连接。"
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Write
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
                 "name": { "type": "string", "maxLength": 64 },
                 "server": { "type": "string" },
                 "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
@@ -671,73 +523,117 @@ impl Tool for NodeCreateTool {
                 "password": { "type": "string", "sensitive": true, "maxLength": 256 },
                 "config_id": { "type": "string" }
             },
-            "required": ["name", "server", "port", "method", "password"],
+            "required": ["source"],
             "additionalProperties": false
         })
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let required = ["name", "server", "method", "password"];
-        for field in required {
-            if input.get(field).and_then(Value::as_str).is_none() {
-                return envelope::finish(
-                    ctx,
-                    "NodeCreate",
-                    ToolOutcome::fail(AivpnError::new(
-                        "INVALID_ARGUMENT",
-                        format!("缺少 {field}"),
-                    ))
-                    .with_changed(Changed::None),
-                );
-            }
-        }
-        let Some(port) = input
-            .get("port")
-            .and_then(Value::as_u64)
-            .and_then(|port| u16::try_from(port).ok())
-        else {
-            return envelope::finish(
+        let reject = |message: String| {
+            envelope::finish(
                 ctx,
-                "NodeCreate",
-                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", "port 不合法"))
+                "NodeImport",
+                ToolOutcome::fail(AivpnError::new("INVALID_ARGUMENT", message))
                     .with_changed(Changed::None),
-            );
+            )
         };
 
-        let outcome = match self
-            .services
-            .node_create(NodeCreateInput {
-                config_id: match super::optional_string(&input, "config_id") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return envelope::finish(
-                            ctx,
-                            "NodeCreate",
-                            ToolOutcome::fail(error).with_changed(Changed::None),
-                        )
-                    }
-                },
-                name: input["name"].as_str().unwrap_or_default().to_string(),
-                server: input["server"].as_str().unwrap_or_default().to_string(),
-                port,
-                password: input["password"].as_str().unwrap_or_default().to_string(),
-                method: input["method"].as_str().unwrap_or_default().to_string(),
-            })
-            .await
-        {
-            Ok(data) => {
-                let name = data
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("-")
-                    .to_string();
-                ToolOutcome::ok(format!("节点「{name}」已创建。"), data).with_facts(vec![
-                    Fact::with_params(FactKey::NodeName, json!({ "name": name })),
-                ])
+        // 错类型不能被当成「没给」：所有已知字符串字段先做一次类型校验。
+        for field in ["url", "text", "name", "server", "method", "password"] {
+            if input.get(field).is_some() {
+                if let Err(error) = super::optional_string(&input, field) {
+                    return envelope::finish(
+                        ctx,
+                        "NodeImport",
+                        ToolOutcome::fail(error).with_changed(Changed::None),
+                    );
+                }
             }
-            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
+        }
+        let config_id = match super::optional_string(&input, "config_id") {
+            Ok(value) => value,
+            Err(error) => {
+                return envelope::finish(
+                    ctx,
+                    "NodeImport",
+                    ToolOutcome::fail(error).with_changed(Changed::None),
+                )
+            }
         };
-        envelope::finish(ctx, "NodeCreate", outcome)
+
+        let Some(source) = input.get("source").and_then(Value::as_str) else {
+            return reject("缺少 source".to_string());
+        };
+        let outcome = match source {
+            "url" => {
+                let Some(url) = input.get("url").and_then(Value::as_str) else {
+                    return reject("缺少 url".to_string());
+                };
+                match self.services.node_import_url(config_id, url).await {
+                    Ok(data) => import_outcome(data),
+                    Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
+                }
+            }
+            "text" => {
+                let Some(text) = input.get("text").and_then(Value::as_str) else {
+                    return reject("缺少 text".to_string());
+                };
+                match self.services.node_import_text(config_id, text).await {
+                    Ok(data) => import_outcome(data),
+                    Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown),
+                }
+            }
+            "manual" => {
+                for field in ["name", "server", "method", "password"] {
+                    if input.get(field).and_then(Value::as_str).is_none() {
+                        return reject(format!("缺少 {field}"));
+                    }
+                }
+                let Some(port) = input
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok())
+                else {
+                    return reject(if input.get("port").is_none() {
+                        "缺少 port".to_string()
+                    } else {
+                        "port 不合法".to_string()
+                    });
+                };
+                match self
+                    .services
+                    .node_create(NodeCreateInput {
+                        config_id,
+                        name: input["name"].as_str().unwrap_or_default().to_string(),
+                        server: input["server"].as_str().unwrap_or_default().to_string(),
+                        port,
+                        password: input["password"].as_str().unwrap_or_default().to_string(),
+                        method: input["method"].as_str().unwrap_or_default().to_string(),
+                    })
+                    .await
+                {
+                    Ok(data) => {
+                        let name = data
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("-")
+                            .to_string();
+                        ToolOutcome::ok(format!("节点「{name}」已创建。"), data).with_facts(vec![
+                            Fact::with_params(FactKey::NodeName, json!({ "name": name })),
+                        ])
+                    }
+                    Err(error) => {
+                        ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown)
+                    }
+                }
+            }
+            other => {
+                return reject(format!(
+                    "source 不合法：{other}，只能是 url / text / manual"
+                ))
+            }
+        };
+        envelope::finish(ctx, "NodeImport", outcome)
     }
 }
 

@@ -74,6 +74,49 @@
 
 ---
 
-## 2. 后续批次（未开始）
+## 2. 第 3 组：节点写入路径（2026-11-24）
 
-第 3、4、5 组各自单独出决策单，不预先写死。
+### 2.1 事实
+
+| 工具 | 入参 | 做什么 | 权限 |
+|---|---|---|---|
+| `NodeImportUrl` | `url`（必填）、`config_id?` | 拉 HTTPS 订阅，解析 base64 的 `ss://` 列表，逐条进节点池 | Write |
+| `NodeImportText` | `text`（必填，≤64 KiB）、`config_id?` | 解析用户粘贴的 `ss://` 分享链接，坏行跳过 | Write |
+| `NodeCreate` | `name` / `server` / `port` / `method` / `password` 必填，`config_id?` | 手动建一个节点 | Write |
+
+三个都是「往节点池里写节点」，差别只在**节点从哪来**。中英文 `resources/prompts/*/kickoff.md:79-81` 点名了这三个工具，`:121` 也列了一次——合并必须同批改提示词，否则模型调到不存在的工具。
+
+### 2.2 决定
+
+**三条合成一个 `NodeImport`，用 `source` 区分来源**：
+
+| `source` | 该带哪个字段 | 说明 |
+|---|---|---|
+| `url` | `url` | 订阅地址 |
+| `text` | `text` | 粘贴的 `ss://` 链接，可多行 |
+| `manual` | `name` / `server` / `port` / `method` / `password` | 逐项填写 |
+
+- 公共可选 `config_id`；不传只进节点池（与现在一致）。
+- schema 里只有 `source` 必填，其余按来源在 `execute` 里校验，缺字段回 `INVALID_ARGUMENT` 并指明缺哪个——JSON Schema 表达不了条件必填，写进 description 并在代码里兜住。
+- 权限沿用 `Write`。
+- **三条 Host 命令保留**（`node_import_url` / `node_import_text` / `node_create`），界面仍在调（`src/agent/tauriBridge.ts:1369/1407/1416`）。
+
+### 2.3 连带改动
+
+- 中英文 `kickoff.md`：`:79-81` 三行合成一行（按来源给 `source` 取值），`:121` 的工具名一起换。
+- `tools.md`：§3 40 → **38**，版本 **3.28.0**；§4 三个小节合并为一节，旧小节标「已合并（3.28.0）」。
+- `tool-display.md`、`TOOL_COPY`（三条文案 → 一条）、`toolDisplay.test.ts`。
+- `commands.md`：命令 → 工具映射改指 `NodeImport`，命令本身不动；按文件惯例升版本并加变更记录。
+- 描述与文案要写清「只解析、不连接、返回值不含密码」，与现在三条的措辞保持一致。
+
+### 2.4 验收
+
+- 工具数 40 → 38；`tools.md` §3 与 `TOOL_COPY` 逐名相等（自动）。
+- 三种来源各有一条用例：正常导入、缺字段报 `INVALID_ARGUMENT` 且指明字段、`additionalProperties` 仍然拒绝多余字段。
+- `grep -rn "NodeImportUrl\|NodeImportText\|NodeCreate" resources/prompts/` 为空。
+
+---
+
+## 3. 后续批次（未开始）
+
+第 4、5 组各自单独出决策单。

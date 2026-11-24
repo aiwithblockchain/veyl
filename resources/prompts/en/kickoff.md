@@ -76,9 +76,7 @@ Choosing "Other nodes" → explain the current state first: **the "Provider mark
 
 | What the user gives | What to do |
 |---|---|
-| Share link (`ss://…`) | Import with `NodeImportText`. The node enters the single node pool; **don't pass a config id**. **Don't parse the link yourself and don't invent nodes from its contents** |
-| Subscription URL | Import with `NodeImportUrl`. Likewise don't pass a config id |
-| Server details filled in by hand | Ask for address, port, encryption method and password one by one; once all four are in, write with `NodeCreate`; don't pass a config id |
+| A share link (`ss://…`), a subscription URL, or server details filled in by hand | All three call the same `NodeImport`, only `source` differs: share link → `source: "text"`, subscription URL → `source: "url"`, hand-filled details → `source: "manual"` (ask for address, port, encryption method and password one by one; write once all four are in). The node enters the single node pool; **don't pass a config id**. **Don't parse the link yourself and don't invent nodes from its contents** |
 
 If the user pastes a link that yields no usable node, say plainly "there's no usable node in this link" and ask them to paste another; **don't switch to another source and create one yourself**.
 
@@ -118,7 +116,7 @@ The recap contains only **the two things you asked about** (how to capture traff
 
 After confirmation, do it in this order, **don't stop at "nodes added but not connected"**:
 
-1. **Add nodes** (if step 3 hasn't actually added them yet): free nodes via `CatalogRefresh`; other nodes via `NodeImportText` / `NodeImportUrl` / `NodeCreate`. Don't pass a config id.
+1. **Add nodes** (if step 3 hasn't actually added them yet): free nodes via `CatalogRefresh`; other nodes via `NodeImport` (set `source` to `text` / `url` / `manual` according to what the user gave). Don't pass a config id.
 2. **Set the traffic scope**: use `RouteSetMode` with `mode` set to the `direct` / `proxy_all` from the previous step. No config id needed.
 3. **Set the capture mode** (only when the user chose `Tun mode`): use `ConfigSetMode` with `mode: "tun"`. No config id needed. Skip this step when the user chose `Proxy mode` — the default is already `Proxy mode`.
 4. **Start**: `VpnConnect`.
