@@ -79,8 +79,9 @@
 | 机器 | 服务器 id、地区、创建时间、当前状态 |
 | 节点 | 本地节点 id、端口（**不含密码**）、是否正在使用 |
 | 连通性 | ICMP 结果与耗时、TCP 32100 的结果 |
-| 更新配置 | 是否有变化、端口是否变化、重测结果 |
-| 重置 | 成功/失败、失败 reason 码 |
+| sing-box 可用性 | 是否可达、Clash 延迟、没测成原因 |
+| 同步配置 | 是否有变化、端口是否变化、重测结果 |
+| 更换连接密码 | 成功/失败、失败 reason 码 |
 | 本机 | 应用版本、平台、本次会话的 UI 日志路径 |
 
 后续再打磨：是否带 agent 日志摘要（在机器上，桌面拿不到，需要控制面转存或用户 console 拷贝）。
@@ -226,3 +227,16 @@
 - 前端：`ConnectionStage.tsx`（主按钮与回调）、`App.tsx`（connection 档依赖装配）、`useNodeDiagnosis.ts`（profile、`DiagnosisConclusion` 新增 8 个 kind（`service-down` / `local-network` / `probe-error` 复用现有）、`DiagnosisAction` 增 `openSettings` / `changeNode` / `reconnect`）、`DiagnosisPanel.tsx`（标题）、`assistantPrompts.ts`（新增 `connectDiagnosis`）、zh/en 字典（主按钮与 `diagnosis.entry` 统一「智能诊断」、新增结论与动作键）。
 - **退役**：`assistant.prompt.connectDiag` 的中英两键与 `connectDiagAsk()` 随新链路删除，避免下次审计把它当成漏项。
 - Host / 契约：**不改**，全部复用现有 UI 命令；`换一个节点` 本版只做导航，不调 `node_switch`。
+
+---
+
+## 11. 自定义节点（`url` / `manual`）：只有只读诊断，没有修复动作
+
+订阅导入与手动填写的节点，凭据在用户或服务商手里。本节约束这一类的诊断，**托管节点（`owned`）的 §1–§10 逐字不变**。
+
+- **能做**：连接失败后的本地只读检查、节点行「问 AI」、连接诊断面板的只读结论、重新测速。
+- **不能做**：更换连接密码 / 重置端口、销毁重建、任何跳「我的服务器」的修复动作。这些流程要求 `source === "owned"` 且有 `server_id`，自定义节点两条都不满足。
+- **行内动作**：只保留「问 AI」与「换个节点」，不加「智能分析」、不加删除。
+- **给 AI 的事实**：`ConnectionFacts.nodeSource` 必须放行 `url`，取值集合是 `owned | url | manual | null`；不得把 `url` 折成 `null`。
+- **建议边界**：只能建议换一个节点、检查用户自己的服务商、或把只读诊断结论转给服务商。提示词与产品文档都写明这条，不靠模型自行推断。
+- **验收**：订阅 / 手动节点失败 → 行内只有「问 AI」；模型上下文里 `source` 为 `url` / `manual`；回复里不出现「重置端口」「智能修复」「销毁重建」。
