@@ -666,6 +666,7 @@ export const en: Record<MessageKey, string> = {
   "console.node.unreachable": "Unreachable",
   "console.node.untested": "Not tested",
   "console.node.fastest": "Fastest",
+  "console.node.custom": "Custom",
   "console.node.expired": "Expired",
   "console.node.pendingNote": "Available after reconnecting",
   "console.node.askAi": "Ask AI",

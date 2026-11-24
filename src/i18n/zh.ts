@@ -637,6 +637,7 @@ export const zh = {
   "console.node.unreachable": "测不通",
   "console.node.untested": "未测",
   "console.node.fastest": "最快",
+  "console.node.custom": "自定义",
   "console.node.expired": "已到期",
   "console.node.pendingNote": "重新连接后可用",
   "console.node.askAi": "问 AI",

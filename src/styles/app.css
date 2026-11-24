@@ -6829,6 +6829,15 @@ details[open] > .settings-fold__summary::before {
   padding: 10px 0;
   border: 0;
   background: transparent;
+/* 用户自己加的节点（订阅 / 手填）：静态来源标签，不做胶囊、不抢状态点。 */
+.stage-node__custom {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--ink-3);
+}
+
   text-align: left;
   cursor: pointer;
   scroll-margin-top: 12px;

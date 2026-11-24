@@ -636,6 +636,9 @@ export function ConnectionStage({
           {fastestMarkId === node.node_id ? (
             <span className="stage-node__fastest">{t("console.node.fastest")}</span>
           ) : null}
+          {node.source === "url" || node.source === "manual" ? (
+            <span className="stage-node__custom">{t("console.node.custom")}</span>
+          ) : null}
           {expired ? (
             <span className="stage-node__sub">{t("console.node.expired")}</span>
           ) : null}

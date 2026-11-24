@@ -2483,3 +2483,69 @@ describe("周期同步发现当前节点变更（hero 提示）", () => {
     expect(screen.getByRole("button", { name: "断开连接" })).toBeTruthy();
   });
 });
+
+describe("节点卡添加节点入口", () => {
+  it("点击只上报，由 App 打开弹层", () => {
+    const onAddNode = vi.fn();
+    renderStage({ onAddNode });
+
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(onAddNode).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有节点时入口仍然显示", () => {
+    renderStage({
+      config: { ...CONFIG, node_count: 0, nodes: [] },
+      onAddNode: vi.fn(),
+    });
+
+    expect(screen.getByRole("button", { name: "添加节点" })).toBeTruthy();
+  });
+
+  it("没传 onAddNode 时不渲染入口", () => {
+    renderStage();
+
+    expect(screen.queryByRole("button", { name: "添加节点" })).toBeNull();
+  });
+});
+
+describe("自定义节点标记", () => {
+  function withSource(source: ConfigDetail["nodes"][number]["source"]) {
+    return {
+      ...CONFIG,
+      node_count: 1,
+      current_node_id: "n1",
+      nodes: [{ ...CONFIG.nodes[0], source }],
+    };
+  }
+
+  function customTag(): Element | null {
+    const row = screen.getAllByRole("option")[0] as HTMLElement;
+    return row.querySelector(".stage-node__custom");
+  }
+
+  it("订阅导入的节点显示「自定义」", () => {
+    renderStage({ config: withSource("url") });
+
+    expect(customTag()?.textContent).toBe("自定义");
+  });
+
+  it("手动填写的节点显示「自定义」", () => {
+    renderStage({ config: withSource("manual") });
+
+    expect(customTag()?.textContent).toBe("自定义");
+  });
+
+  it("托管服务器节点不显示「自定义」", () => {
+    renderStage({ config: withSource("owned") });
+
+    expect(customTag()).toBeNull();
+  });
+
+  it("免费节点不显示「自定义」", () => {
+    renderStage({ config: withSource("seed") });
+
+    expect(customTag()).toBeNull();
+  });
+});
