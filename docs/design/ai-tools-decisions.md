@@ -32,9 +32,9 @@
 
 | 工具 | AI 工具注册 | Host 命令 | 界面是否还在调 | 产品现状 |
 |---|---|---|---|---|
-| `RouteTargetsSet` | 是（`tools/mod.rs:183`） | `route_targets_set` | 否 | 产品已无「按服务分流」入口 |
-| `CategoryList` | 是（`tools/mod.rs:184`） | `category_list` | **是**（`src/agent/tauriBridge.ts:1444`，`bridge.ts:107` 的分类 id 来源） | 分类仍被节点卡片使用 |
-| `RulesStatus` | 是（`tools/mod.rs:185`） | `rules_status` | 否 | 规则集状态只给模型看 |
+| `RouteTargetsSet` | 是（`vpn_tools()` 注册；改动前在 `tools/mod.rs:183`） | `route_targets_set` | 否 | 产品已无「按服务分流」入口 |
+| `CategoryList` | 是（`vpn_tools()` 注册；改动前在 `tools/mod.rs:184`） | `category_list` | **是**（`src/agent/tauriBridge.ts:1444`，`bridge.ts:107` 的分类 id 来源） | 分类仍被节点卡片使用 |
+| `RulesStatus` | 是（`vpn_tools()` 注册；改动前在 `tools/mod.rs:185`） | `rules_status` | 否 | 规则集状态只给模型看 |
 
 ### 1.2 决定
 
@@ -48,13 +48,14 @@
 - `tool-display.md`：工具数不再写死，三处引用同步。
 - `TOOL_COPY`（`src/components/toolDisplay.ts`）：删三条文案；`toolDisplay.test.ts` 的 `arrayContaining` 断言不涉及这三项，无需改。
 - 提示词：`docs/prompt-design.md` 里 `update_hint` 一栏提到 `RulesStatus`，改为「规则/种子有新版本」的说明，不点名工具。
+- 运行期提示词：`resources/prompts/zh/product.md` 的「写分类前先查分类列表」改为事实——「分流只有智能 / 全局两档，没有按服务挑选」；英文版本来就写「Only these two — there is no per-service selection」，无需改。
 - 契约自检：`commands.md` §10.3 / §10.7 / §10.8 的「命令 → 工具」映射行标注为「无 AI 工具」。
 
 ### 1.4 验收
 
-- 工具数 43 → 40，`tools.md` §3 与 `vpn_tools()` 逐条对上（`toolDisplay.test.ts` 的严格比对会兜住）。
+- 工具数 43 → 40：本批**人工核对** `tools.md` §3 / §3.1 与 `vpn_tools()` 各为 40、名字逐条相同。**自动断言尚未建立**——`toolDisplay.test.ts` 只比对 `tools.md` 与 TS 的 `TOOL_COPY`，不读 Rust 注册表；Rust 侧目前只有 `tools.len() >= 20`。契约与注册表的自动一致性检查列入阶段 1 待补。
 - 界面仍能正常显示分类（`category_list` 命令未动）。
-- 模型侧：删掉的三个工具不再出现在任何提示词点名里（当前提示词未点名，无需改）。
+- 提示词：中文 `resources/prompts/zh/product.md` 原有一句「先用分类列表取到合法分类名」，本批改为「分流只有智能 / 全局两档，没有按服务挑选」；英文 `resources/prompts/en/product.md` 本来就写「Only these two — there is no per-service selection」，无需改。删掉的三个工具名不再出现在提示词里。
 
 ---
 
@@ -66,7 +67,8 @@
 |---|---|
 | `docs/contracts/tools.md` | 版本 3.27.0、状态改「部分落地」；§3 / §3.1 按 43 − 3 = **40** 重写（恢复 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 三条独立工具与 `CatalogOptions` 原名）；§4.38 / §4.42 / §4.43 为「已删除（3.27.0）」；§4.25 `ConfigUpdate` 入参无 `targets`；变更表写明本版只落第 2 条，合并 / 改名 / 新增标为后续批次 |
 | `docs/design/tool-display.md` | 工具数 43 → **40**，映射表改为当前批次 40 行；合并 / 改名 / 新增标为后续批次 |
-| `docs/contracts/commands.md` | §10.3 / §10.7 / §10.8 标注「命令保留，3.27.0 起无 AI 工具」；§12.1 能力映射与 §13 命令 → 工具映射同步；§9.8 的 44 → 40 |
+| `docs/contracts/commands.md` | §10.3 / §10.7 / §10.8 标注「命令保留，3.27.0 起无 AI 工具」；§12.1 能力映射与 §13 命令 → 工具映射同步；§9.8 的 44 → 40；版本升 `2.65.0` 并补 §16 变更记录，§15.5 矩阵同步 `tools.md` 3.27.0 |
+| `resources/prompts/zh/product.md` | 删掉「先用分类列表」一句，改为「分流只有智能 / 全局两档，没有按服务挑选」；英文版无此句 |
 | `docs/prompt-design.md` | `update_hint` 的数据来源改为「Host 注入的规则数据与种子版本状态」，不再点名 `RulesStatus` |
 | `docs/design/ai-tools-decisions.md` | 本记录 |
 
