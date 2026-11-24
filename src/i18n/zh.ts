@@ -1008,6 +1008,8 @@ export const zh = {
   "serversPage.loginAction": "登录 / 注册",
   "serversPage.errorTitle": "连不上服务器，稍后再试",
   "serversPage.errorText": "已有服务器和节点不受影响。",
+  "serversPage.errorIpHint":
+    "多次重试仍连不上，可能是 IP 出了问题；新建一个节点就能接着用。",
   "serversPage.pending": "服务器已下单，正在创建，稍后会自动出现。",
   "serversPage.emptyTitle": "还没有服务器",
   "serversPage.emptyText": "买一台装好后，节点会出现在这里，也能直接用来连接。",

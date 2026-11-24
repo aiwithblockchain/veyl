@@ -3990,6 +3990,23 @@ body[data-resizing] {
   margin-top: 20px;
 }
 
+/* 列表读取失败：第二句是「怎么办」，与上一句贴紧，不再吃正文的行距。 */
+.myservers__error-hint {
+  margin-top: 4px;
+}
+
+/* 错误态并排两个动作：重试在左，新建节点在右（主按钮）。 */
+.myservers__empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.myservers__empty-actions .btn {
+  margin-top: 0;
+}
+
 /* 向导期间 / 身份不可用：左栏可见但禁用，45% 透明。 */
 .rail--locked .rail-server,
 .rail--locked .rail__add,
