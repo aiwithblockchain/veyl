@@ -3089,10 +3089,14 @@ export default function App() {
               onEnsureIdentity={myServers.ensureIdentity}
               onTopUp={myServers.openTopUp}
               onAuthRequired={myServers.openLogin}
-              onAskAi={() => {
-                lastActionRef.current = { id: "new_node.ask_ai" };
-                askAiInPanel(t("assistant.prompt.pickRegion"));
-              }}
+              onAskAi={
+                aiReady
+                  ? () => {
+                      lastActionRef.current = { id: "new_node.ask_ai" };
+                      askAiInPanel(t("assistant.prompt.pickRegion"));
+                    }
+                  : undefined
+              }
               aiSelection={stageSelect}
               initialSelection={newNodeSelection}
               onBusyChange={(busy) => {

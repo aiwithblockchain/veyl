@@ -1131,24 +1131,25 @@ export const en: Record<MessageKey, string> = {
   "wizard.noRegion": "No regions are available right now",
   "wizard.region": "Region",
   "wizard.regionNote":
-    "Only regions that can be opened right now are shown; DigitalOcean availability changes at any time.",
-  "wizard.regionConnectNote":
-    "Whether you can connect depends on your network's route to that region. After setup, click \"Test\" in Connect to check; if it won't connect, destroy and rebuild — the day's charge isn't refunded.",
+    "Only regions that can be opened right now are listed; availability can change at any time.",
+  "wizard.risk.lead": "The IP may not be reachable",
+  "wizard.risk.body":
+    "The target region can block it, or the route may not work. After setup, check it in Connect; if it doesn't connect, destroy it and create another. Billing starts the day it's activated — destroying is free, but that day's charge isn't refunded.",
   "wizard.plan": "Server type",
   "wizard.planUnsupportedAria": "{plan}: not available in this region",
   "wizard.planUnsupported": "Not available in this region",
   "wizard.perDay": "Per day",
   "wizard.traffic": "{gib} GB outbound per month",
   "wizard.unavailable": "Unavailable",
-  "wizard.system": "System",
+  "wizard.summaryAria": "Setup summary",
   "wizard.shortfallHint": "After topping up, come back and click \"Create\".",
   "wizard.retryHint": "Click \"Create\" to try again.",
   "wizard.changeHint": "Pick another region or plan, then click \"Create\".",
   "wizard.topUp": "Top up",
   "wizard.combination": "This region doesn't offer that plan. Pick another plan or region.",
   "wizard.monthly": "About {price}/month",
-  "wizard.demo":
-    "Billing starts once it's ready and is charged daily; you'll be prompted to top up if the balance runs short.",
+  "wizard.billing":
+    "Renewed daily; if the balance runs low, you'll be asked to top up.",
   "wizard.signingIn": "Signing in…",
   "wizard.creating": "Creating…",
   "wizard.balanceShort": "Not enough balance; {amount} short.",

@@ -1416,3 +1416,51 @@ describe("左栏门禁", () => {
     expect(rail.querySelector(".rail__action-row")).toBeNull();
   }, 15_000);
 });
+
+describe("新建节点：AI 入口按配置显隐", () => {
+  async function openWizard() {
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
+    await screen.findByRole("main", { name: "新建节点" });
+  }
+
+  it("AI 可用：标题区右上角出现 ghost「让 AI 帮我选」", async () => {
+    prepare([SERVER]);
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+      providers: [
+        {
+          providerId: "deepseek",
+          name: "DeepSeek",
+          protocol: "openai",
+          baseUrl: "https://api.deepseek.com",
+          model: "deepseek-chat",
+          hasKey: true,
+          isActive: true,
+          isBuiltin: true,
+        },
+      ],
+      activeProviderId: "deepseek",
+    } as never);
+
+    await openWizard();
+    const ask = await screen.findByRole("button", { name: "让 AI 帮我选" });
+    expect(ask.className).toContain("btn--ghost");
+    expect(ask.closest(".myservers__wizard-head")).toBeTruthy();
+  }, 15_000);
+
+  it("AI 未配置：不渲染这个入口", async () => {
+    prepare([SERVER]);
+    localStorage.setItem("veyl.onboarding.skipped", "1");
+    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
+      providers: [],
+      activeProviderId: null,
+    } as never);
+
+    await openWizard();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
+  }, 15_000);
+});

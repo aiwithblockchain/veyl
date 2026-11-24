@@ -213,7 +213,7 @@ describe("未配置 AI 的右栏", () => {
 });
 
 describe("未配置 AI 的动作入口", () => {
-  it("建机向导「让 AI 帮我选」被拦：告警、无消息、面板不展开、向导不前进", async () => {
+  it("建机向导：未配置 AI 时入口不渲染，不弹告警、面板不展开", async () => {
     seedSkipped();
     // 建机入口要求登录：先给邮箱账户，未登录会改弹登录层。
     signInForServers();
@@ -232,23 +232,18 @@ describe("未配置 AI 的动作入口", () => {
       await screen.findByRole("button", { name: /新建节点/ }),
     );
     await screen.findByRole("heading", { name: "新建节点" });
-    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我选" }));
 
+    // 未配置 AI：入口根本不渲染，「点击被拦、弹告警」那条路径已不存在。
+    expect(screen.queryByText("让 AI 帮我选")).toBeNull();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
     expect(
-      await screen.findByRole("dialog", { name: "还没有配置 AI 服务" }),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
-      ).toBeNull(),
-    );
+      screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
+    ).toBeNull();
 
     expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
     // 还停在向导同一屏。
     expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
   }, 15_000);
 
   it("报告问题被拦：告警，取消后不建会话、不调 AI", async () => {

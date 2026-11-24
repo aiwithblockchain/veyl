@@ -16,7 +16,7 @@ import {
   formatUsdCents,
 } from "../myservers/labels";
 import { IconChevronLeft } from "./icons";
-import { t, useT } from "../i18n";
+import { t, useLanguage, useT } from "../i18n";
 import type { MessageKey } from "../i18n";
 
 interface Props {
@@ -442,24 +442,43 @@ export function MyServerWizard({
     }
   };
 
+  const language = useLanguage();
+  const riskSeparator = language === "en" ? ": " : "：";
+
+  const header = (
+    <header className="myservers__wizard-head">
+      <div className="myservers__wizard-heading">
+        {onBack ? (
+          <button
+            type="button"
+            className="myservers__wizard-back"
+            onClick={onBack}
+            disabled={busy}
+          >
+            <IconChevronLeft size={14} />
+            {tr("wizard.back")}
+          </button>
+        ) : null}
+        <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
+      </div>
+      {onAskAi ? (
+        <button
+          type="button"
+          className="btn btn--ghost wizard-ask-ai"
+          disabled={busy}
+          onClick={onAskAi}
+        >
+          {tr("controls.askAi")}
+        </button>
+      ) : null}
+    </header>
+  );
+
   if (unreadable) {
     const pending = fetchState === "loading";
     return (
       <div ref={rootRef} className={`myservers__wizard ${pointed ? "is-pointed" : ""}`}>
-        <div className="myservers__wizard-head">
-          {onBack ? (
-            <button
-              type="button"
-              className="myservers__wizard-back"
-              onClick={onBack}
-              disabled={busy}
-            >
-              <IconChevronLeft size={14} />
-              {tr("wizard.back")}
-            </button>
-          ) : null}
-          <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
-        </div>
+        {header}
         {pending ? (
           <p className="myservers__hint" role="status">
             {tr("wizard.loadingRegions")}
@@ -480,221 +499,224 @@ export function MyServerWizard({
     );
   }
 
+  /** 价格行：摘要卡与吸底栏共用同一组事实，只换摆放方式。 */
+  const priceNode = (modifier: string) =>
+    currentPlan ? (
+      <div className={`wizard-price ${modifier}`.trim()}>
+        <span className="wizard-price__row">
+          <span className="wizard-price__label">{tr("wizard.perDay")}</span>
+          <span className="wizard-price__daily num">
+            {formatDailyPrice(currentPlan.daily_price_cents)}
+          </span>
+        </span>
+        <span className="wizard-price__monthly">
+          {tr("wizard.monthly", {
+            price: formatMonthlyFromDaily(currentPlan.daily_price_cents),
+          })}
+        </span>
+      </div>
+    ) : null;
+
+  const createDisabled =
+    busy ||
+    !currentPlan ||
+    !currentRegion ||
+    combinationUnavailable ||
+    noUsableRegion;
+
   return (
     <div ref={rootRef} className={`myservers__wizard ${pointed ? "is-pointed" : ""}`}>
-      <div className="myservers__wizard-head">
-        {onBack ? (
-          <button
-            type="button"
-            className="myservers__wizard-back"
-            onClick={onBack}
-            disabled={busy}
-          >
-            <IconChevronLeft size={14} />
-            {tr("wizard.back")}
-          </button>
-        ) : null}
-        <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
-      </div>
+      {header}
 
-      {noUsableRegion ? (
-        <p className="myservers__hint wizard-no-region" role="status">
-          {tr("wizard.noRegion")}
-        </p>
-      ) : null}
+      <div className="wizard-layout">
+        <div className="wizard-main">
+          {noUsableRegion ? (
+            <p className="myservers__hint wizard-no-region" role="status">
+              {tr("wizard.noRegion")}
+            </p>
+          ) : (
+            <>
+              <section className="wizard-block">
+                <p className="wizard-block__title">{tr("wizard.region")}</p>
+                <p className="wizard-block__note">{tr("wizard.regionNote")}</p>
+                <div
+                  className="myservers__regions"
+                  role="radiogroup"
+                  aria-label={tr("wizard.region")}
+                  onKeyDown={moveWithinGroup}
+                >
+                  {groups.map((group) => (
+                    <div key={group.continent} className="myservers__region-group">
+                      <p className="myservers__region-label">{group.label}</p>
+                      <div className="myservers__region-grid">
+                        {group.regions.map((region) => {
+                          const selected = currentRegion?.id === region.id;
+                          return (
+                            <button
+                              key={region.id}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              tabIndex={selected ? 0 : -1}
+                              className={`myservers__region ${selected ? "is-selected" : ""}`}
+                              disabled={busy}
+                              onClick={() => {
+                                setRegionId(region.id);
+                                onSelect?.("region", region.id);
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === " " || event.key === "Enter") {
+                                  event.preventDefault();
+                                  setRegionId(region.id);
+                                  onSelect?.("region", region.id);
+                                }
+                              }}
+                            >
+                              {region.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
 
-      {!noUsableRegion ? (
-        <>
-      <section className="wizard-block">
-        <p className="wizard-block__title">{tr("wizard.region")}</p>
-        <p className="wizard-block__note wizard-block__note--fact">
-          {tr("wizard.regionNote")}
-        </p>
-        <div
-          className="myservers__regions"
-          role="radiogroup"
-          aria-label={tr("wizard.region")}
-          onKeyDown={moveWithinGroup}
-        >
-          {groups.map((group) => (
-            <div key={group.continent} className="myservers__region-group">
-              <p className="myservers__region-label">{group.label}</p>
-              <div className="myservers__region-grid">
-                {group.regions.map((region) => {
-                  const selected = currentRegion?.id === region.id;
-                  return (
-                    <button
-                      key={region.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      tabIndex={selected ? 0 : -1}
-                      className={`myservers__region ${selected ? "is-selected" : ""}`}
-                      disabled={busy}
-                      onClick={() => {
-                        setRegionId(region.id);
-                        onSelect?.("region", region.id);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === " " || event.key === "Enter") {
-                          event.preventDefault();
-                          setRegionId(region.id);
-                          onSelect?.("region", region.id);
+              <section className="wizard-block">
+                <p className="wizard-block__title">{tr("wizard.plan")}</p>
+                <div
+                  className="wizard-plan-cards"
+                  role="radiogroup"
+                  aria-label={tr("wizard.plan")}
+                  onKeyDown={moveWithinGroup}
+                >
+                  {plans.map((plan, index) => {
+                    const selected = currentPlan?.id === plan.id;
+                    const tier = plans.length === 3 ? TIERS[index] : null;
+                    const unsupported =
+                      currentRegion !== null &&
+                      !planSupportsRegion(plan, currentRegion);
+                    return (
+                      <button
+                        key={plan.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        tabIndex={selected ? 0 : -1}
+                        className={`wizard-plan ${selected ? "is-selected" : ""}`}
+                        disabled={busy || unsupported}
+                        aria-label={
+                          unsupported
+                            ? tr("wizard.planUnsupportedAria", { plan: plan.label })
+                            : undefined
                         }
-                      }}
-                    >
-                      {region.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+                        title={unsupported ? tr("wizard.planUnsupported") : undefined}
+                        onClick={() => {
+                          setPlanId(plan.id);
+                          onSelect?.("plan", plan.id);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === " " || event.key === "Enter") {
+                            event.preventDefault();
+                            setPlanId(plan.id);
+                            onSelect?.("plan", plan.id);
+                          }
+                        }}
+                      >
+                        {tier ? <span className="wizard-plan__tier">{tr(tier)}</span> : null}
+                        <span className="wizard-plan__spec">{plan.label}</span>
+                        <span className="wizard-plan__sub">
+                          <span className="wizard-plan__price">
+                            {tr("wizard.perDay")}{" "}
+                            <span className="num wizard-plan__amount">
+                              {formatDailyPrice(plan.daily_price_cents)}
+                            </span>
+                          </span>
+                          {plan.transfer_gib > 0 ? (
+                            <span className="wizard-plan__transfer">
+                              {tr("wizard.traffic", { gib: plan.transfer_gib })}
+                            </span>
+                          ) : null}
+                        </span>
+                        {unsupported ? (
+                          <span className="wizard-plan__unavailable">
+                            {tr("wizard.unavailable")}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {combinationUnavailable ? (
+                <p className="myservers__hint wizard-blocked">
+                  {tr("wizard.combination")}
+                </p>
+              ) : null}
+            </>
+          )}
         </div>
-        <p className="wizard-block__note wizard-block__note--connect">
-          {tr("wizard.regionConnectNote")}
-        </p>
-      </section>
 
-      <section className="wizard-block">
-        <p className="wizard-block__title">{tr("wizard.plan")}</p>
-        <div
-          className="wizard-plan-cards"
-          role="radiogroup"
-          aria-label={tr("wizard.plan")}
-          onKeyDown={moveWithinGroup}
-        >
-          {plans.map((plan, index) => {
-            const selected = currentPlan?.id === plan.id;
-            const tier = plans.length === 3 ? TIERS[index] : null;
-            const unsupported =
-              currentRegion !== null &&
-              !planSupportsRegion(plan, currentRegion);
-            return (
-              <button
-                key={plan.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                tabIndex={selected ? 0 : -1}
-                className={`wizard-plan ${selected ? "is-selected" : ""}`}
-                disabled={busy || unsupported}
-                aria-label={
-                  unsupported
-                    ? tr("wizard.planUnsupportedAria", { plan: plan.label })
-                    : undefined
-                }
-                title={unsupported ? tr("wizard.planUnsupported") : undefined}
-                onClick={() => {
-                  setPlanId(plan.id);
-                  onSelect?.("plan", plan.id);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === " " || event.key === "Enter") {
-                    event.preventDefault();
-                    setPlanId(plan.id);
-                    onSelect?.("plan", plan.id);
-                  }
-                }}
-              >
-                {tier ? <span className="wizard-plan__tier">{tr(tier)}</span> : null}
-                <span className="wizard-plan__spec">{plan.label}</span>
-                <span className="wizard-plan__sub">
-                  <span className="wizard-plan__price">
-                    {tr("wizard.perDay")}{" "}
-                    <span className="num">
-                      {formatDailyPrice(plan.daily_price_cents)}
-                    </span>
-                  </span>
-                  {plan.transfer_gib > 0 ? (
-                    <span className="wizard-plan__transfer">
-                      {tr("wizard.traffic", { gib: plan.transfer_gib })}
-                    </span>
-                  ) : null}
-                </span>
-                {unsupported ? (
-                  <span className="wizard-plan__unavailable">
-                    {tr("wizard.unavailable")}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-        </>
-      ) : null}
-
-      <section className="wizard-block">
-        <p className="wizard-block__title">{tr("wizard.system")}</p>
-        <p className="wizard-system">Ubuntu 24.04 LTS</p>
-      </section>
-
-      {error ? (
-        <>
-          <p className="myservers__error" role="alert">
-            {error.message}
-          </p>
-          <p className="myservers__hint">
-            {error.shortfallCents !== undefined
-              ? tr("wizard.shortfallHint")
-              : error.retryable
-                ? tr("wizard.retryHint")
-                : tr("wizard.changeHint")}
-          </p>
-          {error.shortfallCents !== undefined ? (
-            <div className="myservers__actions">
-              <button type="button" className="btn btn--ghost" onClick={onTopUp}>
-                {tr("wizard.topUp")}
-              </button>
-            </div>
+        <aside className="wizard-summary" aria-label={tr("wizard.summaryAria")}>
+          <div className="wizard-summary__details">
+            <p className="wizard-summary__region">{currentRegion?.name ?? ""}</p>
+            <p className="wizard-summary__plan">
+              {currentPlan
+                ? `${currentTier ? `${tr(currentTier)} · ` : ""}${currentPlan.label}`
+                : ""}
+            </p>
+          </div>
+          <div className="wizard-summary__price">
+            {priceNode("")}
+            <p className="wizard-summary__billing">{tr("wizard.billing")}</p>
+          </div>
+          {!noUsableRegion ? (
+            <p className="wizard-risk">
+              <strong>{tr("wizard.risk.lead")}</strong>
+              {riskSeparator}
+              {tr("wizard.risk.body")}
+            </p>
           ) : null}
-        </>
-      ) : null}
-
-      {combinationUnavailable && !noUsableRegion ? (
-        <p className="myservers__hint wizard-foot__blocked">
-          {tr("wizard.combination")}
-        </p>
-      ) : null}
-
-      <div className="wizard-foot">
-        <div className="wizard-foot__meta">
-          <p className="wizard-foot__price">
-            {currentPlan
-              ? `${currentTier ? `${tr(currentTier)} · ` : ""}${tr("wizard.monthly", {
-                  price: formatMonthlyFromDaily(currentPlan.daily_price_cents),
-                })}`
-              : null}
-          </p>
-          <p className="myservers__demo">{tr("wizard.demo")}</p>
-        </div>
-        <button
-          type="button"
-          className="btn btn--primary"
-          disabled={
-            busy ||
-            !currentPlan ||
-            !currentRegion ||
-            combinationUnavailable ||
-            noUsableRegion
-          }
-          aria-busy={busy || undefined}
-          onClick={() => void placeOrder()}
-        >
-          {phase === "identity"
-            ? tr("wizard.signingIn")
-            : phase === "creating"
-              ? tr("wizard.creating")
-              : tr("wizard.create")}
-        </button>
+          <div className="wizard-summary__actions">
+            {error ? (
+              <div className="wizard-summary__error">
+                <p className="myservers__error" role="alert">
+                  {error.message}
+                </p>
+                <p className="myservers__hint">
+                  {error.shortfallCents !== undefined
+                    ? tr("wizard.shortfallHint")
+                    : error.retryable
+                      ? tr("wizard.retryHint")
+                      : tr("wizard.changeHint")}
+                </p>
+                {error.shortfallCents !== undefined ? (
+                  <button type="button" className="btn btn--ghost" onClick={onTopUp}>
+                    {tr("wizard.topUp")}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="wizard-actions">
+              {priceNode("wizard-price--bar")}
+              <button
+                type="button"
+                className="btn btn--primary wizard-create"
+                disabled={createDisabled}
+                aria-busy={busy || undefined}
+                onClick={() => void placeOrder()}
+              >
+                {phase === "identity"
+                  ? tr("wizard.signingIn")
+                  : phase === "creating"
+                    ? tr("wizard.creating")
+                    : tr("wizard.create")}
+              </button>
+            </div>
+          </div>
+        </aside>
       </div>
-
-      {onAskAi ? (
-        <button type="button" className="settings-link wizard-ask-ai" onClick={onAskAi}>
-          {tr("controls.askAi")}
-        </button>
-      ) : null}
     </div>
   );
 }

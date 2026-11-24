@@ -420,8 +420,9 @@ describe("返回控件", () => {
 
     const head = document.querySelector(".myservers__wizard-head");
     const back = screen.getByRole("button", { name: "返回" });
-    // 两行结构：返回是标题的上一行，标题因此回到内容列左边缘。
-    expect(head?.firstElementChild).toBe(back);
+    // 标题区左边是「返回 + 标题」两行；右上角留给「让 AI 帮我选」。
+    const heading = head?.querySelector(".myservers__wizard-heading");
+    expect(heading?.firstElementChild).toBe(back);
     expect(back.nextElementSibling?.tagName).toBe("H4");
     expect(back.querySelector("svg")).not.toBeNull();
     expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
@@ -663,9 +664,7 @@ describe("档位按地区过滤", () => {
     expect(planCard(/1 核 · 2 GB/).disabled).toBe(false);
     // 只有地区这一条事实说明，档位区不再重复一句。
     expect(
-      screen.getAllByText(
-        "只显示当前可开通的地区，DigitalOcean 的可用性会随时变化。",
-      ),
+      screen.getAllByText("只列出现在能开通的地区，可用地区会随时变化。"),
     ).toHaveLength(1);
     expect(screen.queryByText(/灰掉的档位/)).toBeNull();
     expect(screen.queryByText(/灰掉的地区/)).toBeNull();
@@ -802,8 +801,9 @@ describe("地区没有任何可用档位", () => {
     expect(
       (screen.getByRole("button", { name: "创建" }) as HTMLButtonElement).disabled,
     ).toBe(true);
-    // 系统行不参与地区/档位过滤，仍然显示。
-    expect(screen.getByText("Ubuntu 24.04 LTS")).toBeTruthy();
+    // 系统行整块删除；没有可建组合时风险说明也不出现。
+    expect(screen.queryByText("Ubuntu 24.04 LTS")).toBeNull();
+    expect(document.querySelector(".wizard-risk")).toBeNull();
   });
 });
 
@@ -860,37 +860,78 @@ describe("打开向导时回源目录", () => {
   });
 });
 
-describe("向导底部计费说明", () => {
-  it("写明开通后才开始计费，不是下单即扣", async () => {
-    render(
+describe("摘要、风险说明与 AI 入口", () => {
+  function renderPlain(over: { onAskAi?: () => void } = {}) {
+    return render(
       <MyServerWizard
         bridge={makeBridge()}
         catalog={CATALOG}
         onOrdered={() => {}}
         onEnsureIdentity={async () => true}
         onTopUp={() => {}}
+        {...over}
       />,
     );
+  }
 
-    expect(
-      await screen.findByText("开通后开始计费，每天续扣；余额不足会提示充值。"),
-    ).toBeTruthy();
+  it("计费行只说每天续扣，不再重复「开通后开始计费」", () => {
+    renderPlain();
+    expect(screen.getByText("每天续扣；余额不足会提示充值。")).toBeTruthy();
+    expect(screen.queryByText(/开通后开始计费/)).toBeNull();
   });
 
-  it("地区选择下方提醒线路决定能不能连上，且只出现一次", async () => {
-    render(
-      <MyServerWizard
-        bridge={makeBridge()}
-        catalog={CATALOG}
-        onOrdered={() => {}}
-        onEnsureIdentity={async () => true}
-        onTopUp={() => {}}
-      />,
-    );
+  it("风险说明：六点事实一次说清，引导句加粗、没有告警语义", () => {
+    renderPlain();
+    const risk = document.querySelector(".wizard-risk") as HTMLElement;
+    expect(risk).not.toBeNull();
+    expect(risk.getAttribute("role")).toBeNull();
+    expect(risk.querySelector("strong")?.textContent).toBe("IP 不一定能连上");
+    const text = risk.textContent ?? "";
+    for (const fact of ["屏蔽", "线路不通", "测速", "销毁重建", "开通当天", "不收费", "不退"]) {
+      expect(text).toContain(fact);
+    }
+    // 只在摘要里出现一次，地区块不再重复。
+    expect(document.querySelectorAll(".wizard-risk")).toHaveLength(1);
+  });
 
-    expect(
-      await screen.findAllByText(/取决于你当前的网络到那个地区的线路/),
-    ).toHaveLength(1);
+  it("价格：日价是主数字，月价永远带「约」；摘要卡与吸底栏同一组事实", () => {
+    renderPlain();
+    const card = document.querySelector(".wizard-summary__price") as HTMLElement;
+    expect(card.querySelector(".wizard-price__daily")?.textContent).toBe("$0.30");
+    expect(card.querySelector(".wizard-price__monthly")?.textContent).toBe(
+      "约 $9/月",
+    );
+    const bar = document.querySelector(".wizard-price--bar") as HTMLElement;
+    expect(bar.querySelector(".wizard-price__daily")?.textContent).toBe("$0.30");
+    expect(bar.querySelector(".wizard-price__monthly")?.textContent).toBe(
+      "约 $9/月",
+    );
+    // 没有第二个价格数字或「低至」类措辞。
+    expect(document.body.textContent).not.toContain("低至");
+  });
+
+  it("结构：选择区 + 摘要；动作栏在摘要里，创建是唯一主按钮", () => {
+    renderPlain();
+    expect(document.querySelector(".wizard-layout")).not.toBeNull();
+    expect(document.querySelector(".wizard-main .wizard-block")).not.toBeNull();
+    const summary = document.querySelector(".wizard-summary");
+    expect(summary?.getAttribute("aria-label")).toBe("创建摘要");
+    expect(summary?.querySelector(".wizard-summary__actions")).not.toBeNull();
+    expect(document.querySelectorAll(".btn--primary")).toHaveLength(1);
+  });
+
+  it("AI 入口：给了 onAskAi 才出现，是标题区右上角的 ghost 按钮", () => {
+    const onAskAi = vi.fn();
+    const view = renderPlain({ onAskAi });
+    const ask = screen.getByRole("button", { name: "让 AI 帮我选" });
+    expect(ask.className).toContain("btn--ghost");
+    expect(ask.closest(".myservers__wizard-head")).toBeTruthy();
+    fireEvent.click(ask);
+    expect(onAskAi).toHaveBeenCalledTimes(1);
+    view.unmount();
+
+    renderPlain();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   });
 });
 
