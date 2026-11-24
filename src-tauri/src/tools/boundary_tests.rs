@@ -98,6 +98,8 @@ impl Recorder {
 struct FakeServices {
     rec: Arc<Recorder>,
     data: Value,
+    /// `trial_status` 单独返回：`None` 模拟读不到试用状态。
+    trial: Option<Value>,
     /// `node_import_text` 专用：模拟解析失败时返回的错误码。
     text_error: Option<&'static str>,
 }
@@ -112,6 +114,18 @@ impl FakeServices {
         let services = Arc::new(Self {
             rec: Arc::clone(&rec),
             data,
+            trial: None,
+            text_error: None,
+        });
+        (services, rec)
+    }
+
+    fn with_trial(data: Value, trial: Value) -> (Arc<Self>, Arc<Recorder>) {
+        let rec = Arc::new(Recorder::default());
+        let services = Arc::new(Self {
+            rec: Arc::clone(&rec),
+            data,
+            trial: Some(trial),
             text_error: None,
         });
         (services, rec)
@@ -123,6 +137,7 @@ impl FakeServices {
         let services = Arc::new(Self {
             rec: services.rec.clone(),
             data: json!({}),
+            trial: None,
             text_error: Some(code),
         });
         (services, rec)
@@ -288,6 +303,12 @@ impl VpnToolServices for FakeServices {
     async fn default_profile_status(&self) -> anyhow::Result<Value> {
         self.rec.record("default_profile_status");
         Ok(self.data.clone())
+    }
+    async fn trial_status(&self) -> anyhow::Result<Value> {
+        self.rec.record("trial_status");
+        self.trial
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not wired"))
     }
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value> {
         self.rec.record(format!("default_profile_refresh({force})"));
@@ -1598,8 +1619,10 @@ async fn diag_run_writes_every_check_into_the_model_visible_summary() {
     let (is_error, env) = run(tool(&all, "DiagRun"), json!({})).await;
     assert!(!is_error, "{env}");
     let summary = env["summary"].as_str().unwrap_or_default();
-    assert!(summary.contains("共 3 项检查"), "{summary}");
-    assert!(summary.contains("1 项未通过"), "{summary}");
+    assert!(
+        summary.contains("诊断完成：共 3 项检查，1 项未通过，1 项没检查。"),
+        "{summary}"
+    );
     assert!(
         summary.contains("- DNS：失败 —— 3 个解析器，example.com 无法解析 → 刷新 DNS 缓存后重试"),
         "{summary}"
@@ -1613,6 +1636,31 @@ async fn diag_run_writes_every_check_into_the_model_visible_summary() {
         summary.contains("下一步：刷新 DNS 缓存后重试。"),
         "{summary}"
     );
+    assert!(!summary.contains("data"), "{summary}");
+    assert!(!summary.contains("checks"), "{summary}");
+}
+
+/// `DefaultProfileStatus` 的出口把试用状态带进模型可见内容：到期后不能只报缓存。
+#[tokio::test]
+async fn default_profile_status_carries_the_trial_state() {
+    let (svc, _rec) = FakeServices::with_trial(
+        json!({ "content_sha256": "abc", "node_count": 2, "checked_at": 0 }),
+        json!({
+            "state": "expired",
+            "started_at": "2026-11-17T05:44:07Z",
+            "expires_at": "2026-11-24T05:48:46Z",
+            "remaining_ms": 0,
+            "seed_node_count": 0
+        }),
+    );
+    let all = tools(svc);
+    let (is_error, env) = run(tool(&all, "DefaultProfileStatus"), json!({})).await;
+    assert!(!is_error, "{env}");
+    let summary = env["summary"].as_str().unwrap_or_default();
+    assert!(summary.contains("试用已到期"), "{summary}");
+    assert!(summary.contains("刷新不会加回"), "{summary}");
+    assert!(summary.contains("池内免费节点 0 个"), "{summary}");
+    assert!(summary.contains("缓存里 2 个"), "{summary}");
     assert!(!summary.contains("data"), "{summary}");
     assert!(!summary.contains("checks"), "{summary}");
 }

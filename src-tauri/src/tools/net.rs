@@ -252,6 +252,73 @@ impl DefaultProfileStatusTool {
     }
 }
 
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// 日期只取 ISO 8601 的前 10 位（YYYY-MM-DD）；读不到或为空时返回 `None`。
+fn iso_date(value: Option<&str>) -> Option<String> {
+    value
+        .map(|at| at.chars().take(10).collect::<String>())
+        .filter(|date| !date.is_empty())
+}
+
+/// 试用状态那句。读不到或状态不认识时整句省略，不编。
+fn trial_sentence(trial: Option<&Value>) -> Option<String> {
+    let trial = trial?;
+    let state = trial.get("state").and_then(Value::as_str)?;
+    let pool = trial
+        .get("seed_node_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let expires = iso_date(trial.get("expires_at").and_then(Value::as_str));
+    Some(match state {
+        "expired" => match expires {
+            Some(date) => format!(
+                "免费节点试用已到期（{date} 结束）：节点已从节点池移除，刷新不会加回。池内免费节点 {pool} 个。"
+            ),
+            None => format!(
+                "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 {pool} 个。"
+            ),
+        },
+        "active" => {
+            let remaining = trial
+                .get("remaining_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let days = (remaining.saturating_add(DAY_MS - 1) / DAY_MS).max(1);
+            match expires {
+                Some(date) => format!(
+                    "免费节点试用中：还剩 {days} 天（{date} 到期）。池内免费节点 {pool} 个。"
+                ),
+                None => format!("免费节点试用中：还剩 {days} 天。池内免费节点 {pool} 个。"),
+            }
+        }
+        "available" => format!(
+            "免费节点试用还没有开始：第一次连上免费节点起算。池内免费节点 {pool} 个。"
+        ),
+        _ => return None,
+    })
+}
+
+/// 试用状态 + 缓存状态两句话。模型只看得到 `content`，两份事实都要落在这里。
+fn default_profile_summary(data: &Value, trial: Option<&Value>) -> String {
+    let cache = if data.get("content_sha256").and_then(Value::as_str).is_some() {
+        let count = data.get("node_count").and_then(Value::as_i64).unwrap_or(0);
+        match data.get("checked_at").and_then(Value::as_i64) {
+            Some(checked) => match iso_date(Some(&crate::store::db::iso_from_ms(checked))) {
+                Some(date) => format!("缓存里 {count} 个，检查于 {date}。"),
+                None => format!("缓存里 {count} 个，检查时间未知。"),
+            },
+            None => format!("缓存里 {count} 个，检查时间未知。"),
+        }
+    } else {
+        "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。".into()
+    };
+    match trial_sentence(trial) {
+        Some(sentence) => format!("{sentence}\n{cache}"),
+        None => cache,
+    }
+}
+
 #[async_trait]
 impl Tool for DefaultProfileStatusTool {
     fn name(&self) -> &str {
@@ -259,8 +326,9 @@ impl Tool for DefaultProfileStatusTool {
     }
 
     fn description(&self) -> &str {
-        "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间。\
-         只代表免费节点缓存，不是用户的节点总量；「我有几个节点」要用 ConfigDetail。"
+        "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间，以及免费节点试用状态\
+         （阶段、剩余天数、池内免费节点数）。回答「试用还剩几天 / 是不是到期了」用它；\
+         缓存里的节点数不等于池内节点数，也不是用户的节点总量——「我有几个节点」要用 ConfigDetail。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -278,18 +346,8 @@ impl Tool for DefaultProfileStatusTool {
                     .get("content_sha256")
                     .and_then(Value::as_str)
                     .is_some();
-                let summary = if available {
-                    format!(
-                        "Veyl 免费节点 {} 个{}",
-                        data.get("node_count").and_then(Value::as_i64).unwrap_or(0),
-                        data.get("checked_at")
-                            .and_then(Value::as_i64)
-                            .map(|at| format!(" · 检查于 {at}"))
-                            .unwrap_or_default()
-                    )
-                } else {
-                    "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。".to_string()
-                };
+                let trial = self.services.trial_status().await.ok();
+                let summary = default_profile_summary(&data, trial.as_ref());
                 let facts = if available {
                     let count = data
                         .get("node_count")
@@ -343,5 +401,73 @@ mod tests {
                 Fact::with_params(FactKey::NetDefaultInterface, json!({ "name": "en0" })),
             ]
         );
+    }
+
+    fn cache(count: i64, checked_at: Option<i64>) -> Value {
+        json!({
+            "content_sha256": "abc",
+            "node_count": count,
+            "checked_at": checked_at,
+        })
+    }
+
+    #[test]
+    fn an_expired_trial_says_refresh_will_not_bring_nodes_back() {
+        let trial = json!({
+            "state": "expired",
+            "expires_at": "2026-11-20T00:00:00Z",
+            "remaining_ms": 0,
+            "seed_node_count": 0,
+        });
+        let text = default_profile_summary(&cache(2, Some(0)), Some(&trial));
+        assert!(
+            text.contains("免费节点试用已到期（2026-11-20 结束）"),
+            "{text}"
+        );
+        assert!(text.contains("刷新不会加回"), "{text}");
+        assert!(text.contains("池内免费节点 0 个"), "{text}");
+        assert!(text.contains("缓存里 2 个，检查于 1970-01-01。"), "{text}");
+    }
+
+    #[test]
+    fn an_active_trial_rounds_the_remaining_days_up() {
+        let trial = json!({
+            "state": "active",
+            "expires_at": "2026-12-01T00:00:00Z",
+            "remaining_ms": DAY_MS + 1,
+            "seed_node_count": 2,
+        });
+        let text = default_profile_summary(&cache(3, Some(0)), Some(&trial));
+        assert!(
+            text.contains("免费节点试用中：还剩 2 天（2026-12-01 到期）"),
+            "{text}"
+        );
+        assert!(text.contains("池内免费节点 2 个"), "{text}");
+        assert!(text.contains("\n缓存里 3 个"), "{text}");
+    }
+
+    #[test]
+    fn a_trial_that_has_not_started_says_when_it_starts() {
+        let trial = json!({
+            "state": "available",
+            "expires_at": null,
+            "remaining_ms": null,
+            "seed_node_count": 2,
+        });
+        let text = default_profile_summary(&cache(2, Some(0)), Some(&trial));
+        assert!(
+            text.starts_with("免费节点试用还没有开始：第一次连上免费节点起算。池内免费节点 2 个。"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_trial_leaves_only_the_cache_sentence() {
+        let text = default_profile_summary(&cache(2, Some(0)), None);
+        assert!(!text.contains("试用"), "{text}");
+        assert!(!text.contains('\n'), "{text}");
+        assert!(text.starts_with("缓存里 2 个"), "{text}");
+        let missing = default_profile_summary(&json!({}), None);
+        assert_eq!(missing, "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。");
     }
 }
