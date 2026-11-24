@@ -2205,6 +2205,139 @@ fn diag_check(
     })
 }
 
+/// 免费节点试用到期后的建议：缓存不删但节点已移出，刷新不会加回。
+const TRIAL_EXPIRED_REMEDIATION: &str = "换用自己的节点，或新建一台服务器";
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// 免费节点相关的三条检查：试用状态、缓存是否可用、缓存是否新鲜。
+/// 到期后缓存文件还在，但节点已从节点池移除、刷新被排除项挡住；
+/// 这时必须说「到期」，不能让模型去建议一次刷不回来的刷新。
+fn seed_checks(seed: &Value, trial: Option<&crate::trial::Status>) -> Vec<Value> {
+    let seed_available = seed.get("content_sha256").and_then(Value::as_str).is_some();
+    let node_count = seed.get("node_count").and_then(Value::as_i64).unwrap_or(0);
+    let phase = trial.map(|status| status.phase);
+    let expired = phase == Some(crate::trial::Phase::Expired);
+
+    let trial_check = match phase {
+        Some(crate::trial::Phase::Available) => diag_check(
+            "config.trial_state",
+            "config",
+            CheckStatus::Ok,
+            "免费节点试用还没有开始：第一次连上免费节点起算".into(),
+            None,
+            None,
+        ),
+        Some(crate::trial::Phase::Active) => {
+            let remaining = trial.and_then(|status| status.remaining_ms).unwrap_or(0);
+            let days = (remaining.saturating_add(DAY_MS - 1) / DAY_MS).max(1);
+            diag_check(
+                "config.trial_state",
+                "config",
+                CheckStatus::Ok,
+                format!("免费节点试用中：还剩 {days} 天"),
+                None,
+                None,
+            )
+        }
+        Some(crate::trial::Phase::Expired) => diag_check(
+            "config.trial_state",
+            "config",
+            CheckStatus::Failed,
+            format!(
+                "免费节点试用已到期：免费节点已从节点池移除（缓存里还有 {node_count} 个，刷新不会加回）"
+            ),
+            Some(TRIAL_EXPIRED_REMEDIATION),
+            None,
+        ),
+        None => diag_check(
+            "config.trial_state",
+            "config",
+            CheckStatus::Skipped,
+            "读取试用状态失败，未判断".into(),
+            None,
+            None,
+        ),
+    };
+
+    let available_check = if expired {
+        diag_check(
+            "config.seed_available",
+            "config",
+            CheckStatus::Failed,
+            "试用已到期，免费节点不可用".into(),
+            Some(TRIAL_EXPIRED_REMEDIATION),
+            None,
+        )
+    } else if seed_available {
+        diag_check(
+            "config.seed_available",
+            "config",
+            CheckStatus::Ok,
+            format!("Veyl 免费节点 {node_count} 个"),
+            None,
+            None,
+        )
+    } else {
+        diag_check(
+            "config.seed_available",
+            "config",
+            CheckStatus::Failed,
+            "还没有 Veyl 免费节点缓存".into(),
+            Some("刷新 Veyl 免费节点"),
+            Some(json!({ "kind": "refresh_default_profile" })),
+        )
+    };
+
+    let stale_check = if expired {
+        diag_check(
+            "config.seed_stale",
+            "config",
+            CheckStatus::Skipped,
+            "试用已到期，不再检查更新".into(),
+            None,
+            None,
+        )
+    } else {
+        let stale = seed
+            .get("checked_at")
+            .and_then(Value::as_i64)
+            .map(|checked| {
+                store::now_ms().saturating_sub(checked)
+                    > crate::seed::REFRESH_INTERVAL.as_millis() as i64
+            })
+            .unwrap_or(true);
+        diag_check(
+            "config.seed_stale",
+            "config",
+            if !stale {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Failed
+            },
+            if !seed_available {
+                "没有 Veyl 免费节点".into()
+            } else if stale {
+                "Veyl 免费节点超过 6 小时未更新".into()
+            } else {
+                "Veyl 免费节点较新".into()
+            },
+            if stale {
+                Some("刷新 Veyl 免费节点")
+            } else {
+                None
+            },
+            if stale {
+                Some(json!({ "kind": "refresh_default_profile" }))
+            } else {
+                None
+            },
+        )
+    };
+
+    vec![trial_check, available_check, stale_check]
+}
+
 /// 诊断看到的连接情况。四项与连接有关的检查按它选结论与文案：
 /// 未连接时没有可判的对象（`skipped`，不是失败），TUN 与代理各有自己的检查面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2839,6 +2972,89 @@ mod diag_connection_tests {
         let tun = process_alive_check(DiagConnection::Tun, false);
         assert!(!detail(&tun).contains("sing-box"), "{tun}");
         assert_eq!(detail(&tun), "隧道进程没在运行");
+    }
+}
+
+/// 免费节点三条检查按试用状态分流：到期后缓存还在，但不能让模型去刷新。
+#[cfg(test)]
+mod seed_checks_tests {
+    use super::*;
+
+    fn trial(phase: crate::trial::Phase, remaining_ms: Option<i64>) -> crate::trial::Status {
+        crate::trial::Status {
+            phase,
+            started_at_ms: None,
+            expires_at_ms: None,
+            remaining_ms,
+        }
+    }
+
+    fn check<'a>(checks: &'a [Value], name: &str) -> &'a Value {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("找不到检查项 {name}：{checks:?}"))
+    }
+
+    fn detail(check: &Value) -> &str {
+        check["detail"].as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn an_expired_trial_says_expired_and_never_suggests_refresh() {
+        let seed = json!({ "content_sha256": "abc", "node_count": 2, "checked_at": 0 });
+        let expired = trial(crate::trial::Phase::Expired, Some(0));
+        let checks = seed_checks(&seed, Some(&expired));
+
+        let state = check(&checks, "config.trial_state");
+        assert_eq!(state["status"], "failed", "{state}");
+        assert!(detail(state).contains("已到期"), "{state}");
+
+        let available = check(&checks, "config.seed_available");
+        assert_eq!(available["status"], "failed", "{available}");
+        let remediation = available["remediation"].as_str().unwrap_or("");
+        assert!(!remediation.contains("刷新"), "{available}");
+        assert!(remediation.contains("换用"), "{available}");
+        assert!(available["action"].is_null(), "{available}");
+
+        let stale = check(&checks, "config.seed_stale");
+        assert_eq!(stale["status"], "skipped", "{stale}");
+        assert!(stale["remediation"].is_null(), "{stale}");
+        assert!(stale["action"].is_null(), "{stale}");
+    }
+
+    #[test]
+    fn an_active_trial_reports_the_remaining_days_rounded_up() {
+        let seed = json!({ "content_sha256": "abc", "node_count": 2 });
+        let active = trial(crate::trial::Phase::Active, Some(DAY_MS + 1));
+        let checks = seed_checks(&seed, Some(&active));
+
+        let state = check(&checks, "config.trial_state");
+        assert_eq!(state["status"], "ok", "{state}");
+        assert!(detail(state).contains("还剩 2 天"), "{state}");
+    }
+
+    #[test]
+    fn a_trial_that_has_not_started_leaves_the_seed_checks_unchanged() {
+        let seed =
+            json!({ "content_sha256": "abc", "node_count": 2, "checked_at": store::now_ms() });
+        let available = trial(crate::trial::Phase::Available, None);
+        let checks = seed_checks(&seed, Some(&available));
+
+        let state = check(&checks, "config.trial_state");
+        assert_eq!(state["status"], "ok", "{state}");
+        assert_eq!(
+            detail(state),
+            "免费节点试用还没有开始：第一次连上免费节点起算"
+        );
+
+        let seed_available = check(&checks, "config.seed_available");
+        assert_eq!(seed_available["status"], "ok", "{seed_available}");
+        assert_eq!(detail(seed_available), "Veyl 免费节点 2 个");
+
+        let seed_stale = check(&checks, "config.seed_stale");
+        assert_eq!(seed_stale["status"], "ok", "{seed_stale}");
+        assert_eq!(detail(seed_stale), "Veyl 免费节点较新");
     }
 }
 
@@ -7723,69 +7939,8 @@ impl VpnToolServices for WiredServices {
             },
         ));
 
-        let seed_available = seed.get("content_sha256").and_then(Value::as_str).is_some();
-        checks.push(diag_check(
-            "config.seed_available",
-            "config",
-            if seed_available {
-                CheckStatus::Ok
-            } else {
-                CheckStatus::Failed
-            },
-            if seed_available {
-                format!(
-                    "Veyl 免费节点 {} 个",
-                    seed.get("node_count").and_then(Value::as_i64).unwrap_or(0)
-                )
-            } else {
-                "还没有 Veyl 免费节点缓存".into()
-            },
-            if seed_available {
-                None
-            } else {
-                Some("刷新 Veyl 免费节点")
-            },
-            if seed_available {
-                None
-            } else {
-                Some(json!({ "kind": "refresh_default_profile" }))
-            },
-        ));
-
-        let stale = seed
-            .get("checked_at")
-            .and_then(Value::as_i64)
-            .map(|checked| {
-                store::now_ms().saturating_sub(checked)
-                    > crate::seed::REFRESH_INTERVAL.as_millis() as i64
-            })
-            .unwrap_or(true);
-        checks.push(diag_check(
-            "config.seed_stale",
-            "config",
-            if !stale {
-                CheckStatus::Ok
-            } else {
-                CheckStatus::Failed
-            },
-            if !seed_available {
-                "没有 Veyl 免费节点".into()
-            } else if stale {
-                "Veyl 免费节点超过 6 小时未更新".into()
-            } else {
-                "Veyl 免费节点较新".into()
-            },
-            if stale {
-                Some("刷新 Veyl 免费节点")
-            } else {
-                None
-            },
-            if stale {
-                Some(json!({ "kind": "refresh_default_profile" }))
-            } else {
-                None
-            },
-        ));
+        let trial = crate::trial::status(&self.store.conn()).ok();
+        checks.extend(seed_checks(&seed, trial.as_ref()));
 
         let total = checks.len();
         let count_status = |wanted: &str| {

@@ -45,6 +45,7 @@ fn check_label(name: &str) -> &str {
         "network.reachable_seed_source" => "免费节点源",
         "network.reachable_github" => "GitHub 访问",
         "config.current_config" => "当前配置",
+        "config.trial_state" => "免费节点试用",
         "config.seed_available" => "免费节点缓存",
         "config.seed_stale" => "免费节点更新",
         other => other,
@@ -65,11 +66,24 @@ fn format_diag_summary(checks: &[Value]) -> String {
         .iter()
         .filter(|check| check_str(check, "status") == "failed")
         .count();
+    let skipped = checks
+        .iter()
+        .filter(|check| check_str(check, "status") == "skipped")
+        .count();
     let mut lines = Vec::with_capacity(checks.len() + 2);
-    lines.push(if failed == 0 {
+    // 两个计数都写出来：只给未通过数，模型会自己用总数减去它，
+    // 把没检查的项算成正常。
+    lines.push(if failed == 0 && skipped == 0 {
         format!("诊断完成：共 {} 项检查，全部正常。", checks.len())
-    } else {
+    } else if failed == 0 {
+        format!("诊断完成：共 {} 项检查，{skipped} 项没检查。", checks.len())
+    } else if skipped == 0 {
         format!("诊断完成：共 {} 项检查，{failed} 项未通过。", checks.len())
+    } else {
+        format!(
+            "诊断完成：共 {} 项检查，{failed} 项未通过，{skipped} 项没检查。",
+            checks.len()
+        )
     });
     for check in checks {
         let label = check_label(check_str(check, "name"));
@@ -196,10 +210,21 @@ mod tests {
             check("network.reachable_seed_source", "ok", "可达", None),
         ];
         let text = format_diag_summary(&checks);
-        assert!(text.starts_with("诊断完成：共 2 项检查，全部正常。"));
+        assert!(text.starts_with("诊断完成：共 2 项检查，1 项没检查。"));
         assert!(text.contains("- 控制面：没检查（未连接）"));
         assert!(!text.contains("未通过"));
         assert!(!text.contains("下一步"));
+    }
+
+    #[test]
+    fn a_failed_and_a_skipped_check_are_both_counted_in_the_headline() {
+        let checks = vec![
+            check("system.dns", "failed", "无法解析", Some("重新连接后再试")),
+            check("app.process_alive", "ok", "进程在运行", None),
+            check("app.clash_api", "skipped", "未连接", None),
+        ];
+        let text = format_diag_summary(&checks);
+        assert!(text.starts_with("诊断完成：共 3 项检查，1 项未通过，1 项没检查。"));
     }
 
     #[test]
