@@ -2351,6 +2351,43 @@ fn seed_checks(seed: &Value, trial: Option<&Value>) -> Vec<Value> {
     vec![trial_check, available_check, stale_check]
 }
 
+/// 配置组：当前配置 + 免费节点三条。抽出来是为了让测试能直接确认诊断里
+/// 确实带上了试用检查，不用跑整个 `diag_run`（它要联网探测）。
+fn config_checks(
+    config_label: Option<&str>,
+    has_config: bool,
+    running: bool,
+    seed: &Value,
+    trial: Option<&Value>,
+) -> Vec<Value> {
+    let mut checks = vec![diag_check(
+        "config.current_config",
+        "config",
+        if has_config {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Failed
+        },
+        match (config_label, running) {
+            (Some(name), _) => format!("当前配置：{name}"),
+            (None, true) => "配置已应用".to_string(),
+            (None, false) => "还没有可用配置".to_string(),
+        },
+        if has_config {
+            None
+        } else {
+            Some("新建一套配置")
+        },
+        if has_config {
+            None
+        } else {
+            Some(json!({ "kind": "open_default_profile" }))
+        },
+    )];
+    checks.extend(seed_checks(seed, trial));
+    checks
+}
+
 /// 诊断看到的连接情况。四项与连接有关的检查按它选结论与文案：
 /// 未连接时没有可判的对象（`skipped`，不是失败），TUN 与代理各有自己的检查面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3085,6 +3122,21 @@ mod seed_checks_tests {
         let seed_stale = check(&checks, "config.seed_stale");
         assert_eq!(seed_stale["status"], "ok", "{seed_stale}");
         assert_eq!(detail(seed_stale), "Veyl 免费节点较新");
+    }
+
+    #[test]
+    fn the_config_group_includes_the_trial_state() {
+        let seed =
+            json!({ "content_sha256": "abc", "node_count": 2, "checked_at": store::now_ms() });
+        let active = trial("active", Some(3 * 24 * 60 * 60 * 1000), 2);
+        let checks = config_checks(Some("东京"), true, true, &seed, Some(&active));
+
+        let current = check(&checks, "config.current_config");
+        assert_eq!(detail(current), "当前配置：东京");
+
+        let state = check(&checks, "config.trial_state");
+        assert_eq!(state["status"], "ok", "{state}");
+        assert_eq!(detail(state), "免费节点试用中：还剩 3 天");
     }
 }
 
@@ -7944,33 +7996,14 @@ impl VpnToolServices for WiredServices {
             .or_else(|| status.config_name.clone())
             .or_else(|| status.config_id.clone());
         let has_config = active_config.is_some() || status.config_id.is_some() || running;
-        checks.push(diag_check(
-            "config.current_config",
-            "config",
-            if has_config {
-                CheckStatus::Ok
-            } else {
-                CheckStatus::Failed
-            },
-            match (&config_label, running) {
-                (Some(name), _) => format!("当前配置：{name}"),
-                (None, true) => "配置已应用".to_string(),
-                (None, false) => "还没有可用配置".to_string(),
-            },
-            if has_config {
-                None
-            } else {
-                Some("新建一套配置")
-            },
-            if has_config {
-                None
-            } else {
-                Some(json!({ "kind": "open_default_profile" }))
-            },
-        ));
-
         let trial = crate::trial::status_json(&self.store.conn()).ok();
-        checks.extend(seed_checks(&seed, trial.as_ref()));
+        checks.extend(config_checks(
+            config_label.as_deref(),
+            has_config,
+            running,
+            &seed,
+            trial.as_ref(),
+        ));
 
         let total = checks.len();
         let count_status = |wanted: &str| {

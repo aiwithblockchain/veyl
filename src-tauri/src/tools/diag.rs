@@ -239,9 +239,10 @@ mod tests {
         assert_eq!(format_diag_summary(&[]), "诊断没有返回任何检查项。");
     }
 
-    /// 诊断发出的每个检查 id 都要有中文名，否则模型会看到英文 id。
+    /// 已知的检查 id 都要有中文名。新增检查 id 时要同时加进这张表，
+    /// 否则模型会看到英文 id（这张表不会自动覆盖新增项）。
     #[test]
-    fn every_check_the_diagnosis_emits_has_a_chinese_label() {
+    fn known_check_ids_all_have_chinese_labels() {
         let ids = [
             "app.runtime_installed",
             "app.process_alive",

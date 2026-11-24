@@ -564,6 +564,10 @@ fn unknown_update_argument(input: &Value) -> Option<AivpnError> {
     let Some(object) = input.as_object() else {
         return Some(invalid("invalid_argument", "参数必须是一个对象"));
     };
+    // 契约给了专用错误码：字段名没写错，是这个改动必须新建配置。
+    if object.contains_key("connect_mode") {
+        return Some(invalid("connect_mode_immutable", "改接管方式需要新建配置"));
+    }
     object
         .keys()
         .find(|key| !CONFIG_UPDATE_KEYS.contains(&key.as_str()))
@@ -873,7 +877,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_mode_is_rejected_as_an_unknown_argument() {
+    async fn connect_mode_is_rejected_as_immutable() {
         let result = not_wired_update()
             .execute(
                 json!({ "config_id": "cfg_1", "connect_mode": "tun" }),
@@ -884,10 +888,10 @@ mod tests {
         let env = envelope_of(&result);
         assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
         assert_eq!(
-            env["error"]["details"]["reason"], "unknown_argument",
+            env["error"]["details"]["reason"], "connect_mode_immutable",
             "{env}"
         );
-        assert_eq!(env["summary"], "不支持的参数 connect_mode", "{env}");
+        assert_eq!(env["summary"], "改接管方式需要新建配置", "{env}");
     }
 
     #[test]

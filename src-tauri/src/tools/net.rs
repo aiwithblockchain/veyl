@@ -311,6 +311,14 @@ fn default_profile_summary(data: &Value, trial: Option<&Value>) -> String {
     }
 }
 
+/// 试用状态读不到时的摘要：缓存句照常给，末尾说明试用这句缺失，不能静默。
+fn unreadable_trial_summary(data: &Value) -> String {
+    format!(
+        "{}\n试用状态暂时读不到。",
+        default_profile_summary(data, None)
+    )
+}
+
 #[async_trait]
 impl Tool for DefaultProfileStatusTool {
     fn name(&self) -> &str {
@@ -343,10 +351,7 @@ impl Tool for DefaultProfileStatusTool {
                     Ok(trial) => default_profile_summary(&data, Some(trial)),
                     Err(error) => {
                         log::debug!("读取试用状态失败：{error}");
-                        format!(
-                            "{}\n试用状态暂时读不到。",
-                            default_profile_summary(&data, None)
-                        )
+                        unreadable_trial_summary(&data)
                     }
                 };
                 let facts = if available {
@@ -488,5 +493,13 @@ mod tests {
         assert!(text.starts_with("缓存里 2 个"), "{text}");
         let missing = default_profile_summary(&json!({}), None);
         assert_eq!(missing, "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。");
+    }
+
+    /// S6：读不到试用时不能静默，摘要末尾必须说明。
+    #[test]
+    fn an_unreadable_trial_adds_a_note_instead_of_staying_silent() {
+        let text = unreadable_trial_summary(&cache(2, Some(0)));
+        assert!(text.contains("试用状态暂时读不到。"), "{text}");
+        assert!(text.contains("缓存里 2 个"), "{text}");
     }
 }
