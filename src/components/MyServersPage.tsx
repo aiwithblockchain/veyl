@@ -236,15 +236,28 @@ export function MyServersPage({
         <section className="myservers__empty" role="alert">
           <h1 className="myservers__empty-title">{t("serversPage.errorTitle")}</h1>
           <p className="myservers__empty-text">{t("serversPage.errorText")}</p>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            disabled={retrying}
-            aria-busy={retrying || undefined}
-            onClick={onRetry}
-          >
-            {retrying ? t("serversPage.retrying") : t("serversPage.retry")}
-          </button>
+          <p className="myservers__empty-text myservers__error-hint">
+            {t("serversPage.errorIpHint")}
+          </p>
+          <div className="myservers__empty-actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={retrying}
+              aria-busy={retrying || undefined}
+              onClick={onRetry}
+            >
+              {retrying ? t("serversPage.retrying") : t("serversPage.retry")}
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary"
+              disabled={readOnly}
+              onClick={onNew}
+            >
+              {t("serversPage.newNode")}
+            </button>
+          </div>
         </section>
       </div>
     );

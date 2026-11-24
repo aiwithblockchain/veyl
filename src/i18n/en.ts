@@ -1061,6 +1061,8 @@ export const en: Record<MessageKey, string> = {
   "serversPage.loginAction": "Sign in / Sign up",
   "serversPage.errorTitle": "Can't reach the server. Try again later.",
   "serversPage.errorText": "Your servers and nodes aren't affected.",
+  "serversPage.errorIpHint":
+    "If retrying doesn't help, the IP may be the problem; a new node gets you going again.",
   "serversPage.pending":
     "The server is ordered and being created; it will appear automatically.",
   "serversPage.emptyTitle": "No servers yet",

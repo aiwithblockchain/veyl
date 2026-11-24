@@ -697,6 +697,57 @@ describe("我的服务器 destination", () => {
     expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
     // 左栏不再放第二个重试按钮。
     expect(screen.getAllByRole("button", { name: "重试" }).length).toBe(1);
+    // 多一句 IP 说明，并给出「新建节点」这条出路。
+    expect(
+      screen.getByText(
+        "多次重试仍连不上，可能是 IP 出了问题；新建一个节点就能接着用。",
+      ),
+    ).toBeTruthy();
+    // 重试旁边是「新建节点」；左栏标题的 ＋ 是同一个动作的图标入口，不算重复主按钮。
+    expect(
+      within(screen.getByRole("alert")).getByRole("button", {
+        name: "新建节点",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("列表失败：重试与新建节点并排，各自触发自己的动作", () => {
+    const onRetry = vi.fn();
+    const onNew = vi.fn();
+    render(
+      <MyServersPage
+        bridge={makeBridge() as unknown as AgentBridge}
+        catalog={CATALOG}
+        selected={null}
+        account={ACCOUNT}
+        signedIn={true}
+        accountLoaded={true}
+        accountError={false}
+        loading={false}
+        error="读不到你的服务器。已有服务器和节点不受影响；稍后再试。"
+        retrying={false}
+        detailError={null}
+        detailRetrying={false}
+        readOnly={false}
+        onNew={onNew}
+        onLogin={vi.fn()}
+        onRefreshAccount={vi.fn()}
+        onRetry={onRetry}
+        onChanged={vi.fn()}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        onRebuilt={vi.fn()}
+        onRetryDetail={vi.fn()}
+        onGoConnect={vi.fn()}
+      />,
+    );
+
+    const card = screen.getByRole("alert");
+    fireEvent.click(within(card).getByRole("button", { name: "重试" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(card).getByRole("button", { name: "新建节点" }));
+    expect(onNew).toHaveBeenCalledTimes(1);
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
   it("详情读取失败：中间给新文案，不再写「连不上服务器」", () => {
