@@ -278,8 +278,9 @@ function Harness({
         <MyServerTopUp
           wallet={state.wallet}
           loading={state.walletLoading}
+          refreshing={state.walletRefreshing}
           error={state.walletError}
-          onRetry={() => void state.refreshWallet()}
+          onRetry={() => state.refreshWallet()}
           onTopUp={state.topup}
           onClose={state.closeTopUp}
         />

@@ -66,6 +66,11 @@ export type WalletTrigger =
   | "order"
   | "topup";
 
+/** 余额刷新结果：skipped 表示没有发请求（在途/门禁/未登录等），failed 才是真的失败。 */
+export type WalletRefreshResult =
+  | { ok: true; wallet: MyServerWallet }
+  | { ok: false; reason: "skipped" | "failed" };
+
 /** 进程内单调递增：并发/交错时按 seq 把触发行与结果行配成对。 */
 let walletRefreshSeq = 0;
 
@@ -246,7 +251,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   }, [resetWallet]);
 
   const refreshWallet = useCallback(
-    async (options: { force?: boolean; trigger?: WalletTrigger } = {}) => {
+    async (options: { force?: boolean; trigger?: WalletTrigger } = {}): Promise<WalletRefreshResult> => {
       const trigger = options.trigger ?? "manual";
       const seq = (walletRefreshSeq += 1);
       // 一次刷新只落「触发」和「结果」两行，中间态不打；两行同 seq。
@@ -254,17 +259,17 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       const source = (bridge as AccountCapable).myServerWallet;
       if (!source) {
         uiLog("debug", `refresh seq=${seq} skipped reason=unsupported`);
-        return;
+        return { ok: false, reason: "skipped" };
       }
       // 未登录不发：组件可能在登出后的下一拍才卸载。
       if (!loggedInRef.current) {
         uiLog("debug", `refresh seq=${seq} skipped reason=logged_out`);
-        return;
+        return { ok: false, reason: "skipped" };
       }
       // 并发请求没有意义；30 秒内刚成功过就直接用缓存（手动刷新传 force）。
       if (walletInFlightRef.current) {
         uiLog("debug", `refresh seq=${seq} skipped reason=inflight`);
-        return;
+        return { ok: false, reason: "skipped" };
       }
       // 显式动作不受门禁限制：手动刷新和失败后的「重试」都要立刻发。
       const forced = options.force === true || trigger === "retry";
@@ -279,7 +284,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           "debug",
           `refresh seq=${seq} skipped reason=gate elapsed_ms=${sinceSuccess}`,
         );
-        return;
+        return { ok: false, reason: "skipped" };
       }
       const startedAt = Date.now();
       const epoch = walletEpochRef.current;
@@ -293,7 +298,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         if (epoch !== walletEpochRef.current) {
           // 等响应期间登出或换了账户：这是上一个账户的值，丢弃。
           uiLog("debug", `refresh seq=${seq} discarded reason=account_changed`);
-          return;
+          return { ok: false, reason: "skipped" };
         }
         setWallet(next);
         walletRef.current = next;
@@ -303,10 +308,11 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           "debug",
           `refresh seq=${seq} done outcome=ok balance_cents=${next.balance_cents} elapsed_ms=${Date.now() - startedAt}`,
         );
+        return { ok: true, wallet: next };
       } catch (error) {
         if (epoch !== walletEpochRef.current) {
           uiLog("debug", `refresh seq=${seq} discarded reason=account_changed`);
-          return;
+          return { ok: false, reason: "skipped" };
         }
         setWalletFailed(true);
         // 失败只记错误码/短原因，不记错误原文。
@@ -329,6 +335,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           setWalletError(t("account.walletError"));
         }
         // 已有旧值：保留数字，由 walletStale 写「显示的是上次的余额」。
+        return { ok: false, reason: "failed" };
       } finally {
         // 只有仍持有令牌的请求才能清标记：别把后来那次请求的在途状态抹掉。
         if (walletTokenRef.current === token) {

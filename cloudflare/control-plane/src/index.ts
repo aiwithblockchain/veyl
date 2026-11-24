@@ -10,6 +10,7 @@ import { handleIssues, siteBase } from "./issues";
 import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
 import { handleStripeWebhook } from "./webhooks/stripe";
+import { retrieveCheckoutSession } from "./payments/stripe";
 
 export interface Env {
   ENVIRONMENT: string;
@@ -355,40 +356,65 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     });
   }
 
-  // 支付回跳页：Stripe 完成后跳回来，只做展示；入账以 webhook 为准，这里不写库、不读 session_id。
+  // 支付回跳页：只做展示，不写库；入账以 webhook 为准。异步方式回跳时可能仍在处理中，
+  // 所以查一次 Stripe session 再决定文案，不能仅凭 session_id 宣称完成。
   if (url.pathname === "/payment/return") {
     const zh = (request.headers.get("accept-language") ?? "").trim().toLowerCase().startsWith("zh");
-    // cancel_url 带 canceled=1；有 session_id 才是 Stripe 的真实成功回跳，两者都没有只给中性提示。
-    const state = url.searchParams.get("canceled") === "1"
-      ? "canceled"
-      : url.searchParams.has("session_id")
-        ? "success"
-        : "neutral";
+    const canceled = url.searchParams.get("canceled") === "1";
+    const sessionId = url.searchParams.get("session_id") ?? "";
+    let state: "paid" | "processing" | "canceled" | "unknown";
+    if (canceled) {
+      // cancel_url 优先：两个参数同时出现也不能说成功。
+      state = "canceled";
+    } else if (!sessionId) {
+      state = "unknown";
+    } else {
+      const session = await retrieveCheckoutSession(env, sessionId);
+      if (!session.ok) {
+        // 查不到就如实说查不到，不猜成功。
+        state = "unknown";
+      } else if (session.status === "complete" && session.paymentStatus === "paid") {
+        state = "paid";
+      } else if (session.status === "complete") {
+        // 微信 / 支付宝等异步方式：授权完成但资金尚未结算。
+        state = "processing";
+      } else {
+        state = "unknown";
+      }
+    }
     const copy = zh
       ? {
+          paid: {
+            title: "支付完成",
+            body: "回到 Veyl 应用查看服务额度，此页可以关闭。",
+          },
+          processing: {
+            title: "支付处理中",
+            body: "微信 / 支付宝到账可能需要几分钟。到账后余额会自动更新，此页可以关闭。",
+          },
           canceled: {
             title: "支付未完成",
             body: "回到 Veyl 应用重新发起充值，此页可以关闭。",
           },
-          success: {
-            title: "支付完成",
-            body: "回到 Veyl 应用即可看到服务额度，此页可以关闭。",
-          },
-          neutral: {
+          unknown: {
             title: "支付流程已结束",
             body: "回到 Veyl 应用查看结果，此页可以关闭。",
           },
         }
       : {
+          paid: {
+            title: "Payment complete",
+            body: "Return to the Veyl app to view your service credits. You can close this page.",
+          },
+          processing: {
+            title: "Payment processing",
+            body: "WeChat Pay or Alipay can take a few minutes to settle. Your credits update automatically once it does; you can close this page.",
+          },
           canceled: {
             title: "Payment not completed",
             body: "Return to the Veyl app to start the top-up again. You can close this page.",
           },
-          success: {
-            title: "Payment complete",
-            body: "Return to the Veyl app to see your service credits. You can close this page.",
-          },
-          neutral: {
+          unknown: {
             title: "Payment flow ended",
             body: "Return to the Veyl app to see the result. You can close this page.",
           },
@@ -396,9 +422,11 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     const text = copy[state];
     const lang = zh ? "zh" : "en";
     const check =
-      state === "success"
+      state === "paid"
         ? `<div class="badge"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#1B7A4E" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
-        : "";
+        : state === "processing"
+          ? `<div class="badge badge--pending"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="#9A6B12" stroke-width="1.8"/><path d="M12 8v4.5l3 1.8" stroke="#9A6B12" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
+          : "";
     const html = `<!DOCTYPE html>
 <html lang="${lang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -411,6 +439,7 @@ main{min-height:100vh;display:flex;align-items:center;justify-content:center;pad
 .card{width:100%;max-width:420px;background:#FFFFFF;border:1px solid rgba(20,22,28,.10);border-radius:16px;padding:40px 32px 32px;text-align:center;box-shadow:0 1px 2px rgba(20,22,28,.04),0 12px 32px rgba(20,22,28,.06)}
 .brand{margin:0 0 28px;font-size:15px;font-weight:600;letter-spacing:.06em;color:#14161C}
 .badge{width:56px;height:56px;margin:0 auto 20px;border-radius:50%;background:rgba(27,122,78,.10);display:flex;align-items:center;justify-content:center}
+.badge--pending{background:rgba(154,107,18,.10)}
 h1{margin:0 0 10px;font-size:20px;font-weight:600;letter-spacing:-.01em}
 p{margin:0;font-size:14px;line-height:1.7;color:#5B5850}
 .footer{margin-top:28px;padding-top:20px;border-top:1px solid rgba(20,22,28,.10)}
@@ -424,7 +453,13 @@ ${check}
 <p>${text.body}</p>
 <div class="footer"><a href="${siteBase(env)}">${zh ? "了解 Veyl" : "Learn about Veyl"} &rarr;</a></div>
 </div></main></body></html>`;
-    return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+    return new Response(html, {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        // 状态会从处理中变成完成，不能让浏览器缓存旧结果。
+        "cache-control": "no-store",
+      },
+    });
   }
 
   // 国内分流规则集：公开只读，随 Worker 打包；sing-box profile 的 rule_set 从这里拉。

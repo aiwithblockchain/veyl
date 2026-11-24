@@ -3207,6 +3207,15 @@ body[data-resizing] {
   font-variant-numeric: tabular-nums;
 }
 
+.myservers-topup__spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
 .myservers__detail {
   display: flex;
   flex-direction: column;

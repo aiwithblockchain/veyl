@@ -993,8 +993,8 @@ describe("余额请求在途去重", () => {
     await waitFor(() => expect(wallet).toHaveBeenCalled());
     expect(wallet.mock.calls.length).toBe(1);
 
-    let first: Promise<void> = Promise.resolve();
-    let second: Promise<void> = Promise.resolve();
+    let first: Promise<unknown> = Promise.resolve();
+    let second: Promise<unknown> = Promise.resolve();
     act(() => {
       first = view.result.current.refreshWallet({ force: true });
       second = view.result.current.refreshWallet({ force: true });

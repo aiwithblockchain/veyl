@@ -7,12 +7,14 @@ import { IconClose } from "./icons";
 import { useFocusTrap } from "../ui/focus";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
+import type { WalletRefreshResult } from "../myservers/useMyServers";
 
 interface Props {
   wallet: MyServerWallet | null;
   loading: boolean;
+  refreshing: boolean;
   error: string | null;
-  onRetry: () => void;
+  onRetry: () => Promise<WalletRefreshResult>;
   onTopUp: (denominationCents: number) => Promise<MyServerTopup>;
   onClose: () => void;
 }
@@ -42,6 +44,7 @@ function topupError(error: unknown): string {
 export function MyServerTopUp({
   wallet,
   loading,
+  refreshing,
   error,
   onRetry,
   onTopUp,
@@ -50,13 +53,18 @@ export function MyServerTopUp({
   const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
+  const [refreshFailure, setRefreshFailure] = useState<string | null>(null);
   const [failure, setFailure] = useState<{
     message: string;
     url: string | null;
     cents: number;
   } | null>(null);
   const busyRef = useRef(false);
+  const refreshBusyRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const refreshTimerRef = useRef<number | null>(null);
   const [copied, setCopied] = useState(false);
   useFocusTrap(true, dialogRef);
 
@@ -68,12 +76,23 @@ export function MyServerTopUp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const start = async (cents: number) => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusyCents(cents);
     setNotice(null);
     setFailure(null);
+    setRefreshNotice(null);
+    setRefreshFailure(null);
     try {
       const result = await onTopUp(cents);
       setNotice(
@@ -95,6 +114,43 @@ export function MyServerTopUp({
     } finally {
       busyRef.current = false;
       setBusyCents(null);
+    }
+  };
+
+  const refreshInFlight = refreshBusy || refreshing;
+
+  const refreshBalance = async () => {
+    if (refreshBusyRef.current || refreshing) return;
+    refreshBusyRef.current = true;
+    setRefreshBusy(true);
+    setRefreshNotice(null);
+    setRefreshFailure(null);
+    try {
+      const result = await onRetry();
+      if (!result.ok) {
+        // skipped 表示没有真的发请求（在途 / 门禁 / 登出 / 切账户），不能当成失败报错。
+        if (result.reason === "failed") {
+          setRefreshFailure(tr("topup.refreshFailed"));
+        }
+        return;
+      }
+      setRefreshNotice(
+        tr("topup.balanceUpdated", {
+          amount: formatUsdCents(result.wallet.balance_cents),
+        }),
+      );
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        setRefreshNotice(null);
+      }, 2500);
+    } catch {
+      setRefreshFailure(tr("topup.refreshFailed"));
+    } finally {
+      refreshBusyRef.current = false;
+      setRefreshBusy(false);
     }
   };
 
@@ -145,7 +201,7 @@ export function MyServerTopUp({
                 {error}
               </p>
               <div className="myservers__login-actions">
-                <button type="button" className="btn btn--ghost" onClick={onRetry}>
+                <button type="button" className="btn btn--ghost" onClick={() => void onRetry()}>
                   {tr("topup.retry")}
                 </button>
               </div>
@@ -154,7 +210,7 @@ export function MyServerTopUp({
             <>
               <p className="myservers__hint">{tr("topup.none")}</p>
               <div className="myservers__login-actions">
-                <button type="button" className="btn btn--ghost" onClick={onRetry}>
+                <button type="button" className="btn btn--ghost" onClick={() => void onRetry()}>
                   {tr("topup.refresh")}
                 </button>
               </div>
@@ -232,11 +288,34 @@ export function MyServerTopUp({
               {notice}
             </p>
           ) : null}
+          {refreshNotice ? (
+            <p className="myservers__hint" role="status">
+              {refreshNotice}
+            </p>
+          ) : null}
+          {refreshFailure ? (
+            <p className="myservers__error" role="alert">
+              {refreshFailure}
+            </p>
+          ) : null}
 
           <div className="myservers__login-actions">
             {notice ? (
-              <button type="button" className="btn btn--ghost" onClick={onRetry}>
-                {tr("topup.refreshBalance")}
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={busy || refreshInFlight}
+                aria-busy={refreshInFlight || undefined}
+                onClick={() => void refreshBalance()}
+              >
+                {refreshInFlight ? (
+                  <>
+                    <span className="myservers-topup__spinner" aria-hidden="true" />
+                    {tr("topup.refreshingBalance")}
+                  </>
+                ) : (
+                  tr("topup.refreshBalance")
+                )}
               </button>
             ) : null}
             <button type="button" className="btn btn--ghost" disabled={busy} onClick={onClose}>

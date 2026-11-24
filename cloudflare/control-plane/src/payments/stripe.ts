@@ -90,6 +90,8 @@ export async function createCheckoutSession(
   form.set("line_items[0][price_data][product_data][name]", PRODUCT_NAME);
   form.set("line_items[0][price_data][product_data][description]", PRODUCT_DESCRIPTION);
   form.set("consent_collection[terms_of_service]", "required");
+  // 微信支付走 Checkout 时必须显式声明客户端类型；缺这个字段会失败（stripe-migration.md §3.1）。
+  form.set("payment_method_options[wechat_pay][client]", "web");
 
   let response: Response;
   try {
@@ -127,6 +129,52 @@ export async function createCheckoutSession(
     return { ok: false, reason: "upstream", detail: `unexpected_body:${keys}` };
   }
   return { ok: true, sessionId, checkoutUrl };
+}
+
+export type CheckoutSessionLookup =
+  | { ok: true; status: string; paymentStatus: string }
+  | { ok: false; reason: "not_configured" | "upstream" };
+
+/**
+ * 回跳页只读查询：确认 session 的真实状态，避免仅凭 session_id 宣称支付完成。
+ * 不写库；入账仍以 webhook 为唯一来源。
+ */
+export async function retrieveCheckoutSession(
+  env: StripeEnv,
+  sessionId: string,
+): Promise<CheckoutSessionLookup> {
+  if (!env.STRIPE_SECRET_KEY) return { ok: false, reason: "not_configured" };
+  const expected = env.ENVIRONMENT === "production" ? "sk_live_" : "sk_test_";
+  if (!env.STRIPE_SECRET_KEY.startsWith(expected)) return { ok: false, reason: "not_configured" };
+  // 只接受 Checkout Session id 形状，避免把任意字符串拼进 Stripe 路径。
+  if (!/^cs_[A-Za-z0-9_]{1,200}$/.test(sessionId)) return { ok: false, reason: "upstream" };
+
+  let response: Response;
+  try {
+    response = await fetch(`${STRIPE_API}/${sessionId}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+        "stripe-version": STRIPE_VERSION,
+      },
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    console.warn("[stripe] session_retrieve_failed network");
+    return { ok: false, reason: "upstream" };
+  }
+  if (!response.ok) {
+    console.warn(`[stripe] session_retrieve_failed status=${response.status}`);
+    return { ok: false, reason: "upstream" };
+  }
+
+  const body = (await response.json().catch(() => null)) as
+    | { status?: unknown; payment_status?: unknown }
+    | null;
+  const status = typeof body?.status === "string" ? body.status : "";
+  const paymentStatus = typeof body?.payment_status === "string" ? body.payment_status : "";
+  if (!status || !paymentStatus) return { ok: false, reason: "upstream" };
+  return { ok: true, status, paymentStatus };
 }
 
 export interface StripeEventPayload {
