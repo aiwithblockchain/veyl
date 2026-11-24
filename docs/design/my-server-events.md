@@ -66,10 +66,10 @@ CREATE TABLE audit_log (
 GET /v1/servers/{id}/events        → 200 { events: MyServerEvent[], has_more: boolean }
 ```
 
-- **归属校验**：与 `getServer` 一致，`loadServer(db, identity.accountId, id)`；别人的服务器与不存在的服务器**一律 404**，不泄露是否存在。查询再加一层 `AND account_id = ?`，双保险。
+- **归属校验**：与 `getServer` 一致，`loadServer(db, identity.accountId, id)`；别人的服务器与不存在的服务器**一律 404**，不泄露是否存在。**审计查询只按 `server_id` 过滤，不再加 `AND account_id = ?`**：归属已经由 `loadServer` 校验；而账号合并（`auth_email.ts` 的 `account.merge`）只改 `devices` / `orders` / `servers`，**不重写 `audit_log` 的历史行**，再按 `account_id` 过滤会把合并之前的创建记录整段丢掉。
 - **只读**，不需要幂等键；不写库、不发事件、不改变任何状态。
 - **排序**：`at DESC`（审计行同毫秒时按 `id DESC` 兜底），里程碑参与同一次排序。
-- **上限**：审计最多取 51 行，与里程碑合并、折叠后按时间排序，**返回前 50 条**；`has_more = 截断前还有条目被丢弃`。无 `limit` 参数、无游标分页——一条建机链路的事件量是个位数，50 是给「长期端口轮换 + 反复失败」留的余量。
+- **上限**：审计最多取 51 行，与里程碑合并、折叠后按时间排序，**返回前 50 条**。`has_more` 必须同时计入**原始截断**与折叠后超限：SQL 取满 51 行即说明还有更早的条目，哪怕折叠后只剩一两条也要为 `true`。无 `limit` 参数、无游标分页——一条建机链路的事件量是个位数，50 是给「长期端口轮换 + 反复失败」留的余量。
 - **折叠**：相邻两条同 `code` 且时间差 ≤ 10 分钟合并为一条，`count` 记次数、`at` 取较晚那条。Cron 重试与 agent 重复上报产生的连续同动作是这里的主要来源；跨小时的同类动作（两次端口轮换）是两件事，不并。
 - 错误码**不新增**，沿用 §7.15：`UNAUTHENTICATED / auth_required`（未登录）、`NOT_FOUND / server_gone`（不是自己的或已不存在）、`UPSTREAM_ERROR / provider_unavailable`、`TIMEOUT / timeout`、`UPSTREAM_ERROR / invalid_response`。没有审计行不是错误，返回空数组。
 
@@ -123,7 +123,7 @@ type MyServerEvents = { events: MyServerEvent[]; has_more: boolean };
 ### 2.4 实现要点
 
 - 在 `handleServers` 里加 `parts.length === 4 && parts[3] === "events" && GET`。
-- 先 `loadServer` 取行（拿到 4 个时间戳与 `ready_at`），再一次审计查询拿 51 行，映射、合并、折叠、排序都在 Worker 内完成（D1 不做窗口函数折叠，保持简单可测）。
+- 先 `loadServer` 取行（拿到 4 个时间戳与 `ready_at`），再一次审计查询拿 51 行：**SQL 按 `server_id` + 动作白名单过滤**（只取 §3.1 的动作，`billing.failed` / `grace_waived` 这类运维行不得占用 50 条窗口），映射、合并、折叠、排序都在 Worker 内完成（D1 不做窗口函数折叠，保持简单可测）。`has_more = 原始查询取满 51 行 || 折叠后超过 50 条`。
 - 时间戳列是毫秒；`created_at` / `ready_at` 在行里已是数字。
 
 ---

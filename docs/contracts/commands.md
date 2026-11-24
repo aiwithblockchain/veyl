@@ -2336,12 +2336,12 @@ type MyServerEvents = { events: MyServerEvent[]; has_more: boolean };
 
 | 项 | 规则 |
 |---|---|
-| 归属 | 与 `my_server_get` 相同：控制面按 `account_id` 过滤，别人的服务器与不存在的服务器一律 `NOT_FOUND / server_gone`，**不返回空数组**（不泄露是否存在） |
+| 归属 | 与 `my_server_get` 相同：先按 `account_id` 校验服务器归属，别人的服务器与不存在的服务器一律 `NOT_FOUND / server_gone`，**不返回空数组**（不泄露是否存在）。**审计行只按 `server_id` 查询，不再按 `account_id` 过滤**——账号合并（`account.merge`）不重写历史审计行，再按账户过滤会把合并之前的记录整段丢掉 |
 | 时间戳 | `at` 是 Unix 毫秒（§1）；Host 原样透传，界面格式化，不做 ISO 转换 |
 | 排序 | `at` 倒序，最近的在最前；同毫秒时审计行按 `id` 倒序兜底 |
-| 上限 | 最多 50 条；`has_more = true` 表示还有更早的条目没返回。**无 `limit` 参数、无游标分页** |
+| 上限 | 最多 50 条；`has_more = true` 表示还有更早的条目没返回。**`has_more` 必须同时计入原始截断**：SQL 取满 51 行即为 `true`，即使折叠后条目很少。**无 `limit` 参数、无游标分页** |
 | 折叠 | 相邻两条 `code` 相同且时间差 ≤ 10 分钟合并为一条：`count` 记次数、`at` 取较晚那条。跨小时的同类动作是两件事，不并 |
-| 来源 | `audit_log` 为主；`servers.created_at` / `installing_at` / `verifying_at` / `ready_at` **只补成功路径上审计没写的里程碑**。同一次激活三源只出一条，优先级 `enroll.ok` > `settle.ok` > `ready_at`。缺列（旧机器没有阶段上报）时该条不出现，**不估算、不补假时间** |
+| 来源 | `audit_log` 为主；**查询按动作白名单过滤，运维动作（`billing.failed` / `grace_waived` / `agent.token_issued` 等）不得占用 51 行窗口**。`servers.created_at` / `installing_at` / `verifying_at` / `ready_at` **只补成功路径上审计没写的里程碑**。同一次激活三源只出一条，优先级 `enroll.ok` > `settle.ok` > `ready_at`。缺列（旧机器没有阶段上报）时该条不出现，**不估算、不补假时间** |
 | 出网字段 | 只返回 `code` / `at` / `count` / `version` / `amount_cents` / `reason`。**`detail` 原文、`provider_id`、令牌（`jti` / `exp`）、`order_id`、`account_id`、端口、IP、`error` 文本、`log_excerpt`、`password_length` 一律不下发**；`reason` 过白名单，未知值省略、按通用文案渲染 |
 | 错误 | 未登录 `UNAUTHENTICATED / auth_required`；不是自己的或已不存在 `NOT_FOUND / server_gone`；传输失败 / 超时沿用 §7.15 的 `UPSTREAM_ERROR` / `TIMEOUT` 行为。**没有审计行不是错误**，返回 `{ events: [], has_more: false }` |
 
@@ -3124,10 +3124,10 @@ type RulesStatus = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件版本升到 `2.63.0`；新增 §7.31 `my_server_events { serverId }` → `MyServerEvents`（`{ events, has_more }`，仅 UI）：控制面 `GET /v1/servers/{id}/events`，按 `account_id` 过滤（别人的与不存在的一律 `NOT_FOUND / server_gone`），`at` 为 Unix 毫秒，`at` 倒序，最多 50 条、无分页，相邻同 `code` 且间隔 ≤ 10 分钟折叠并带 `count` | 新增命令 | 用户 2026-11-24：节点的创建日志不显示，这个很重要 |
+| 1 | 本文件版本升到 `2.63.0`；新增 §7.31 `my_server_events { serverId }` → `MyServerEvents`（`{ events, has_more }`，仅 UI）：控制面 `GET /v1/servers/{id}/events`，先按 `account_id` 校验归属（别人的与不存在的一律 `NOT_FOUND / server_gone`），`at` 为 Unix 毫秒，`at` 倒序，最多 50 条、无分页，相邻同 `code` 且间隔 ≤ 10 分钟折叠并带 `count` | 新增命令 | 用户 2026-11-24：节点的创建日志不显示，这个很重要 |
 | 2 | 事件来源：`audit_log` 为主；`MyServer.created_at` / `installing_at` / `verifying_at` / `ready_at` 只补成功路径上审计没写的里程碑；同一次激活 `enroll.ok` > `settle.ok` > `ready_at` 三选一。`order.create` 写行时没有 `server_id`，不进时间线 | 语义补充 | PM 2026-11-24 拍板（设计见 `docs/design/my-server-events.md`） |
 | 3 | 出网只给归一化字段（`code` / `at` / `count` / `version` / `amount_cents` / `reason`）：`detail` 原文、provider id、令牌、订单号、账户 id、端口、IP、错误文本与日志片段一律不下发；`reason` 过白名单 | 安全约束 | 审计 `detail` 含 provider 响应与 agent 日志，不能整段外发 |
-| 4 | 控制面要求迁移 `0013` 增加 `idx_audit_log_server(server_id, at)`（只追加）；命令不注册 AI 工具、不发事件、不落本地库 | 实现约束 | 现表无该索引，按 `server_id` 查询会全表扫描 |
+| 4 | 控制面要求迁移 `0013` 增加 `idx_audit_log_server(server_id, at)`（只追加）；审计查询按 `server_id` + 动作白名单（运维动作不占 51 行窗口）、不按 `account_id` 过滤（账号合并不重写历史行），`has_more` 同时计入原始截断；命令不注册 AI 工具、不发事件、不落本地库 | 实现约束 | 现表无该索引；2026-11-24 后端评审发现运维行挤占窗口、account merge 后历史丢失 |
 
 ### 2.62.0（未发布，2026-11-23：账户命令区分「控制面不可达」与「未登录」）
 

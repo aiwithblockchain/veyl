@@ -1357,3 +1357,252 @@ describe("余额不足停机（墓碑）", () => {
     ).toBe(404);
   });
 });
+
+describe("创建记录时间线（2.63.0）", () => {
+  const BASE = 1_700_000_000_000;
+
+  function audit(db: FakeD1, id: number, at: number, action: string, detail: unknown) {
+    db.rows("audit_log").push({
+      id,
+      at,
+      account_id: ACCOUNT,
+      server_id: SERVER,
+      action,
+      detail: typeof detail === "string" ? detail : JSON.stringify(detail),
+    });
+  }
+
+  async function timelineEnv() {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    Object.assign(db.rows("servers")[0], {
+      created_at: BASE,
+      installing_at: BASE + 60_000,
+      verifying_at: BASE + 120_000,
+      ready_at: BASE + 180_000,
+    });
+    return { db, env };
+  }
+
+  async function eventsOf(env: { token: string }, serverId = SERVER) {
+    return handleServers(
+      new Request(`https://example.com/v1/servers/${serverId}/events`, {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+  }
+
+  it("正常机器：四个里程碑 + 机器已创建，已开通只出现一次且带版本", async () => {
+    const { db, env } = await timelineEnv();
+    audit(db, 1, BASE + 5_000, "provision.created", { provider_id: "4242", region: "sgp1" });
+    audit(db, 2, BASE + 170_000, "settle.ok", { order_id: "ord_test", amount_cents: 30 });
+    audit(db, 3, BASE + 175_000, "enroll.ok", { version: "1.14.4" });
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string; version?: string; at: number }>;
+      has_more: boolean;
+    };
+    expect(body.has_more).toBe(false);
+    expect(body.events.map((event) => event.code)).toEqual([
+      "activated",
+      "verify.started",
+      "install.started",
+      "machine.created",
+      "order.confirmed",
+    ]);
+    expect(body.events.filter((event) => event.code === "activated")).toHaveLength(1);
+    expect(body.events[0]).toMatchObject({ at: BASE + 175_000, version: "1.14.4" });
+  });
+
+  it("失败机器：失败 / 销毁 / 退款都在，detail 原文与内部字段不出网", async () => {
+    const { db, env } = await timelineEnv();
+    Object.assign(db.rows("servers")[0], {
+      state: "destroyed",
+      installing_at: null,
+      verifying_at: null,
+      ready_at: null,
+    });
+    audit(db, 1, BASE + 5_000, "provision.created", {
+      provider_id: "999",
+      region: "sgp1",
+      ip: "203.0.113.10",
+      order_id: "ord_secret",
+    });
+    audit(db, 2, BASE + 10_000, "agent.report.failed", {
+      failed_stage: "verifying",
+      error: "secret-error",
+      log_excerpt: "LOG-SECRET",
+    });
+    audit(db, 3, BASE + 20_000, "server.destroy", { reason: "billing_unpaid" });
+    audit(db, 4, BASE + 30_000, "provision.refunded", {
+      order_id: "ord_secret",
+      amount_cents: 600,
+      reason: "secret",
+    });
+    audit(db, 5, BASE + 1_800_000, "server.destroy", { reason: "mystery_reason" });
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<Record<string, unknown>>;
+    };
+    expect(body.events.map((event) => event.code)).toEqual([
+      "destroyed",
+      "refunded",
+      "destroyed",
+      "check.failed",
+      "machine.created",
+      "order.confirmed",
+    ]);
+    // 未知 reason 省略；白名单内的照常下发。
+    expect(body.events[0].reason).toBeUndefined();
+    expect(body.events[2].reason).toBe("billing_unpaid");
+    expect(body.events[1].amount_cents).toBe(600);
+
+    const text = JSON.stringify(body);
+    for (const secret of [
+      "secret-error",
+      "LOG-SECRET",
+      "ord_secret",
+      "999",
+      "203.0.113.10",
+      "20443",
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  it("相邻同 code 10 分钟内折叠，count 记次数且不带端口", async () => {
+    const { db, env } = await timelineEnv();
+    Object.assign(db.rows("servers")[0], {
+      installing_at: null,
+      verifying_at: null,
+      ready_at: null,
+    });
+    audit(db, 1, BASE + 1_000, "server.rotated", { port: 20443 });
+    audit(db, 2, BASE + 4_000, "server.rotated", { port: 20444 });
+    audit(db, 3, BASE + 3_600_000, "server.rotated", { port: 20445 });
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string; at: number; count?: number }>;
+    };
+    expect(body.events.map((event) => event.code)).toEqual([
+      "port.changed",
+      "port.changed",
+      "order.confirmed",
+    ]);
+    expect(body.events[1]).toMatchObject({ at: BASE + 4_000, count: 2 });
+    expect(body.events[0].count).toBeUndefined();
+    const text = JSON.stringify(body);
+    expect(text).not.toContain('"port"');
+    expect(text).not.toContain("20443");
+    expect(text).not.toContain("20445");
+  });
+
+  it("最多 50 条，截断时 has_more 为 true", async () => {
+    const { db, env } = await timelineEnv();
+    Object.assign(db.rows("servers")[0], {
+      installing_at: null,
+      verifying_at: null,
+      ready_at: null,
+    });
+    for (let index = 0; index < 60; index += 1) {
+      audit(db, index + 1, BASE + index * 11 * 60_000, "server.rotated", { port: 20000 + index });
+    }
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string }>;
+      has_more: boolean;
+    };
+    expect(body.events).toHaveLength(50);
+    expect(body.has_more).toBe(true);
+    expect(body.events.every((event) => event.code === "port.changed")).toBe(true);
+  });
+
+  it("运维动作不占窗口：51 条 billing.failed 不会挤掉真实事件", async () => {
+    const { db, env } = await timelineEnv();
+    Object.assign(db.rows("servers")[0], {
+      installing_at: null,
+      verifying_at: null,
+      ready_at: null,
+    });
+    audit(db, 1, BASE + 5_000, "provision.created", { region: "sgp1" });
+    audit(db, 2, BASE + 10_000, "enroll.ok", { version: "1.14.4" });
+    for (let index = 0; index < 51; index += 1) {
+      audit(db, 100 + index, BASE + 20_000 + index * 1_000, "billing.failed", {
+        error: "noise",
+      });
+    }
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string }>;
+      has_more: boolean;
+    };
+    expect(body.events.map((event) => event.code)).toEqual([
+      "activated",
+      "machine.created",
+      "order.confirmed",
+    ]);
+    expect(body.has_more).toBe(false);
+  });
+
+  it("SQL 取满 51 行即可能截断：折叠后不足 50 条也标 has_more", async () => {
+    const { db, env } = await timelineEnv();
+    Object.assign(db.rows("servers")[0], {
+      installing_at: null,
+      verifying_at: null,
+      ready_at: null,
+    });
+    // 60 条同类、全部落在 10 分钟窗口内：折叠成 1 条，但窗口确实被截断了。
+    for (let index = 0; index < 60; index += 1) {
+      audit(db, index + 1, BASE + index * 1_000, "server.rotated", { port: 21000 + index });
+    }
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string; count?: number }>;
+      has_more: boolean;
+    };
+    expect(body.events.map((event) => event.code)).toEqual(["port.changed", "order.confirmed"]);
+    expect(body.events[0].count).toBe(51);
+    expect(body.has_more).toBe(true);
+  });
+
+  it("账户合并后审计行仍是旧 account_id：时间线不受影响", async () => {
+    const { db, env } = await timelineEnv();
+    audit(db, 1, BASE + 5_000, "provision.created", { region: "sgp1" });
+    audit(db, 2, BASE + 175_000, "enroll.ok", { version: "1.14.4" });
+    for (const row of db.rows("audit_log")) {
+      row.account_id = "acct_merged_old000000000";
+    }
+
+    const body = (await (await eventsOf(env))!.json()) as {
+      events: Array<{ code: string }>;
+    };
+    expect(body.events.map((event) => event.code)).toEqual([
+      "activated",
+      "verify.started",
+      "install.started",
+      "machine.created",
+      "order.confirmed",
+    ]);
+  });
+
+  it("别人的服务器与不存在的服务器一律 404", async () => {
+    const { db, env } = await timelineEnv();
+    db.rows("servers")[0].account_id = "acct_someone_else00000000";
+
+    expect((await eventsOf(env))!.status).toBe(404);
+    expect((await eventsOf(env, "srv_missing0000000000000"))!.status).toBe(404);
+  });
+
+  it("未登录返回 401（Host 映射成 auth_required）", async () => {
+    const { env } = await timelineEnv();
+    const res = await handleServers(
+      new Request(`https://example.com/v1/servers/${SERVER}/events`),
+      env as never,
+    );
+    expect(res!.status).toBe(401);
+    const body = (await res!.json()) as { code: string };
+    expect(body.code).toBe("UNAUTHENTICATED");
+  });
+});

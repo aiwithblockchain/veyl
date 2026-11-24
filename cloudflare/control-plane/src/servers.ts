@@ -1817,10 +1817,216 @@ async function getServer(request: Request, env: ServersEnv, serverId: string): P
   return json(serverView(row, money.get(row.id)));
 }
 
+/** 创建记录时间线（my-server-events.md §2.2 / commands.md §7.31）。 */
+type MyServerEventCode =
+  | "order.confirmed"
+  | "machine.created"
+  | "install.started"
+  | "verify.started"
+  | "activated"
+  | "create.failed"
+  | "install.failed"
+  | "check.failed"
+  | "settle.failed"
+  | "destroyed"
+  | "port.changed"
+  | "agent.rejoined"
+  | "refunded"
+  | "refund.pending";
+
+interface MyServerEvent {
+  at: number;
+  code: MyServerEventCode;
+  count?: number;
+  version?: string;
+  amount_cents?: number;
+  reason?: string;
+}
+
+interface AuditRow {
+  id: number;
+  at: number;
+  action: string;
+  detail: string | null;
+}
+
+const EVENT_LIMIT = 50;
+const EVENT_AUDIT_FETCH = 51;
+const EVENT_FOLD_MS = 10 * 60 * 1000;
+
+/** `server.destroy` 的 reason 白名单：未知值不下发，按通用句渲染（§3.3）。 */
+const DESTROY_REASON_WHITELIST = new Set([
+  "user",
+  "billing_unpaid",
+  "enrollment_expired",
+  "activation_lost",
+  "activate_failed",
+  "agent_enroll_failed",
+  "port_mismatch",
+  "install_failed",
+  "agent_install_failed",
+  "verify_failed",
+  "service_inactive",
+]);
+
+function auditDetail(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch {
+    // `provision.failed` 的 detail 是纯文本：解析失败就按「没有可出网字段」处理。
+    return {};
+  }
+}
+
+/**
+ * 时间线动作白名单：唯一来源。
+ *
+ * 既供 `eventCodeFor` 映射，也直接派生 SQL 的 `action IN (…)`——否则
+ * `billing.failed` / `enroll.*_lost` 这些带 server_id 的运维动作会挤占 51 行窗口，
+ * 把 `machine.created` / `enroll.ok` / `destroyed` 挤出时间线。
+ * `agent.report.failed` / `enroll.rejected` 的最终 code 还要看 `failed_stage`。
+ */
+const TIMELINE_ACTION_CODES: Record<string, MyServerEventCode> = {
+  "provision.created": "machine.created",
+  "enroll.ok": "activated",
+  "settle.ok": "activated",
+  "agent.install_failed": "install.failed",
+  "agent.report.failed": "check.failed",
+  "enroll.rejected": "check.failed",
+  "provision.failed": "create.failed",
+  "settle_insufficient": "settle.failed",
+  "server.destroy": "destroyed",
+  "server.rotated": "port.changed",
+  "agent.re_enrolled": "agent.rejoined",
+  "provision.refunded": "refunded",
+  "provision.refund_failed": "refund.pending",
+};
+
+const TIMELINE_ACTIONS = Object.keys(TIMELINE_ACTION_CODES);
+
+function eventCodeFor(
+  action: string,
+  detail: Record<string, unknown>,
+): MyServerEventCode | null {
+  const code = TIMELINE_ACTION_CODES[action];
+  if (!code) return null;
+  if (action === "agent.report.failed" || action === "enroll.rejected") {
+    return detail.failed_stage === "installing" ? "install.failed" : code;
+  }
+  return code;
+}
+
+/** 只把白名单字段搬出网；`detail` 原文、provider_id、端口、错误文本一律丢弃。 */
+function auditEvent(row: AuditRow, hasEnrollOk: boolean): MyServerEvent | null {
+  // 「已开通」三源只出一条：有 enroll.ok 时 settle.ok 不再重复。
+  if (row.action === "settle.ok" && hasEnrollOk) return null;
+  const detail = auditDetail(row.detail);
+  const code = eventCodeFor(row.action, detail);
+  if (!code) return null;
+
+  const event: MyServerEvent = { at: Number(row.at), code };
+  if (
+    code === "activated" &&
+    row.action === "enroll.ok" &&
+    typeof detail.version === "string" &&
+    detail.version !== ""
+  ) {
+    event.version = detail.version;
+  }
+  if (
+    (code === "refunded" || code === "refund.pending") &&
+    typeof detail.amount_cents === "number"
+  ) {
+    event.amount_cents = detail.amount_cents;
+  }
+  if (
+    code === "destroyed" &&
+    typeof detail.reason === "string" &&
+    DESTROY_REASON_WHITELIST.has(detail.reason)
+  ) {
+    event.reason = detail.reason;
+  }
+  return event;
+}
+
+function milestone(
+  at: number | null | undefined,
+  code: MyServerEventCode,
+): MyServerEvent | null {
+  return typeof at === "number" && Number.isFinite(at) ? { at, code } : null;
+}
+
+/** 相邻同 `code` 且间隔 ≤10 分钟折叠：保留较晚那条的 `at`，`count` 记次数。 */
+function foldEvents(events: MyServerEvent[]): MyServerEvent[] {
+  const folded: MyServerEvent[] = [];
+  for (const event of events) {
+    const last = folded[folded.length - 1];
+    if (last && last.code === event.code && last.at - event.at <= EVENT_FOLD_MS) {
+      last.count = (last.count ?? 1) + (event.count ?? 1);
+    } else {
+      folded.push({ ...event });
+    }
+  }
+  return folded;
+}
+
+async function events(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
+  const identity = await authenticate(request, env);
+  if (isResponse(identity)) return identity;
+  if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+
+  // 归属校验与 getServer 一致：别人的与不存在的一律 404，不泄露是否存在。
+  const row = await loadServer(env.DB, identity.accountId, serverId);
+  if (!row) return apiError("NOT_FOUND", "没有这台服务器");
+
+  // 归属已由 loadServer 校验；这里只按 server_id 查：账户合并（merge）不迁移
+  // audit_log，再带旧的 account_id 会把合并前的历史全部过滤掉。
+  // 动作白名单从映射表派生，运维动作不占 51 行窗口。
+  const placeholders = TIMELINE_ACTIONS.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    "SELECT id, at, action, detail FROM audit_log " +
+      `WHERE server_id = ? AND action IN (${placeholders}) ORDER BY at DESC, id DESC LIMIT ?`,
+  )
+    .bind(serverId, ...TIMELINE_ACTIONS, EVENT_AUDIT_FETCH)
+    .all<AuditRow>();
+  const audit = result.results ?? [];
+  const hasEnrollOk = audit.some((item) => item.action === "enroll.ok");
+  const hasActivationAudit = audit.some(
+    (item) => item.action === "enroll.ok" || item.action === "settle.ok",
+  );
+
+  const combined: MyServerEvent[] = [];
+  for (const item of audit) {
+    const event = auditEvent(item, hasEnrollOk);
+    if (event) combined.push(event);
+  }
+  const milestones = [
+    milestone(row.created_at, "order.confirmed"),
+    milestone(row.installing_at, "install.started"),
+    milestone(row.verifying_at, "verify.started"),
+    hasActivationAudit ? null : milestone(row.ready_at, "activated"),
+  ];
+  for (const item of milestones) {
+    if (item) combined.push(item);
+  }
+
+  combined.sort((left, right) => right.at - left.at);
+  const folded = foldEvents(combined);
+  // SQL 拿满 51 行也可能还有更早的：截断与否不能只看折叠后的条数。
+  const hasMore = folded.length > EVENT_LIMIT || audit.length >= EVENT_AUDIT_FETCH;
+  return json({
+    events: folded.slice(0, EVENT_LIMIT),
+    has_more: hasMore,
+  });
+}
+
 /** 名字按 Unicode 码点计长：中文与单个 emoji 都算 1。 */
 const NAME_MIN_CODE_POINTS = 1;
 const NAME_MAX_CODE_POINTS = 24;
-
 /** PATCH /v1/servers/{id} { name }：只能改自己的，允许重名。 */
 async function rename(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
   const identity = await authenticate(request, env);
@@ -2019,6 +2225,9 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
 
   if (parts.length === 2 && request.method === "GET") return listServers(request, env);
   if (parts.length === 3 && request.method === "GET") return getServer(request, env, parts[2]);
+  if (parts.length === 4 && request.method === "GET" && parts[3] === "events") {
+    return events(request, env, parts[2]);
+  }
   if (parts.length === 3 && request.method === "PATCH") return rename(request, env, parts[2]);
   if (parts.length === 4 && post) {
     if (parts[3] === "destroy") return destroy(request, env, parts[2]);

@@ -1530,6 +1530,26 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select id, at, action, detail from audit_log where server_id = ?")) {
+      // 参数：serverId, ...动作白名单, limit
+      const args = a as unknown[];
+      const serverId = args[0];
+      const limit = Number(args[args.length - 1]);
+      const actions = new Set(args.slice(1, -1).map(String));
+      return this.tables.audit_log
+        .filter((row) => row.server_id === serverId && actions.has(String(row.action)))
+        .sort((left, right) => {
+          const byTime = Number(right.at) - Number(left.at);
+          return byTime !== 0 ? byTime : Number(right.id ?? 0) - Number(left.id ?? 0);
+        })
+        .slice(0, limit)
+        .map((row) => ({
+          id: row.id,
+          at: row.at,
+          action: row.action,
+          detail: row.detail,
+        }));
+    }
     if (sql.startsWith("select o.id as order_id, o.account_id, o.amount_cents, s.id as server_id")) {
       return this.tables.orders
         .filter((order) => order.state === "failed" && order.paid_via === "wallet" && (order.charge_mode ?? "upfront") === "upfront")
