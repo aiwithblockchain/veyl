@@ -1558,3 +1558,61 @@ async fn node_switch_to_the_current_node_reads_as_unchanged() {
         )]
     );
 }
+
+/// `DiagRun` 的模型可见文字必须逐项列出 `checks`：状态、实测值与建议都落在
+/// `summary`（即 `content`）里，模型不用去读它看不到的 `data`。
+#[tokio::test]
+async fn diag_run_writes_every_check_into_the_model_visible_summary() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "checks": [
+            {
+                "name": "system.dns",
+                "group": "system",
+                "status": "failed",
+                "ok": false,
+                "detail": "3 个解析器，example.com 无法解析",
+                "remediation": "刷新 DNS 缓存后重试",
+                "action": { "kind": "flush_dns" }
+            },
+            {
+                "name": "app.process_alive",
+                "group": "app",
+                "status": "ok",
+                "ok": true,
+                "detail": "进程在运行",
+                "remediation": null,
+                "action": null
+            },
+            {
+                "name": "app.clash_api",
+                "group": "app",
+                "status": "skipped",
+                "ok": false,
+                "detail": "未连接",
+                "remediation": null,
+                "action": null
+            }
+        ]
+    }));
+    let all = tools(svc);
+    let (is_error, env) = run(tool(&all, "DiagRun"), json!({})).await;
+    assert!(!is_error, "{env}");
+    let summary = env["summary"].as_str().unwrap_or_default();
+    assert!(summary.contains("共 3 项检查"), "{summary}");
+    assert!(summary.contains("1 项未通过"), "{summary}");
+    assert!(
+        summary.contains("- DNS：失败 —— 3 个解析器，example.com 无法解析 → 刷新 DNS 缓存后重试"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("- 后台进程：正常 —— 进程在运行"),
+        "{summary}"
+    );
+    assert!(summary.contains("- 控制面：没检查（未连接）"), "{summary}");
+    assert!(
+        summary.contains("下一步：刷新 DNS 缓存后重试。"),
+        "{summary}"
+    );
+    assert!(!summary.contains("data"), "{summary}");
+    assert!(!summary.contains("checks"), "{summary}");
+}
