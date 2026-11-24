@@ -1121,6 +1121,16 @@ export const en: Record<MessageKey, string> = {
   "detail.confirmDestroy": "Confirm destroy",
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
+  "detail.rotate": "Reset connection credentials",
+  "detail.rotateConfirm":
+    "After resetting, the old port and password stop working immediately. Configurations already imported on your phone must be imported again; the desktop client refreshes automatically. The node will briefly disconnect.",
+  "detail.confirmRotate": "Confirm reset",
+  "detail.rotating": "Resetting…",
+  "detail.rotateDone": "Reset. Re-import the profile on your phone.",
+  "detail.rotateRefreshFailed":
+    "Reset, but this device still has the old credentials. Reconnect, or refresh the server data.",
+  "detail.rotateFailed":
+    "Couldn't reset. The node may be temporarily unreachable; try again later.",
   "detail.repair": "Smart repair",
 
   // New node wizard

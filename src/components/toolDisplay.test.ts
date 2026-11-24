@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import toolsDoc from "../../docs/contracts/tools.md?raw";
+import envelopeSource from "../../src-tauri/src/tools/envelope.rs?raw";
 import { setLanguage } from "../i18n";
 import { en } from "../i18n/en";
 import { zh } from "../i18n/zh";
@@ -22,10 +23,57 @@ function contractToolNames(): string[] {
   );
 }
 
+function contractHeader(): { version: string | null; proposal: boolean } {
+  const head = toolsDoc.split(/^## 0\. /m)[0] ?? "";
+  return {
+    version: head.match(/契约版本：`([^`]+)`/)?.[1] ?? null,
+    proposal: /^>\s*状态：提案/m.test(head),
+  };
+}
+
+/** 实现侧权威版本：Host 信封的 CONTRACT_VERSION（TS 侧同名常量是事件契约，不能比）。 */
+function implContractVersion(): string | null {
+  return (
+    envelopeSource.match(/CONTRACT_VERSION:\s*&str\s*=\s*"([^"]+)"/)?.[1] ?? null
+  );
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
+
 describe("工具名映射集合", () => {
-  it("与 tools.md §3 的工具名完全相等，且包含新增工具", () => {
-    const names = contractToolNames();
-    expect(new Set(names)).toEqual(new Set(TOOL_NAMES));
+  it("提案期只校验版本与非空，定稿后完全相等", () => {
+    const { version: docVersion, proposal } = contractHeader();
+    const implVersion = implContractVersion();
+    expect(
+      docVersion,
+      "未识别到契约头/版本（期望 `> 契约版本：`x.y.z``），请按模板写",
+    ).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(
+      implVersion,
+      "envelope.rs 里未识别到 CONTRACT_VERSION，请按模板写",
+    ).toMatch(/^\d+\.\d+\.\d+$/);
+    if (!docVersion || !implVersion) return;
+
+    if (docVersion === implVersion) {
+      // 文档与实现同版本：不再看状态字样，严格比对。
+      expect(new Set(contractToolNames())).toEqual(new Set(TOOL_NAMES));
+    } else if (compareVersions(docVersion, implVersion) > 0) {
+      // 文档超前实现：必须是声明过的提案，且只做格式 / 非空断言。
+      expect(proposal, "文档版本高于实现时必须声明「状态：提案」").toBe(true);
+      expect(contractToolNames().length).toBeGreaterThan(0);
+      expect(TOOL_NAMES.length).toBeGreaterThan(0);
+    } else {
+      expect.fail(
+        `契约文档 ${docVersion} 落后于实现 ${implVersion}：两边已脱节，请对齐版本`,
+      );
+    }
     // 新工具必须有文案，避免整表对上了却漏掉刚加的两条。
     expect(TOOL_NAMES).toEqual(
       expect.arrayContaining(["OpenSettings", "MyServerFailure", "NodeRotateCredentials"]),

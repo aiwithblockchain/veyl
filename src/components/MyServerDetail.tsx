@@ -15,6 +15,7 @@ import {
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
+import { rotateNodeCredentials } from "../myservers/rotateCredentials";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
 import { errorText as describeError, failureText } from "../i18n/errorText";
@@ -49,6 +50,9 @@ interface Props {
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
 export const DESTROY_RETRY_MS = 60_000;
+
+/** 重置凭据的确认态无操作收回时间。 */
+export const ROTATE_CONFIRM_MS = 8_000;
 
 function errorText(error: unknown): string {
   const problem = toBridgeError(error);
@@ -89,6 +93,15 @@ export function MyServerDetail({
   const focusRenameAfterSave = useRef(false);
   const [ipCopy, setIpCopy] = useState<"idle" | "copied" | "failed">("idle");
   const ipCopyTimer = useRef(0);
+  /** 重置连接凭据：就地确认 → 结果文案，不走整块错误态。 */
+  const [rotatePhase, setRotatePhase] = useState<
+    "idle" | "confirming" | "ok" | "stale" | "failed"
+  >("idle");
+  const rotateCancelRef = useRef<HTMLButtonElement>(null);
+  const rotateButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreRotateFocus = useRef(false);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
 
@@ -197,6 +210,72 @@ export function MyServerDetail({
 
   const destroying = server.state === "destroying";
 
+  /** 只有建好的机器、桥接里有这条命令时才给入口；未桥接就整颗不渲染。 */
+  const canRotate =
+    !readOnly &&
+    (server.state === "healthy" || server.state === "active") &&
+    (server.node_id ?? "").trim() !== "" &&
+    typeof bridge.nodeRotateCredentials === "function";
+
+  const submitRotate = async () => {
+    if (busy) return;
+    const targetId = server.server_id;
+    setBusy(true);
+    try {
+      const result = await rotateNodeCredentials(bridge, server.server_id);
+      // 请求在途时换了服务器：结果属于上一台，不能落到新面板上。
+      if (serverIdRef.current !== targetId) return;
+      restoreRotateFocus.current = true;
+      setRotatePhase(result.refreshed ? "ok" : "stale");
+      onChanged();
+    } catch {
+      if (serverIdRef.current !== targetId) return;
+      restoreRotateFocus.current = true;
+      setRotatePhase("failed");
+    } finally {
+      // 同样要守卫：别把新面板上正在跑的操作解锁。
+      if (serverIdRef.current === targetId) setBusy(false);
+    }
+  };
+
+  // 入口不再可用（状态变了、桥接没了）：收回可能留着的确认态，别继续吞 Esc。
+  useEffect(() => {
+    if (!canRotate) setRotatePhase("idle");
+  }, [canRotate]);
+
+  // 确认态：默认聚焦「取消」，Esc 取消，8 秒无操作收回。
+  useEffect(() => {
+    if (rotatePhase !== "confirming") return;
+    rotateCancelRef.current?.focus();
+    const timer = window.setTimeout(() => {
+      // 请求在途时保留确认块：它是进行中文案唯一的住处。
+      if (busyRef.current) return;
+      setRotatePhase("idle");
+    }, ROTATE_CONFIRM_MS);
+    const onKeyDown = (event: KeyboardEvent) => {
+      // 重命名输入框已经处理过 Esc：这里不再叠加一次。
+      if (event.defaultPrevented) return;
+      if (event.key !== "Escape") return;
+      // 请求在途时取消按钮已禁用，键盘也不能撤掉确认块。
+      if (busyRef.current) return;
+      event.preventDefault();
+      restoreRotateFocus.current = true;
+      setRotatePhase("idle");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [rotatePhase]);
+
+  // 确认块卸载后把焦点送回入口；超时收回不动焦点（用户可能已经在别处操作）。
+  useEffect(() => {
+    if (rotatePhase === "confirming" || !restoreRotateFocus.current) return;
+    restoreRotateFocus.current = false;
+    rotateButtonRef.current?.focus();
+  }, [rotatePhase]);
+
   /** 停机删除的墓碑：删本地节点，调用方同时把这一行收起。 */
   const forget = async () => {
     if (busy || !server.local_node_id) return;
@@ -216,6 +295,7 @@ export function MyServerDetail({
     setRenaming(false);
     setRenameError(null);
     setNameDraft("");
+    setRotatePhase("idle");
   }, [server.server_id]);
 
   useEffect(() => {
@@ -501,8 +581,36 @@ export function MyServerDetail({
 
       <div className="myservers__footer">
         <div className="myservers__danger">
-          {/* 已销毁：对象已不存在，不给「销毁」；右侧仍可「重新购买」。 */}
-          {server.state === "gone" ? null : destroying && !destroyRetryAllowed ? (
+          {/* 重置凭据：就地确认；危险块同时只开一个确认。 */}
+          {rotatePhase === "confirming" && canRotate ? (
+            <div className="myservers__confirm" role="alert">
+              <p>{tr("detail.rotateConfirm")}</p>
+              <div className="myservers__actions">
+                <button
+                  ref={rotateCancelRef}
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    restoreRotateFocus.current = true;
+                    setRotatePhase("idle");
+                  }}
+                >
+                  {tr("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={busy}
+                  aria-busy={busy || undefined}
+                  onClick={() => void submitRotate()}
+                >
+                  {busy ? tr("detail.rotating") : tr("detail.confirmRotate")}
+                </button>
+              </div>
+            </div>
+          ) : /* 已销毁：对象已不存在，不给「销毁」；右侧仍可「重新购买」。 */
+          server.state === "gone" ? null : destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
               {tr("detail.destroying")}
             </p>
@@ -533,17 +641,45 @@ export function MyServerDetail({
               </div>
             </div>
           ) : (
-            <button
-              type="button"
-              className="btn btn--danger-ghost"
-              disabled={locked}
-              onClick={() => {
-                setConfirming(true);
-              }}
-            >
-              {destroying ? tr("detail.retryDestroy") : tr("detail.destroy")}
-            </button>
+            <div className="myservers__actions">
+              {canRotate ? (
+                <button
+                  ref={rotateButtonRef}
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={locked}
+                  onClick={() => setRotatePhase("confirming")}
+                >
+                  {tr("detail.rotate")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn--danger-ghost"
+                disabled={locked}
+                onClick={() => {
+                  setConfirming(true);
+                }}
+              >
+                {destroying ? tr("detail.retryDestroy") : tr("detail.destroy")}
+              </button>
+            </div>
           )}
+          {canRotate && rotatePhase === "ok" ? (
+            <p className="myservers__hint" role="status">
+              {tr("detail.rotateDone")}
+            </p>
+          ) : null}
+          {canRotate && rotatePhase === "stale" ? (
+            <p className="myservers__hint" role="status">
+              {tr("detail.rotateRefreshFailed")}
+            </p>
+          ) : null}
+          {canRotate && rotatePhase === "failed" ? (
+            <p className="myservers__error" role="alert">
+              {tr("detail.rotateFailed")}
+            </p>
+          ) : null}
         </div>
         {/* 右侧动作组：次按钮挨主按钮左侧；没有主按钮时整组不出现，销毁仍靠左。 */}
         <div className="myservers__actions">

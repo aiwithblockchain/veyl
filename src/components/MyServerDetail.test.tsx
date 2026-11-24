@@ -351,7 +351,7 @@ describe("服务器详情", () => {
     );
 
     const group = document.querySelector(
-      ".myservers__footer .myservers__actions",
+      ".myservers__footer > .myservers__actions",
     ) as HTMLElement;
     const buttons = [...group.querySelectorAll("button")].map(
       (button) => button.textContent,
@@ -1250,5 +1250,269 @@ describe("智能诊断入口", () => {
     const destroy = screen.getByRole("button", { name: "销毁" });
     expect(destroy.classList.contains("btn--danger-ghost")).toBe(true);
     expect(destroy.classList.contains("btn--ghost")).toBe(false);
+  });
+});
+
+describe("重置连接凭据", () => {
+  function renderRotate(
+    over: Partial<MyServer> = {},
+    options: {
+      rotate?: (serverId: string) => Promise<{ ok: true; port: number; refreshed: boolean }>;
+      destroy?: () => Promise<MyServer>;
+      onChanged?: () => void;
+      readOnly?: boolean;
+      bridged?: boolean;
+    } = {},
+  ) {
+    const rotate = vi.fn(
+      options.rotate ??
+        (async () => ({ ok: true as const, port: 32101, refreshed: true })),
+    );
+    const onChanged = options.onChanged ?? vi.fn();
+    const bridge = {
+      myServerDestroy: vi.fn(options.destroy ?? (async () => server())),
+      ...(options.bridged === false ? {} : { nodeRotateCredentials: rotate }),
+    } as unknown as AgentBridge;
+    const element = (next: Partial<MyServer>) => (
+      <MyServerDetail
+        bridge={bridge}
+        server={server(next)}
+        regionLabel="新加坡 1"
+        readOnly={options.readOnly}
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+      />
+    );
+    const view = render(element(over));
+    return {
+      rotate,
+      onChanged,
+      rerender: (next: Partial<MyServer>) => view.rerender(element(next)),
+    };
+  }
+
+  it("只在 healthy / active 且节点就绪时出现", () => {
+    for (const state of ["healthy", "active"] as MyServerState[]) {
+      renderRotate({ state });
+      const entry = screen.getByRole("button", { name: "重置连接凭据" });
+      expect(entry.classList.contains("btn--ghost")).toBe(true);
+      expect(entry.classList.contains("btn--danger-ghost")).toBe(false);
+      cleanup();
+    }
+    for (const state of [
+      "creating",
+      "booting",
+      "installing",
+      "verifying",
+      "error",
+      "destroying",
+      "destroyed",
+      "gone",
+    ] as MyServerState[]) {
+      renderRotate({ state });
+      expect(screen.queryByRole("button", { name: "重置连接凭据" })).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("没有 node_id 或桥接里没有这条命令时不出现", () => {
+    renderRotate({ node_id: null });
+    expect(screen.queryByRole("button", { name: "重置连接凭据" })).toBeNull();
+    cleanup();
+
+    renderRotate({}, { bridged: false });
+    expect(screen.queryByRole("button", { name: "重置连接凭据" })).toBeNull();
+  });
+
+  it("只读时不给入口", () => {
+    renderRotate({}, { readOnly: true });
+    expect(screen.queryByRole("button", { name: "重置连接凭据" })).toBeNull();
+  });
+
+  it("点一次进就地确认，取消不调用", () => {
+    const { rotate } = renderRotate();
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    expect(document.querySelector(".myservers__confirm")?.textContent).toContain(
+      "重置后旧的端口和密码立刻失效",
+    );
+    // 确认按钮用独立文案，不和入口同名。
+    expect(screen.getByRole("button", { name: "确认重置" })).toBeTruthy();
+    expect(rotate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("入口消失（状态变了）时收回确认态", () => {
+    const { rerender } = renderRotate();
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    expect(document.querySelector(".myservers__confirm")).not.toBeNull();
+
+    rerender({ state: "error" });
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+    expect(screen.queryByRole("button", { name: "重置连接凭据" })).toBeNull();
+  });
+
+  it("Esc 取消确认，不调用", () => {
+    const { rotate } = renderRotate();
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("确认态 8 秒无操作自动收回", () => {
+    vi.useFakeTimers();
+    renderRotate();
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    act(() => {
+      vi.advanceTimersByTime(8_000);
+    });
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+  });
+
+  it("确认后调用一次，显示成功文案并刷新详情", async () => {
+    const { rotate, onChanged } = renderRotate();
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    await act(async () => {});
+
+    expect(rotate).toHaveBeenCalledTimes(1);
+    expect(rotate).toHaveBeenCalledWith("srv_1");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain(
+      "已重置。手机上的配置要重新导入一次。",
+    );
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+  });
+
+  it("成功但本机没刷新：显示另一句，不说「已重置」", async () => {
+    const { onChanged } = renderRotate({}, {
+      rotate: async () => ({ ok: true as const, port: 32101, refreshed: false }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "已重置，但本机凭据没刷新。请重新连接，或刷新服务器数据。",
+    );
+    expect(document.body.textContent).not.toContain(
+      "已重置。手机上的配置要重新导入一次。",
+    );
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("失败时显示失败文案，事实区不变", async () => {
+    renderRotate({}, {
+      rotate: async () => {
+        throw { code: "agent_unreachable", message: "", retryable: true };
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "没能重置。节点可能暂时连不上，稍后再试。",
+    );
+    const facts = document.querySelector(".myservers__facts")?.textContent ?? "";
+    expect(facts).toContain("新加坡 1");
+    expect(facts).toContain("每天 $0.20");
+    expect(document.querySelector(".myservers__confirm")).toBeNull();
+  });
+
+  it("重置过程中按钮禁用并显示进行中文案", async () => {
+    let finish: () => void = () => {};
+    const pending = new Promise<{ ok: true; port: number; refreshed: boolean }>(
+      (resolve) => {
+        finish = () => resolve({ ok: true, port: 32101, refreshed: true });
+      },
+    );
+    renderRotate({}, { rotate: () => pending });
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    const busy = screen.getByRole("button", { name: "正在重置…" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(busy.getAttribute("aria-busy")).toBe("true");
+    expect(
+      (screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // 在途时 Esc 不能撤掉确认块（取消按钮已禁用）。
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector(".myservers__confirm")).not.toBeNull();
+
+    await act(async () => {
+      finish();
+    });
+    expect(document.body.textContent).toContain(
+      "已重置。手机上的配置要重新导入一次。",
+    );
+    // 确认块卸载后焦点回到入口。
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "重置连接凭据" }),
+    );
+  });
+
+  it("在途时切服务器：结果不落到新面板，也不解开新面板的忙态", async () => {
+    let finishRotate: () => void = () => {};
+    const rotatePending = new Promise<{
+      ok: true;
+      port: number;
+      refreshed: boolean;
+    }>((resolve) => {
+      finishRotate = () => resolve({ ok: true, port: 32101, refreshed: true });
+    });
+    let finishDestroy: (server: MyServer) => void = () => {};
+    const destroyPending = new Promise<MyServer>((resolve) => {
+      finishDestroy = resolve;
+    });
+    const { rerender } = renderRotate(
+      {},
+      {
+        rotate: () => rotatePending,
+        destroy: () => destroyPending,
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重置连接凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    // 请求还没回来就换了另一台，并在新面板上开始销毁。
+    rerender({ server_id: "srv_2", ip: "198.51.100.7" });
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认销毁" }));
+    const destroying = screen.getByRole("button", { name: "正在销毁…" });
+    expect((destroying as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      finishRotate();
+    });
+    // 上一台的结果不落到 srv_2，也不把 srv_2 正在跑的销毁解锁。
+    expect(document.body.textContent).not.toContain(
+      "已重置。手机上的配置要重新导入一次。",
+    );
+    expect(document.body.textContent).not.toContain("没能重置。");
+    expect(
+      (screen.getByRole("button", { name: "正在销毁…" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      finishDestroy(server({ server_id: "srv_2", state: "destroyed" }));
+    });
   });
 });

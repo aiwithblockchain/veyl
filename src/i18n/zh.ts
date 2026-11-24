@@ -1064,6 +1064,15 @@ export const zh = {
   "detail.confirmDestroy": "确认销毁",
   "detail.retryDestroy": "重试销毁",
   "detail.destroy": "销毁",
+  "detail.rotate": "重置连接凭据",
+  "detail.rotateConfirm":
+    "重置后旧的端口和密码立刻失效，手机上已导入的配置要重新导入一次；桌面端会自动刷新。节点会短暂中断。",
+  "detail.confirmRotate": "确认重置",
+  "detail.rotating": "正在重置…",
+  "detail.rotateDone": "已重置。手机上的配置要重新导入一次。",
+  "detail.rotateRefreshFailed":
+    "已重置，但本机凭据没刷新。请重新连接，或刷新服务器数据。",
+  "detail.rotateFailed": "没能重置。节点可能暂时连不上，稍后再试。",
   "detail.repair": "智能修复",
 
   // 新建节点向导
