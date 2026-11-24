@@ -232,18 +232,6 @@ export function formatDuration(totalSeconds: number): string {
     : t("myservers.duration.seconds", { seconds });
 }
 
-/** 创建用时：ready_at − created_at。旧机器没有 ready_at 时返回 null。 */
-export function formatBuildDuration(
-  createdAt: string,
-  readyAt: string | null,
-): string | null {
-  if (!readyAt) return null;
-  const start = Date.parse(createdAt);
-  const end = Date.parse(readyAt);
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-  return formatDuration((end - start) / 1000);
-}
-
 /** 机器详情费用行：日价 + 计费状态的单一文案函数。 */
 export function serverBillingText(
   server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,

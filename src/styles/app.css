@@ -3049,13 +3049,6 @@ body[data-resizing] {
   color: var(--amber);
 }
 
-/* 完成态与进度块同高（实测进度支 88.8px），就绪那一刻下方的行不位移。 */
-.myservers__progress.is-done {
-  justify-content: center;
-  gap: 10px;
-  padding: 20px 0;
-}
-
 .myservers__failure {
   display: flex;
   flex-direction: column;
@@ -3111,12 +3104,6 @@ body[data-resizing] {
   font-size: 13px;
   line-height: 1.6;
   color: var(--ink-3);
-}
-
-.myservers__created-in {
-  margin: 0;
-  font-size: 13px;
-  color: var(--ink-2);
 }
 
 .myservers__hint {
@@ -6281,6 +6268,8 @@ details[open] > .settings-fold__summary::before {
   min-height: 44px;
   padding: 10px;
   color: var(--ink);
+  /* 宽度容器：最小拖拽宽度下按内容宽藏图标，见下方 @container。 */
+  container-type: inline-size;
 }
 
 /* 未登录时左栏没有列表占位，靠这条把入口贴到底部；已登录保留基类的 8px 上边距。 */
@@ -6311,6 +6300,14 @@ details[open] > .settings-fold__summary::before {
 /* 图标不参与首基线：网格基线取文字，价格不再低 1px。 */
 .rail-build__title .rail__new-row__icon {
   align-self: center;
+}
+
+/* 左栏 220–239 宽（按钮内容 ≤170）时图标先让位给标题：
+   中文「新建节点」与英文 "New node" 都不用省略。240 起图标回来。 */
+@container (max-width: 170px) {
+  .rail-build .rail__new-row__icon {
+    display: none;
+  }
 }
 
 /* 英文标题更长：宁可截断，也不让两列互相挤压。 */

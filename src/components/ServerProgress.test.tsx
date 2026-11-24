@@ -134,17 +134,14 @@ describe("四段进度条", () => {
     });
     expect(currentSegment(container)).toBe(3);
     // 最后一格先亮过，完成态不在同一帧出现。
-    expect(container.querySelector(".myservers__progress.is-done")).toBeNull();
+    expect(container.querySelector(".myservers__progress")).not.toBeNull();
+    expect(container.querySelector(".myservers__bar")).not.toBeNull();
 
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
-    // 已开通只留一行，进度条与说明行都不再渲染。
-    expect(container.querySelector(".myservers__bar")).toBeNull();
-    expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
-      "已开通 · 用了 4 秒",
-    );
+    // 就绪后整块不再渲染：状态词在头部，不再重复「已开通 · 用了 X」。
+    expect(container.querySelector(".myservers__progress")).toBeNull();
   });
 
   it("换服务器：游标落在该台当前格，不播入场动画；已就绪的直接是完成态", () => {
@@ -164,7 +161,7 @@ describe("四段进度条", () => {
     });
     expect(currentSegment(container)).toBe(0);
 
-    // 换到一台已就绪的：直接完成态，不逐格补。
+    // 换到一台已就绪的：直接不渲染进度块，不逐格补。
     rerender(
       <ServerProgress
         server={server({
@@ -175,10 +172,7 @@ describe("四段进度条", () => {
         })}
       />,
     );
-    expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
-    expect(container.querySelector(".myservers__created-in")?.textContent).toContain(
-      "已开通 · 用了 2 秒",
-    );
+    expect(container.querySelector(".myservers__progress")).toBeNull();
     expect(currentSegment(container)).toBe(-1);
   });
 
@@ -214,9 +208,10 @@ describe("四段进度条", () => {
     act(() => {
       vi.advanceTimersByTime(1);
     });
-    expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
+    expect(container.querySelector(".myservers__progress")).toBeNull();
     rerender(<ServerProgress server={server({ state: "booting" })} />);
-    expect(container.querySelector(".myservers__progress.is-done")).not.toBeNull();
+    // 完成态不撤回：迟到的旧快照也不会把进度块放回来。
+    expect(container.querySelector(".myservers__progress")).toBeNull();
   });
 });
 

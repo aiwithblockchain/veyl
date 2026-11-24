@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   billingNoticeText,
-  formatBuildDuration,
   serverDetailState,
   serverRailState,
   serverTone,
@@ -136,34 +135,6 @@ describe("stateTone", () => {
     expect(stateTone("active")).toBe("ok");
     expect(stateTone("destroying")).toBe("idle");
     expect(stateTone("destroyed")).toBe("idle");
-  });
-});
-
-describe("formatBuildDuration", () => {
-  const created = "2026-11-18T10:00:00.000Z";
-
-  it("按分秒报创建用时", () => {
-    expect(formatBuildDuration(created, "2026-11-18T10:02:55.000Z")).toBe(
-      "2 分 55 秒",
-    );
-  });
-
-  it("不到一分钟只报秒", () => {
-    expect(formatBuildDuration(created, "2026-11-18T10:00:40.000Z")).toBe("40 秒");
-  });
-
-  it("满一小时换算成小时与分钟，不再报 120 分", () => {
-    expect(formatBuildDuration(created, "2026-11-18T12:00:00.000Z")).toBe(
-      "2 小时 0 分",
-    );
-    expect(formatBuildDuration(created, "2026-11-18T11:03:05.000Z")).toBe(
-      "1 小时 3 分",
-    );
-  });
-
-  it("没有 ready_at 或时间解析失败返回 null", () => {
-    expect(formatBuildDuration(created, null)).toBeNull();
-    expect(formatBuildDuration(created, "not-a-date")).toBeNull();
   });
 });
 

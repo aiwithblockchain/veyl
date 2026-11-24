@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { MyServer } from "../agent/bridge";
-import {
-  formatBuildDuration,
-  formatDuration,
-  serverStateLabel,
-} from "../myservers/labels";
+import { formatDuration, serverStateLabel } from "../myservers/labels";
 import { useT } from "../i18n";
 import type { MessageKey } from "../i18n";
 
@@ -49,7 +45,7 @@ function buildStartedAt(server: MyServer): number | null {
 
 export function ServerProgress({ server }: { server: MyServer }) {
   const t = useT();
-  // 建好之后这块原地换成完成态：四个步骤全打勾 + 创建用时，页面不位移。
+  // 就绪后整块不渲染：状态词「已开通」在头部，建机耗时不是产品事实。
   const ready = server.state === "healthy" || server.state === "active";
   const stageIndex = STAGES.indexOf(server.state as (typeof STAGES)[number]);
   /** 真实状态对应的目标格：完成态也只到最后一格，最后一格亮过再切完成态。 */
@@ -112,32 +108,9 @@ export function ServerProgress({ server }: { server: MyServer }) {
     return () => window.clearTimeout(timer);
   }, [ready, done, shown]);
 
-  if (done) {
-    const buildDuration = formatBuildDuration(
-      server.created_at,
-      server.ready_at ?? null,
-    );
-    return (
-      <div
-        className="myservers__progress is-done"
-        role="group"
-        aria-label={t("progress.groupAria")}
-      >
-        <p className="myservers__created-in">
-          {t("progress.ready")}
-          {" · "}
-          {buildDuration ? (
-            <>
-              {t("progress.used")}{" "}
-              <span className="num">{buildDuration}</span>
-            </>
-          ) : (
-            t("progress.durationMissing")
-          )}
-        </p>
-      </div>
-    );
-  }
+  // 就绪后整块不再渲染：状态词「已开通」在头部，建机耗时不是产品事实，
+  // 再写一行既重复又像用量。
+  if (done) return null;
 
   const stageElapsed =
     stageStart === null ? null : Math.max(0, now - stageStart);

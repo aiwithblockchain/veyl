@@ -318,7 +318,7 @@ export function MyServerDetail({
     (server.billing_state === "past_due" || server.billing_state === "expired") &&
     !halted &&
     !failed;
-  // 建好之后进度块原地换成完成态（含创建用时），不再另起一段。
+  // 就绪后进度块整块抽走（ServerProgress 返回 null）：事实区会随之上移，接受这点位移。
   const ready = server.state === "healthy" || server.state === "active";
   const chargedCents = server.charged_cents;
   const refundedCents = server.refunded_cents;

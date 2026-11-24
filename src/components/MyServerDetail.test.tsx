@@ -466,7 +466,7 @@ describe("服务器详情", () => {
     ).toContain("等待开机");
     expect(document.body.textContent).not.toContain("正在开机");
 
-    // 就绪后进度块原地换成完成态：不再计时，四个步骤全打勾。
+    // 就绪后进度块整块不再渲染：不再计时，状态词由头部接管。
     view.rerender(
       <MyServerDetail
         {...props}
@@ -487,13 +487,10 @@ describe("服务器详情", () => {
       vi.advanceTimersByTime(1);
     });
     expect(screen.queryByText(/已等待/)).toBeNull();
-    expect(screen.getByRole("group", { name: "建机进度" })).toBeTruthy();
-    // 完成态只留一行：进度条与阶段词都不再出现。
+    // 就绪后整块进度不渲染：状态词「已开通」在头部，不再重复建机耗时。
+    expect(screen.queryByRole("group", { name: "建机进度" })).toBeNull();
+    expect(document.querySelector(".myservers__progress")).toBeNull();
     expect(document.querySelector(".myservers__steps")).toBeNull();
-    expect(document.querySelector(".myservers__bar")).toBeNull();
-    const doneLine = document.querySelector(".myservers__created-in");
-    expect(doneLine?.textContent).toContain("已开通");
-    expect(doneLine?.textContent).toContain("用时未记录");
   });
 
   it("重进详情不从零算：整机时间以 created_at 为基准", () => {
@@ -598,37 +595,6 @@ describe("服务器详情", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("就绪的机器显示创建用时；旧机器没有 ready_at 时写未知", () => {
-    const created = "2026-11-18T10:00:00.000Z";
-    const view = renderDetail({
-      state: "healthy",
-      created_at: created,
-      ready_at: "2026-11-18T10:02:55.000Z",
-    });
-    const createdLine = document.querySelector(".myservers__created-in");
-    expect(createdLine?.textContent).toContain("已开通 · 用了 2 分 55 秒");
-    expect(createdLine?.querySelector(".num")?.textContent).toBe("2 分 55 秒");
-    view.unmount();
-
-    renderDetail({
-      state: "healthy",
-      created_at: created,
-      ready_at: null,
-    });
-    expect(
-      document.querySelector(".myservers__created-in")?.textContent,
-    ).toContain("用时未记录");
-  });
-
-  it("没建成的机器不显示创建用时", () => {
-    renderDetail({
-      state: "error",
-      created_at: "2026-11-18T10:00:00.000Z",
-      ready_at: "2026-11-18T10:02:55.000Z",
-    });
-    expect(screen.queryByText(/创建用时/)).toBeNull();
-  });
-
   it("建机进度不显示百分比，秒数每秒更新，当前阶段在第 1 段", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 0, 0) });
     renderDetail({
@@ -719,6 +685,8 @@ describe("服务器详情", () => {
 
     expect(screen.getByText("已开通")).toBeTruthy();
     expect(screen.queryByText("已在使用")).toBeNull();
+    // 就绪态不渲染进度块，也不再有「用了 X」。
+    expect(document.querySelector(".myservers__progress")).toBeNull();
   });
 
   it("主按钮：建机中没有、失败重建、失效重购；全文没有断开", () => {

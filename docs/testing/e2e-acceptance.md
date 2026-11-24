@@ -3930,14 +3930,14 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 2. 记录阶段顺序、`aria-current="step"` 的落点、note 文本与「已等待」的变化；确认页面没有任何百分比数字。
 3. 查 `servers` 行的 `state, installing_at, verifying_at, ready_at`。
 4. 再造一台，停在 `installing`（或 `verifying`）时，把 `enrollment_expires_at` 改成过去，然后打开列表/详情（或等计费 Cron），观察结果。
-5. 找一台旧机器（三个时间列为 NULL），打开详情看用时文案。
+5. 找一台旧机器（三个时间列为 NULL），打开详情确认同样没有进度块与用时文案。
 
 **可判定预期**：
 
-1. 四段进度条 `.myservers__bar` 固定 4 段：已完成段 `is-done`、当前段 `is-current`、未开始段无类；不再渲染阶段词列表；完成后进度条消失，只留 `已开通` 一行；进度区没有 `%` 文案。
+1. 四段进度条 `.myservers__bar` 固定 4 段：已完成段 `is-done`、当前段 `is-current`、未开始段无类；不再渲染阶段词列表；就绪后整个进度块 `.myservers__progress` 从 DOM 消失（没有进度条、说明行或「用了 X」），头部状态词是 `已开通`；进度区没有 `%` 文案。
 2. `installing_at` < `verifying_at` < `ready_at` 且都非空；「已等待」每秒递增；阶段超过 180 秒后 note 变为「这一步已经 N 分钟，还在继续。」
 3. 超时：该服务器被销毁或标失败，`failure_stage` 等于卡住的阶段，失败原因码为 `install_timeout` / `verify_timeout` / `enrollment_timeout`；界面显示失败阶段而不是编造的阶段；`wallet_ledger` 有对应退款。
-4. 旧机器三个时间为 NULL：界面显示「用时未知」，不拿 `created_at` 顶替。
+4. 旧机器三个时间为 NULL：详情同样不渲染进度块，不出现任何「用时」文案。
 
 **不合格时记录什么**：阶段序列与时间戳、`aria-current` 落点、note 原文、`servers` 行、`wallet_ledger` 退款行。
 

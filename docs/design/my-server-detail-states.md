@@ -65,7 +65,7 @@
 | `booting` | 等待开机 · 已等待 X | 第 2 步，共 4 步 · 通常 2–4 分钟 | 四段，当前第 2 段 | 地区、流量 | 销毁（取消创建待排期） |
 | `installing` | 安装服务端 · 已等待 X | 第 3 步，共 4 步 · sing-box {version} · 通常 2–4 分钟 | 四段，当前第 3 段 | 地区、流量 | 销毁（取消创建待排期） |
 | `verifying` | 检查是否可用 · 已等待 X | 第 4 步，共 4 步 · 通常 2–4 分钟 | 四段，当前第 4 段 | 地区、流量 | 销毁（取消创建待排期） |
-| `active` / `healthy` | 已开通 | 用了 3 分 12 秒 | 完成，不画条 | 全部五行 | 销毁；有诊断条件时给「智能诊断」 |
+| `active` / `healthy` | 已开通 | 不渲染（状态词已在头部，不再重复建机耗时） | 不画条，整块不渲染 | 全部五行 | 销毁；有诊断条件时给「智能诊断」 |
 | `error`（非结算） | 出错了 | 失败说明（`failureText`） | 四段：失败前 `--accent`，失败段起全 `--hair`；说明行写「第 N 步时失败」 | 地区、费用（退款结论） | 重新建一台（主）、AI 定位（次）、销毁 |
 | `error`（`settle_insufficient`） | 出错了 | 「服务器没开通，本次没有扣费。」 | 同上，四步已完成 | 地区、费用（本次没有扣费） | 去充值（主，最右）、重新建一台（次，在其左）、销毁（最左）；**不给 AI 定位** |
 | `destroying` | 正在销毁 | 「正在销毁这台服务器…」 | 不画条 | 地区 | 60 秒后给「重试销毁」，期间禁用 |
@@ -113,7 +113,6 @@
 | 典型时长（行内） | 通常 2–4 分钟 | usually 2–4 minutes |
 | 版本行内事实 | sing-box {version} | sing-box {version} |
 | 超时 | 这一步已经 {minutes} 分钟，还在继续。 | This step has been running for {minutes} min and is still going. |
-| 完成用时 | 用了 {duration} | Took {duration} |
 | 取消创建（按钮，待排期） | 取消创建 | Cancel setup |
 | 失败停在某步 | 第 {n} 步时失败 | Failed at step {n} |
 | 可重试补充 | 可以再建一台试试。 | You can create another one and try again. |

@@ -927,10 +927,6 @@ export const en: Record<MessageKey, string> = {
 
   // Server setup progress
   "progress.groupAria": "Server setup progress",
-  "progress.createdIn": "Setup took",
-  "progress.ready": "Ready",
-  "progress.used": "took",
-  "progress.durationMissing": "Duration not recorded",
   "progress.overtime": "This step has been running for {minutes} min and is still going.",
   "progress.creating": "Creating the cloud server — usually 1–2 minutes.",
   "progress.booting": "Server created; starting it up — usually 30–60 seconds.",

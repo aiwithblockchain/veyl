@@ -881,10 +881,6 @@ export const zh = {
 
   // 建机进度
   "progress.groupAria": "建机进度",
-  "progress.createdIn": "创建用时",
-  "progress.ready": "已开通",
-  "progress.used": "用了",
-  "progress.durationMissing": "用时未记录",
   "progress.overtime": "这一步已经 {minutes} 分钟，还在继续。",
   "progress.creating": "正在创建云服务器，通常 1–2 分钟。",
   "progress.booting": "服务器已创建，正在启动，通常 30–60 秒。",
