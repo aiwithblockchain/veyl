@@ -115,33 +115,24 @@ fn base_file_tools() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// 填占位符、追加生效地区与来源。`lang` 决定用哪套提示词。
-fn render_system_prompt(
-    prompt_dir: &std::path::Path,
-    lang: &str,
-    region: &crate::rules::Region,
-    source: crate::rules::RegionSource,
-    system_region: &crate::rules::Region,
-) -> String {
+/// 填占位符，只渲染 system.md 正文。`lang` 决定用哪套提示词。
+fn render_system_prompt(prompt_dir: &std::path::Path, lang: &str) -> String {
     let body = prompts::system(lang)
         .or_else(|| prompts::system(prompts::DEFAULT_LANG))
         .expect("默认语言的 system.md 已编入二进制");
     // Windows 路径带反斜杠：模型把它写进工具 JSON 时漏转义就是 Invalid input。
     // Windows API 接受 `/`，统一成正斜杠。
     let prompt_dir = prompt_dir.to_string_lossy().replace('\\', "/");
-    let rendered = body
+    body
         // 能力清单已从提示词设计里删除；英文 system.md 还留着这个占位符，
         // 渲染器对任何语言都吞成空串，不能把 `{{…}}` 原样发给模型。
         .replace("{{CAPABILITY_CATALOG}}", "")
         .replace("{{BLOCK_CATALOG}}", block_catalog(lang))
-        .replace("{{PROMPT_DIR}}", &prompt_dir);
-    format!(
-        "{rendered}\n\n{}",
-        environment_section(lang, region, source, system_region)
-    )
+        .replace("{{PROMPT_DIR}}", &prompt_dir)
 }
 
-/// 语言约束追加在系统提示词的最末尾，保证最后一句就是它。
+/// 语言约束放在动态段的最后。claurst 若在 append 之后追加自己的段落
+/// （todo 提醒、ultracode 等），那些会排在它后面，这里不保证全局最后一句。
 fn language_constraint(lang: &str) -> &'static str {
     match lang {
         "en" => "Always answer in English, and think in English too.",
@@ -149,7 +140,42 @@ fn language_constraint(lang: &str) -> &'static str {
     }
 }
 
-/// 完整系统提示词：正文 + 环境 + 安全底线 + 语言约束。
+/// 稳定段：正文 + 安全底线。只在会话创建时构建一次。
+fn stable_prompt(prompt_dir: &std::path::Path, lang: &str) -> String {
+    format!(
+        "{}\n\n{}",
+        render_system_prompt(prompt_dir, lang),
+        safety_rules(lang)
+    )
+}
+
+/// 动态段：环境 + 语言约束。每轮重算，段内以语言约束收尾。
+fn dynamic_prompt(
+    lang: &str,
+    region: &crate::rules::Region,
+    source: crate::rules::RegionSource,
+    system_region: &crate::rules::Region,
+) -> String {
+    format!(
+        "{}\n\n{}",
+        environment_section(lang, region, source, system_region),
+        language_constraint(lang)
+    )
+}
+
+/// 按当轮环境只更新动态段。稳定段保持创建时那一份，这里不能重写。
+fn apply_turn_prompt(
+    cfg: &mut QueryConfig,
+    lang: &str,
+    region: &crate::rules::Region,
+    source: crate::rules::RegionSource,
+    system_region: &crate::rules::Region,
+) {
+    cfg.append_system_prompt = Some(dynamic_prompt(lang, region, source, system_region));
+}
+
+/// 完整提示词：稳定段 + 动态段。只给测试用，运行时两段分开下发。
+#[cfg(test)]
 fn compose_system_prompt(
     prompt_dir: &std::path::Path,
     lang: &str,
@@ -158,10 +184,9 @@ fn compose_system_prompt(
     system_region: &crate::rules::Region,
 ) -> String {
     format!(
-        "{}\n\n{}\n\n{}",
-        render_system_prompt(prompt_dir, lang, region, source, system_region),
-        safety_rules(lang),
-        language_constraint(lang)
+        "{}\n\n{}",
+        stable_prompt(prompt_dir, lang),
+        dynamic_prompt(lang, region, source, system_region)
     )
 }
 
@@ -288,8 +313,6 @@ pub struct AivpnSession {
     query_config: QueryConfig,
     messages: Mutex<Vec<Message>>,
     tools: Vec<Box<dyn Tool>>,
-    /// 内容文档目录，`{{PROMPT_DIR}}` 的替换值。
-    prompt_dir: PathBuf,
     /// 本会话的语言：创建时解析一次，之后不跟设置变（Q1：老会话不管）。
     lang: &'static str,
     context: ToolContext,
@@ -375,13 +398,15 @@ impl AivpnSession {
         );
         let prompt_dir = released.dir.clone();
         let (region, region_source) = crate::rules::effective_region_now();
-        query_config.system_prompt = Some(compose_system_prompt(
-            &prompt_dir,
+        // 稳定段只在创建时算一次；环境与语言约束走动态段，每轮重算。
+        query_config.system_prompt = Some(stable_prompt(&prompt_dir, lang));
+        apply_turn_prompt(
+            &mut query_config,
             lang,
             &region,
             region_source,
             &crate::rules::detect_region(),
-        ));
+        );
         query_config.effort_level = Some(EffortLevel::Medium);
         query_config.working_directory = Some(working_dir.to_string_lossy().to_string());
         query_config.provider_registry = Some(Arc::clone(&setup.registry));
@@ -447,7 +472,6 @@ impl AivpnSession {
             query_config,
             messages: Mutex::new(Vec::new()),
             tools,
-            prompt_dir,
             lang,
             context,
             cost_tracker,
@@ -485,14 +509,15 @@ impl AivpnSession {
         query_config.max_turns = if first_run { FIRST_RUN_MAX_TURNS } else { MAX_TURNS };
         // 环境信息每轮重取一次：系统时区/区域改了，下一轮就该是新值。
         // 语言不重取：会话创建时定下来的那一档，老会话不跟设置变。
+        // 只重设动态段；稳定段（正文 + 安全底线）保持创建时那一份。
         let (region, region_source) = crate::rules::effective_region_now();
-        query_config.system_prompt = Some(compose_system_prompt(
-            &self.prompt_dir,
+        apply_turn_prompt(
+            &mut query_config,
             self.lang,
             &region,
             region_source,
             &crate::rules::detect_region(),
-        ));
+        );
 
         // 工具审计要把调用记到当前请求上（工具自己拿不到 request_id）。
         crate::tools::policy::set_current_request(&self.session_id, &request_id);
@@ -1490,13 +1515,7 @@ mod prompt_tests {
 
     /// 中国 + 系统推断，只关心正文。
     fn render() -> String {
-        render_system_prompt(
-            &prompt_dir(),
-            "zh",
-            &crate::rules::Region::Cn,
-            crate::rules::RegionSource::System,
-            &crate::rules::Region::Cn,
-        )
+        render_system_prompt(&prompt_dir(), "zh")
     }
 
     /// 完整提示词（含安全底线与语言约束），供语言相关的用例使用。
@@ -1579,6 +1598,69 @@ mod prompt_tests {
         assert!(!zh.contains("{{"), "中文提示词还有没替换的占位符");
     }
 
+    /// 稳定段只在创建时构建：里面不能有随每轮变化的环境。
+    #[test]
+    fn the_stable_prompt_has_no_environment_section() {
+        let zh = stable_prompt(&prompt_dir(), "zh");
+        for needle in ["# 环境", "用户所在/常用地区", "系统原始推断"] {
+            assert!(!zh.contains(needle), "稳定段混进了环境：{needle}");
+        }
+        assert!(zh.contains("# 安全底线"), "稳定段缺安全底线");
+
+        let en = stable_prompt(&prompt_dir(), "en");
+        for needle in [
+            "# Environment",
+            "User's location / usual region",
+            "Raw system inference",
+        ] {
+            assert!(!en.contains(needle), "stable segment leaked: {needle}");
+        }
+        assert!(en.contains("# Safety floor"));
+    }
+
+    /// 动态段以环境开头、以语言约束收尾：最后一句始终是语言。
+    #[test]
+    fn the_dynamic_prompt_runs_from_environment_to_language_constraint() {
+        let cn = crate::rules::Region::Cn;
+        let zh = dynamic_prompt("zh", &cn, crate::rules::RegionSource::System, &cn);
+        assert!(zh.starts_with("# 环境"), "{zh}");
+        assert!(
+            zh.trim_end()
+                .ends_with("始终使用中文回答，思考过程也用中文。"),
+            "{zh}"
+        );
+        assert!(!zh.contains("# 安全底线"), "动态段不该重复安全底线");
+
+        let en = dynamic_prompt("en", &cn, crate::rules::RegionSource::System, &cn);
+        assert!(en.starts_with("# Environment"), "{en}");
+        assert!(
+            en.trim_end()
+                .ends_with("Always answer in English, and think in English too."),
+            "{en}"
+        );
+    }
+
+    /// 每轮只重写动态段：稳定段即使被设成哨兵值也必须原样保留。
+    /// 这条抓得住「误写稳定段」，抓不住「整行调用被删掉」。
+    #[test]
+    fn a_turn_only_rewrites_the_dynamic_segment() {
+        let mut cfg = QueryConfig::default();
+        cfg.system_prompt = Some("STABLE".into());
+
+        let cn = crate::rules::Region::Cn;
+        apply_turn_prompt(&mut cfg, "zh", &cn, crate::rules::RegionSource::System, &cn);
+
+        assert_eq!(cfg.system_prompt.as_deref(), Some("STABLE"));
+        let append = cfg.append_system_prompt.as_deref().expect("应写入动态段");
+        assert!(append.starts_with("# 环境"), "{append}");
+        assert!(
+            append
+                .trim_end()
+                .ends_with("始终使用中文回答，思考过程也用中文。"),
+            "{append}"
+        );
+    }
+
     /// 没有对应语言的 system.md 时回落默认语言——不会拿空提示词去跑会话。
     #[test]
     fn an_unknown_language_falls_back_to_the_default_prompt() {
@@ -1630,13 +1712,7 @@ mod prompt_tests {
     #[test]
     fn the_prompt_dir_is_rendered_with_forward_slashes() {
         let windows = PathBuf::from(r"C:\Users\veyl\.veyl\prompts\zh");
-        let text = render_system_prompt(
-            &windows,
-            "zh",
-            &crate::rules::Region::Cn,
-            crate::rules::RegionSource::System,
-            &crate::rules::Region::Cn,
-        );
+        let text = render_system_prompt(&windows, "zh");
         assert!(
             text.contains("C:/Users/veyl/.veyl/prompts/zh/product.md"),
             "{text}"
@@ -1774,8 +1850,7 @@ mod prompt_tests {
     #[test]
     fn the_environment_section_carries_the_effective_region_and_source() {
         let system_cn = crate::rules::Region::Cn;
-        let cn = render_system_prompt(
-            &prompt_dir(),
+        let cn = dynamic_prompt(
             "zh",
             &system_cn,
             crate::rules::RegionSource::System,
@@ -1786,8 +1861,7 @@ mod prompt_tests {
         assert!(cn.contains("系统原始推断：中国大陆"));
         assert!(cn.contains("不要为了确认地区而追问用户"));
 
-        let unknown = render_system_prompt(
-            &prompt_dir(),
+        let unknown = dynamic_prompt(
             "zh",
             &crate::rules::Region::Unknown,
             crate::rules::RegionSource::System,
@@ -1800,8 +1874,7 @@ mod prompt_tests {
 
         // AI 写入值压过系统推断：来源不能再说成系统推断，系统原始值仍单独可见。
         let jp = crate::rules::Region::from_code("jp");
-        let ai = render_system_prompt(
-            &prompt_dir(),
+        let ai = dynamic_prompt(
             "zh",
             &jp,
             crate::rules::RegionSource::Ai,
