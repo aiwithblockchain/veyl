@@ -287,27 +287,6 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.oldRoute",
     false,
   ),
-  RouteTargetsSet: entry(
-    "tool.RouteTargetsSet.running",
-    "tool.RouteTargetsSet.done",
-    "tool.RouteTargetsSet.failed",
-    "tool.advice.retry",
-    false,
-  ),
-  CategoryList: entry(
-    "tool.CategoryList.running",
-    "tool.CategoryList.done",
-    "tool.CategoryList.failed",
-    "tool.advice.retryLater",
-    true,
-  ),
-  RulesStatus: entry(
-    "tool.RulesStatus.running",
-    "tool.RulesStatus.done",
-    "tool.RulesStatus.failed",
-    "tool.advice.retryLater",
-    true,
-  ),
   IssueReport: entry(
     "tool.IssueReport.running",
     "tool.IssueReport.done",

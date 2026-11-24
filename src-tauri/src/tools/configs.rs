@@ -169,8 +169,7 @@ impl Tool for ConfigUpdateTool {
                 "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } },
-                "node_ids": { "type": "array", "items": { "type": "string" } },
-                "targets": { "type": "array", "items": { "type": "string" } }
+                "node_ids": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["config_id"],
             "additionalProperties": false
@@ -231,13 +230,8 @@ impl Tool for ConfigUpdateTool {
                                 .collect()
                         }),
                     node_ids,
-                    targets: input.get("targets").and_then(Value::as_array).map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect()
-                    }),
+                    // 分流分类已随 CategoryList / RouteTargetsSet 退出工具面（3.27.0）。
+                    targets: None,
                     connect_mode: input
                         .get("connect_mode")
                         .and_then(Value::as_str)

@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
 > 契约版本：`3.27.0`
-> 状态：提案（未落地）
+> 状态：部分落地——3.27.0 只落第 2 组（删除三个旧分流工具，工具数 43 → 40）；其余工具面变更在后续批次。
 >
-> ⚠️ 本节的工具面（3.27.0，41 个）是 AI 工具重构的**提案**，未落地、未提交。当前实现仍是 3.26.0 的 43 个工具。工具面将另行重构，届时以重构结论为准。
+> ⚠️ 本文件 3.27.0 已落地的工具面是 **40 个**：3.26.0 的 43 个减去 `RouteTargetsSet` / `CategoryList` / `RulesStatus`。§4.10 / §4.10.1 / §4.26 / §4.53 / §4.58–§4.60 记录的是**后续批次（3.28.0 起）的提案**，不属于 3.27.0；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -79,7 +79,7 @@ pub struct ToolResult {
 | `CatalogSearch` | 每个节点一行：id \| 名称 \| 地点 \| 协议 \| 延迟 \| 健康；没有结果时说明 |
 | `ConfigDetail` | 配置名；每个节点一行：id \| 名称 \| `server:port` \| 来源 \| 不可用原因 \| 是否当前 |
 | `ConfigUpdate` | 改了哪些字段、值是什么、何时生效 |
-| `NodeImport` | 新增 / 跳过计数；每个新节点一行：名称 \| `server:port` \| 加密方式（不含密码）；跳过原因汇总 |
+| `NodeImportUrl` / `NodeImportText` / `NodeCreate` | 新增 / 跳过计数；每个新节点一行：名称 \| `server:port` \| 加密方式（不含密码）；跳过原因汇总 |
 | `NodeSwitch` | 节点名称、当前连接状态、是否热切换 |
 | `NodeProbe` | `ok` / `unreachable` / `untested`、延迟或原因 |
 | `VpnConnect` / `VpnDisconnect` | 最终状态、配置名与节点名（连接时）、出口 IP（未知写「还没测到」）、系统代理是否恢复（断开时） |
@@ -100,13 +100,10 @@ pub struct ToolResult {
 | `OpenSettings` | 打开的分段与是否定位到行 |
 | `MyServerFailure` | 阶段、原因、是否可重试、订单事件摘要 |
 | `StageSelect` | 本次选中的地区 / 规格 |
-| `ServerOptions` | 全部地区与规格的可用清单（见 §4.53） |
+| `CatalogOptions` | 全部地区与规格的可用清单（见 §4.53） |
 | `HttpCheck` | `via`、状态码或失败分类、耗时、`server`、`cf_mitigated`、TLS 是否成功 |
 | `NodeRotateCredentials` | 新端口、本机凭据是否刷新、需要断开重连（见 §4.55） |
 | `submit_issue_to_public_wall` / `read_public_issue_wall` | 见 §4.56 / §4.57 |
-| `AccountBalance` | 余额、是否登录、充值入口是否可用（见 §4.58） |
-| `TrialStatus` | 试用状态、到期时间、剩余时长、池内免费节点数（见 §4.59） |
-| `AiProviders` | 服务商列表与当前项；不含 Key（见 §4.60） |
 | `AskUserQuestion` | 由 claurst 内置实现决定，不适用本表 |
 
 ### 1.3 `ToolEnvelope`
@@ -174,7 +171,7 @@ type NextAction = {
 | `ConfigDelete` | ~~直接删除一套配置~~ | **3.18.0 已移出工具集**，见 §4.17 |
 | `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`ServerOptions`、`HttpCheck`、`AccountBalance`、`TrialStatus`、`AiProviders`、`read_public_issue_wall`）在 `PermissionMode::Default` 下直接允许；其余工具（含 2.45.2 起的 `NodeProbe`：探不通时可能停隧道）由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`、`HttpCheck`、`read_public_issue_wall`）在 `PermissionMode::Default` 下直接允许；其余工具（含 2.45.2 起的 `NodeProbe`：探不通时可能停隧道）由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -253,7 +250,7 @@ type CallSource = "ui" | "agent";
 | `NodeSwitch` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` | `{ "config_id": "cfg_1a2b", "node_id": "nod_3c4d" }` |
 | `DeepseekSaveKey` | `{ "key": "sk-abc…" }` | **省略**（唯一字段被打码） |
 | `CatalogSearch` | `{ "region": "jp", "limit": 10 }` | `{ "region": "jp", "limit": 10 }` |
-| `NodeImport`（`source = "manual"`） | `{ "source": "manual", "name": "洛杉矶", "server": "203.0.113.7", "port": 8388, "method": "aes-256-gcm", "password": "…" }` | 其余字段展示，`password` 显示为 `"***"` |
+| `NodeCreate` | `{ "name": "洛杉矶", "server": "203.0.113.7", "port": 8388, "method": "aes-256-gcm", "password": "…" }` | 其余字段展示，`password` 显示为 `"***"` |
 
 其他要求：
 
@@ -265,10 +262,10 @@ type CallSource = "ui" | "agent";
 | 工具 | 字段 |
 |---|---|
 | `DeepseekSaveKey` | `key` |
-| `NodeImport`（`source = "manual"`） | `password` |
+| `NodeCreate` | `password` |
 | 其余工具 | 无 |
 
-只有 `DeepseekSaveKey` 会因为「全是敏感字段」而省略 preview；`NodeImport` 的手动模式只把 `password` 打码，其余字段正常展示。
+只有 `DeepseekSaveKey` 会因为「全是敏感字段」而省略 preview；`NodeCreate` 只把 `password` 打码，其余字段正常展示。
 
 ---
 
@@ -288,7 +285,7 @@ type CallSource = "ui" | "agent";
 
 1. **不叙述工具调用**。只说结果和影响。写「我先看一下现在的连接状态」，不写「我调用 `RuntimeStatus`」「`RuntimeStatus` 返回 ok」。
 2. **正文不出现内部术语与 ID**：`proxy`、`TUN`、`分流`、`规则集`、`selector`、`入站/出站`、`runtime`、`sing-box`、工具名、字段名、错误码、`cfg_…` / `nod_…` 等 id、路径。
-3. **失败三段式**：发生了什么（用户语言）→ 有没有改动（`VpnConnect` / `NetRepair` / `CoreUpgrade` / `NodeImport` 必须说清）→ 现在能做什么（只给一个动作）。不确定有没有改动就说「不确定，诊断日志里有记录」。
+3. **失败三段式**：发生了什么（用户语言）→ 有没有改动（`VpnConnect` / `NetRepair` / `CoreUpgrade` / `NodeImportUrl` / `NodeImportText` / `NodeCreate` 必须说清）→ 现在能做什么（只给一个动作）。不确定有没有改动就说「不确定，诊断日志里有记录」。
 4. **长流程分阶段**，一个阶段一句；不逐步骤报，也不提前报还没发生的阶段。
 5. 需要技术细节时只说「技术细节在诊断日志里」并告诉用户在哪复制；不贴字段名、错误码、原始返回。
 6. **用户主动问技术问题才用术语**；第一次出现时紧跟一句白话解释。
@@ -298,16 +295,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 41 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 40 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 41 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 40 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「41 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「40 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放末尾。系统提示不再渲染能力清单（`capability_catalog` 已移除），description 全文只作为工具 schema；第一行仍应是该工具的一句话用途，便于模型选工具。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -343,49 +340,48 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 8 | `CatalogSearch` | `CatalogSearchTool` | 查询**远端**节点目录（不含本地导入） | `ReadOnly` | 只读 |
 | 9 | `ConfigDetail` | `ConfigDetailTool` | 一套配置的节点集、DNS、布局 | `ReadOnly` | 只读 |
 | 10 | `ConfigUpdate` | `ConfigUpdateTool` | 编辑配置（名称 / 分流 / DNS / 节点集） | `Write` | 中 |
-| 11 | `NodeImport` | `NodeImportTool` | 从订阅 URL / 粘贴文本 / 手动填写导入节点（`source` 枚举） | `Write` | 中 |
-| 12 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
-| 13 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `Write` | 中（探测只读；探不通时会停已停机销毁的隧道，2.45.2） |
-| 14 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
-| 15 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
-| 16 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
-| 17 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
-| 18 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
-| 19 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
-| 20 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
-| 21 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
-| 22 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
-| 23 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
-| 24 | `RouteGet` | `RouteGetTool` | 分流模式与生效状态 | `ReadOnly` | 只读 |
-| 25 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
-| 26 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
-| 27 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
-| 28 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
-| 29 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（Tun 模式 ↔ Proxy 模式，**会断开重连**） | `Execute` | 高 |
-| 30 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
-| 31 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
-| 32 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
-| 33 | `ServerOptions` | `ServerOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
-| 34 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
-| 35 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 重置某台服务器的节点端口与密码（**有确认点**，会重启节点） | `Execute` | 高 |
-| 36 | `submit_issue_to_public_wall` | `SubmitIssueToPublicWallTool` | 把问题发到公开问题墙（**有确认点**，提交即公开） | `Write` | 中（公开可见） |
-| 37 | `read_public_issue_wall` | `ReadPublicIssueWallTool` | 搜索 / 读取问题墙与运营答复（**无需登录**） | `ReadOnly` | 只读 |
-| 38 | `AccountBalance` | `AccountBalanceTool` | 账户余额、登录态与充值入口状态（只读） | `ReadOnly` | 只读 |
-| 39 | `TrialStatus` | `TrialStatusTool` | 试用阶段、到期时间、剩余时长、免费节点数（只读） | `ReadOnly` | 只读 |
-| 40 | `AiProviders` | `AiProvidersTool` | AI 服务商列表与当前项（只读，不含 Key） | `ReadOnly` | 只读 |
-| 41 | `AskUserQuestion` | （Claurst 内置；`AskUserQuestionGuard` 包装） | 向用户提问 | `None` | 低 |
+| 11 | `NodeImportUrl` | `NodeImportUrlTool` | 从订阅 URL 导入节点 | `Write` | 中 |
+| 12 | `NodeImportText` | `NodeImportTextTool` | 解析粘贴的 `ss://` 分享链接导入节点 | `Write` | 中 |
+| 13 | `NodeCreate` | `NodeCreateTool` | 手动创建一个 Shadowsocks 节点 | `Write` | 中 |
+| 14 | `NodeSwitch` | `NodeSwitchTool` | 切换某套配置的当前节点 | `Execute` | 中 |
+| 15 | `NodeProbe` | `NodeProbeTool` | 测试单个节点连通性（D6） | `Write` | 中（探测只读；探不通时会停已停机销毁的隧道，2.45.2） |
+| 16 | `VpnConnect` | `VpnConnectTool` | 连接 + 设置系统代理 / TUN | `Execute` | 高 |
+| 17 | `VpnDisconnect` | `VpnDisconnectTool` | 断开 + 恢复系统代理 | `Write` | 中 |
+| 18 | `DiagRun` | `DiagRunTool` | 一键诊断 | `ReadOnly` | 只读 |
+| 19 | `DeepseekSetupKey` | `DeepseekSetupKeyTool` | 给出注册/取 Key 步骤 | `ReadOnly` | 低 |
+| 20 | `DeepseekSaveKey` | `DeepseekSaveKeyTool` | 保存 Key 到本地加密文件 | `Write` | 中 |
+| 21 | `JobGet` | `JobGetTool` | 查询长任务 | `ReadOnly` | 只读 |
+| 22 | `NetConfigGet` | `NetConfigGetTool` | 读取系统代理 / DNS / 路由 / 监听端口 | `ReadOnly` | 只读 |
+| 23 | `NetRepair` | `NetRepairTool` | 受限修复：恢复直连 / 刷 DNS / 只改 Veyl 自己的代理 | `Execute` | 高 |
+| 24 | `CatalogRefresh` | `CatalogRefreshTool` | 拉取并应用默认配置包 | `Write` | 中 |
+| 25 | `DefaultProfileStatus` | `DefaultProfileStatusTool` | 种子版本与状态 | `ReadOnly` | 只读 |
+| 26 | `RouteGet` | `RouteGetTool` | 分流模式与生效状态 | `ReadOnly` | 只读 |
+| 27 | `RouteSetMode` | `RouteSetModeTool` | 切换分流模式（A↔B 热切） | `Execute` | 中 |
+| 28 | `IssueReport` | `IssueReportTool` | 生成问题报告文件夹（两阶段，仅写固定目录） | `Write` | 低（只写桌面报告目录） |
+| 29 | `SetUserRegion` | `SetUserRegionTool` | 记录用户所在地区（AI 唯一写入路径） | `Write` | 低（只写本地设置） |
+| 30 | `MyServers` | `MyServersTool` | 我的服务器列表与状态（只读） | `ReadOnly` | 只读 |
+| 31 | `ConfigSetMode` | `ConfigSetModeTool` | 在线切换接管方式（Tun 模式 ↔ Proxy 模式，**会断开重连**） | `Execute` | 高 |
+| 32 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
+| 33 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
+| 34 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
+| 35 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
+| 36 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
+| 37 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 重置某台服务器的节点端口与密码（**有确认点**，会重启节点） | `Execute` | 高 |
+| 38 | `submit_issue_to_public_wall` | `SubmitIssueToPublicWallTool` | 把问题发到公开问题墙（**有确认点**，提交即公开） | `Write` | 中（公开可见） |
+| 39 | `read_public_issue_wall` | `ReadPublicIssueWallTool` | 搜索 / 读取问题墙与运营答复（**无需登录**） | `ReadOnly` | 只读 |
+| 40 | `AskUserQuestion` | （Claurst 内置；`AskUserQuestionGuard` 包装） | 向用户提问 | `None` | 低 |
 
-> 3.27.0 工具总数 43 → **41**：删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`；`CatalogOptions` 改名 `ServerOptions`；新增 `AccountBalance` / `TrialStatus` / `AiProviders`。本节序号只是清单编号，§4 的章节号是稳定引用。
+> 3.27.0 工具总数 43 → **40**：只删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`。节点写入三工具合并为 `NodeImport`（3.28.0）、`CatalogOptions` 改名 `ServerOptions` 与新增 `AccountBalance` / `TrialStatus` / `AiProviders` 均在**后续批次**，不属于本版。本节序号只是清单编号，§4 的章节号是稳定引用。
 
 > `AskUserQuestion` 的 schema 与执行由 `claurst-tools` 提供；Veyl 用 `AskUserQuestionGuard` 包装（description 末尾加一行约束、校验 `options` 为非空字符串数组），其余委托内置实现（§4.22）。**3.27.0 更正**：旧文「Veyl 不重写这个工具」与实现不符。
 
 **破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`NodeRotateCredentials`（**有确认点**，会重启节点并改端口，见 §4.55）、`submit_issue_to_public_wall`（**有确认点**，内容会立即公开，见 §4.56）、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` / `NodeRotateCredentials` / `submit_issue_to_public_wall` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0、`ConfigDelete` 已在 3.18.0 从工具集移除，见 §4.7 / §4.17。
 
-**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。**`trial_status` 也是例外（只读）**：命令继续供界面使用，模型经 `TrialStatus`（§4.59）读取同一份状态。
+**UI 专用命令不注册工具**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`（`commands.md` §7.10）与 `tun_helper_info` / `tun_helper_restart`（§7.8.1–§7.8.2）。**`core_upgrade` 是例外**：模型只能经 `CoreUpgrade` 工具调用，且必须由用户逐字确认（§4.45）；确认卡由 Host 生成，模型无法伪造。**`trial_status` 在 3.27.0 仍是 UI 专用命令**：命令继续供界面使用，没有对应 AI 工具；`TrialStatus` 在后续批次（3.30.0）才加入。
 
 ### 3.1 注册清单（照抄）
 
-> 构造签名待回填：3.27.0 已按新工具面更新名字与集合；本段沿用旧版构造签名作示意，**实际注册入口以实现为准**：`src-tauri/src/tools/mod.rs` 的 `vpn_tools(Arc<dyn VpnToolServices>)`。
+> 构造签名待回填：3.27.0 只删除了 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，其余名字与 3.26.0 相同；本段沿用旧版构造签名作示意，**实际注册入口以实现为准**：`src-tauri/src/tools/mod.rs` 的 `vpn_tools(Arc<dyn VpnToolServices>)`。
 
 ```rust
 // server_catalog 是「建机目录」（地区 + 套餐）；与上面的 catalog（共享节点目录客户端）不是一个东西。
@@ -399,10 +395,12 @@ let tools: Vec<Box<dyn Tool>> = vec![
     Box::new(CoreListVersionsTool::new(installer.clone())),
     Box::new(CoreUpgradeTool::new(installer.clone())),
     Box::new(CatalogSearchTool::new(catalog.clone())),
-    // 2.0：配置与节点（3.27.0：三条写节点路径合并为 NodeImport）
+    // 2.0：配置与节点（3.27.0 仍是三条独立写节点路径；合并到 NodeImport 在 3.28.0）
     Box::new(ConfigDetailTool::new(store.clone())),
     Box::new(ConfigUpdateTool::new(store.clone())),
-    Box::new(NodeImportTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeImportUrlTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeImportTextTool::new(store.clone(), secrets.clone())),
+    Box::new(NodeCreateTool::new(store.clone(), secrets.clone())),
     Box::new(NodeSwitchTool::new(rt.clone(), store.clone())),
     Box::new(NodeProbeTool::new(rt.clone(), store.clone())),
     Box::new(VpnConnectTool::new(rt.clone(), store.clone(), proxy.clone())),
@@ -435,13 +433,9 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 设置指路（只读）
     Box::new(OpenSettingsTool::new()),
     Box::new(StageSelectTool::new(server_catalog.clone())),
-    Box::new(ServerOptionsTool::new(server_catalog.clone())),
+    Box::new(CatalogOptionsTool::new(server_catalog.clone())),
     // 只读网页可达性（AI 自查）
     Box::new(HttpCheckTool::new()),
-    // 3.27.0：账户、试用与 AI 服务商（只读）
-    Box::new(AccountBalanceTool::new(services.clone())),
-    Box::new(TrialStatusTool::new(services.clone())),
-    Box::new(AiProvidersTool::new(services.clone())),
     // claurst-tools 内置 AskUserQuestion 的包装（校验 options、加一行 description）
     Box::new(AskUserQuestionGuard::new()),
 ];
@@ -449,7 +443,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
 
 > **两个目录，两个变量，别复用。** `catalog`（`CatalogSearchTool` 用）是**共享节点目录客户端** `crate::catalog::CatalogClient`；`server_catalog` 才是建机目录（地区 + 套餐）。把后者写成 `catalog` 会把节点列表工具换成错的目录源。
 >
-> `server_catalog` 与 `my_server_catalog`（`commands.md` §7.14）是**同一个取数入口**：`VpnToolServices::server_catalog()` → `control_plane::catalog::fetch_catalog`，`StageSelect` 的校验与 `ServerOptions` 的读取都走它，不各自拼 URL。**不做本地缓存**（§7.14 明确「不做本地缓存、不返回假数据」）——Worker 侧已有 5 分钟服务端缓存，Host 每次现取，代价只是几十条 JSON；陈旧目录会让用户看到已下架的地区或旧价格，比多打一次请求更糟。目录只在 `commands.rs:285` 现取的写法**作废**：命令层与工具层都调 `VpnToolServices` 这一个方法。
+> `server_catalog` 与 `my_server_catalog`（`commands.md` §7.14）是**同一个取数入口**：`VpnToolServices::server_catalog()` → `control_plane::catalog::fetch_catalog`，`StageSelect` 的校验与 `CatalogOptions` 的读取都走它，不各自拼 URL。**不做本地缓存**（§7.14 明确「不做本地缓存、不返回假数据」）——Worker 侧已有 5 分钟服务端缓存，Host 每次现取，代价只是几十条 JSON；陈旧目录会让用户看到已下架的地区或旧价格，比多打一次请求更糟。目录只在 `commands.rs:285` 现取的写法**作废**：命令层与工具层都调 `VpnToolServices` 这一个方法。
 
 ### 3.2 `VpnConnect` 没有确认点
 
@@ -487,7 +481,7 @@ P1 移除审批后，`VpnConnect` 直接执行：它会修改系统代理，不�
 
 | 当前状态 | 建议动作 |
 |---|---|
-| `idle` | `VpnConnect`（池里已有节点时）/ `NodeImport`（`source = "url" / "text" / "manual"`，空池时） |
+| `idle` | `VpnConnect`（池里已有节点时）/ `NodeImportUrl` / `NodeImportText` / `NodeCreate`（空池时） |
 | `running` | `VpnDisconnect` |
 | `failed` | `DiagRun` |
 | `starting` / `restarting` / `stopping` | 空 |
@@ -721,7 +715,9 @@ type CatalogSearchData = {
 
 ---
 
-### 4.10 `NodeImport`（3.27.0 合并）
+### 4.10 `NodeImport`（后续批次 3.28.0 提案，3.27.0 未落地）
+
+> **不属于 3.27.0**：本节的合并方案在 3.28.0 落地；3.27.0 仍是 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 三个独立工具（见 §4.10.1、§4.26 与 §3）。
 
 把原来的 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并成一个工具，用 `source` 区分来源。服务层三条实现保留，工具层只做分发与统一返回；绑定、去重、跳过、密码处理都不变。
 
@@ -767,9 +763,9 @@ type CatalogSearchData = {
 
 ---
 
-### 4.10.1 `NodeImportText`（已并入 `NodeImport`，3.27.0）
+### 4.10.1 `NodeImportText`（3.27.0 仍是独立工具；3.28.0 起并入 `NodeImport`）
 
-`NodeImportText` 不再是独立工具；文本导入由 §4.10 的 `source = "text"` 表达，下列规则仍是该来源的行为定义：
+3.28.0 起不再是独立工具，文本导入由 §4.10 的 `source = "text"` 表达；**3.27.0 仍是独立工具**，下列规则即它的行为定义：
 
 用户**直接粘贴**的 `ss://` 分享链接（一行或多行）。与 UI 的 `node_import_text`（`commands.md` §4.1.1）**共用同一个服务层实现**，区别只在通道：一条是模型调用，一条是界面调用。
 
@@ -1411,7 +1407,7 @@ type DefaultProfileStatusData = {
 
 **已删除（3.18.0）。** `ConfigCreate` 从 AI 工具集移除，**不保留别名**。全局只有一套配置，由服务层懒创建（`commands.md` §3.1 / §4.0）；模型不再有新建配置的路径。
 
-- 加节点：`NodeImport`（`source = "url" / "text" / "manual"`），省略 `config_id` 即绑定全局配置（`commands.md` §4.0–§4.2）。
+- 加节点：`NodeImportUrl` / `NodeImportText` / `NodeCreate`，省略 `config_id` 即绑定全局配置（`commands.md` §4.0–§4.2）。
 - 改连接参数：`ConfigUpdate`；改接管方式：`ConfigSetMode`。
 - 旧规则随之移到命令层：`source = "seed"` 的新建 **`current_node_id` 留空**、界面预选不写库，连接时先 `NodeSwitch` 再 `RuntimeStart`（`commands.md` §3.2；`NodeAttach` 永不改当前节点）。
 - 历史 schema（仅供回滚对照，**模型不可见**）：
@@ -1471,9 +1467,9 @@ type DefaultProfileStatusData = {
 
 ---
 
-### 4.26 `NodeCreate`（已并入 `NodeImport`，3.27.0）
+### 4.26 `NodeCreate`（3.27.0 仍是独立工具；3.28.0 起并入 `NodeImport`）
 
-`NodeCreate` 不再是独立工具；手动建节点由 §4.10 的 `source = "manual"` 表达，下列规则仍是该来源的行为定义：
+3.28.0 起不再是独立工具，手动建节点由 §4.10 的 `source = "manual"` 表达；**3.27.0 仍是独立工具**，下列规则即它的行为定义：
 
 `data`：`NodeSummary`（`commands.md` §3.0）。
 
@@ -2067,8 +2063,8 @@ type StageSelectData = {
 - **校验在 Host（唯一可信处）**：请求里出现的 `region` / `plan` 必须在目录里；不在目录即拒绝。
   - 未知值 → `INVALID_ARGUMENT / unknown_region` / `unknown_plan`，整次拒绝、不发事件；
   - **地区与规格同时出现时，还必须是目录里的真实组合**（`plan.regions` 含该地区，2.38.0）：不满足 → `INVALID_ARGUMENT / plan_unavailable_in_region`，`details` 带 `region`、`plan`，整次拒绝、不发事件。**不假设「每个地区都能开每一档」**——真实数据里 sgp1 就没有 `s-1vcpu-1gb`；
-  - 目录取不到 → **与 `ServerOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
-- **调之前先拿 id**：必须先调 `ServerOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
+  - 目录取不到 → **与 `CatalogOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
+- **调之前先拿 id**：必须先调 `CatalogOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
 - 成功后 Host 发 `stage-select`（`events.md` §4.26），`region` / `plan` 里未请求的字段为 `null`。**舞台可见且不在创建中时**，UI 按字段合并、缺省保持当前值，合并后高亮 1.5 秒——**成功不等于「一定高亮」**：Host 没有屏幕状态，事件完全可能在用户停在连接屏时到达并被 UI 丢掉，这是正常结果，不是失败。
 - **舞台没打开 / 正在创建**：UI 忽略事件，不排队重放，对话里仍留工具卡——与 `settings-point`（`events.md` §4.25）同一口径。此时 `display` 不承诺「屏幕上已经变了」。
 - **越权边界**：schema 里没有 `screen`、没有 config、没有命令字段——它只能改「新建节点」这一处选择。设置、接管方式、连接、服务器、布局都碰不到。要扩到别的舞台必须升版本并单独评审。
@@ -2077,9 +2073,11 @@ type StageSelectData = {
 
 ---
 
-### 4.53 `ServerOptions`（可选地区与规格；3.27.0 由 `CatalogOptions` 改名）
+### 4.53 `CatalogOptions`（可选地区与规格；后续批次改名 `ServerOptions`，3.27.0 未改名）
 
-原 `CatalogOptions` 与 `CatalogSearch` 都以「Catalog」命名，但一个查建机目录、一个查共享节点目录。3.27.0 改名为 `ServerOptions`，行为与返回形状不变；UI 命令名不变。
+> **不属于 3.27.0**：改名在 3.28.0 之后落地；3.27.0 仍叫 `CatalogOptions`，行为与返回形状见下。
+
+原 `CatalogOptions` 与 `CatalogSearch` 都以「Catalog」命名，但一个查建机目录、一个查共享节点目录。改名只解决命名混淆，行为与返回形状不变；UI 命令名不变。
 
 只读的建机目录：给模型真实 id，让它能把 `StageSelect` 说对。
 
@@ -2088,7 +2086,7 @@ type StageSelectData = {
 ```
 
 ```ts
-type ServerOptionsData = {
+type CatalogOptionsData = {
   regions: Array<{ id: string; name: string; continent: string }>;   // 目录里的全部地区
   plans: Array<{ id: string; label: string; daily_price_cents: number; transfer_gib: number; regions: string[] }>;
 };
@@ -2291,7 +2289,9 @@ type SubmitIssueToPublicWallData = {
 
 ---
 
-### 4.58 `AccountBalance`（余额与登录态，3.27.0 新增）
+### 4.58 `AccountBalance`（余额与登录态，后续批次 3.30.0 提案，3.27.0 未落地）
+
+> **§4.58–§4.60 都不属于 3.27.0**：它们是后续批次（3.30.0）的提案，3.27.0 未注册这三个工具。
 
 只读。回答「我还有多少余额 / 登录了吗 / 能不能充值」，不发起充值、不改账户。
 
@@ -2319,7 +2319,7 @@ type AccountBalanceData = {
 
 ---
 
-### 4.59 `TrialStatus`（试用状态，3.27.0 新增）
+### 4.59 `TrialStatus`（试用状态，后续批次 3.30.0 提案，3.27.0 未落地）
 
 只读。回答「试用还能用多久 / 免费节点还有几个 / 是否已到期」。
 
@@ -2345,7 +2345,7 @@ type TrialStatusData = {
 
 ---
 
-### 4.60 `AiProviders`（AI 服务商，3.27.0 新增）
+### 4.60 `AiProviders`（AI 服务商，后续批次 3.30.0 提案，3.27.0 未落地）
 
 只读。列出已支持的 AI 服务商与当前项，**不返回 Key**，不测试连接、不切换服务商。
 
@@ -2380,20 +2380,20 @@ type AiProvidersData = {
 ### 5.1 标准连接链路
 
 ```
-用 Veyl 免费节点：DefaultProfileStatus（空时 CatalogRefresh）→ NodeImport（`source = "url"` 或 `"text"`，省略 config_id，自动绑进全局配置）→ VpnConnect
-其它节点：      NodeImport（`source = "url" / "text" / "manual"`，自动绑定）→ VpnConnect
+用 Veyl 免费节点：DefaultProfileStatus（空时 CatalogRefresh）→ NodeImportUrl（或 NodeImportText，省略 config_id，自动绑进全局配置）→ VpnConnect
+其它节点：      NodeImportUrl / NodeImportText / NodeCreate（自动绑定）→ VpnConnect
 换节点：        NodeSwitch
 ```
 
 > **「链路」不等于「自动执行」**：免费节点首次加入之后，**UI 与模型都不得自动 `VpnConnect` 或 `NodeSwitch`**——测速完停在 `未连接`，由用户自己点「连接」（`ai-first-product.md` §选中免费节点之后）；**「设为当前节点」只能发生在用户点「连接」的那一刻**。模型也不得把这条链路当成一次性脚本从头跑到尾；每一步都要对应用户当轮的明确意图。
 
-`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式建节点——池里没有节点时报 `no_nodes`，由模型引导用户加节点（`NodeImport`）或刷新免费节点。全局配置由服务层在第一次绑定节点时懒创建，模型不参与。
+`VpnConnect` **不隐式安装或下载运行时**：静默下载会让用户不知道自己的机器上多了一个二进制。也不隐式建节点——池里没有节点时报 `no_nodes`，由模型引导用户加节点（`NodeImportUrl` / `NodeImportText` / `NodeCreate`）或刷新免费节点。全局配置由服务层在第一次绑定节点时懒创建，模型不参与。
 
 ### 5.2 幂等矩阵
 
 | 工具 | 重复调用行为 |
 |---|---|
-| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` / `HttpCheck` / `AccountBalance` / `TrialStatus` / `AiProviders` | 纯读取，天然幂等 |
+| `RuntimeStatus` / `CoreListVersions` / `CatalogSearch` / `ConfigDetail` / `JobGet` / `OpenSettings` / `MyServers` / `MyServerFailure` / `HttpCheck` | 纯读取，天然幂等 |
 | `NodeProbe` | 探测本身幂等；探不通时可能顺手停一次运行时（已停 → `ok: true`），重复调用无副作用 |
 | `RuntimeStart` | 已 `running` 且目标一致 → `ok: true`，`already_running: true` |
 | `RuntimeStop` / `VpnDisconnect` | 已 `idle` → `ok: true` |
@@ -2402,7 +2402,7 @@ type AiProvidersData = {
 | ~~`ConfigDelete`~~ | **3.18.0 起无此工具**；全局配置不可删（命令层 `only_config`） |
 | `RouteSetMode` | 目标模式与当前一致 → `ok: true`，不发事件 |
 | `SetUserRegion` | 地区与当前 `user_region` 一致 → `ok: true`，不发事件 |
-| `NodeImport` | 同 `(source, source_key)` → 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
+| `NodeImportUrl` / `NodeImportText` / `NodeCreate` | 同一条节点（`source_key`）→ 不新建，计入 `skipped`（`duplicate`）；`data` 仍返回已有节点 |
 | `NodeSwitch` | 目标就是当前节点 → `ok: true`，不发事件 |
 | `CoreUpgrade` | 同目标版本已有任务 → `BUSY`，`details.job_id`；无新版本 → 成功且 `changed: false`，不建任务 |
 | `VpnConnect` | 已连同一配置同一节点 → `ok: true`，不重复设置代理 |
@@ -2416,8 +2416,8 @@ type AiProvidersData = {
 |---|---|
 | 只读工具 | 3s |
 | `NodeProbe` | 20s（15s 探测含 8s 探针运行时启动 + 最多 5s 判定；判为已销毁后的 `runtime_stop` 在后台，不计入；探通了不检查） |
-| `NodeImport`（`source = "url"`） | 15s（抓取 10s + 解析）；`text` / `manual` 3s |
-| `ServerOptions` | 8s（走缓存，必要时取一次目录） |
+| `NodeImportUrl` | 15s（抓取 10s + 解析）；`NodeImportText` / `NodeCreate` 3s |
+| `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
 | `HttpCheck` | `timeout_ms`（默认 8s，最大 15s） |
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
@@ -2474,16 +2474,18 @@ type AiProvidersData = {
 
 ## 8. 变更记录
 
-### 3.27.0（未发布，2026-11-24：工具面收敛与 `content` 自足）
+### 3.27.0（未发布，2026-11-24：第 2 组落地与 `content` 自足）
+
+> 本版只落地第 2 条：删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，工具总数 43 → **40**。第 3–5 条是**后续批次**的提案（合并 3.28.0、改名后续批次、新增只读工具 3.30.0），不属于本版；§3 / §3.1 只按本版落地结果改写。
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 版本升到 `3.27.0`；§1.2 重写：`content` 是模型唯一可见的通道，必须自足、可多行，`data` / `metadata` 只服务 UI；新增 §1.2.1 逐工具 `content` 验收清单；§4 中原本「事实只在 `data`」的工具补上 `content` 要求（`DiagRun` / `JobGet` / `NodeImport` / `IssueReport` / `HttpCheck` / `NetConfigGet` / `CatalogRefresh` / `ConfigDetail` / `RuntimeLogs` / `CoreListVersions` / `CatalogSearch` / `DeepseekSetupKey` / `NodeProbe` / `RouteGet` / `RouteSetMode`） | 口径 | `ai-tools-inventory.md` P0；2026-11-24 PM 阶段 0 |
-| 2 | 删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`ConfigUpdate.targets` 删除；保留 `RouteGet` / `RouteSetMode`。工具总数 43 → 40 | 删除工具 | 产品只有「智能 / 全局」两档，没有按服务挑选 |
-| 3 | `NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`（`source` 枚举 `url` / `text` / `manual`）；服务层三条实现保留，工具层只做分发与统一返回。总数 40 → 38 | 合并工具 | 三条路径写同一个节点池 |
-| 4 | `CatalogOptions` 改名 `ServerOptions`（消除与 `CatalogSearch` 的命名冲突）；`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 如实登记为内置 `AskUserQuestion` 的包装，更正「Veyl 不重写内置工具」的旧说法 | 改名 / 更正 | 2026-11-24 PM 阶段 0 |
-| 5 | 新增只读工具 `AccountBalance`（§4.58）、`TrialStatus`（§4.59）、`AiProviders`（§4.60）；手机导出与批量测速仍不给工具。总数 38 → **41** | 新增工具 | 缺口 G1 / G2 / G8 |
-| 6 | 待回填：`ConfigUpdate.connect_mode` 的错误、`NodeImport` 手动模式的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举 | 待回填 | 以实现为准，不凭空写字段 |
+| 1 | 版本升到 `3.27.0`；§1.2 重写：`content` 是模型唯一可见的通道，必须自足、可多行，`data` / `metadata` 只服务 UI；新增 §1.2.1 逐工具 `content` 验收清单；§4 中原本「事实只在 `data`」的工具补上 `content` 要求（`DiagRun` / `JobGet` / `NodeImportUrl` / `NodeImportText` / `NodeCreate` / `IssueReport` / `HttpCheck` / `NetConfigGet` / `CatalogRefresh` / `ConfigDetail` / `RuntimeLogs` / `CoreListVersions` / `CatalogSearch` / `DeepseekSetupKey` / `NodeProbe` / `RouteGet` / `RouteSetMode`） | 口径 | `ai-tools-inventory.md` P0；2026-11-24 PM 阶段 0 |
+| 2 | 删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`ConfigUpdate.targets` 删除；保留 `RouteGet` / `RouteSetMode`。工具总数 43 → **40** | 删除工具 | 产品已无按服务分流；`category_list` / `route_targets_set` / `rules_status` 三条 Host 命令保留给界面 |
+| 3 | **后续批次（3.28.0）**：`NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`（`source` 枚举 `url` / `text` / `manual`）；服务层三条实现保留，工具层只做分发与统一返回。总数 40 → 38 | 合并工具（未落地） | 三条路径写同一个节点池 |
+| 4 | **后续批次**：`CatalogOptions` 改名 `ServerOptions`（消除与 `CatalogSearch` 的命名冲突）；`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 如实登记为内置 `AskUserQuestion` 的包装，更正「Veyl 不重写内置工具」的旧说法 | 改名 / 更正（未落地） | 2026-11-24 PM 阶段 0 |
+| 5 | **后续批次（3.30.0）**：新增只读工具 `AccountBalance`（§4.58）、`TrialStatus`（§4.59）、`AiProviders`（§4.60）；手机导出与批量测速仍不给工具。总数 38 → **41** | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
+| 6 | 待回填：`ConfigUpdate.connect_mode` 的错误、`NodeCreate` 的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举（后三项随 3.30.0） | 待回填 | 以实现为准，不凭空写字段 |
 | 7 | 已知残留：`resources/prompts/zh/product.md:53` 仍教 AI 用「分类列表」，与本次删除冲突；本批不改提示词，阶段 3 处理 | 已知残留 | 提示词批次 |
 
 ### 3.26.0（未发布，2026-11-23：登录态与 MyServers 门禁）

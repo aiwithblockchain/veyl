@@ -541,7 +541,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.26.0",
+                env["contract_version"], "3.27.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -663,7 +663,7 @@ async fn oversized_strings_do_not_break_the_envelope() {
         ("ConfigUpdate", json!({ "config_id": huge })),
         ("NodeImportUrl", json!({ "url": huge })),
         ("JobGet", json!({ "job_id": huge })),
-        ("CategoryList", json!({ "query": huge })),
+        ("RouteGet", json!({ "config_id": huge })),
     ];
 
     for (name, input) in cases {
@@ -785,7 +785,7 @@ fn optional_string_params(schema: &Value) -> Vec<String> {
 /// 每个「有可选字符串参数」的工具的最小合法输入。
 fn base_input(name: &str) -> Option<Value> {
     let value = match name {
-        "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" | "CategoryList" => json!({}),
+        "VpnConnect" | "RouteGet" | "RuntimeLogs" | "CatalogSearch" => json!({}),
         // 问题墙的检索参数全部可选，最小输入是空对象。
         "read_public_issue_wall" => json!({}),
         "IssueReport" => json!({}),
@@ -1207,7 +1207,7 @@ async fn zero_argument_tools_work() {
         "RuntimeStop",
         "VpnDisconnect",
         "NetConfigGet",
-        "RulesStatus",
+        "RouteGet",
         "DefaultProfileStatus",
         "CoreListVersions",
     ] {

@@ -2727,7 +2727,7 @@ Host 必须在发给模型的两处写入**同一套**表达规则（全文见 `
 UI 侧不依赖模型的措辞：
 
 - `tool-call-end.display`（`events.md` §3.4）是完成 / 失败的唯一用户文案；缺失时回落到前端映射表，不报错、不丢事件。
-- 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 44 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
+- 前端映射表位于 `src/components/toolDisplay.ts`（`TOOL_COPY`，设计文档里也称 `TOOL_DISPLAY`），键集合必须与 `tools.md` §3 的 40 个工具名**双向相等**；`AskUserQuestion` 虽在表中，但渲染层必须跳过它的工具行（提问由问答浮层承担）。
 - **不做输出正则改写**：静默替换模型正文（例如抹掉 `cfg_` 开头的串）比漏一句更难排查；拦截放在渲染层，不改写生成内容。
 - 工具 description 的表达约束放 `\n` 之后的末尾：第一行是模型挑工具时看到的摘要，第一行出现约束句会让摘要把约束当成用途。
 - running 状态文案来自映射表，不得拼工具名；未知工具固定「正在处理…」（`events.md` §3.5）。
@@ -2834,8 +2834,9 @@ type RulesStatus = {
 错误：`INVALID_ARGUMENT`（`routing_mode_not_supported` / `invalid_routing_mode`）、`NOT_FOUND`、
 `PRECONDITION_FAILED`（`will_disconnect` / `config_unknown`）、`INTERNAL`。
 
-### 10.3 `route_targets_set { configId, categories }` → `RouteState`
+### 10.3 `route_targets_set { configId, categories }` → `RouteState`（命令保留；3.27.0 起无 AI 工具）
 
+- **3.27.0 起该命令没有对应 AI 工具**：`RouteTargetsSet` 已从工具集删除（`tools.md` §4.38），命令本身仍供界面读取 / 写旧数据。
 - **G4** 整体替换「指定服务」的分类集合。**只对旧数据的 `proxy_selected` 有意义**：新写入路径不再产生该模式，
   新配置的分类集合不影响生成。
 - 任何一个 id 不在分类目录 → `NOT_FOUND / category_unknown`，`details.unknown` 一次列全。
@@ -2858,14 +2859,15 @@ type RulesStatus = {
 - **G4** 幂等：不存在 → `deleted = false`、`already_absent = true`。
 - 不重排 `position`（留空不影响顺序），`route_revision + 1`，发 `routing-changed`。
 
-### 10.7 `category_list { query?, limit? }` → `{ categories: Category[], total }`
+### 10.7 `category_list { query?, limit? }` → `{ categories: Category[], total }`（命令保留；3.27.0 起无 AI 工具）
 
-- **I1** 分类目录，AI 与 UI 共用。
+- **I1** 分类目录，命令供界面使用。**3.27.0 起没有对应 AI 工具**：`CategoryList` 已删除（`tools.md` §4.42），分类仍被节点卡片使用。
 - `query` 对 id 与中英文名做不区分大小写的子串匹配；`limit` 默认 50、上限 200。
 - 只读，不联网，读当前生效规则版本的 `categories.json`。
 
-### 10.8 `rules_status {}` → `RulesStatus`
+### 10.8 `rules_status {}` → `RulesStatus`（命令保留；3.27.0 起无 AI 工具）
 
+- **3.27.0 起该命令没有对应 AI 工具**：`RulesStatus` 已删除（`tools.md` §4.43），命令继续供界面读取规则数据状态。
 - **G3 / I2** 当前规则数据版本与新鲜度。只读，不联网。
 - `stale` 只用于提示，不阻断连接；`pending_update` 表示有排队任务（见 10.9）。
 
@@ -2946,11 +2948,11 @@ type RulesStatus = {
 | `default_profile_status` / `_refresh` | **C1** / **C2** / **C3** | `update_hint`、`source_choice` |
 | `route_get` | **G1** 查看当前分流方式 | 设置页 / 分流文本 | |
 | `route_set_mode` | **G2** 切换分流方式 | 分流选项 | A↔B 热切；跨家族需确认后重连 |
-| `route_targets_set` | **G4** 用户自定义分流（目标服务） | 设置页 / 表单 | |
+| `route_targets_set` | **G4** 用户自定义分流（目标服务） | 设置页 / 表单 | 3.27.0 起无 AI 工具，命令保留 |
 | `rule_custom_list` / `_add` / `_delete` | **G4** 用户自定义分流（逐条规则） | 设置页 / 对话 | |
-| `category_list` | **I1** 读取分类目录 | 表单 / AI 工具 | |
+| `category_list` | **I1** 读取分类目录 | 节点分类（表单） | 3.27.0 起无 AI 工具，命令保留 |
 | `system_region` | —（UI 展示用，无用户能力 ID） | 新建配置的地区提示 / 中间区直连口径行 | 与 `route_get.detected_region` 同源；AI 拿提示词里的注入句 |
-| `rules_status` | **G3** 更新分流规则数据 / **I2** | `update_hint`、设置页 | |
+| `rules_status` | **G3** 更新分流规则数据 / **I2** | `update_hint`、设置页 | 3.27.0 起无 AI 工具，命令保留 |
 | `rules_update` | **G3** / **I2** | 设置页按钮 | 未连接时排队 |
 
 ### 12.2 固定骨架与块的完整对应
@@ -3010,11 +3012,11 @@ type RulesStatus = {
 | `issue_handoff` / `issue_resolve` / `issue_ignore` | **无**（3.15.0 起无 AI 工具：失败定位走 `MyServerFailure` / `DiagRun`） | — |
 | `route_get` | `RouteGet`（2.1 新增） | **必须** |
 | `route_set_mode` | `RouteSetMode`（2.1 新增） | **必须** |
-| `route_targets_set` | `RouteTargetsSet`（2.1 新增） | **必须** |
+| `route_targets_set` | **无**（3.27.0 起无 AI 工具：产品已无按服务分流；命令保留给界面与旧数据） | — |
 | `rule_custom_list` / `_add` / `_delete` | **无**（3.15.0 起无 AI 工具：新设计没有自定义直连规则） | — |
-| `category_list` | `CategoryList`（2.1 新增） | **必须** |
+| `category_list` | **无**（3.27.0 起无 AI 工具：`CategoryList` 已删除；命令保留给界面，节点分类仍在使用） | — |
 | `system_region` | **无**（UI 专用，见 §10.10；AI 走系统提示词注入） | — |
-| `rules_status` | `RulesStatus`（2.1 新增） | **必须** |
+| `rules_status` | **无**（3.27.0 起无 AI 工具：`RulesStatus` 已删除；命令保留给界面） | — |
 | `rules_update` | **无**（3.15.0 起无 AI 工具：规则数据随包预置） | — |
 | `net_repair` | `NetRepair` | **必须** |
 | `core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback` | **无**（UI 专用，见 §7.10） | — |

@@ -99,7 +99,7 @@ A2 断开连接 · 工具 RuntimeStop
 | `proxy_card` | 三级、本机代理、已连接 | 无 | `NetConfigGet` |
 | `source_choice` | 没有任何节点 | 无 | 两个选项是固定的 |
 | `action_card` | 需要用户在 1–3 个动作里挑一个 | 标题 / 说明 / 按钮文案 | AI 自己写；点击只上报 action id |
-| `update_hint` | 规则/种子有新版本 | 无 | `RulesStatus` / `DefaultProfileStatus` |
+| `update_hint` | 规则/种子有新版本 | 无 | Host 注入的规则数据与种子版本状态（不点名工具） |
 
 规则：
 

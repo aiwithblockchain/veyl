@@ -240,8 +240,6 @@ pub fn is_readonly(tool: &str) -> bool {
             | "ConfigDetail"
             | "NodeProbe"
             | "RouteGet"
-            | "CategoryList"
-            | "RulesStatus"
             | "DiagRun"
             | "read_public_issue_wall"
             | "DeepseekSetupKey"
@@ -271,7 +269,7 @@ mod tests {
     /// 只读工具失败也不能声称改动过。
     #[test]
     fn read_only_tools_never_report_a_change() {
-        for tool in ["DiagRun", "RuntimeStatus", "CategoryList"] {
+        for tool in ["DiagRun", "RuntimeStatus", "RouteGet"] {
             for ok in [true, false] {
                 assert_eq!(fallback(tool, ok).changed, Changed::None, "{tool}");
             }
