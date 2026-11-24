@@ -2342,7 +2342,7 @@ type MyServerEvents = { events: MyServerEvent[]; has_more: boolean };
 | 上限 | 最多 50 条；`has_more = true` 表示还有更早的条目没返回。**`has_more` 必须同时计入原始截断**：SQL 取满 51 行即为 `true`，即使折叠后条目很少。**无 `limit` 参数、无游标分页** |
 | 折叠 | 相邻两条 `code` 相同且时间差 ≤ 10 分钟合并为一条：`count` 记次数、`at` 取较晚那条。跨小时的同类动作是两件事，不并 |
 | 来源 | `audit_log` 为主；**查询按动作白名单过滤，运维动作（`billing.failed` / `grace_waived` / `agent.token_issued` 等）不得占用 51 行窗口**。`servers.created_at` / `installing_at` / `verifying_at` / `ready_at` **只补成功路径上审计没写的里程碑**。同一次激活三源只出一条，优先级 `enroll.ok` > `settle.ok` > `ready_at`。缺列（旧机器没有阶段上报）时该条不出现，**不估算、不补假时间** |
-| 出网字段 | 只返回 `code` / `at` / `count` / `version` / `amount_cents` / `reason`。**`detail` 原文、`provider_id`、令牌（`jti` / `exp`）、`order_id`、`account_id`、端口、IP、`error` 文本、`log_excerpt`、`password_length` 一律不下发**；`reason` 过白名单，未知值省略、按通用文案渲染 |
+| 出网字段 | 只返回 `code` / `at` / `count` / `version` / `amount_cents` / `reason`。**可选字段在缺省时不出现（`null` 也算违约）**。`detail` 原文、`provider_id`、令牌（`jti` / `exp`）、`order_id`、`account_id`、端口、IP、`error` 文本、`log_excerpt`、`password_length` 一律不下发；`reason` 过白名单，未知值省略、按通用文案渲染 |
 | 错误 | 未登录 `UNAUTHENTICATED / auth_required`；不是自己的或已不存在 `NOT_FOUND / server_gone`；传输失败 / 超时沿用 §7.15 的 `UPSTREAM_ERROR` / `TIMEOUT` 行为。**没有审计行不是错误**，返回 `{ events: [], has_more: false }` |
 
 **动作映射（只列会出网的动作）**

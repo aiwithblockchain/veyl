@@ -82,7 +82,7 @@ pub struct MyServer {
     pub plan: String,
     pub state: String,
     pub created_at: String,
-    /// 激活成功的时刻（ISO 8601）；旧机器为 null = 用时未知，不要拿 created_at 顶替。
+    /// 激活成功的时刻（ISO 8601）；null = 界面不渲染建机耗时，不要拿 created_at 顶替。
     #[serde(default)]
     pub ready_at: Option<String>,
     /// 首次进入 installing / verifying 的时刻；没上报过就是 null。
@@ -189,6 +189,33 @@ pub struct MyServerTopup {
     #[serde(default)]
     pub checkout_url: Option<String>,
     pub denomination_cents: i64,
+}
+
+/// 服务器详情「创建记录」的一条（commands.md §7.31）。
+///
+/// `at` 是 Unix 毫秒，Host 原样透传、不做格式化；可选字段只在该事件类型下出现。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerEvent {
+    pub at: i64,
+    pub code: String,
+    /// 折叠次数；仅相邻同类事件合并后 > 1 时出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    /// 仅 `activated`：sing-box 版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// 仅 `refunded` / `refund.pending`（USD 分）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_cents: Option<i64>,
+    /// 仅 `destroyed`：白名单枚举，未知值不下发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyServerEvents {
+    pub events: Vec<MyServerEvent>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -658,6 +685,18 @@ async fn get_with(client: &ControlPlane, server_id: &str) -> Result<MyServer, Cp
         cache_and_link(&conn, &mut server);
     }
     Ok(server)
+}
+
+/// 服务器创建记录（`GET /v1/servers/{id}/events`，commands.md §7.31）。
+///
+/// 只读控制面历史：不落本地库、不缓存、不发事件。
+pub async fn events(server_id: &str) -> Result<MyServerEvents, CpError> {
+    let client = ControlPlane::new()?;
+    let raw = client
+        .get(&format!("/v1/servers/{server_id}/events"))
+        .await?;
+    serde_json::from_value(raw)
+        .map_err(|_| CpError::invalid_response("服务器创建记录格式不正确"))
 }
 
 /// 改服务器名（`PATCH /v1/servers/{id}`）：只能改自己的，允许重名。
@@ -1843,6 +1882,74 @@ mod tests {
 
         // 缺 topup_id 不可信。
         assert!(parse_topup(json!({ "denomination_cents": 1000 }), 2000).is_err());
+    }
+
+    #[test]
+    fn a_server_events_payload_keeps_whitelisted_fields_and_drops_the_rest() {
+        let events: MyServerEvents = serde_json::from_value(json!({
+            "events": [
+                {
+                    "at": 1763000000000i64,
+                    "code": "destroyed",
+                    "count": 3,
+                    "version": "1.14.4",
+                    "amount_cents": 1200,
+                    "reason": "billing_unpaid",
+                    "detail": "上游原文不该下发",
+                    "provider_id": 123456,
+                    "log_excerpt": "x"
+                }
+            ],
+            "has_more": true,
+            "unknown": "ignored"
+        }))
+        .unwrap();
+
+        assert!(events.has_more);
+        assert_eq!(events.events.len(), 1);
+        let event = &events.events[0];
+        assert_eq!(event.at, 1_763_000_000_000);
+        assert_eq!(event.code, "destroyed");
+        assert_eq!(event.count, Some(3));
+        assert_eq!(event.version.as_deref(), Some("1.14.4"));
+        assert_eq!(event.amount_cents, Some(1200));
+        assert_eq!(event.reason.as_deref(), Some("billing_unpaid"));
+
+        // 透传给 UI 的只有契约字段：未知字段不会被带出去。
+        let out = serde_json::to_value(&events).unwrap();
+        assert!(out["events"][0].get("detail").is_none(), "{out}");
+        assert!(out["events"][0].get("provider_id").is_none(), "{out}");
+        assert!(out["events"][0].get("log_excerpt").is_none(), "{out}");
+        assert!(out.get("unknown").is_none(), "{out}");
+    }
+
+    #[test]
+    fn an_empty_server_events_list_keeps_has_more_false() {
+        let events: MyServerEvents =
+            serde_json::from_value(json!({ "events": [], "has_more": false })).unwrap();
+        assert!(events.events.is_empty());
+        assert!(!events.has_more);
+
+        // 可选字段缺省：只出现该事件类型真正带的那几个。
+        let events: MyServerEvents = serde_json::from_value(json!({
+            "events": [{ "at": 1763000000000i64, "code": "order.confirmed" }],
+            "has_more": false
+        }))
+        .unwrap();
+        let event = &events.events[0];
+        assert_eq!(event.code, "order.confirmed");
+        assert!(event.count.is_none());
+        assert!(event.version.is_none());
+        assert!(event.amount_cents.is_none());
+        assert!(event.reason.is_none());
+
+        // 契约：可选字段「只在该事件类型下出现」，不能序列化成 null。
+        let out = serde_json::to_value(&events).unwrap();
+        let event = out["events"][0].as_object().unwrap();
+        for field in ["count", "version", "amount_cents", "reason"] {
+            assert!(!event.contains_key(field), "{field} 不应出现：{out}");
+        }
+        assert_eq!(event.len(), 2, "{out}");
     }
 
     #[test]

@@ -470,6 +470,15 @@ pub async fn my_server_get(
     }
 }
 
+/// 服务器创建记录时间线（§7.31）：只读控制面历史，不碰运行时。
+#[tauri::command]
+pub async fn my_server_events(server_id: String) -> Result<Value, Value> {
+    match crate::control_plane::servers::events(&server_id).await {
+        Ok(events) => Ok(json!(events)),
+        Err(error) => Err(error.envelope()),
+    }
+}
+
 #[tauri::command]
 pub async fn my_server_create(
     region: String,
