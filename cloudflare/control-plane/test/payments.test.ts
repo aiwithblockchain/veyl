@@ -372,7 +372,24 @@ describe("充值", () => {
     expect(form.get("line_items[0][quantity]")).toBe("1");
     expect(form.get("line_items[0][price_data][currency]")).toBe("usd");
     expect(form.get("line_items[0][price_data][unit_amount]")).toBe("2400");
-    expect(form.get("line_items[0][price_data][product_data][name]")).toBe("Veyl SAAS服务额度");
+    expect(form.get("line_items[0][price_data][product_data][name]")).toBe("Veyl Service Credits");
+    expect(form.get("line_items[0][price_data][product_data][description]")).toBe(
+      "Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.",
+    );
+    expect(form.get("locale")).toBe("en");
+    expect(form.get("branding_settings[display_name]")).toBe("Veyl");
+    expect(form.get("branding_settings[background_color]")).toBe("#FAFAF8");
+    expect(form.get("branding_settings[button_color]")).toBe("#14161C");
+    expect(form.get("branding_settings[font_family]")).toBe("inter");
+    expect(form.get("branding_settings[border_style]")).toBe("rounded");
+    expect(form.get("branding_settings[logo][type]")).toBe("url");
+    expect(form.get("branding_settings[logo][url]")).toBe("https://veyl.dessage.xyz/logo.png");
+    expect(form.get("custom_text[submit][message]")).toBe(
+      "Your service credits are added to your Veyl account after payment.",
+    );
+    expect(form.get("custom_text[after_submit][message]")).toBe(
+      "Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.",
+    );
     expect(form.get("consent_collection[terms_of_service]")).toBe("required");
     expect(form.get("payment_method_types")).toBeNull();
     expect(form.get("payment_method_options[wechat_pay][client]")).toBe("web");
@@ -1199,61 +1216,41 @@ describe("支付回跳页 /payment/return", () => {
     return calls;
   }
 
-  it("paid 才显示完成页，且只查一次 Stripe、不回显 session_id", async () => {
+  it("paid 才显示完成页，强制英文、只查一次 Stripe、不回显 session_id", async () => {
     const calls = stubSession({ status: "complete", payment_status: "paid" });
+    // 即便浏览器偏好中文，支付页也保持英文（美国公司）。
     const res = await get("?session_id=cs_test_123", "zh-CN,zh;q=0.9,en;q=0.8");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(res.headers.get("cache-control")).toBe("no-store");
     const html = await res.text();
     expect(calls).toEqual(["https://api.stripe.com/v1/checkout/sessions/cs_test_123"]);
-    expect(html).toContain('<html lang="zh">');
-    expect(html).toContain("支付完成");
-    expect(html).toContain("回到 Veyl 应用查看服务额度，此页可以关闭。");
-    expect(html).toContain('href="https://veyl.dessage.xyz"');
-    expect(html).toContain("了解 Veyl");
-    expect(html).toContain('name="robots" content="noindex"');
-    expect(html).toContain('stroke="#1B7A4E"');
-    expect(html).not.toContain("cs_test_123");
-    expect(html).not.toContain("支付流程已结束");
-  });
-
-  it("paid 的英文页仍是完成页", async () => {
-    stubSession({ status: "complete", payment_status: "paid" });
-    const res = await get("?session_id=cs_test_123", "en-US,en;q=0.9");
-    const html = await res.text();
     expect(html).toContain('<html lang="en">');
     expect(html).toContain("Payment complete");
     expect(html).toContain(
       "Return to the Veyl app to view your service credits. You can close this page.",
     );
+    expect(html).toContain('href="https://veyl.dessage.xyz"');
+    expect(html).toContain("Learn about Veyl");
+    expect(html).toContain('name="robots" content="noindex"');
     expect(html).toContain('stroke="#1B7A4E"');
     expect(html).not.toContain("cs_test_123");
+    expect(html).not.toContain("支付");
   });
 
   it("unpaid + complete 显示处理中，不宣称完成也不给绿勾", async () => {
-    const cases = [
-      ["zh-CN", "zh", "支付处理中", "微信 / 支付宝到账可能需要几分钟。到账后余额会自动更新，此页可以关闭。"],
-      [
-        "en-US",
-        "en",
-        "Payment processing",
-        "WeChat Pay or Alipay can take a few minutes to settle. Your credits update automatically once it does; you can close this page.",
-      ],
-    ] as const;
-    for (const [header, lang, title, body] of cases) {
-      stubSession({ status: "complete", payment_status: "unpaid" });
-      const res = await get("?session_id=cs_test_123", header);
-      const html = await res.text();
-      expect(html).toContain(`<html lang="${lang}">`);
-      expect(html).toContain(title);
-      expect(html).toContain(body);
-      expect(html).not.toContain("支付完成");
-      expect(html).not.toContain("Payment complete");
-      expect(html).not.toContain('stroke="#1B7A4E"');
-      expect(html).toContain('stroke="#9A6B12"');
-      expect(html).not.toContain("cs_test_123");
-    }
+    stubSession({ status: "complete", payment_status: "unpaid" });
+    const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("Payment processing");
+    expect(html).toContain(
+      "WeChat Pay or Alipay can take a few minutes to settle. Your credits update automatically once it does; you can close this page.",
+    );
+    expect(html).not.toContain("Payment complete");
+    expect(html).not.toContain('stroke="#1B7A4E"');
+    expect(html).toContain('stroke="#9A6B12"');
+    expect(html).not.toContain("cs_test_123");
+    expect(html).not.toContain("支付");
   });
 
   it("session 仍 open / 已过期时不给完成页", async () => {
@@ -1263,8 +1260,8 @@ describe("支付回跳页 /payment/return", () => {
     ]) {
       stubSession(session);
       const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-      expect(html).toContain("支付流程已结束");
-      expect(html).not.toContain("支付完成");
+      expect(html).toContain("Payment flow ended");
+      expect(html).not.toContain("Payment complete");
       expect(html).not.toContain('stroke="#1B7A4E"');
       expect(html).not.toContain("cs_test_123");
     }
@@ -1273,8 +1270,8 @@ describe("支付回跳页 /payment/return", () => {
   it("Stripe 查询失败时回落中性提示", async () => {
     stubSession({ error: { message: "upstream" } }, 500);
     const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
     expect(html).not.toContain('stroke="#1B7A4E"');
     expect(html).not.toContain("cs_test_123");
   });
@@ -1282,8 +1279,8 @@ describe("支付回跳页 /payment/return", () => {
   it("open + paid 的异常组合不给完成页", async () => {
     stubSession({ status: "open", payment_status: "paid" });
     const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
     expect(html).not.toContain('stroke="#1B7A4E"');
   });
 
@@ -1295,8 +1292,8 @@ describe("支付回跳页 /payment/return", () => {
       }),
     );
     const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
     expect(html).not.toContain('stroke="#1B7A4E"');
   });
 
@@ -1310,23 +1307,23 @@ describe("支付回跳页 /payment/return", () => {
       }),
     );
     const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
   });
 
   it("Stripe 返回非 JSON 时回落中性提示", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("not json", { status: 200 })));
     const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
   });
 
   it("Stripe 返回缺 status / payment_status 时回落中性提示", async () => {
     for (const body of [{ status: "complete" }, { payment_status: "paid" }, {}]) {
       stubSession(body);
       const html = await (await get("?session_id=cs_test_123", "zh-CN")).text();
-      expect(html).toContain("支付流程已结束");
-      expect(html).not.toContain("支付完成");
+      expect(html).toContain("Payment flow ended");
+      expect(html).not.toContain("Payment complete");
     }
   });
 
@@ -1334,72 +1331,42 @@ describe("支付回跳页 /payment/return", () => {
     const calls = stubSession({ status: "complete", payment_status: "paid" });
     const html = await (await get("?session_id=../../v1/charges", "zh-CN")).text();
     expect(calls).toHaveLength(0);
-    expect(html).toContain("支付流程已结束");
-    expect(html).not.toContain("支付完成");
+    expect(html).toContain("Payment flow ended");
+    expect(html).not.toContain("Payment complete");
   });
 
-  it("canceled=1 返回「支付未完成」，优先于 session_id 且不查询 Stripe", async () => {
-    const cases = [
-      [
-        "zh-CN",
-        "zh",
-        "支付未完成",
-        "回到 Veyl 应用重新发起充值，此页可以关闭。",
-        "支付完成",
-      ],
-      [
-        "en-US",
-        "en",
-        "Payment not completed",
-        "Return to the Veyl app to start the top-up again. You can close this page.",
-        "Payment complete",
-      ],
-    ] as const;
-    for (const [header, lang, title, body, success] of cases) {
-      const calls = stubSession({ status: "complete", payment_status: "paid" });
-      const res = await get("?canceled=1&session_id=cs_test_123", header);
-      expect(calls).toHaveLength(0);
-      expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain(`<html lang="${lang}">`);
-      expect(html).toContain(title);
-      expect(html).toContain(body);
-      expect(html).not.toContain(success);
-      expect(html).not.toContain('stroke="#1B7A4E"');
-      expect(html).not.toContain("cs_test_123");
-      expect(html).toContain('href="https://veyl.dessage.xyz"');
-    }
+  it("canceled=1 返回未完成，优先于 session_id 且不查询 Stripe", async () => {
+    const calls = stubSession({ status: "complete", payment_status: "paid" });
+    const res = await get("?canceled=1&session_id=cs_test_123", "zh-CN");
+    expect(calls).toHaveLength(0);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("Payment not completed");
+    expect(html).toContain(
+      "Return to the Veyl app to start the top-up again. You can close this page.",
+    );
+    expect(html).not.toContain("Payment complete");
+    expect(html).not.toContain('stroke="#1B7A4E"');
+    expect(html).not.toContain("cs_test_123");
+    expect(html).toContain('href="https://veyl.dessage.xyz"');
+    expect(html).not.toContain("支付");
   });
 
   it("没有 canceled / session_id 时返回中性页且不查询 Stripe", async () => {
-    const cases = [
-      [
-        "zh-CN",
-        "zh",
-        "支付流程已结束",
-        "回到 Veyl 应用查看结果，此页可以关闭。",
-        "支付完成",
-      ],
-      [
-        "en-US",
-        "en",
-        "Payment flow ended",
-        "Return to the Veyl app to see the result. You can close this page.",
-        "Payment complete",
-      ],
-    ] as const;
-    for (const [header, lang, title, body, success] of cases) {
-      const calls = stubSession({ status: "complete", payment_status: "paid" });
-      const res = await get("", header);
-      expect(calls).toHaveLength(0);
-      expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain(`<html lang="${lang}">`);
-      expect(html).toContain(title);
-      expect(html).toContain(body);
-      expect(html).not.toContain(success);
-      expect(html).not.toContain('stroke="#1B7A4E"');
-      expect(html).toContain('href="https://veyl.dessage.xyz"');
-    }
+    const calls = stubSession({ status: "complete", payment_status: "paid" });
+    const res = await get("", "zh-CN");
+    expect(calls).toHaveLength(0);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('<html lang="en">');
+    expect(html).toContain("Payment flow ended");
+    expect(html).toContain(
+      "Return to the Veyl app to see the result. You can close this page.",
+    );
+    expect(html).not.toContain("Payment complete");
+    expect(html).not.toContain('stroke="#1B7A4E"');
+    expect(html).toContain('href="https://veyl.dessage.xyz"');
+    expect(html).not.toContain("支付");
   });
 });

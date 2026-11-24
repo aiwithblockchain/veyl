@@ -359,7 +359,6 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
   // 支付回跳页：只做展示，不写库；入账以 webhook 为准。异步方式回跳时可能仍在处理中，
   // 所以查一次 Stripe session 再决定文案，不能仅凭 session_id 宣称完成。
   if (url.pathname === "/payment/return") {
-    const zh = (request.headers.get("accept-language") ?? "").trim().toLowerCase().startsWith("zh");
     const canceled = url.searchParams.get("canceled") === "1";
     const sessionId = url.searchParams.get("session_id") ?? "";
     let state: "paid" | "processing" | "canceled" | "unknown";
@@ -382,45 +381,26 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
         state = "unknown";
       }
     }
-    const copy = zh
-      ? {
-          paid: {
-            title: "支付完成",
-            body: "回到 Veyl 应用查看服务额度，此页可以关闭。",
-          },
-          processing: {
-            title: "支付处理中",
-            body: "微信 / 支付宝到账可能需要几分钟。到账后余额会自动更新，此页可以关闭。",
-          },
-          canceled: {
-            title: "支付未完成",
-            body: "回到 Veyl 应用重新发起充值，此页可以关闭。",
-          },
-          unknown: {
-            title: "支付流程已结束",
-            body: "回到 Veyl 应用查看结果，此页可以关闭。",
-          },
-        }
-      : {
-          paid: {
-            title: "Payment complete",
-            body: "Return to the Veyl app to view your service credits. You can close this page.",
-          },
-          processing: {
-            title: "Payment processing",
-            body: "WeChat Pay or Alipay can take a few minutes to settle. Your credits update automatically once it does; you can close this page.",
-          },
-          canceled: {
-            title: "Payment not completed",
-            body: "Return to the Veyl app to start the top-up again. You can close this page.",
-          },
-          unknown: {
-            title: "Payment flow ended",
-            body: "Return to the Veyl app to see the result. You can close this page.",
-          },
-        };
+    const copy = {
+      paid: {
+        title: "Payment complete",
+        body: "Return to the Veyl app to view your service credits. You can close this page.",
+      },
+      processing: {
+        title: "Payment processing",
+        body: "WeChat Pay or Alipay can take a few minutes to settle. Your credits update automatically once it does; you can close this page.",
+      },
+      canceled: {
+        title: "Payment not completed",
+        body: "Return to the Veyl app to start the top-up again. You can close this page.",
+      },
+      unknown: {
+        title: "Payment flow ended",
+        body: "Return to the Veyl app to see the result. You can close this page.",
+      },
+    };
     const text = copy[state];
-    const lang = zh ? "zh" : "en";
+    const lang = "en";
     const check =
       state === "paid"
         ? `<div class="badge"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#1B7A4E" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
@@ -451,7 +431,7 @@ a:hover{color:#14161C;text-decoration:underline}
 ${check}
 <h1>${text.title}</h1>
 <p>${text.body}</p>
-<div class="footer"><a href="${siteBase(env)}">${zh ? "了解 Veyl" : "Learn about Veyl"} &rarr;</a></div>
+<div class="footer"><a href="${siteBase(env)}">Learn about Veyl &rarr;</a></div>
 </div></main></body></html>`;
     return new Response(html, {
       headers: {

@@ -12,8 +12,9 @@ export interface StripeEnv extends PaymentConfigEnv {
 const STRIPE_API = "https://api.stripe.com/v1/checkout/sessions";
 /** 固定 API 版本；升级时单独改、单独测，不跟随账户默认版本漂移。 */
 const STRIPE_VERSION = "2026-11-18.endive";
-const PRODUCT_NAME = "Veyl SAAS服务额度";
-const PRODUCT_DESCRIPTION = "Veyl 云服务器管理服务的预付额度，仅限本服务消费，不退不转让。";
+const PRODUCT_NAME = "Veyl Service Credits";
+const PRODUCT_DESCRIPTION =
+  "Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.";
 
 export type CheckoutResult =
   | { ok: true; sessionId: string; checkoutUrl: string }
@@ -78,6 +79,15 @@ export async function createCheckoutSession(
 
   const form = new URLSearchParams();
   form.set("mode", "payment");
+  form.set("locale", "en");
+  // 收银台品牌化：沿用 APP 的 canvas / ink / Inter / rounded；logo 由 Pages 直出。
+  form.set("branding_settings[display_name]", "Veyl");
+  form.set("branding_settings[background_color]", "#FAFAF8");
+  form.set("branding_settings[button_color]", "#14161C");
+  form.set("branding_settings[font_family]", "inter");
+  form.set("branding_settings[border_style]", "rounded");
+  form.set("branding_settings[logo][type]", "url");
+  form.set("branding_settings[logo][url]", "https://veyl.dessage.xyz/logo.png");
   form.set("success_url", withSessionId(input.returnUrl));
   form.set("cancel_url", withQuery(input.returnUrl, "canceled=1"));
   form.set("customer_email", input.email);
@@ -90,6 +100,15 @@ export async function createCheckoutSession(
   form.set("line_items[0][price_data][product_data][name]", PRODUCT_NAME);
   form.set("line_items[0][price_data][product_data][description]", PRODUCT_DESCRIPTION);
   form.set("consent_collection[terms_of_service]", "required");
+  // 收银台文案：提交按钮旁说明到账口径，提交后再次提示回应用查看。
+  form.set(
+    "custom_text[submit][message]",
+    "Your service credits are added to your Veyl account after payment.",
+  );
+  form.set(
+    "custom_text[after_submit][message]",
+    "Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.",
+  );
   // 微信支付走 Checkout 时必须显式声明客户端类型；缺这个字段会失败（stripe-migration.md §3.1）。
   form.set("payment_method_options[wechat_pay][client]", "web");
 
