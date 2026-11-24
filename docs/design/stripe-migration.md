@@ -80,7 +80,7 @@ Stripe-Version: 2026-11-18.endive
 |---|---|---|
 | `mode` | `payment` | 一次性付款 |
 | `success_url` | `https://<控制面>/payment/return?session_id={CHECKOUT_SESSION_ID}` | `{CHECKOUT_SESSION_ID}` 是**字面占位符**，由 Stripe 替换；不要自己拼 |
-| `cancel_url` | `https://<控制面>/payment/return` | 取消也回到同一页，页面不区分 |
+| `cancel_url` | `https://<控制面>/payment/return?canceled=1` | 取消回跳带 `canceled=1`；页面据此显示「支付未完成」，不再与成功页混用 |
 | `customer_email` | 账户邮箱 | 预填，用户仍可在收银台改 |
 | `client_reference_id` | `topup_id` | 最长 200 字符；第二层匹配 |
 | `metadata[topup_id]` | `top_…` | 第一层匹配 |
@@ -97,7 +97,7 @@ Stripe-Version: 2026-11-18.endive
 ```
 mode=payment
 success_url=https://dev.veyl.dessage.xyz/payment/return?session_id={CHECKOUT_SESSION_ID}
-cancel_url=https://dev.veyl.dessage.xyz/payment/return
+cancel_url=https://dev.veyl.dessage.xyz/payment/return?canceled=1
 customer_email=buyer@example.com
 client_reference_id=top_...
 metadata[topup_id]=top_...
@@ -144,7 +144,7 @@ Stripe 返回 `id`（`cs_…`）与 `url`（收银台地址）。现有代码里
 
 `success_url` 的占位符在表单编码后可能变成 `%7BCHECKOUT_SESSION_ID%7D`，Stripe 会按解码后的值替换；实现后必须用真实测试会话确认回跳 URL 里带上了 `session_id`，不能只看代码。
 
-`/payment/return` 页面只显示「支付已完成，回到应用即可看到余额变化」，不做任何写操作。入账只认 webhook（Stripe 官方也明确要求不能只靠成功页履约）。
+`/payment/return` 页面只做提示，按查询参数分三态：带 `session_id` 显示「支付完成」；带 `canceled=1` 显示「支付未完成」（取消回跳，优先于 `session_id`）；两者都没有显示中性的「支付流程已结束」。三种状态都不做任何写操作，也不根据 `session_id` 宣称已到账。入账只认 webhook（Stripe 官方也明确要求不能只靠成功页履约）。
 
 ---
 

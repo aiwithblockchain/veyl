@@ -6,7 +6,7 @@ import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
 import { handleServers } from "./servers";
 import { handleMobile } from "./mobile";
-import { handleIssues } from "./issues";
+import { handleIssues, siteBase } from "./issues";
 import { handleRules } from "./rules";
 import { handleSeed } from "./seed";
 import { handleStripeWebhook } from "./webhooks/stripe";
@@ -355,16 +355,75 @@ export async function route(request: Request, env: Env, ctx?: ExecutionContext):
     });
   }
 
-  // 支付回跳页：Stripe 支付完成后跳回来，这里只给一句「回到应用」，不做任何写操作。
+  // 支付回跳页：Stripe 完成后跳回来，只做展示；入账以 webhook 为准，这里不写库、不读 session_id。
   if (url.pathname === "/payment/return") {
-    const html = `<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Veyl</title>
-<style>body{margin:0;background:#FAFAF9;color:#1B1B1A;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
-main{max-width:420px;padding:32px;text-align:center}h1{font-size:17px;font-weight:600;margin:0 0 12px}p{font-size:14px;line-height:1.65;color:#5C5C58;margin:0}</style>
-</head><body><main>
-<h1>支付流程已结束</h1>
-<p>支付结果以应用内显示为准，回到 Veyl 应用即可查看。这个页面可以直接关闭。</p>
-</main></body></html>`;
+    const zh = (request.headers.get("accept-language") ?? "").trim().toLowerCase().startsWith("zh");
+    // cancel_url 带 canceled=1；有 session_id 才是 Stripe 的真实成功回跳，两者都没有只给中性提示。
+    const state = url.searchParams.get("canceled") === "1"
+      ? "canceled"
+      : url.searchParams.has("session_id")
+        ? "success"
+        : "neutral";
+    const copy = zh
+      ? {
+          canceled: {
+            title: "支付未完成",
+            body: "回到 Veyl 应用重新发起充值，此页可以关闭。",
+          },
+          success: {
+            title: "支付完成",
+            body: "回到 Veyl 应用即可看到服务额度，此页可以关闭。",
+          },
+          neutral: {
+            title: "支付流程已结束",
+            body: "回到 Veyl 应用查看结果，此页可以关闭。",
+          },
+        }
+      : {
+          canceled: {
+            title: "Payment not completed",
+            body: "Return to the Veyl app to start the top-up again. You can close this page.",
+          },
+          success: {
+            title: "Payment complete",
+            body: "Return to the Veyl app to see your service credits. You can close this page.",
+          },
+          neutral: {
+            title: "Payment flow ended",
+            body: "Return to the Veyl app to see the result. You can close this page.",
+          },
+        };
+    const text = copy[state];
+    const lang = zh ? "zh" : "en";
+    const check =
+      state === "success"
+        ? `<div class="badge"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#1B7A4E" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
+        : "";
+    const html = `<!DOCTYPE html>
+<html lang="${lang}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${text.title} · Veyl</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#FAFAF8;color:#14161C;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{width:100%;max-width:420px;background:#FFFFFF;border:1px solid rgba(20,22,28,.10);border-radius:16px;padding:40px 32px 32px;text-align:center;box-shadow:0 1px 2px rgba(20,22,28,.04),0 12px 32px rgba(20,22,28,.06)}
+.brand{margin:0 0 28px;font-size:15px;font-weight:600;letter-spacing:.06em;color:#14161C}
+.badge{width:56px;height:56px;margin:0 auto 20px;border-radius:50%;background:rgba(27,122,78,.10);display:flex;align-items:center;justify-content:center}
+h1{margin:0 0 10px;font-size:20px;font-weight:600;letter-spacing:-.01em}
+p{margin:0;font-size:14px;line-height:1.7;color:#5B5850}
+.footer{margin-top:28px;padding-top:20px;border-top:1px solid rgba(20,22,28,.10)}
+a{font-size:13px;color:#5B5850;text-decoration:none}
+a:hover{color:#14161C;text-decoration:underline}
+</style>
+</head><body><main><div class="card">
+<p class="brand">Veyl</p>
+${check}
+<h1>${text.title}</h1>
+<p>${text.body}</p>
+<div class="footer"><a href="${siteBase(env)}">${zh ? "了解 Veyl" : "Learn about Veyl"} &rarr;</a></div>
+</div></main></body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
 

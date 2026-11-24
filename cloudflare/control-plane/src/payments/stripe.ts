@@ -19,9 +19,13 @@ export type CheckoutResult =
   | { ok: true; sessionId: string; checkoutUrl: string }
   | { ok: false; reason: "not_configured" | "upstream"; status?: number; detail?: string };
 
-function withSessionId(url: string): string {
+function withQuery(url: string, param: string): string {
   const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}session_id={CHECKOUT_SESSION_ID}`;
+  return `${url}${separator}${param}`;
+}
+
+function withSessionId(url: string): string {
+  return withQuery(url, "session_id={CHECKOUT_SESSION_ID}");
 }
 
 /** Checkout 需要 secret key 与 webhook secret 同时存在；缺任一都 fail closed。 */
@@ -75,7 +79,7 @@ export async function createCheckoutSession(
   const form = new URLSearchParams();
   form.set("mode", "payment");
   form.set("success_url", withSessionId(input.returnUrl));
-  form.set("cancel_url", input.returnUrl);
+  form.set("cancel_url", withQuery(input.returnUrl, "canceled=1"));
   form.set("customer_email", input.email);
   form.set("client_reference_id", topupId);
   form.set("metadata[topup_id]", topupId);

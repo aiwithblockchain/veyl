@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { handleOrders } from "../src/orders";
 import { handleTopups } from "../src/topups";
+import { route } from "../src/index";
+import type { Env } from "../src/index";
 import { handleStripeWebhook } from "../src/webhooks/stripe";
 import { signAccessToken } from "../src/lib/crypto";
 import { FakeD1 } from "./helpers/fakeD1";
@@ -362,7 +364,7 @@ describe("充值", () => {
     expect(form.get("success_url")).toBe(
       "https://control.example.com/payment/return?session_id={CHECKOUT_SESSION_ID}",
     );
-    expect(form.get("cancel_url")).toBe("https://control.example.com/payment/return");
+    expect(form.get("cancel_url")).toBe("https://control.example.com/payment/return?canceled=1");
     expect(form.get("customer_email")).toBe("buyer@example.com");
     expect(form.get("client_reference_id")).toBe(db.rows("topups")[0].id);
     expect(form.get("metadata[topup_id]")).toBe(db.rows("topups")[0].id);
@@ -1166,5 +1168,116 @@ describe("买机扣余额", () => {
     expect(db.rows("wallet_ledger")).toHaveLength(0);
     expect(db.rows("orders")[0].state).toBe("failed");
     expect(db.rows("servers")[0].state).toBe("error");
+  });
+});
+
+describe("支付回跳页 /payment/return", () => {
+  const env = {
+    ENVIRONMENT: "dev",
+    PUBLIC_SITE_URL: "https://veyl.dessage.xyz",
+  } as unknown as Env;
+
+  const get = (query: string, acceptLanguage?: string) =>
+    route(
+      new Request(`https://control.example.com/payment/return${query}`, {
+        headers: acceptLanguage ? { "accept-language": acceptLanguage } : {},
+      }),
+      env,
+    );
+
+  it("中文成功回跳返回品牌化完成页，只指向站点且不回显 session_id", async () => {
+    const res = await get("?session_id=cs_test_123", "zh-CN,zh;q=0.9,en;q=0.8");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    const html = await res.text();
+    expect(html).toContain('<html lang="zh">');
+    expect(html).toContain("支付完成");
+    expect(html).toContain("回到 Veyl 应用即可看到服务额度，此页可以关闭。");
+    expect(html).toContain('href="https://veyl.dessage.xyz"');
+    expect(html).toContain("了解 Veyl");
+    expect(html).toContain('name="robots" content="noindex"');
+    expect(html).toContain('stroke="#1B7A4E"');
+    expect(html).not.toContain("cs_test_123");
+    expect(html).not.toContain("支付流程已结束");
+  });
+
+  it("非中文成功回跳（含缺失 Accept-Language）返回英文页", async () => {
+    for (const header of ["en-US,en;q=0.9", undefined]) {
+      const res = await get("?session_id=cs_test_123", header);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain('<html lang="en">');
+      expect(html).toContain("Payment complete");
+      expect(html).toContain(
+        "Return to the Veyl app to see your service credits. You can close this page.",
+      );
+      expect(html).toContain('href="https://veyl.dessage.xyz"');
+      expect(html).toContain('name="robots" content="noindex"');
+      expect(html).toContain('stroke="#1B7A4E"');
+      expect(html).not.toContain("cs_test_123");
+      expect(html).not.toContain("支付完成");
+    }
+  });
+
+  it("canceled=1 返回「支付未完成」，不出现成功文案与绿勾", async () => {
+    const cases = [
+      [
+        "zh-CN",
+        "zh",
+        "支付未完成",
+        "回到 Veyl 应用重新发起充值，此页可以关闭。",
+        "支付完成",
+      ],
+      [
+        "en-US",
+        "en",
+        "Payment not completed",
+        "Return to the Veyl app to start the top-up again. You can close this page.",
+        "Payment complete",
+      ],
+    ] as const;
+    for (const [header, lang, title, body, success] of cases) {
+      // canceled 优先于 session_id：两个参数同时出现也不能说成功。
+      const res = await get("?canceled=1&session_id=cs_test_123", header);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain(`<html lang="${lang}">`);
+      expect(html).toContain(title);
+      expect(html).toContain(body);
+      expect(html).not.toContain(success);
+      expect(html).not.toContain('stroke="#1B7A4E"');
+      expect(html).not.toContain("cs_test_123");
+      expect(html).toContain('href="https://veyl.dessage.xyz"');
+    }
+  });
+
+  it("没有 canceled / session_id 时返回中性「支付流程已结束」，不出现成功文案与绿勾", async () => {
+    const cases = [
+      [
+        "zh-CN",
+        "zh",
+        "支付流程已结束",
+        "回到 Veyl 应用查看结果，此页可以关闭。",
+        "支付完成",
+      ],
+      [
+        "en-US",
+        "en",
+        "Payment flow ended",
+        "Return to the Veyl app to see the result. You can close this page.",
+        "Payment complete",
+      ],
+    ] as const;
+    for (const [header, lang, title, body, success] of cases) {
+      const res = await get("", header);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain(`<html lang="${lang}">`);
+      expect(html).toContain(title);
+      expect(html).toContain(body);
+      expect(html).not.toContain(success);
+      expect(html).not.toContain('stroke="#1B7A4E"');
+      expect(html).toContain('href="https://veyl.dessage.xyz"');
+    }
   });
 });
