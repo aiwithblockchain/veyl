@@ -4,6 +4,9 @@ import type {
   MyServerCatalog,
   MyServerCreateInput,
   MyServerCredentialNode,
+  MyServerEvent,
+  MyServerEventCode,
+  MyServerEvents,
   MyServerFailure,
   MyServerLoginTicket,
   MyServerOrder,
@@ -389,6 +392,75 @@ export class MockMyServerService {
       };
     }
     return copyServer(server);
+  }
+
+  /**
+   * 创建记录（mock）：由服务器行的时间戳与状态拼出，形状与控制面一致。
+   * 正常机器 5 条；失败机器另有失败、销毁、退款三条，并给一次折叠次数。
+   */
+  events(serverId: string): MyServerEvents {
+    const server = this.get(serverId);
+    const started = Date.parse(server.created_at);
+    const base = Number.isFinite(started) ? started : Date.now() - 5 * 60_000;
+    const minute = 60_000;
+    const at = (iso: string | null | undefined, fallback: number): number => {
+      const parsed = iso ? Date.parse(iso) : NaN;
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const events: MyServerEvent[] = [];
+    const push = (
+      when: number,
+      code: MyServerEventCode,
+      extra: Partial<MyServerEvent> = {},
+    ) => {
+      events.push({ at: when, code, ...extra });
+    };
+
+    push(base, "order.confirmed");
+    push(base + 1000, "machine.created");
+    if (server.state !== "creating") {
+      push(at(server.installing_at, base + minute), "install.started");
+    }
+    if (
+      server.state === "verifying" ||
+      server.state === "healthy" ||
+      server.state === "active"
+    ) {
+      push(at(server.verifying_at, base + 2 * minute), "verify.started");
+    }
+    if (server.state === "healthy" || server.state === "active") {
+      push(at(server.ready_at, base + 3 * minute), "activated", {
+        version: "1.14.4",
+      });
+    }
+    if (server.state === "destroyed") {
+      push(base + 4 * minute, "destroyed", {
+        reason:
+          server.failure?.code === "billing_unpaid"
+            ? "billing_unpaid"
+            : "install_failed",
+      });
+      push(base + 4 * minute, "refunded", {
+        amount_cents: server.daily_price_cents,
+      });
+    }
+    if (server.failure && server.state === "error") {
+      const stage = server.failure.stage;
+      const code: MyServerEventCode =
+        stage === "installing"
+          ? "install.failed"
+          : stage === "verifying"
+            ? "check.failed"
+            : "create.failed";
+      push(base + 4 * minute, code, stage === "installing" ? { count: 2 } : {});
+      push(base + 4 * minute, "destroyed", { reason: "install_failed" });
+      push(base + 4 * minute, "refunded", {
+        amount_cents: server.daily_price_cents,
+      });
+    }
+
+    events.sort((a, b) => b.at - a.at);
+    return { events, has_more: false };
   }
 
   rename(serverId: string, name: string): MyServer {

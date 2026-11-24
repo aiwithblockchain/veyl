@@ -245,7 +245,7 @@ describe("服务器详情", () => {
     expect(facts?.textContent).toContain("每天 $0.20");
   });
 
-  it("分区顺序固定：状态块 → 事实块 → 危险块", () => {
+  it("分区顺序固定：状态块 → 事实块 → 创建记录 → 危险块", () => {
     for (const state of ["healthy", "installing", "error"] as const) {
       renderDetail({ state });
       const children = [
@@ -253,9 +253,46 @@ describe("服务器详情", () => {
       ].map((node) => node.className);
       expect(children[0]).toContain("myservers__block");
       expect(children[1]).toContain("myservers__facts");
-      expect(children[2]).toContain("myservers__footer");
+      expect(children[2]).toContain("myservers__events");
+      expect(children[3]).toContain("myservers__footer");
       cleanup();
     }
+  });
+
+  it("创建记录排在事实区与危险块之间；墓碑视图不渲染", async () => {
+    const props = {
+      bridge: {
+        myServerEvents: vi.fn(async () => ({
+          events: [{ at: Date.now(), code: "machine.created" as const }],
+          has_more: false,
+        })),
+      } as unknown as AgentBridge,
+      regionLabel: "新加坡 1",
+      onCreateAnother: vi.fn(),
+      onChanged: () => {},
+      onRebuilt: () => {},
+      onGone: vi.fn(),
+      onForget: async () => {},
+    };
+    const view = render(
+      <MyServerDetail {...props} server={server({ state: "healthy" })} />,
+    );
+    await screen.findByText("1 条");
+    const children = [
+      ...(document.querySelector(".myservers__detail")?.children ?? []),
+    ].map((node) => node.className);
+    expect(children[1]).toContain("myservers__facts");
+    expect(children[2]).toContain("myservers__events");
+    expect(children[3]).toContain("myservers__footer");
+    view.unmount();
+
+    render(
+      <MyServerDetail
+        {...props}
+        server={server({ state: "destroyed", billing_state: "expired" })}
+      />,
+    );
+    expect(screen.queryByText("创建记录")).toBeNull();
   });
 
   it("就绪后扣费余额不够：写明没开通没扣费，给去充值与重新建一台", () => {

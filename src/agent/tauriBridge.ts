@@ -40,6 +40,9 @@ import type {
   MyServerCredentialNode,
   NodeRotateCredentialsResult,
   MyServerDeviceIdentity,
+  MyServerEvent,
+  MyServerEventCode,
+  MyServerEvents,
   MyServerFailure,
   MyServerIdentity,
   MyServerLoginTicket,
@@ -766,6 +769,58 @@ function normalizeMyServerFailure(value: unknown): MyServerFailure | null {
 
 const SYNC_INTERVALS = new Set<number>([0, 30, 60, 240, 480, 1440]);
 
+const MY_SERVER_EVENT_CODES = new Set<MyServerEventCode>([
+  "order.confirmed",
+  "machine.created",
+  "install.started",
+  "verify.started",
+  "activated",
+  "create.failed",
+  "install.failed",
+  "check.failed",
+  "settle.failed",
+  "destroyed",
+  "port.changed",
+  "agent.rejoined",
+  "refunded",
+  "refund.pending",
+]);
+
+/** 单条事件逐字段校验；形状不对的条目丢弃，不猜默认值。 */
+function normalizeMyServerEvent(value: unknown): MyServerEvent | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.at !== "number" ||
+    !Number.isFinite(raw.at) ||
+    typeof raw.code !== "string" ||
+    !MY_SERVER_EVENT_CODES.has(raw.code as MyServerEventCode)
+  ) {
+    return null;
+  }
+  const event: MyServerEvent = { at: raw.at, code: raw.code as MyServerEventCode };
+  if (
+    typeof raw.count === "number" &&
+    Number.isInteger(raw.count) &&
+    raw.count > 1
+  ) {
+    event.count = raw.count;
+  }
+  if (typeof raw.version === "string" && raw.version !== "") {
+    event.version = raw.version;
+  }
+  if (
+    typeof raw.amount_cents === "number" &&
+    Number.isInteger(raw.amount_cents) &&
+    raw.amount_cents >= 0
+  ) {
+    event.amount_cents = raw.amount_cents;
+  }
+  if (typeof raw.reason === "string" && raw.reason !== "") {
+    event.reason = raw.reason;
+  }
+  return event;
+}
 function normalizeSyncInterval(value: unknown): SyncIntervalMinutes | null {
   return typeof value === "number" && SYNC_INTERVALS.has(value)
     ? (value as SyncIntervalMinutes)
@@ -1526,6 +1581,21 @@ export class TauriAgentBridge implements AgentBridge {
     );
     if (!server) serverDataError();
     return server;
+  }
+
+  async myServerEvents(serverId: string): Promise<MyServerEvents> {
+    const raw = await call<{ events?: unknown; has_more?: unknown }>(
+      "my_server_events",
+      { serverId },
+    );
+    if (!raw || !Array.isArray(raw.events)) serverDataError();
+    return {
+      events: raw.events.flatMap((item): MyServerEvent[] => {
+        const event = normalizeMyServerEvent(item);
+        return event ? [event] : [];
+      }),
+      has_more: raw.has_more === true,
+    };
   }
 
   async myServerRename(serverId: string, name: string): Promise<MyServer> {

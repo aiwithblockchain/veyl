@@ -658,6 +658,42 @@ export interface MyServerFailure {
   retryable: boolean;
 }
 
+/** 创建记录的事件类型（契约 §7.31）：只认归一化后的 code，不暴露审计 action 与原文。 */
+export type MyServerEventCode =
+  | "order.confirmed"
+  | "machine.created"
+  | "install.started"
+  | "verify.started"
+  | "activated"
+  | "create.failed"
+  | "install.failed"
+  | "check.failed"
+  | "settle.failed"
+  | "destroyed"
+  | "port.changed"
+  | "agent.rejoined"
+  | "refunded"
+  | "refund.pending";
+
+export interface MyServerEvent {
+  /** Unix 毫秒；Host 原样透传，界面负责格式化。 */
+  at: number;
+  code: MyServerEventCode;
+  /** 折叠次数；仅 > 1 时出现。 */
+  count?: number;
+  /** 仅 activated：sing-box 版本。 */
+  version?: string;
+  /** 仅 refunded / refund.pending：退款金额（USD 分）。 */
+  amount_cents?: number;
+  /** 仅 destroyed：控制面白名单里的原因；未知值缺省。 */
+  reason?: string;
+}
+
+export interface MyServerEvents {
+  events: MyServerEvent[];
+  has_more: boolean;
+}
+
 export interface MyServer {
   server_id: string;
   /** 建这台机器的订单；列表接口带上时用来把订单对到服务器。 */
@@ -1087,6 +1123,8 @@ export interface AgentBridge {
     minutes: SyncIntervalMinutes,
   ): Promise<{ minutes: SyncIntervalMinutes }>;
   myServerGet(serverId: string): Promise<MyServer>;
+  /** 创建记录时间线（2.63.0）：只读历史，不落本地库、不注册 AI 工具。 */
+  myServerEvents(serverId: string): Promise<MyServerEvents>;
   /** 改服务器名：只能改自己的，允许重名；服务端按码点校验 1–24。 */
   myServerRename(serverId: string, name: string): Promise<MyServer>;
   /** 下单；本期是假支付，只产生一张订单。 */

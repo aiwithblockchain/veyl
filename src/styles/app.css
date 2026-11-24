@@ -3652,6 +3652,133 @@ body[data-resizing] {
   color: var(--err-text);
 }
 
+/* 我的服务器详情 · 创建记录（第四块，位于事实区与危险块之间）
+   标题行是折叠按钮；列表只有时间列 + 圆点 + 文本，行间 8。 */
+.myservers__events {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.myservers__events-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: stretch;
+  height: 24px;
+  margin-left: -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+  font-weight: 500;
+  text-align: left;
+}
+
+.myservers__events-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.myservers__events-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.myservers__events-count {
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.myservers__events-chevron {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--ink-3);
+}
+
+.myservers__events-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.myservers__events-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 收起时用 hidden 常驻面板；类选择器的 display 会盖过 UA 的 [hidden]。 */
+.myservers__events-panel[hidden] {
+  display: none;
+}
+
+.myservers__events-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 时间列按最长格式定宽：12px mono 实测跨年 `2026-11-24 14:32` 117.5px、
+   英文同年 `Nov 24, 14:32` 95.5px；设计稿的 64px 连中文同年 80.8px 都放不下。 */
+.myservers__event {
+  display: grid;
+  grid-template-columns: 120px 6px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
+}
+
+.myservers__event-time {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.myservers__event-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: 2px;
+  background: var(--ink-4);
+}
+
+/* 失败类事件用红点；成功不用绿色，一屏最多两种彩色。 */
+.myservers__event-dot.is-failure {
+  background: var(--red);
+}
+
+.myservers__event-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.myservers__event-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* 加载 / 空 / 失败 / 截断共用一行：给 min-height，展开时不把下方危险块顶走。 */
+.myservers__events-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 20px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
 .myservers__footer {
   display: flex;
   align-items: flex-end;

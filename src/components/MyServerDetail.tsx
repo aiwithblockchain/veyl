@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
+import { ServerEvents } from "./ServerEvents";
 import { IconPencil } from "./icons";
 import {
   billingNoticeText,
@@ -494,6 +495,9 @@ export function MyServerDetail({
 
       {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
       {void rebuild}
+
+      {/* 第四块：创建记录。墓碑视图在上面的分支里提前返回，不渲染这一块。 */}
+      <ServerEvents key={server.server_id} bridge={bridge} server={server} />
 
       <div className="myservers__footer">
         <div className="myservers__danger">
