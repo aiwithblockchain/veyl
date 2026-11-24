@@ -93,7 +93,7 @@
 - 偶发：`App.servers.test.tsx`「登录弹窗开着时 Esc 只关弹窗」与 `DiagnosisPanel.test`「重置后连续两次没测成」，在并行全量中各挂过一次；单跑与复跑均通过，待观察。
 - CI 第 1/2 步在 HEAD 上既有红：`check-secrets.sh` 与 `secret-scan.sh` 命中既有测试假凭据与示例 IP，需单独一批加 `check-secrets:allow` 标记。
 - 节点配置同步档位已改为 `手动 / 30 分钟 / 1 / 4 / 8 / 24 小时`、默认 4 小时（2026-11-22 拍板；旧 5/15/30/60 已下线，非法值拒绝）。
-- dev 曾于 2026-11-24 13:42/13:46 被一份未提交的紧凑写法（`method=` / `udp=1`）覆盖部署，导致 iOS Shadowrocket 导入报「无法获取订阅节点」；14:23 已从 main 重发（`f81ad45c`），真实令牌核验恢复为 `encrypt-method` / `udp-relay=true`，仅剩 Shadowrocket 真机未验。
+- dev 曾于 2026-11-24 13:42/13:46 被一份未提交的紧凑写法（`method=` / `udp=1`）覆盖部署，导致 iOS Shadowrocket 导入报「无法获取订阅节点」；14:23 已从 main 重发（`f81ad45c`）恢复 Surge 文本；14:52 端点改为内联分流规则的 Clash YAML（`c9059395`，契约 2.64.0），待真机复验。
 
 ---
 
