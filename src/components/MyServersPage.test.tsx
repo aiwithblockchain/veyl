@@ -406,13 +406,13 @@ describe("我的服务器 destination", () => {
     expect(document.querySelector(".myservers--empty")).not.toBeNull();
     const rail = await screen.findByRole("complementary", { name: "服务器列表" });
     expect(within(rail).getByText("我的服务器")).toBeTruthy();
-    // 未登录左栏只留守提示与底部建机入口，不渲染服务器行。
+    // 未登录左栏只留守提示：建机入口只在已登录且有服务器时出现。
     expect(
       within(rail).getByText("登录后这里会列出你的服务器。"),
     ).toBeTruthy();
     expect(
-      within(rail).getByRole("button", { name: /新建节点/ }),
-    ).toBeTruthy();
+      within(rail).queryByRole("button", { name: /新建节点/ }),
+    ).toBeNull();
     expect(within(rail).queryByRole("button", { name: /新加坡/ })).toBeNull();
     expect(within(rail).queryByRole("button", { name: "登录 / 注册" })).toBeNull();
     expect(bridge.myServerList).not.toHaveBeenCalled();
@@ -625,7 +625,7 @@ describe("我的服务器 destination", () => {
     ).toBeNull();
   });
 
-  it("已登录零台：左栏只留标题行，中间空态与新建入口", async () => {
+  it("已登录零台：左栏只留标题行，建机入口只在中间空态", async () => {
     const bridge = makeBridge([]);
     renderHarness(bridge);
 
@@ -635,10 +635,9 @@ describe("我的服务器 destination", () => {
     expect(within(rail).getByText("我的服务器")).toBeTruthy();
     expect(within(rail).getByText("0")).toBeTruthy();
     expect(within(rail).queryByText("还没有服务器")).toBeNull();
+    // 0 台时底部入口不出现；rail 里带「新建节点」名字的只剩顶部 ＋。
+    expect(rail.querySelector(".rail-build")).toBeNull();
     expect(within(rail).getByRole("button", { name: "新建节点" })).toBeTruthy();
-    expect(
-      screen.getAllByRole("button", { name: "新建节点" }).length,
-    ).toBeGreaterThanOrEqual(2);
   });
 
   it("下单后列表还没回来：显示「正在创建」而不是空态，列表出现后恢复详情", async () => {
@@ -1111,12 +1110,12 @@ describe("左栏滚动容器与常驻新建行", () => {
     expect(body).not.toBeNull();
     expect(body?.querySelectorAll(".rail-server").length).toBe(13);
     // 新建行不在滚动容器里，列表滚到底也遮不住它。
-    expect(body?.querySelector(".rail__new-row")).toBeNull();
-    const row = document.querySelector(".rail__new-row");
+    expect(body?.querySelector(".rail-build")).toBeNull();
+    const row = document.querySelector(".rail-build");
     expect(row?.textContent).toContain("新建节点");
   });
 
-  it("空列表仍保留左栏 CTA，但不带填充色（主按钮在中间）", () => {
+  it("空列表不出现左栏建机入口（0 台时主按钮在中间空态）", () => {
     render(
       <MyServersRail
         servers={[]}
@@ -1128,13 +1127,7 @@ describe("左栏滚动容器与常驻新建行", () => {
       />,
     );
 
-    const cta = document.querySelector<HTMLButtonElement>(
-      ".rail__new-row.rail-build",
-    );
-    expect(cta).not.toBeNull();
-    expect(cta?.textContent).toContain("新建节点");
-    // 一屏唯一的实心按钮仍是中间空态那个。
-    expect(cta?.className).not.toContain("btn--primary");
+    expect(document.querySelector(".rail-build")).toBeNull();
   });
 
   it("点常驻新建行调用 onNew；禁用时不可点", () => {
@@ -1149,7 +1142,7 @@ describe("左栏滚动容器与常驻新建行", () => {
         onNew={onNew}
       />,
     );
-    fireEvent.click(document.querySelector(".rail__new-row") as HTMLButtonElement);
+    fireEvent.click(document.querySelector(".rail-build") as HTMLButtonElement);
     expect(onNew).toHaveBeenCalledTimes(1);
 
     view.rerender(
@@ -1164,7 +1157,7 @@ describe("左栏滚动容器与常驻新建行", () => {
       />,
     );
     expect(
-      (document.querySelector(".rail__new-row") as HTMLButtonElement).disabled,
+      (document.querySelector(".rail-build") as HTMLButtonElement).disabled,
     ).toBe(true);
   });
 });
@@ -1194,7 +1187,7 @@ describe("左栏常驻区与抽屉滚动", () => {
     expect(hint).not.toBeNull();
     // 不在滚动容器里：列表滚到底也还看得见。
     expect(document.querySelector(".rail__body .myservers__trial-hint--rail")).toBeNull();
-    expect(hint?.nextElementSibling?.classList.contains("rail__new-row")).toBe(true);
+    expect(hint?.nextElementSibling?.classList.contains("rail-build")).toBe(true);
   });
 
   it("抽屉里的长列表也有滚动容器", () => {
@@ -1236,7 +1229,7 @@ describe("左栏试用旁注的边界", () => {
     );
 
     expect(document.querySelector(".myservers__trial-hint--rail")).toBeNull();
-    expect(document.querySelector(".rail__new-row")).toBeNull();
+    expect(document.querySelector(".rail-build")).toBeNull();
   });
 
   it("锁定期间「去控制台」也禁用", () => {

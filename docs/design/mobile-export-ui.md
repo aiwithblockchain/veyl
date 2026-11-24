@@ -81,7 +81,7 @@
 |---|---|
 | 位置 | 左栏（非紧凑模式）底部，`新建节点` 之后；DOM 顺序与视觉顺序一致 |
 | 出现条件 | **已登录 且 至少一台服务器的节点已就绪**。不是「服务器台数 > 0」：安装中、出错、墓碑都不算。**2026-11-19 实机评审修正**：统一为单一谓词 `state ∈ {healthy, active} && node_id != null`，详情事实行与左栏共用 |
-| 形态 | 与 `.rail__new-row` 同构：flex、gap 8、高 40、`margin: 8px 8px 0`、`padding: 0 10px`、`border-top: 1px --hair`、`border-radius: 0 0 8px 8px`、13 / 500 / `--ink-2`；两行共用 `.rail__action-row` |
+| 形态 | `flex`、gap 8、高 40、`margin: 8px 8px 0`、`padding: 0 10px`、`border-top: 1px --hair`、`border-radius: 0 0 8px 8px`、13 / 500 / `--ink-2`；类名 `.rail__action-row`（2026-11-24 起建机入口已改成实心主按钮，两者不再共用盒模型） |
 | 图标列 | 14×14 槽；新增同族 `IconPhone`（16 viewBox、stroke 1.4、圆角矩形 + 底部横线），不用品牌标志；漏做时保留空槽 |
 | 分隔线 / 间距 | 每行各自保留 `border-top`，不合并；两行之间只有第二行的 `margin-top: 8` |
 | hover / focus | hover `--bg-hover` + `--ink`；`:focus-visible` 内侧 2px `--focus` |

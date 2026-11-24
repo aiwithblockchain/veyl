@@ -3831,7 +3831,6 @@ body[data-resizing] {
 .rail--locked .rail-server,
 .rail--locked .rail__add,
 .rail--locked .rail__sync,
-.rail--locked .rail__new-row,
 .rail--locked .rail__action-row,
 .rail--locked .myservers__trial-link,
 .rail--locked .rail-drawer__new {
@@ -6345,10 +6344,8 @@ details[open] > .settings-fold__summary::before {
   padding: 0 4px;
 }
 
-/* 列表底部的常驻入口：整行可点，次级（不加实心底）。
-   两行共用同一盒模型（新建节点 / 在手机上使用），各自保留 border-top。
+/* 列表底部的「在手机上使用」：整行可点，次级（不加实心底）。
    与上面的行对齐（左右 8px），顶部一条细线把它和滚动内容分开。 */
-.rail__new-row,
 .rail__action-row {
   flex: none;
   display: flex;
@@ -6368,13 +6365,11 @@ details[open] > .settings-fold__summary::before {
   cursor: pointer;
 }
 
-.rail__new-row:hover:not(:disabled),
 .rail__action-row:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--ink);
 }
 
-.rail__new-row:focus-visible,
 .rail__action-row:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
@@ -6383,72 +6378,18 @@ details[open] > .settings-fold__summary::before {
 
 .rail__new-row__icon { display: inline-flex; color: var(--ink-3); }
 
-/* 我的服务器左栏 · 新建节点入口
-   单行：左「＋ 新建节点」，右日价；细线沿用 .rail__new-row 的 border-top。
-   价格只取最小可用档位，未登录 / 目录缺失时不渲染，也不留占位。 */
+/* 我的服务器左栏 · 新建节点
+   已登录且至少一台服务器时出现：实心主按钮，占满左栏内容宽。
+   0 台与未登录都不渲染——中间区已有同款主按钮或登录主按钮，左栏再来一份
+   就是同屏两个主按钮。实心块自带边界，不再压细线，也不再显示价格。 */
 .rail-build {
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
-  gap: 0;
-  height: auto;
-  min-height: 44px;
-  padding: 10px;
-  color: var(--ink);
-  /* 宽度容器：最小拖拽宽度下按内容宽藏图标，见下方 @container。 */
-  container-type: inline-size;
-}
-
-/* 未登录时左栏没有列表占位，靠这条把入口贴到底部；已登录保留基类的 8px 上边距。 */
-.rail-build--flush {
-  margin-top: auto;
-}
-
-.rail-build__grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "title price";
-  column-gap: 6px;
-  align-items: baseline;
-}
-
-.rail-build__title {
-  grid-area: title;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
+  flex: none;
+  width: 100%;
+  height: 40px;
+  margin-top: 8px;
+  border-radius: 8px;
   font-size: 15px;
   font-weight: 500;
-  color: var(--ink);
-  white-space: nowrap;
-}
-
-/* 图标不参与首基线：网格基线取文字，价格不再低 1px。 */
-.rail-build__title .rail__new-row__icon {
-  align-self: center;
-}
-
-/* 左栏 220–239 宽（按钮内容 ≤170）时图标先让位给标题：
-   中文「新建节点」与英文 "New node" 都不用省略。240 起图标回来。 */
-@container (max-width: 170px) {
-  .rail-build .rail__new-row__icon {
-    display: none;
-  }
-}
-
-/* 英文标题更长：宁可截断，也不让两列互相挤压。 */
-.rail-build__label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.rail-build__price {
-  grid-area: price;
-  font-size: 13px;
-  color: var(--ink-2);
-  white-space: nowrap;
 }
 
 .rail-servers {

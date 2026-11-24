@@ -75,6 +75,8 @@ function renderCta(
     catalogError?: boolean;
     compact?: boolean;
     trialHint?: string | null;
+    loading?: boolean;
+    error?: string | null;
     onNew?: () => void;
   } = {},
 ) {
@@ -93,64 +95,45 @@ function renderCta(
 }
 
 describe("左栏底部的「新建节点」入口", () => {
-  it("有服务器：试用行在上、CTA 在下；整块一个按钮，价格取最小可用日价", () => {
+  it("有服务器：实心主按钮，点击调用 onNew", () => {
+    const onNew = vi.fn();
+    const { container } = renderCta({ onNew });
+    const cta = container.querySelector<HTMLButtonElement>(".rail-build");
+    expect(cta).not.toBeNull();
+    expect(cta?.className).toContain("btn");
+    expect(cta?.className).toContain("btn--primary");
+    expect(cta?.textContent).toContain("新建节点");
+    // 整块一个按钮：内部没有嵌套的可点元素。
+    expect(cta?.querySelector("a, button")).toBeNull();
+    fireEvent.click(cta as HTMLButtonElement);
+    expect(onNew).toHaveBeenCalledTimes(1);
+  });
+
+  it("有服务器：试用行在上、入口在下", () => {
     const { container } = renderCta({
       trialHint: "还有 2 个免费节点可用，6 天后到期。",
     });
     const hint = container.querySelector(".myservers__trial-hint--rail");
-    const cta = container.querySelector<HTMLButtonElement>(".rail__new-row");
+    const cta = container.querySelector(".rail-build");
     expect(hint).not.toBeNull();
     expect(cta).not.toBeNull();
-    // 试用行紧挨在 CTA（顶部细线）上方。
     expect(hint?.nextElementSibling).toBe(cta);
-    expect(cta?.className).toContain("rail-build");
-    expect(cta?.textContent).toContain("新建节点");
-    // 单行：只有标题与价格，不再有第二行价值句。
-    expect(cta?.textContent).not.toContain("独享 IP");
-    // jsdom 没有布局：至少保证截断时有悬停全文。
-    expect(cta?.querySelector(".rail-build__label")?.getAttribute("title")).toBe(
-      "新建节点",
-    );
-    // 200 / 100 / 50（regions 为空数组，排除）→ 最小 $1.00。
-    expect(cta?.querySelector(".rail-build__price .num")?.textContent).toBe(
-      "$1.00",
-    );
-    expect(cta?.textContent).toContain("/天起");
-    // 整块一个按钮：内部没有嵌套的可点元素。
-    expect(cta?.querySelector("a, button")).toBeNull();
   });
 
-  it("点击整块（标题或价格）都打开新建向导", () => {
-    const onNew = vi.fn();
-    const { container } = renderCta({ onNew });
-    const cta = container.querySelector<HTMLButtonElement>(".rail__new-row");
-    const price = container.querySelector(".rail-build__price") as HTMLElement;
-    fireEvent.click(cta as HTMLButtonElement);
-    fireEvent.click(price);
-    expect(onNew).toHaveBeenCalledTimes(2);
-  });
-
-  it("已登录零台：不显示试用行，但 CTA 与价格保留", () => {
+  it("已登录零台：不渲染入口（中间空态已有主按钮）", () => {
     const { container } = renderCta({ servers: [] });
     expect(container.querySelector(".myservers__trial-hint--rail")).toBeNull();
-    const cta = container.querySelector(".rail__new-row");
-    expect(cta).not.toBeNull();
-    expect(cta?.querySelector(".rail-build__price")).not.toBeNull();
-    // CTA 不带填充色：一屏唯一的实心按钮仍是中间区那个。
-    expect(cta?.className).not.toContain("btn--primary");
+    expect(container.querySelector(".rail-build")).toBeNull();
   });
 
-  it("未登录：不显示服务器行与价格，仍保留 CTA", () => {
+  it("未登录：不渲染服务器行与入口，只留一行提示", () => {
     const { container } = renderCta({ servers: [], signedIn: false });
     expect(container.querySelector(".rail-server")).toBeNull();
     expect(container.textContent).toContain("登录后这里会列出你的服务器。");
-    const cta = container.querySelector(".rail__new-row");
-    expect(cta).not.toBeNull();
-    expect(cta?.querySelector(".rail-build__price")).toBeNull();
-    expect(container.textContent).not.toContain("/天起");
+    expect(container.querySelector(".rail-build")).toBeNull();
   });
 
-  it("未登录且控制面不可达：只显示「连不上」，不显示 CTA", () => {
+  it("未登录且控制面不可达：只显示「连不上」，同样没有入口", () => {
     for (const props of [{ accountError: true }, { catalogError: true }]) {
       const { container, unmount } = render(
         <MyServersRail
@@ -165,47 +148,23 @@ describe("左栏底部的「新建节点」入口", () => {
         />,
       );
       expect(container.textContent).toContain("连不上服务器，稍后再试");
-      expect(container.querySelector(".rail__new-row")).toBeNull();
+      expect(container.querySelector(".rail-build")).toBeNull();
       unmount();
     }
   });
 
-  it("目录失败 / 未加载：CTA 保留但整段价格不渲染（不留 -- 或占位）", () => {
-    const { container } = renderCta({ catalog: null });
-    const cta = container.querySelector(".rail__new-row");
-    expect(cta).not.toBeNull();
-    expect(cta?.querySelector(".rail-build__price")).toBeNull();
-    expect(cta?.textContent).not.toContain("/天起");
-    expect(cta?.textContent).not.toContain("--");
-    expect(cta?.textContent).not.toContain("价格");
+  it("列表加载中 / 读取失败：入口不出现", () => {
+    const loadingView = renderCta({ loading: true });
+    expect(loadingView.container.querySelector(".rail-build")).toBeNull();
+    loadingView.unmount();
+
+    const errorView = renderCta({ error: "连不上服务器，稍后再试" });
+    expect(errorView.container.querySelector(".rail-build")).toBeNull();
   });
 
-  it("所有档位都没有可用地区：不渲染价格", () => {
-    const catalog: MyServerCatalog = {
-      ...CATALOG,
-      plans: CATALOG.plans.map((plan) => ({ ...plan, regions: [] })),
-    };
-    const { container } = renderCta({ catalog });
-    expect(container.querySelector(".rail-build__price")).toBeNull();
-    expect(container.textContent).not.toContain("/天起");
-  });
-
-  it("所有档位日价 ≤ 0：不渲染价格", () => {
-    const catalog: MyServerCatalog = {
-      ...CATALOG,
-      plans: [
-        { ...CATALOG.plans[0], daily_price_cents: 0 },
-        { ...CATALOG.plans[1], daily_price_cents: -1 },
-      ],
-    };
-    const { container } = renderCta({ catalog });
-    expect(container.querySelector(".rail-build__price")).toBeNull();
-    expect(container.textContent).not.toContain("/天起");
-  });
-
-  it("compact（抽屉）形态：左栏不出现 CTA", () => {
+  it("compact（抽屉）形态：左栏不出现入口", () => {
     const { container } = renderCta({ compact: true });
-    expect(container.querySelector(".rail__new-row")).toBeNull();
+    expect(container.querySelector(".rail-build")).toBeNull();
   });
 });
 

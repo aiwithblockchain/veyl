@@ -343,7 +343,7 @@ describe("destination 与我的服务器", () => {
       (lockedRail.querySelector(".rail__add") as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
-      (lockedRail.querySelector(".rail__new-row") as HTMLButtonElement).disabled,
+      (lockedRail.querySelector(".rail-build") as HTMLButtonElement).disabled,
     ).toBe(true);
 
     const stage = document.querySelector('main[aria-label="新建节点"]') as HTMLElement;
@@ -1372,16 +1372,15 @@ describe("左栏门禁", () => {
     expect(rail.querySelector(".rail__action-row")).toBeTruthy();
   }, 15_000);
 
-  it("设备身份（未登录）：左栏留提示与建机入口，没有服务器行与手机入口", async () => {
+  it("设备身份（未登录）：左栏只留提示，没有建机入口、服务器行与手机入口", async () => {
     prepare([SERVER]);
     vi.spyOn(bridge, "myServerAccount").mockResolvedValue(DEVICE_ACCOUNT);
 
     const rail = await openServers();
     expect(await screen.findByText("登录后这里会列出你的服务器。")).toBeTruthy();
-    // 未登录仍保留底部建机入口（点击门禁到登录弹窗），但不渲染服务器行。
-    expect(
-      within(rail).getByRole("button", { name: /新建节点/ }),
-    ).toBeTruthy();
+    // 未登录左栏不渲染建机入口：登录主按钮在中间区。
+    expect(within(rail).queryByRole("button", { name: /新建节点/ })).toBeNull();
+    expect(rail.querySelector(".rail-build")).toBeNull();
     expect(within(rail).queryByRole("button", { name: /新加坡/ })).toBeNull();
     expect(rail.querySelector(".rail__action-row")).toBeNull();
     // 中间是登录引导，不是服务器详情。
@@ -1415,34 +1414,5 @@ describe("左栏门禁", () => {
 
     const rail = await openServers();
     expect(rail.querySelector(".rail__action-row")).toBeNull();
-  }, 15_000);
-});
-
-describe("建机入口的登录门禁", () => {
-  it("设备身份点「新建节点」：弹登录层，不打开向导", async () => {
-    prepare([]);
-    vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
-      logged_in: false,
-      email: null,
-      account_id: "acct_1",
-      device_id: "dev_1",
-      account_kind: "device",
-      session_expires_at: null,
-    });
-    vi.spyOn(bridge, "configList").mockResolvedValue({
-      configs: [],
-      active_config_id: null,
-    });
-
-    render(<App />);
-    // 账户读完（导航显示未登录）再点，才走得到门禁分支。
-    await screen.findByRole("button", { name: "账户，未登录" });
-    fireEvent.click(await screen.findByRole("button", { name: /新建节点/ }));
-
-    expect(
-      await screen.findByRole("dialog", { name: "登录我的服务器" }),
-    ).toBeTruthy();
-    // 建机向导的 <main aria-label="新建节点"> 不存在。
-    expect(document.querySelector('main[aria-label="新建节点"]')).toBeNull();
   }, 15_000);
 });

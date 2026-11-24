@@ -119,41 +119,6 @@ function ServerRow({
   );
 }
 
-/**
- * 目录里可售档位的最低日价；未登录 / 目录缺失 / 没有 > 0 的档位时返回 null。
- * `regions` 明确为空数组说明这个档位没有可用地区，不参与取价；缺省按不限制保留。
- */
-function lowestDailyPrice(
-  catalog: MyServerCatalog | null,
-  signedIn: boolean,
-): number | null {
-  if (!signedIn || !catalog) return null;
-  let min = Number.POSITIVE_INFINITY;
-  for (const plan of catalog.plans) {
-    if (plan.regions !== undefined && plan.regions.length === 0) continue;
-    if (plan.daily_price_cents > 0 && plan.daily_price_cents < min) {
-      min = plan.daily_price_cents;
-    }
-  }
-  return Number.isFinite(min) ? min : null;
-}
-
-/** 价格里只有数字套等宽：前缀（英文 from）与后缀走正文。 */
-function PriceLabel({ cents }: { cents: number }) {
-  const t = useT();
-  const price = formatDailyPrice(cents);
-  const text = t("rail.build.price", { price });
-  const at = text.indexOf(price);
-  if (at < 0) return <>{text}</>;
-  return (
-    <>
-      {text.slice(0, at)}
-      <span className="num">{price}</span>
-      {text.slice(at + price.length)}
-    </>
-  );
-}
-
 export function MyServersRail({
   servers,
   selectedId,
@@ -192,31 +157,21 @@ export function MyServersRail({
   const regionName = (regionId: string) =>
     catalog?.regions.find((region) => region.id === regionId)?.name ?? regionId;
 
-  const buildPrice = lowestDailyPrice(catalog, signedIn);
-  /** 底部唯一的建机入口：整块可点，零台与未登录都保留；列表加载中 / 读取失败时不出现。 */
-  const buildCta = (modifier = "") =>
+  /**
+   * 建机入口：只在「已登录且至少一台服务器」时出现，并且是实心主按钮。
+   * 0 台时中间空态已有同款主按钮、未登录时中间已有登录主按钮，左栏再放一份
+   * 就是同屏两个主按钮或两个同名动作。列表加载中 / 读取失败时也不出现。
+   */
+  const buildCta = () =>
     !loading && !error ? (
       <button
         type="button"
-        className={`rail__new-row rail-build ${modifier}`.trim()}
+        className="btn btn--primary rail-build"
         disabled={disabled}
         onClick={onNew}
       >
-        <span className="rail-build__grid">
-          <span className="rail-build__title">
-            <span className="rail__new-row__icon">
-              <IconPlus size={14} />
-            </span>
-            <span className="rail-build__label" title={t("rail.newNode")}>
-              {t("rail.newNode")}
-            </span>
-          </span>
-          {buildPrice !== null ? (
-            <span className="rail-build__price">
-              <PriceLabel cents={buildPrice} />
-            </span>
-          ) : null}
-        </span>
+        <IconPlus size={16} />
+        {t("rail.newNode")}
       </button>
     ) : null;
 
@@ -239,7 +194,6 @@ export function MyServersRail({
         >
           {unreachable ? t("rail.error") : t("rail.loginHint")}
         </p>
-        {!compact && !unreachable ? buildCta("rail-build--flush") : null}
       </aside>
     );
   }
@@ -381,7 +335,7 @@ export function MyServersRail({
           {/* 列表自己滚：.rail 是 overflow:hidden，不套这层超出的行会被裁掉。 */}
           <div className="rail__body">{content}</div>
           {trialNote}
-          {buildCta()}
+          {servers.length > 0 ? buildCta() : null}
           {showMobile && onMobile && !loading && !error ? (
             <button
               type="button"
