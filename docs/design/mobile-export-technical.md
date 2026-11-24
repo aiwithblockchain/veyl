@@ -3,7 +3,7 @@
 > 日期：2026-11-19（§3.7 多格式增补于 2026-11-20）
 > 状态：**技术设计，待评审**。只出文档：不改代码、不改共享契约文件、不改其它设计稿、不提交。
 > 上游：`mobile-export.md`（需求）、`mobile-export-ui.md`（界面定稿）、`my-servers.md` §16 / §17（凭据模型、用户无 SSH）、`login-and-payment.md` §2.5（令牌模型）、`environments.md`
-> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。多格式（2026-11-20，§3.7）的客户端 Basic 支持已对 CMFA 主路径与 Hiddify 的 Dart 回退路径源码核实；Karing / Stash 未核实。**2026-11-21：Shadowrocket 真机通过**——走「配置 → 扫码」导入 `/profile/shadowrocket` 的 Surge 风格配置（§3.7.13），同时证明它对订阅 URL 会带 Basic；**该结论已被 2026-11-24 复测推翻**（两台 iOS 设备两种导入路径均失败，同客户端改用 Clash YAML 成功），§3.7.13 已改发内联分流规则的 Clash YAML，待真机复验；**Hiddify 在 iPhone 上真机通过**（含其自有路由规则的实际行为，见 §3.7.5）。**Android 三个客户端（SFA / CMFA / Hiddify）尚未真机**。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
+> 事实边界：sing-box 配置形状已于 2026-11-19 用随包 `sing-box 1.14.4` 的 `check` 在本地实测通过（§3.6，含最小 TUN 入站、最小 DNS 与零节点样张）；真机先后暴露「无 DNS 时 VPN 已连、无法上网」「无 TUN 入站时已连接但流量为 0」「有 TUN 但仍无法出网（出站未绑定物理网卡）」「有计数、能测速、仍打不开网页（缺 `stack` / 缺 `sniff`、多带 `strict_route`）」四种现象，据此依次改写模板；TUN 是否创建系统隧道由官方客户端源码确认（§3.5）。**2026-11-20：四项修复后在 iPhone 上确认可打开网页（Wi-Fi）；蜂窝网络复验尚未执行**（V12）。多格式（2026-11-20，§3.7）的客户端 Basic 支持已对 CMFA 主路径与 Hiddify 的 Dart 回退路径源码核实；Karing / Stash 未核实。**2026-11-21：Shadowrocket 真机通过**——走「配置 → 扫码」导入 `/profile/shadowrocket` 的 Surge 风格配置（§3.7.13），同时证明它对订阅 URL 会带 Basic；**该结论已被 2026-11-24 复测推翻**（两台 iOS 设备两种导入路径均失败，同客户端改用 Clash YAML 成功），§3.7.13 已改发内联分流规则的 Clash YAML，**2026-11-24 真机通过**（导入成功，国内直连与境外走节点均实测）；**Hiddify 在 iPhone 上真机通过**（含其自有路由规则的实际行为，见 §3.7.5）。**Android 三个客户端（SFA / CMFA / Hiddify）尚未真机**。客户端扫码、Basic 认证、自动更新等外部行为沿用需求文档的「待验证」，本文件 §8 给出可执行步骤，**不凭记忆断言**。
 > 契约增量：全部写在本文件 §5 / §6，不直接改 `docs/contracts/*`，由 PM 统一集成。
 
 ---
@@ -532,7 +532,7 @@ ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%
 - 令牌进入**请求行与路径**，会进 Cloudflare 访问日志、客户端日志、截图、代理日志；与 §7.1「令牌不进日志」直接冲突。
 - 需要**单独一套令牌**（路径令牌）或接受「同一枚令牌同时以 userinfo 和路径出现」，两种都比现在多一份状态与轮换语义。
 - rotate 仍可一次让三种格式失效，但路径令牌的存在会让「令牌只进二维码」这条口径失效。
-- **M1 不实现**。不支持 Basic 的客户端不进列表；也不做「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定：粘贴整段链接对用户是断崖式体验，且不会自动更新）。Shadowrocket 的真机已于 2026-11-21 通过（§3.7.13），不再需要「路径令牌」的备选设计；该真机结论已被 2026-11-24 复测推翻（客户端不接受 Surge 文本），现改发 Clash YAML 待复验，「会带 Basic、不做 ss 文本粘贴」的结论仍成立。
+- **M1 不实现**。不支持 Basic 的客户端不进列表；也不做「仅 ss 文本粘贴」的特例（产品 2026-11-20 决定：粘贴整段链接对用户是断崖式体验，且不会自动更新）。Shadowrocket 的真机已于 2026-11-21 通过（§3.7.13），不再需要「路径令牌」的备选设计；该真机结论已被 2026-11-24 复测推翻（客户端不接受 Surge 文本），现改发 Clash YAML 并于 2026-11-24 真机通过，「会带 Basic、不做 ss 文本粘贴」的结论仍成立。
 
 #### 3.7.6 限流、缓存、401 / 429
 
@@ -593,7 +593,7 @@ type MobileExportData =
 | App | 平台 | M1 格式 | 订阅 Basic | 状态 | 官方下载 | 依据 |
 |---|---|---|---|---|---|---|
 | **sing-box 官方**（iOS 商店名 `sing-box MT`，TestFlight 版即 SFI） | iOS / Android | sing-box JSON | **已核实** | **真机已验证**（iPhone，§3.6） | iOS <https://apps.apple.com/us/app/sing-box-mt/id6785326793>；Android <https://github.com/SagerNet/sing-box-for-android/releases> | 官方 `clients/apple/`、`clients/android/` 页；Remote Profile body 是 sing-box 配置（§3.7.5） |
-| **Shadowrocket** | iOS | Clash YAML（内联分流规则，§3.7.13） | **已核实（真机，2026-11-21；2026-11-24 同客户端拉取 Clash 成功）** | 同客户端 Clash YAML 真机通过；`shadowrocket` 端点 2026-11-24 改格式后**待复验** | <https://apps.apple.com/us/app/shadowrocket/id932747118>（美区） | 闭源；2026-11-21 的 Surge 配置导入结论已被 2026-11-24 复测推翻（§3.7.13） |
+| **Shadowrocket** | iOS | Clash YAML（内联分流规则，§3.7.13） | **已核实（真机，2026-11-21；2026-11-24 同客户端拉取 Clash 成功）** | 同客户端 Clash YAML 真机通过；`shadowrocket` 端点已于 2026-11-24 改格式后**真机通过** | <https://apps.apple.com/us/app/shadowrocket/id932747118>（美区） | 闭源；2026-11-21 的 Surge 配置导入结论已被 2026-11-24 复测推翻（§3.7.13） |
 | **Clash Meta for Android** | Android | Clash YAML | **已核实**（mihomo `SetBasicAuth`） | 源码核实，缺真机 | <https://github.com/MetaCubeX/ClashMetaForAndroid/releases> | `ProfileProcessor.kt:146` → `Clash.fetchAndValid`；`fetch.go` 的 `openUrl` → mihomo `component/http/http.go:58–60`；49,842 star，2026-11-20 推送 |
 | **Hiddify** | iOS / Android | sing-box JSON（备选 Clash YAML） | **已核实（Dart 回退路径）** | **真机通过（iPhone，2026-11-21）**；Android 待测 | <https://github.com/hiddify/hiddify-app/releases>、App Store `id6596777532` | `dio_http_client.dart:168–184` 显式拼 Basic；README + `link_parsers.dart`；**核心下载路径是否透传 userinfo 未核实**（§3.7.5）；34,196 star |
 
@@ -716,7 +716,7 @@ M1 只对 **sing-box 官方 / Shadowrocket / CMFA / Hiddify** 四个 App 负责�
 | ss 列表 | **不能** | 只有节点，没有规则语法 | 保留给通用客户端；界面写明「只能全部走节点」 |
 | Clash YAML（Shadowrocket） | **能** | `rules` 内联：`DOMAIN-SUFFIX,cn` → `GEOIP,CN` → `MATCH` | 专用端点 `/profile/shadowrocket`，不带 `rule-providers`（客户端不保证拉 `.mrs`），取代 ss 列表进界面（§3.7.13） |
 
-**Shadowrocket 结论（2026-11-24 更新）：原先「保留该行、接受全局、不做 conf 端点」的决定已被 §3.7.13 取代**——专用配置让分流随文件下发。2026-11-21 的 Surge 配置真机结论已被同日复测推翻（两台 iOS 设备导入失败，同客户端改用 Clash YAML 成功），现改发内联规则的 Clash YAML，待真机复验。`/profile/ss` 继续保留（通用客户端与兜底），但界面上的 Shadowrocket 行不再使用它。
+**Shadowrocket 结论（2026-11-24 更新）：原先「保留该行、接受全局、不做 conf 端点」的决定已被 §3.7.13 取代**——专用配置让分流随文件下发。2026-11-21 的 Surge 配置真机结论已被同日复测推翻（两台 iOS 设备导入失败，同客户端改用 Clash YAML 成功），现改发内联规则的 Clash YAML，2026-11-24 真机通过。`/profile/ss` 继续保留（通用客户端与兜底），但界面上的 Shadowrocket 行不再使用它。
 
 - `/profile/ss` 继续保留，二维码 = 订阅 URL 本身（§3.7.8）。
 - `/profile/shadowrocket` 于 2026-11-20 实现；2026-11-24 由 Surge 文本改为 Clash YAML（§3.7.13）。
@@ -948,7 +948,9 @@ rules:
 - **不再下发的字段**：新 Clash YAML 不含 `dns-server` / `skip-proxy` / `bypass-system`（Surge 文本才有），DNS 交给客户端默认；`GEOIP,CN` 依赖解析后的 IP，国内域名主要靠前面的 `DOMAIN-SUFFIX,cn` 命中。这是形态切换的结果，不是回归。
 - **节点自带**：配置里内联节点，不引用订阅，也不引用用户其它配置里的分组——导入后**不需要删除他原有的订阅或配置**。
 - **值的安全写法**：节点名与密码按 YAML 双引号标量转义（`yamlScalar`，与 Clash 输出同一套）。
-- **真机状态**：2026-11-24 起的格式**尚未在 Shadowrocket 真机复验**；可导入的依据是同客户端同日成功导入同一形状的 `/profile/clash` 配置（区别仅在内联规则与无 provider）。复验：按 §8 的真机检查，用 `/profile/shadowrocket` 的 URL 走「配置 → 从 URL 下载」与「手动粘贴」两条路径。
+- **真机状态（2026-11-24）**：新格式**已在 iPhone 的 Shadowrocket 上通过**——「配置 → 从 URL 下载」导入成功；连接后国内站点走直连（`DOMAIN-SUFFIX,cn` / `GEOIP,CN` 命中），境外站点走节点，出口随 `Veyl` 组里选中的节点变化。
+- **已知的客户端行为，不计为本产品缺陷**：导入后 Shadowrocket **更新配置时不重建已有代理组的成员**，新加的节点要手动「添加」进组；节点切换的失败在对照机上用其它服务商的订阅同样复现，判定为客户端/环境问题。
+- **另需注意**：发出去的配置是**导入那一刻的快照**，桌面端新建节点不会自动出现在已导入的配置里，需要在客户端点「更新」重新拉取。
 
 ## 4. 桌面 Host
 
@@ -1327,7 +1329,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 5. **两个 UI 入口共用同一弹层与命令**；左栏行只在「已登录 + 至少一台节点就绪 + 列表非 loading/error」时出现。
 6. **契约增量**合并：`commands.md` **固定 `2.47.0`**（`formats[]` + `mobile_clients_qr` 枚举）、`tools.md` 保持 `3.22.x`（这三个命令都是仅 UI，**不新增 AI 工具**；仅有的相关项是 `account.mobile` 行登记）。
 7. **验签 / 解密失败不得泄露凭据**：单台凭据解不开就跳过，不返回错误详情到客户端。
-8. **M1 只对四个 App 负责**：sing-box 官方 / Shadowrocket / CMFA / Hiddify（§3.7.8）。Shadowrocket 走专用配置（§3.7.13，2026-11-24 起为内联规则的 Clash YAML，待真机复验）而非 ss 列表；Karing / Stash / Loon / Quantumult X / v2rayNG / FlClash 不列入；不做「仅 ss 文本粘贴」特例（§3.7.5）。
+8. **M1 只对四个 App 负责**：sing-box 官方 / Shadowrocket / CMFA / Hiddify（§3.7.8）。Shadowrocket 走专用配置（§3.7.13，2026-11-24 起为内联规则的 Clash YAML，同日真机通过）而非 ss 列表；Karing / Stash / Loon / Quantumult X / v2rayNG / FlClash 不列入；不做「仅 ss 文本粘贴」特例（§3.7.5）。
 
 **智能分流（§3.8）的 P1**：sing-box 模板的 `route.default_domain_resolver` 不能回退（缺了 1.14 直接 FATAL）；规则集必须与 profile 同 origin、不写 `download_detour`；Clash 必须用 `DOMAIN-SUFFIX,cn` 保底 + 自有域名 `.mrs` provider，**不得使用 `GEOIP/GEOSITE`**（默认 geodata 源是 GitHub，失败会静默全局），`.mrs` 兼容性由 V20 取证；Shadowrocket 用 `/profile/shadowrocket` 下发内联规则的 Clash YAML（无 `rule-providers`），`DOMAIN-SUFFIX,cn` / `GEOIP,CN` 由客户端自带库解析（§3.7.13）。
 
@@ -1353,7 +1355,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 不改 `/v1/mobile/profile` 路径、不加 `/singbox` 后缀 | 已导入的旧 profile 永远指向它；改名会让所有手机下一次更新 404 |
 | M1 不做路径令牌 | 令牌会进请求行与日志，违反 §7.1；不支持 Basic 的客户端不进列表，也不做 ss 文本粘贴特例 |
 | 不预先砍 Clash 二维码 | 产品 2026-11-20 决定保留，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回只给复制链接 |
-| 不把未核实 Basic 的客户端列进 M1 | Karing / Stash / Loon / Quantumult X 核实后再进（Shadowrocket 已于 2026-11-21 真机通过，§3.7.13；该真机结论已被 2026-11-24 复测推翻，现改发 Clash YAML 待复验） |
+| 不把未核实 Basic 的客户端列进 M1 | Karing / Stash / Loon / Quantumult X 核实后再进（Shadowrocket 已于 2026-11-21 真机通过，§3.7.13；该真机结论已被 2026-11-24 复测推翻，现改发 Clash YAML，2026-11-24 真机通过） |
 | Clash YAML 用 `DOMAIN-SUFFIX,cn` 保底 + 自有域名 `.mrs` provider，带最小 `dns`；不塞 TUN / 端口 / `mode` | 纯字符串规则不会静默失效；TUN 与端口由客户端管理 |
 
 ---
@@ -1370,7 +1372,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 | 6 | 下载页 Android 渠道文案 | 已定：只给官方客户端页一条 | 已定，不改 |
 | 7 | 配置是否携带 DNS | **必须携带**：真机实测覆盖了初版「不导出 DNS」。非零模板固定 `1.1.1.1` DoH（`detour: "proxy"`）+ `hijack-dns`；零节点不带 DNS。已落地，不再是待确认项 | 已定（架构师），PM 知会 |
 | 8 | 配置是否携带 TUN 入站 | **必须携带**：官方客户端源码确认只有声明 TUN 入站才创建系统隧道（§3.5）。非零用最小 TUN（`auto_route: true`、`dns_mode: "hijack"`、`dns_address`）+ `route.auto_detect_interface: true`；零节点不建 TUN，避免假 VPN 把全部流量直连 | 已定（架构师），PM 知会 |
-| 9 | Shadowrocket / Karing / Stash 的 Basic | **已解决（2026-11-21）**：Shadowrocket 真机通过（专用配置，会带 Basic，§3.7.13）；该真机结论已被 2026-11-24 复测推翻，现改发 Clash YAML 待复验，「会带 Basic」仍成立；Karing / Stash 不列入（Basic 未核实） | 已闭环 |
+| 9 | Shadowrocket / Karing / Stash 的 Basic | **已解决（2026-11-21）**：Shadowrocket 真机通过（专用配置，会带 Basic，§3.7.13）；该真机结论已被 2026-11-24 复测推翻，现改发 Clash YAML 并于 2026-11-24 真机通过，「会带 Basic」仍成立；Karing / Stash 不列入（Basic 未核实） | 已闭环 |
 | 10 | Clash 的二维码内容 | **已定（2026-11-20）：保留**，码内容 = 带凭据的订阅 URL；能否扫通由 V13 判定，扫不通再退回「只给复制链接」 | PM 已定 |
 | 11 | ss 空 body 的客户端表现 | 零节点返回 200 + 0 字节；是否被客户端当作「更新成功」未核实（V16）。若被当作失败，可改为 204 或保留最后一份空列表 | 验证结论 + 架构师 |
 | 12 | Clash 的 `udp: true` | 服务端 SS 入站与防火墙都支持 UDP，但客户端实际路径未验（V17）。不可用就去掉该字段，TCP 不受影响 | 验证结论 |
