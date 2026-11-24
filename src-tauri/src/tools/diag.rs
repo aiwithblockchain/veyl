@@ -27,6 +27,96 @@ fn coverage_next_action(coverage_failed: bool) -> Option<NextAction> {
     })
 }
 
+/// 检查项 id 到中文名的固定映射。映射里没有的保留原名——名字是事实，
+/// 宁可露英文 id 也不编一个听起来像真的中文名。
+fn check_label(name: &str) -> &str {
+    match name {
+        "app.runtime_installed" => "运行库",
+        "app.process_alive" => "后台进程",
+        "app.version" => "运行时版本",
+        "app.config_valid" => "配置",
+        "app.clash_api" => "控制面",
+        "app.data_plane" => "数据面",
+        "system.proxy_services" => "系统代理",
+        "system.dns" => "DNS",
+        "system.default_route" => "默认路由",
+        "network.exit_ip" => "出口 IP",
+        "network.coverage" => "接管范围",
+        "network.reachable_seed_source" => "免费节点源",
+        "network.reachable_github" => "GitHub 访问",
+        "config.current_config" => "当前配置",
+        "config.seed_available" => "免费节点缓存",
+        "config.seed_stale" => "免费节点更新",
+        other => other,
+    }
+}
+
+fn check_str<'a>(check: &'a Value, key: &str) -> &'a str {
+    check.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// 把 `checks` 写成模型能直接读的清单。模型只看得到 `content`，
+/// 所以每项的结论、原因与建议都必须落在这里，不能指去 `data`。
+fn format_diag_summary(checks: &[Value]) -> String {
+    if checks.is_empty() {
+        return "诊断没有返回任何检查项。".into();
+    }
+    let failed = checks
+        .iter()
+        .filter(|check| check_str(check, "status") == "failed")
+        .count();
+    let mut lines = Vec::with_capacity(checks.len() + 2);
+    lines.push(if failed == 0 {
+        format!("诊断完成：共 {} 项检查，全部正常。", checks.len())
+    } else {
+        format!("诊断完成：共 {} 项检查，{failed} 项未通过。", checks.len())
+    });
+    for check in checks {
+        let label = check_label(check_str(check, "name"));
+        let detail = check_str(check, "detail").trim();
+        let line = match check_str(check, "status") {
+            "failed" => {
+                let remediation = check_str(check, "remediation").trim();
+                let mut line = format!("- {label}：失败");
+                if !detail.is_empty() {
+                    line.push_str(" —— ");
+                    line.push_str(detail);
+                }
+                if !remediation.is_empty() {
+                    line.push_str(" → ");
+                    line.push_str(remediation);
+                }
+                line
+            }
+            // skipped 是「没检查」不是故障；括号里的 detail 说明为什么没查。
+            "ok" => {
+                if detail.is_empty() {
+                    format!("- {label}：正常")
+                } else {
+                    format!("- {label}：正常 —— {detail}")
+                }
+            }
+            _ => {
+                if detail.is_empty() {
+                    format!("- {label}：没检查")
+                } else {
+                    format!("- {label}：没检查（{detail}）")
+                }
+            }
+        };
+        lines.push(line);
+    }
+    let next = checks.iter().find_map(|check| {
+        (check_str(check, "status") == "failed")
+            .then(|| check_str(check, "remediation").trim())
+            .filter(|remediation| !remediation.is_empty())
+    });
+    if let Some(remediation) = next {
+        lines.push(format!("下一步：{remediation}。"));
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +132,86 @@ mod tests {
     #[test]
     fn a_passing_coverage_check_offers_nothing() {
         assert!(coverage_next_action(false).is_none());
+    }
+
+    fn check(name: &str, status: &str, detail: &str, remediation: Option<&str>) -> Value {
+        json!({
+            "name": name,
+            "group": "app",
+            "status": status,
+            "ok": status == "ok",
+            "detail": detail,
+            "remediation": remediation,
+            "action": null,
+        })
+    }
+
+    #[test]
+    fn an_all_ok_diagnosis_says_so_and_lists_each_check() {
+        let checks = vec![
+            check("app.process_alive", "ok", "进程在运行", None),
+            check("system.proxy_services", "ok", "代理配置正常", None),
+        ];
+        let text = format_diag_summary(&checks);
+        assert!(text.starts_with("诊断完成：共 2 项检查，全部正常。"));
+        assert!(text.contains("- 后台进程：正常 —— 进程在运行"));
+        assert!(text.contains("- 系统代理：正常 —— 代理配置正常"));
+        assert!(!text.contains("下一步"));
+    }
+
+    #[test]
+    fn an_ok_check_without_detail_shows_only_the_status() {
+        let checks = vec![check("network.exit_ip", "ok", "", None)];
+        let text = format_diag_summary(&checks);
+        assert!(text.contains("- 出口 IP：正常"));
+        assert!(!text.contains("——"));
+    }
+
+    #[test]
+    fn a_failed_check_carries_detail_and_remediation_and_sets_the_next_step() {
+        let checks = vec![
+            check("app.process_alive", "ok", "进程在运行", None),
+            check(
+                "system.dns",
+                "failed",
+                "3 个解析器，example.com 无法解析",
+                Some("刷新 DNS 缓存后重试"),
+            ),
+            check("system.default_route", "ok", "默认网关正常", None),
+        ];
+        let text = format_diag_summary(&checks);
+        assert!(text.starts_with("诊断完成：共 3 项检查，1 项未通过。"));
+        assert!(
+            text.contains("- DNS：失败 —— 3 个解析器，example.com 无法解析 → 刷新 DNS 缓存后重试")
+        );
+        assert!(text.ends_with("下一步：刷新 DNS 缓存后重试。"));
+        assert!(!text.contains("data"));
+        assert!(!text.contains("checks"));
+    }
+
+    #[test]
+    fn a_skipped_check_reads_as_not_checked_not_as_failure() {
+        let checks = vec![
+            check("app.clash_api", "skipped", "未连接", None),
+            check("network.reachable_seed_source", "ok", "可达", None),
+        ];
+        let text = format_diag_summary(&checks);
+        assert!(text.starts_with("诊断完成：共 2 项检查，全部正常。"));
+        assert!(text.contains("- 控制面：没检查（未连接）"));
+        assert!(!text.contains("未通过"));
+        assert!(!text.contains("下一步"));
+    }
+
+    #[test]
+    fn an_unknown_check_name_keeps_its_original_id() {
+        let checks = vec![check("future.check", "failed", "出错了", None)];
+        let text = format_diag_summary(&checks);
+        assert!(text.contains("- future.check：失败 —— 出错了"));
+    }
+
+    #[test]
+    fn an_empty_check_list_says_so_instead_of_inventing_one() {
+        assert_eq!(format_diag_summary(&[]), "诊断没有返回任何检查项。");
     }
 }
 
@@ -110,15 +280,8 @@ impl Tool for DiagRunTool {
                 if coverage_failed {
                     facts.push(Fact::new(FactKey::ScopeNoHttp3));
                 }
-                let outcome = ToolOutcome::ok(
-                    match (failed, skipped) {
-                        (0, 0) => "诊断通过，没有发现异常。",
-                        (0, _) => "诊断完成，有几项这次没检查。",
-                        _ => "诊断完成，有检查项未通过，详情见 data.checks。",
-                    },
-                    data,
-                )
-                .with_display(facts, Changed::None);
+                let outcome = ToolOutcome::ok(format_diag_summary(&checks), data)
+                    .with_display(facts, Changed::None);
                 if coverage_failed {
                     // 不自动切换：DiagRun 仍是 ReadOnly，交给用户点。
                     match coverage_next_action(coverage_failed) {
