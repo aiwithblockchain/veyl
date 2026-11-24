@@ -1,8 +1,9 @@
 # AI 文档管理：入口、内容与三份文档的加载与版本
 
 > 日期：2026-11-21
-> 状态：**梳理稿，方案未定**。本文只做清点与列问题，供讨论；讨论出的结论回填本文件并去掉「待讨论」标注。
-> 依据：`resources/prompts/zh/first-run.md`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
+> 最后核对：2026-11-24，对照 `8fbcd77`
+> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 是待落地的方案 B，前置条件（子模块策略）未定。§2–§5 是清点与设计记录，不代表全部已实现。
+> 依据：`resources/prompts/{zh,en}/{system,kickoff,product,faq}.md`、`src-tauri/src/claurst_session/prompts.rs`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
 
 ---
 
@@ -24,25 +25,27 @@
 
 ## 1. 「问 AI」入口清单（现行代码）
 
-所有入口最终都走 `askAiInPanel` / `handleAskAi`（`src/App.tsx:1492`、`:1809`）：新建一个会话、展开右栏、发送文本；AI 未配置时不展开，只提示并跳到设置 › AI。`hidden` 的入口不落用户气泡。
+所有入口最终都走 `askAiInPanel` / `handleAskAi`（`src/App.tsx:2087`、`:1753`）：新建一个会话、展开右栏、发送文本；AI 未配置时不展开，只提示并跳到设置 › AI。`hidden` 的入口不落用户气泡。
 
 | # | 界面位置 | 按钮文案 | 发送给 AI 的内容 | 附带上下文 | 代码 |
 |---|---|---|---|---|---|
-| 1 | 连接页 · 接管方式 / 流量范围旁边 | `问 AI` | 「我在 Veyl 的连接页看接管方式和流量范围。当前是 {Tun/Proxy} + {智能/全局}…」 | 当前接管方式、当前流量范围 | `StageQuickToggles.tsx:332`、`ai/advancedPrompts.ts:14` |
-| 2 | 连接失败时 · hero 主按钮 | `让 AI 检查` | 「连接失败了。请先跑一次诊断…」 | 无（AI 自己调 `DiagRun`） | `ConnectionStage.tsx:329,523`、`App.tsx:2365`、`ui/assistantPrompts.ts:12` |
-| 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts` |
-| 4 | 设置 › 连接 · 「新建节点」 | `新建节点` | 无文本，只展开右栏并把焦点给输入框 | 无 | `App.tsx:1802`（`handleAskAiFromConsole`） |
-| 5 | 设置 › 帮助 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1434`、`ui/issueReport.ts:6` |
-| 6 | 我的服务器 › 建机向导底部 | `让 AI 帮我选` | 「帮我选一个地区和规格。」 | 无（AI 自己调 `StageSelect` / `CatalogOptions`） | `MyServerWizard.tsx:686`、`App.tsx:2389` |
-| 7 | 我的服务器 › 创建失败（向导内 / 详情页） | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerWizard.tsx:640`、`MyServerDetail.tsx:462`、`ui/assistantPrompts.ts:2` |
-| 8 | 「在手机上使用」弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:726`、`ai/advancedPrompts.ts:34` |
-| 9 | 右栏 AI 空态 · 预设问题 | 5 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:75` |
-| 10 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:10` |
-| 11 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:280`、`useNodeDiagnosis.ts:284-297`、`App.tsx:2291` |
+| 1 | 连接页 · 接管方式 / 流量范围旁边 | `问 AI` | 「我在 Veyl 的连接页看接管方式和流量范围。当前是 {Tun/Proxy} + {智能/全局}…」 | 当前接管方式、当前流量范围 | `StageQuickToggles.tsx:340`、`ai/advancedPrompts.ts:5` |
+| 2 | 连接失败时 · hero 主按钮 | `让 AI 检查` | 「连接失败了。请先跑一次诊断…」 | 无（AI 自己调 `DiagRun`） | `ConnectionStage.tsx:329,523`、`App.tsx:2506`、`ui/assistantPrompts.ts:15` |
+| 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts:7` |
+| 4 | 设置 › 连接 · 「新建节点」 | `新建节点` | 无文本，只展开右栏并把焦点给输入框 | 无 | `App.tsx:2080`（`handleAskAiFromConsole`） |
+| 5 | 设置 › 帮助 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
+| 6 | 我的服务器 › 建机向导底部 | `让 AI 帮我选` | 「帮我选一个地区和规格。」 | 无（AI 自己调 `StageSelect` / `CatalogOptions`） | `MyServerWizard.tsx:469`、`App.tsx:3096` |
+| 7 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
+| 8 | 「在手机上使用」弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
+| 9 | 右栏 AI 空态 · 预设问题 | 5 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
+| 10 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:22` |
+| 11 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:327`、`useNodeDiagnosis.ts:635`、`App.tsx:2310` |
 
 > 2026-11-22 更正：#2 的 hero 主按钮**仍在**，只在**非免费节点**连接失败时出现（`canDiagnose = failed && onDiagnose && !failedOnSeed`）；免费节点失败退成「重新连接」（`6a455d6`）。#10 拆成两条：自有节点先走「智能分析」面板，AI 是面板最后一步的兜底，不再是测不通时的第一动作。
 
 > 2026-11-21 起设置页的入口收敛：API 类型、模型选择、本地代理端口三处行内「问 AI」全部删除，只保留顶部「咨询 AI」。用户提示词于 2026-11-22 定稿：带当前分区的实际值开口，不再反问「想咨询哪个模块」。
+
+> 2026-11-24 核对：#7 的向导内入口已不存在——创建失败会直接跳到那台服务器的详情页，`AI 定位` 只在详情页出现。本表行号已按 `8fbcd77` 逐条校正。
 
 **相关但不算「问 AI」的两个入口**（写在这里避免漏掉）：
 
@@ -110,7 +113,7 @@
 
 - **AI 服务商**：API 类型（openai 兼容 / anthropic 兼容）、Base URL、模型；DeepSeek 一键配置。
 - **高级项**：默认配置源、本地代理端口、日志目录、恢复网络、运行时升级（只能用户明确要求才升）。
-- 每一项旁边都有固定「问 AI」，回答模板是「改了什么 / 什么时候改 / 改错会怎样」三句。
+- 设置页只有顶部一个 `咨询 AI`，行内「问 AI」已于 2026-11-21 收敛（见 §1）。回答模板仍是「改了什么 / 什么时候改 / 改错会怎样」三句。
 
 工具：`OpenSettings`、`NetConfigGet`、`CoreListVersions`、`CoreUpgrade`、`RuntimeLogs`、`DeepseekSetupKey`、`DeepseekSaveKey`。
 
@@ -124,18 +127,21 @@
 
 ---
 
-## 3. 三份文档怎么管理、怎么加载、怎么版本化（待讨论）
+## 3. 三份文档怎么管理、怎么加载、怎么版本化
 
-### 3.1 现状
+### 3.1 现状（2026-11-24 核对）
 
 | 事实 | 位置 |
 |---|---|
-| 只有**一份**系统提示词，编译期编进二进制 | `resources/prompts/zh/first-run.md` → `include_str!`（`claurst_session/mod.rs:42`） |
-| 渲染时填两个占位符：工具清单（从注册表生成）、块清单（Rust 常量） | `mod.rs:58-88` |
-| 每轮追加「环境」段（地区 / 来源 / 系统推断）与 `SAFETY_RULES` 九条 | `mod.rs:93-143`、`:360` |
-| **没有**产品功能介绍文档、**没有** FAQ 文档（2026-11-21 已建占位：`resources/prompts/{zh,en}/product.md`、`faq.md`） | `resources/prompts/zh/` 下只有 `first-run.md` |
-| AI **没有读文件的能力**：工具集里没有 Read / Glob / 搜索 | `tools/mod.rs:154-203` |
-| 文件头写着「构建时与回访、失败、分流追问等段落拼接为 system.md」 | 实际没有这个拼接步骤，注释与实现不符 |
+| **四份**提示词 / 文档，中英各一套，编译期编进二进制 | `resources/prompts/{zh,en}/` 下 `system.md`、`kickoff.md`、`product.md`、`faq.md` → `claurst_session/prompts.rs:21-28` |
+| 启动时释放到 `<data_dir>/prompts/<lang>/`，**内容变了才写盘** | `prompts.rs:109-137`（`release` / `write_if_changed`） |
+| 每种语言一个内容哈希（前 8 位），会话创建时写进日志对账 | `prompts.rs:109-136`、`mod.rs:369-375` |
+| 渲染时填两个占位符：块清单（Rust 常量）、文档目录；能力清单 `{{CAPABILITY_CATALOG}}` 已移除，渲染器仍吞掉 | `mod.rs:119-142` |
+| 系统提示词**每轮重建**（会话创建时先建一次，之后每轮重取环境）；语言在会话创建时定 | `mod.rs:360-384`、`:483-495` |
+| 每轮追加「环境」段（地区 / 来源 / 系统推断）与安全底线**三条** | `mod.rs:184-236`、`:237-259` |
+| `product.md` 已有正文（本机 186 行）；`faq.md` **仍是占位**（12 行） | `resources/prompts/zh/{product,faq}.md` |
+| AI **已能读文件**：六个基础工具随会话注册 | `mod.rs:106-116`（Read / Edit / Write / Bash / Glob / Grep）；与 Veyl 工具合并见 `mod.rs:78-100` |
+| 两种语言必须同构：标题层级序列与占位符集合一致 | `prompts.rs:215-234`（测试） |
 
 ### 3.2 要回答的问题
 
@@ -145,7 +151,7 @@
 - 功能介绍：产品有哪些能力、每项怎么用、边界在哪——**按需进上下文**。
 - FAQ：具体问句与标准答案——**按需进上下文**。
 
-待决：哪些内容必须留在系统提示词里（例如「不承诺结果」「节点只有一个池」），哪些可以挪进按需文档，挪出去会不会让 AI 在流程中分心或答错。
+**已定（D1，见 §7）**：系统提示词只留角色、工作方式与文档指路；产品事实与操作细节进 `product.md` / `faq.md`，由 AI 按需读。哪些必须常驻、哪些可以挪出去的判定标准见 §7。
 
 **B. 加载方式**：三选一或组合。
 
@@ -155,18 +161,25 @@
 | B 按需检索 | 三份编进二进制，新增一个只读工具（如 `HelpLookup`），AI 判断需要时取 | 多一次工具往返；离线仍成立；要设计检索粒度 |
 | C 入口注入 | 系统提示词常驻；FAQ / 功能介绍只在该入口被点击时整段或按段注入 | 入口之外的自由提问拿不到；需要维护「入口 → 段落」映射 |
 
-待决：先定 B 还是 C，还是 B+C（入口注入保准，检索兜底）。
+**已定（D2）：取 B 的变体——「指路 + 按需读取」。** 不新增 `HelpLookup` 之类的检索工具，改为把文档释放到应用数据目录、给 AI 注册六个基础文件工具（Read / Edit / Write / Bash / Glob / Grep），由它在需要时直接读 `{{PROMPT_DIR}}` 下的文件。已落地，见 §7.1。方案 C（入口注入）未采用：入口之外的自由提问拿不到文档。
 
 **C. 版本管理**：三份文档各自独立版本还是跟着客户端版本走？
 
 - 需要能回答：这份提示词是哪一版？FAQ 某条什么时候改的、为什么改？旧客户端加载旧文档会不会答错新功能？
-- 候选做法：文档内 `version` 字段 + 内容哈希；变更记录 `CHANGELOG`；CI 校验（占位符已填、引用 id 存在、禁词检查）；随客户端版本发布时把三份文档的版本写进日志，便于对账。
-- 待决：文档与客户端是**绑定发布**（同一版二进制）还是**可独立更新**（从服务端拉最新）。前者简单、离线友好；后者要处理「文档比客户端新」的错答。
+- **已有什么**：
+  - 内容哈希：每种语言目录一个 8 位版本号，会话创建时写进日志（`prompts.rs:109-136`、`mod.rs:369-375`）。
+  - 两种语言同构校验：标题层级序列与占位符集合必须一致（`prompts.rs:215-234`）。
+  - 版本只看内容：同样的内容重复释放得到同一个版本（`prompts.rs:265-274`）。
+- **还差什么**：
+  - 文档内没有 `version` 字段，也没有变更记录（`CHANGELOG`）——「某条什么时候改的、为什么改」查不到。
+  - 没有 CI 校验（占位符已填、引用 id 存在、禁词检查）。
+  - 发布方式未定（D3）。
+- **仍在待决**：文档与客户端是**绑定发布**（同一版二进制）还是**可独立更新**（从服务端拉最新）。前者简单、离线友好；后者要处理「文档比客户端新」的错答。
 
 ### 3.3 约束（不参与讨论，作为前提）
 
 - **离线可用**：开机没网时 AI 也要能答基础问题，文档不能只放在服务端。
-- **禁词与措辞规则**沿用 `first-run.md` 的「文案规则」，FAQ 不能破例。
+- **禁词与措辞规则**沿用 `system.md` 的「怎么说话」，FAQ 不能破例。
 - **不新增外部依赖**；文档加载走已有机制，不引入向量库。
 
 ---
@@ -220,13 +233,13 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 | # | 问题 | 谁拍 | 状态 |
 |---|---|---|---|
-| D1 | 三份文档的边界：什么必须留在系统提示词 | PM + ds-lead | **已定，见 §7** |
-| D2 | 加载方式：全量 / 按需检索 / 入口注入（是否组合） | PM + 架构师 | **已定「指路 + 按需读取」，落地细节待定，见 §7.3** |
-| D3 | 产品介绍与 FAQ 是绑定客户端发布，还是可独立更新 | 架构师 | 待讨论 |
-| D4 | 文档的版本标识与变更记录形式 | 架构师 | 待讨论 |
+| D1 | 三份文档的边界：什么必须留在系统提示词 | PM + ds-lead | **已定，见 §7；已落地** |
+| D2 | 加载方式：全量 / 按需检索 / 入口注入（是否组合） | PM + 架构师 | **已定「指路 + 按需读取」，已落地，见 §7.1** |
+| D3 | 产品介绍与 FAQ 是绑定客户端发布，还是可独立更新 | 架构师 | 待讨论（现状：四份都编进二进制、随客户端发布；独立更新未做） |
+| D4 | 文档的版本标识与变更记录形式 | 架构师 | 待讨论（已有内容哈希 + 两语言同构测试；缺文档内 `version`、`CHANGELOG`、CI 校验） |
 | D5 | FAQ 条目是否编号、长度上限、审核人 | PM | 待讨论 |
 | D6 | 入口额外上下文：放用户消息还是系统提示词 | PM | 待讨论 |
-| D7 | 是否新增只读检索工具（名称、检索粒度、命中不到时怎么办） | 架构师 + be-lead | 待讨论 |
+| D7 | 是否新增只读检索工具（名称、检索粒度、命中不到时怎么办） | 架构师 + be-lead | **已随 D2 解决**：不新增，改用六个基础文件工具直接读文件 |
 | D8 | 预设问题入口（#9）是否保留、是否挂 FAQ id | PM | 待讨论 |
 
 ---
@@ -245,36 +258,34 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 | 文档 | 范围 |
 |---|---|
-| `product.md` | 产品定位与设计；App 的功能、操作与设置；10 个「问 AI」入口对应的功能 |
+| `product.md` | 产品定位与设计；App 的功能、操作与设置；11 个「问 AI」入口对应的功能 |
 | `faq.md` | 使用 VPN 过程中的场景与解决办法（连上了打不开、某些软件没走 VPN、速度慢等） |
 
 两边不写同一个问题；需要实时状态才能回答的（「我现在连的是哪个节点」）两边都不写，交给工具。
 
-**会话工作流的重排（待实现）**
+**会话工作流的重排（已实现）**
 
-- `first-run.md` 退役，改名 `system.md`，只承担「角色 + 方式 + 文档指路」。
-- 首启：用户配置好 AI Key 进入界面时，先加载系统提示词，再给一条用户提示词——「用户刚进入 APP，引导他选择节点并回答相关问题」；AI 收到后给出选项，引导用户选「自建节点」或「免费节点」。
+- `first-run.md` 已退役（`5a7d8bc`），拆成 `system.md`（系统提示词，只承担「角色 + 方式 + 文档指路」）与 `kickoff.md`（首启用户提示词，正文是原 `first-run.md` 的「首次配置」整段）。
+- 首启：用户配置好 AI Key 进入界面时，先加载系统提示词，再发 `kickoff.md` 作为用户提示词；AI 给出选项，引导用户选「自建节点」或「免费节点」。前端调 `ai_session_kickoff` 取这段（`prompts.rs:47-54`）。
 - 不照搬 TweetPilot 的多会话类型，只保留「系统提示词 + 可选的一条用户提示词」。
 
 **语言**
 
-- 提示词按 `resources/prompts/zh/` 与 `resources/prompts/en/` 两套维护，随系统设置里的语言切换（见待办）。
+- 提示词按 `resources/prompts/zh/` 与 `resources/prompts/en/` 两套维护，随系统设置里的语言切换——但只对新建会话生效：语言在会话创建时解析一次，老会话不跟设置变（`mod.rs:363-364`、`:486-488`）。
 - 参考 TweetPilot 的 `prompt_lang_dir()`：按语言前缀归一（`en-GB`、`en-AU` 都算 `en`），只支持 zh / en 两档。
 
-### 7.1 落地前必须解决的两件事（评审发现）
+### 7.1 落地前必须解决的两件事（已完成）
 
-现在 Veyl 的 AI 会话只注册了 39 个自研工具（`run_query_loop` 拿到的就是 `self.tools`），**没有 claurst 默认的文件读写工具**。TweetPilot 的「指路」之所以成立，是它把详细文档装到 `~/.tweetpilot/prompts/...`，AI 用内置文件工具去读。Veyl 要做同样的事：
+评审时 Veyl 的 AI 会话只注册了自研工具，**没有 claurst 默认的文件读写工具**——「指路」只会让 AI 假装读过。两件现在都已做：
 
-1. **文档落到磁盘**：启动时把 `resources/prompts/{zh,en}/` 释放到应用数据目录，并把绝对路径写进系统提示词。
-2. **给 AI 读文件的能力**：注册 claurst 内置的六个基础工具（Read / Edit / Write / Bash / Glob / Grep）。2026-11-21 已拍板：不做只读限制，用户对自己的文件与终端操作不设限；提示词目录只是默认资料位置。
+1. **文档落到磁盘**：启动时把 `resources/prompts/{zh,en}/` 释放到 `<data_dir>/prompts/<lang>/`，绝对路径写进系统提示词（`{{PROMPT_DIR}}`）。内容变了才写盘（`prompts.rs:106-137`）。
+2. **给 AI 读文件的能力**：注册 claurst 内置的六个基础工具（Read / Edit / Write / Bash / Glob / Grep），与 Veyl 工具合并进 `session_tools`（`mod.rs:78-116`）。2026-11-21 已拍板：不做只读限制，用户对自己的文件与终端操作不设限；提示词目录只是默认资料位置。
 
-不解决这两点，「指路」只会让 AI 假装读过。
+### 7.2 细节（2026-11-24 已定）
 
-### 7.2 仍未定的细节
-
-- 文档释放时机与路径：每次启动覆盖，还是版本变了才覆盖。
+- 文档释放时机与路径：**已定**——`<data_dir>/prompts/<lang>/`，内容变了才写盘（`prompts.rs:106-137`）。
 - 可读范围：**已定不限制**——AI 可以读用户目录里的文件（Word 等），提示词目录只是文档默认位置。注入风险的缓解见 `ai-prompt-loading.md` §4.1。
-- 系统提示词是每轮重建（现状）还是会话创建时快照。
+- 系统提示词：**已确认每轮重建**（`mod.rs:483-495`），不是会话创建时快照；语言在会话创建时定，之后不跟设置变。
 
 ### 7.3 参考：TweetPilot 的做法
 
@@ -284,16 +295,53 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 ---
 
-## 附录 · AI 现有工具（39 个，另有 1 个不对用户暴露的包装）
+## 8. 系统提示词的组装方式：方案 B（待落地）
+
+### 8.1 现状：claurst 是附加模式
+
+- `SystemPromptOptions` 是 `#[derive(Default)]`，`replace_system_prompt` 默认 `false`（`claurst/src-rust/crates/core/src/system_prompt.rs:233`、`:263`）。
+- 我们的 `system.md` 被包成 `<custom_instructions>` 放进**稳定块**（`system_prompt.rs:356-360`）。
+- 稳定块里还有 claurst 自己整套编码助手提示词：能力说明、工具使用规范、权限、协调者模式等（`system_prompt.rs:324-348`）。
+- 动态块在 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之后（`system_prompt.rs:381-382`）；`append_system_prompt` 追加在最末（`system_prompt.rs:439-441`）。
+- `enabled_tools` 在 `build_system_prompt` 层面 `None` 表示「未知」，会把全部工具的用法说明都发出去（`system_prompt.rs:268-278`）；但查询循环在组装前会用本次真实工具集把它填上（`claurst/src-rust/crates/query/src/lib.rs:1053-1059`），所以 Veyl 会话实际不走「未知」分支。
+- Veyl 从未设置 append / replace / enabled_tools：`system_prompt` 在会话创建（`claurst_session/mod.rs:378`）和每轮（`claurst_session/mod.rs:489`）整体重拼。
+- `QueryConfig` 没有 `replace_system_prompt` 字段（`claurst/src-rust/crates/query/src/lib.rs:95-182`）；runner 里硬编码默认值（`claurst/src-rust/crates/query/src/runner/prompt.rs:28` 注释、`:41` `..Default::default()`）。
+
+### 8.2 方案 B 的目标结构
+
+- `system_prompt` = `system.md` 渲染结果 + 安全底线 + 语言约束，会话创建时构建一次。
+- `append_system_prompt` = 环境段（地区 / 来源 / 系统推断），每轮重建。
+- `replace_system_prompt = true`：不再发送 claurst 默认提示词，身份冲突消失。
+
+### 8.3 前置阻塞
+
+- `QueryConfig` 缺 `replace_system_prompt` 字段，需要在子模块加字段并在 `runner/prompt.rs` 转发。
+- replace 模式目前提前 return，只输出 custom 文本加边界（`system_prompt.rs:308-312`），会丢掉 `append_system_prompt`；要「替换 + 动态段」同时成立，还需让 replace 分支也走 append。
+- 子模块策略未定：本地补丁 / upstream PR / 不改子模块。
+
+### 8.4 不改子模块的退路
+
+- **A 保持附加**：`system.md` 进 `system_prompt`、环境进 `append_system_prompt`。缓存友好（稳定块逐轮不变），但 claurst 默认提示词仍在，身份冲突没解决。
+- **A′ 把 `system.md` 放到 `append_system_prompt` 末尾**：靠位置压过默认提示词。代价是静态内容被标成动态、稳定缓存前缀变短，而且「最后说的算」只是概率，不是保证。
+
+### 8.5 待定
+
+- 子模块改不改、方案 B 的具体代码改动与验收，等 AI 工具审计结果出来再补。
+
+---
+
+## 附录 · AI 现有工具（Veyl 自研 42 个，另有 1 个不对用户暴露的包装；再加 6 个基础文件工具）
 
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
 目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `CategoryList` `StageSelect` `CatalogOptions`
-配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImportUrl` `NodeImportText` `NodeCreate` `NodeSwitch` `NodeProbe`
+配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImportUrl` `NodeImportText` `NodeCreate` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
 路由：`RouteGet` `RouteSetMode` `RouteTargetsSet` `RulesStatus`
 连接：`VpnConnect` `VpnDisconnect`
-诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `NetRepair` `NetConfigGet`
+诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `SubmitIssueToPublicWall` `ReadPublicIssueWall` `NetRepair` `NetConfigGet`
 服务器：`MyServers` `MyServerFailure` `JobGet`
 其它：`SetUserRegion` `OpenSettings` `DeepseekSetupKey` `DeepseekSaveKey` `AskUserQuestionGuard`（包装，不对用户暴露）
 
-> 工具清单由 `tools/mod.rs:154` 的注册表决定，随每次请求作为工具定义发给模型；2026-11-21 起系统提示词里不再渲染能力清单（`{{CAPABILITY_CATALOG}}` 已移除）。
+基础文件工具（claurst 内置，随会话注册）：`Read` `Edit` `Write` `Bash` `Glob` `Grep`（`mod.rs:106-116`）
+
+> 工具清单由 `tools/mod.rs:157` 的 `vpn_tools` 决定，经 `session_tools`（`mod.rs:78-100`）与基础文件工具合并后，随每次请求作为工具定义发给模型；2026-11-21 起系统提示词里不再渲染能力清单（`{{CAPABILITY_CATALOG}}` 已移除）。

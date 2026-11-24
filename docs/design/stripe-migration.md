@@ -127,6 +127,16 @@ consent_collection[terms_of_service]=required
 - 这句话不是 Stripe 原生的第二个勾选项。`consent_collection[terms_of_service]` 只能覆盖「同意条款」；「不在 EEA/UK」目前只能通过 `custom_text[submit][message]` 作为**告知**展示，或由 Radar 按账单国家 / 卡国家直接阻断。如果法律上必须有主动勾选，需要另做一步——见 §10。
 - 结账页如做本地化，中文译文需与英文同源确认后再上，不要自行翻译。
 
+#### 3.2.1 当前测试状态（2026-11-24）
+
+EIN 未到，Stripe 账户未完成 Activate Payments，Dashboard 的 Public details 打不开，填不了 ToS URL；此时传 `required` 建会话会直接报错。当前做法：
+
+- **仓库代码保持 `required`**，不提交任何「临时去掉」的改动，避免 dev / prod 出现两套逻辑。
+- 需要部署 dev 时，在部署的工作树里临时删掉 `src/payments/stripe.ts` 的这一行，部署完成后立刻还原；dev 包因此不含它，仓库与生产代码仍是同一份。门禁仍按 `required` 跑，不因临时删除而改测试。
+- 当前 dev 部署（`45470206`）就是这种临时包；**不要用「dev 能充值」推断 `required` 已验证**。
+- **EIN 到位后必须补做，未完成不得上线**：Activate Payments → Public details 填 `https://veyl.dessage.xyz/en/legal/terms` → 在 test 模式用真实测试卡回归一次带 ToS 勾选的收银台（勾选后 `session.consent` 有记录）→ 再切 live。
+- 这条临时状态是**部署动作，不是代码分支**；任何新会话都不应把删除后的文件提交。
+
 ### 3.3 地区限制
 
 条款暂不受理 EEA/UK 订单，支付侧要做两层：
@@ -326,7 +336,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 
 ### 9.1 上线前 Dashboard 校验
 
-- **ToS URL**：Settings → Public details 填好；否则 `consent_collection[terms_of_service] = required` 建会话会失败。
+- **ToS URL**：Settings → Public details 填好；否则 `consent_collection[terms_of_service] = required` 建会话会失败（当前临时状态与 EIN 后的补做步骤见 §3.2.1）。
 - **Radar**：按账单国家 / 卡国家拦截 EEA/UK 的规则，先在 test 验证「命中拒绝」与「正常放行」两个方向，再启用 live。
 - **支付方式**：Dashboard 启用卡、Apple Pay / Google Pay；支付宝 / 微信按账户资格单独申请。代码不传 `payment_method_types`，不要写死列表。
 - **Webhook 端点**：`https://<prod>/v1/webhooks/stripe`，只订阅 `checkout.session.completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` 四个事件；每个端点用自己的 `whsec_`。
@@ -387,7 +397,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 
 | 位置 | 具体 |
 |---|---|
-| 客户端 i18n（中文） | `src/i18n/zh.ts`：`account.balance`、`account.walletError`、`account.stale`、`topup.balance`、`topup.refreshBalance`、`topup.opened`、`serversPage.loginText`、`detail.destroyConfirm`、`wizard.demo`、`wizard.balanceShort`、`wizard.balanceShortBare`、`settings.account.balance`、`settings.account.billingNote`、`settings.consult.fact.balance`、`myservers.tombstone.text`、`myservers.billing.pastDueNoGrace`、`myservers.billing.pastDueGrace`、`myservers.billing.expired`、`app.billsNotice`、`tool.fact.server.destroyed.billingUnpaid`、`error.reason.insufficientBalance`、`error.reason.insufficientBalanceBare`、`error.reason.settleInsufficient`、`error.failure.billingUnpaid` |
+| 客户端 i18n（中文） | `src/i18n/zh.ts`：`account.balance`、`account.walletError`、`account.stale`、`topup.balance`、`topup.refreshBalance`、`topup.opened`、`serversPage.loginText`、`detail.destroyConfirm`、`wizard.billing`、`wizard.balanceShort`、`wizard.balanceShortBare`、`settings.account.balance`、`settings.account.billingNote`、`settings.consult.fact.balance`、`myservers.tombstone.text`、`myservers.billing.pastDueNoGrace`、`myservers.billing.pastDueGrace`、`myservers.billing.expired`、`app.billsNotice`、`tool.fact.server.destroyed.billingUnpaid`、`error.reason.insufficientBalance`、`error.reason.insufficientBalanceBare`、`error.reason.settleInsufficient`、`error.failure.billingUnpaid` |
 | 客户端 i18n（英文） | `src/i18n/en.ts` 的**同名 key**；中英文必须同一批改，不能只改中文 |
 | Host 固定串 | `src-tauri/src/tools/my_servers.rs`（`因余额不足停机删除`、`余额不足，已停机删除`，含工具描述）；`src-tauri/src/control_plane/error.rs`（`余额不足，服务器没有开通`）。这些会出现在界面与 AI 工具说明里，不能漏 |
 | 控制面展示文案 | `cloudflare/control-plane/src/index.ts` 的 `/payment/return` 页：`余额变化` → `服务额度变化`；`orders.ts` 的 `余额不足，先充值`；`servers.ts` 的墓碑原因 `余额不足，已停机删除` |

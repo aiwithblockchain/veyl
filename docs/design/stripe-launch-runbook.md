@@ -93,6 +93,8 @@ npx wrangler secret list --env dev
 | Checkout 同意项 | 代码传 `consent_collection[terms_of_service]=required`；Dashboard 没填 ToS URL 时建会话会直接报错 |
 | EEA/UK | Radar 阻断 + 收银台 `custom_text` 告知；条款口径见 `stripe-migration.md` §3.2–3.3 |
 
+> **2026-11-24 当前状态**：EIN 未到、账户未激活，Public details 填不了 ToS URL；dev 部署（`45470206`）临时去掉了 `consent_collection[terms_of_service]=required`，仓库仍是 `required`。EIN 后必须按 `stripe-migration.md` §3.2.1 补 ToS URL、在 test 模式回归一次带勾选的收银台，未完成不得上线。
+
 ### 2.4 支付方式
 
 Settings → Payments → Payment methods：
