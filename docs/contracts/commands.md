@@ -1746,7 +1746,7 @@ type MyServerCatalogData = {
 - **打开新建向导时拿最新目录**：前端以 `my_server_catalog { fresh: true }` 调 Host，Host 请求控制面 `GET /v1/catalog?fresh=1`，跳过年龄判断直接回源（10 秒内重复打开不重复回源）；**不带 `fresh` 的页面加载走控制面的 5 分钟全局年龄判断**。控制面用 D1 存一份全局目录，所有边缘共享同一份数据。回源失败一律 `503 catalog_unavailable`（`retryable: true`），**不回退旧数据**——过期的可用性会把用户引到建不成的组合上；旧行留在库里等下次成功后覆盖。
 - **`transfer_gib` 来自 `/v2/sizes` 的 `transfer`**：DO 该字段是 **float、单位 TB**，只计公网出口；折算乘 **1000**（DO 计费文档把 1 TB 档写作「1,000 GiB」），四舍五入到整 GiB。**不新增任何 DO 调用、不需要额外 scope**——`/sizes` 本来就在取。取不到或非正数时填 `0`，界面整行不显示，**不写「不限量」**。
 - **`regions` 来自 `/v2/sizes` 每条规格自己的 `regions`（2.38.0）**：DO 按地区给可用性，**不存在「每个地区都能开每一档」**——2026-11-18 的建机 422 就是因为拿 sgp1 去开 `s-1vcpu-1gb`，而该档位在 sgp1 并不存在。`regions` 里的 id 一定是本目录 `regions[]` 的子集；缺这个字段或不是数组的套餐**整条丢弃**，不补空数组去猜。界面只能展示 `region ∈ plan.regions` 的组合；Worker 的下单 / `checkout` 在开始建机前按同一份数据校验，不满足返回 `plan_unavailable_in_region`（见 §7.15），**不先扣后退**。
-- 不注册为 AI 工具；不改任何本地状态；不发事件。**AI 读目录走只读工具 `CatalogOptions`（`tools.md` §4.53），两者共用同一个取数入口 `VpnToolServices::server_catalog()`，同样不做本地缓存**——目录本身仍不是工具。上面那组错误码就是 `CatalogOptions` 与 `StageSelect` 的错误码，工具侧不另造。
+- 不注册为 AI 工具；不改任何本地状态；不发事件。**AI 读目录走只读工具 `CatalogOptions`（`tools.md` §4.53；3.29.0 起改名 `ServerOptions`），两者共用同一个取数入口 `VpnToolServices::server_catalog()`，同样不做本地缓存**——目录本身仍不是工具。上面那组错误码就是 `CatalogOptions` 与 `StageSelect` 的错误码，工具侧不另造。
 
 ### 7.15 「我的服务器」8 条命令（仅 UI，2.23.0）
 
@@ -2573,7 +2573,7 @@ screen: {screen}
 - `context` **不赋予任何额外权限**：模型据此发起的写操作，仍须满足工具各自的触发约束与确认点。`context` 里出现 `servers.destroy` 不等于用户同意销毁。
 - `client.probe` **只上报、不触发任何命令**：点「测速」由界面自己跑一轮节点测速（`node_probe_*` 是 UI 命令，不经模型）；`last_action` 只让模型知道用户刚做过什么，模型不得据此声称「我帮你测了」。
 - 未知 `screen` → `INVALID_ARGUMENT / invalid_context`，整条拒绝；未知控件 id 只剔除该条（UI 改版与 Host 版本不一致时，宁少一条也不要整轮失败）。
-- **反向的一条通道**：AI 通过 `StageSelect` 工具（`tools.md` §4.52）写「新建节点」舞台的地区与规格选择，Host 发 `stage-select` 事件（`events.md` §4.26）。事件只带本次请求的字段，`null` 表示不改；UI 合并后高亮。`context` 是 UI → AI 的上报，`stage-select` 是 AI → UI 的唯一写通道，两者互不替代。模型要拿真实 id 先调 `CatalogOptions`（`tools.md` §4.53）。
+- **反向的一条通道**：AI 通过 `StageSelect` 工具（`tools.md` §4.52）写「新建节点」舞台的地区与规格选择，Host 发 `stage-select` 事件（`events.md` §4.26）。事件只带本次请求的字段，`null` 表示不改；UI 合并后高亮。`context` 是 UI → AI 的上报，`stage-select` 是 AI → UI 的唯一写通道，两者互不替代。模型要拿真实 id 先调 `CatalogOptions`（`tools.md` §4.53；3.29.0 起改名 `ServerOptions`）。
 
 > **`attachments` 已删除（2.3.0）。** 它自 1.0 起只在本命令里声明过：Rust 形参从未接收、前端从未传、`docs/` 里没有任何需求、UI 或存储设计。属于「声明了但从未实现、也没有计划」的字段，留着会让契约与实现永久对不上。将来要做附件，按新能力重新设计，不复用这个占位。
 
@@ -3027,7 +3027,7 @@ type RulesStatus = {
 | `proxy_recovery_report` | **无**（UI 专用，见 §7.13；异常退出的恢复结果只用于首屏提示） | — |
 | `ui_log` | **无**（UI 专用，见 §7.24；模型不得写应用日志） | — |
 | `ai_session_kickoff` | **无**（UI 专用，见 §7.25；用户提示词由界面在首启时发出） | — |
-| `my_server_catalog` | **无**（UI 专用，见 §7.14；控制面目录只读） | — |
+| `my_server_catalog` | **无**（UI 专用，见 §7.14；控制面目录只读。AI 侧读目录走 `CatalogOptions`，3.29.0 起改名 `ServerOptions`） | — |
 | `my_server_list` / `my_server_get` | `MyServers`（只读，仅列表；详情与凭据不进 AI 上下文） | — |
 | `my_server_events` | **无**（UI 专用，见 §7.31；创建记录只给用户看） | — |
 | `my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename` | **无**（§10.5：建机、销毁、凭据只能由用户点界面） | — |

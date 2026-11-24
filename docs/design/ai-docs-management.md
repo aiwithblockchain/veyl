@@ -330,17 +330,18 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 ---
 
-## 附录 · AI 现有工具（Veyl 自研 42 个，另有 1 个不对用户暴露的包装；再加 6 个基础文件工具）
+## 附录 · AI 现有工具（Veyl 自研 37 个，另有 1 个不对用户暴露的包装；再加 6 个基础文件工具）
 
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
-目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `CategoryList` `StageSelect` `CatalogOptions`
+目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `StageSelect` `CatalogOptions`
 配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImport` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
-路由：`RouteGet` `RouteSetMode` `RouteTargetsSet` `RulesStatus`
+路由：`RouteGet` `RouteSetMode`
 连接：`VpnConnect` `VpnDisconnect`
 诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `SubmitIssueToPublicWall` `ReadPublicIssueWall` `NetRepair` `NetConfigGet`
 服务器：`MyServers` `MyServerFailure` `JobGet`
-其它：`SetUserRegion` `OpenSettings` `DeepseekSetupKey` `DeepseekSaveKey` `AskUserQuestionGuard`（包装，不对用户暴露）
+其它：`SetUserRegion` `OpenSettings` `DeepseekSetupKey` `DeepseekSaveKey`
+不对用户暴露的包装：`AskUserQuestionGuard`
 
 基础文件工具（claurst 内置，随会话注册）：`Read` `Edit` `Write` `Bash` `Glob` `Grep`（`mod.rs:106-116`）
 

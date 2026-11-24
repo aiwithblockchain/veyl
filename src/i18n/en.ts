@@ -1117,7 +1117,7 @@ export const en: Record<MessageKey, string> = {
   "detail.destroy": "Destroy",
   "detail.rotate": "Change connection password",
   "detail.rotateConfirm":
-    "Changing it invalidates the old password. Re-import the profile on your phone; the desktop app refreshes on its own.",
+    "After changing it, the old port and password stop working immediately and the node drops briefly. Re-import the profile on your phone; the desktop app refreshes on its own.",
   "detail.confirmRotate": "Confirm change",
   "detail.rotating": "Changing…",
   "detail.rotateDone": "Changed. Re-import the profile on your phone.",

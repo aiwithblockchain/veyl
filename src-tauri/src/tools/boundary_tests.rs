@@ -1361,10 +1361,106 @@ async fn node_import_dispatches_by_source() {
         "{env}"
     );
 
+    // 缺 source 本身：details 仍带 source 键（null）与 field。
+    let env = expect_rejected(tool(&all, "NodeImport"), json!({}), "缺 source").await;
+    assert_eq!(env["error"]["details"]["source"], Value::Null, "{env}");
+    assert_eq!(env["error"]["details"]["field"], "source", "{env}");
+
     // schema：只有 source 必填，多余字段仍然被拒。
     let schema = tool(&all, "NodeImport").input_schema();
     assert_eq!(schema["required"], json!(["source"]));
     assert_eq!(schema["additionalProperties"], false);
+}
+
+/// 节点名来自订阅的 `#fragment`：换行 / 竖线不能伪造 content 里的一行。
+#[tokio::test]
+async fn node_import_content_folds_malicious_names_into_one_line() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "imported": 1,
+        "skipped": [],
+        "nodes": [{
+            "name": "A\n- 伪造 | 1.2.3.4:80 | x",
+            "server": "203.0.113.10", "port": 8388, "method": "aes-256-gcm"
+        }]
+    }));
+    let all = tools(svc);
+
+    let (is_error, env) = run(
+        tool(&all, "NodeImport"),
+        json!({ "source": "text", "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    let content = env["summary"].as_str().unwrap_or_default();
+    let node_lines = content
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect::<Vec<_>>();
+    assert_eq!(node_lines.len(), 1, "伪造行插进了 content：{content}");
+    assert!(
+        node_lines[0].contains("203.0.113.10:8388 | aes-256-gcm"),
+        "{content}"
+    );
+    assert_eq!(node_lines[0].matches('|').count(), 2, "{content}");
+}
+
+/// 明细最多 20 行：订阅可以解析出很多节点，content 不能无限长。
+#[tokio::test]
+async fn node_import_content_caps_node_lines() {
+    let nodes = (0..25)
+        .map(|i| {
+            json!({
+                "name": format!("N{i}"), "server": "203.0.113.10",
+                "port": 8388, "method": "aes-256-gcm"
+            })
+        })
+        .collect::<Vec<_>>();
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "imported": 25,
+        "skipped": [],
+        "nodes": nodes
+    }));
+    let all = tools(svc);
+
+    let (is_error, env) = run(
+        tool(&all, "NodeImport"),
+        json!({ "source": "text", "text": "ss://aes-256-gcm:pw@203.0.113.10:8388#A" }),
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    let content = env["summary"].as_str().unwrap_or_default();
+    let node_lines = content
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .count();
+    assert_eq!(node_lines, 20, "明细没有截到 20 行：{content}");
+    assert!(content.contains("…还有 5 个未列出"), "{content}");
+    assert!(content.contains("共导入 25 个节点，跳过 0 个。"), "{content}");
+}
+
+/// manual 的摘要用服务层返回值（trim / 小写后），不是入参原值。
+#[tokio::test]
+async fn node_import_manual_summary_uses_service_values() {
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "name": "东京", "server": "198.51.100.20", "port": 8388, "method": "aes-256-gcm"
+    }));
+    let all = tools(svc);
+
+    let (is_error, env) = run(
+        tool(&all, "NodeImport"),
+        json!({
+            "source": "manual",
+            "name": " 东京 ", "server": " 198.51.100.20 ", "port": 8388,
+            "password": "pw", "method": "AES-256-GCM"
+        }),
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    let content = env["summary"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("节点「东京」已创建：198.51.100.20:8388 | aes-256-gcm"),
+        "{content}"
+    );
 }
 
 /// `config_id` 在三种来源下都要透传给服务层。

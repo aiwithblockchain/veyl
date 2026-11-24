@@ -1337,7 +1337,7 @@ describe("更换连接密码", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "更换连接密码" }));
     expect(document.querySelector(".myservers__confirm")?.textContent).toContain(
-      "更换后旧的密码立刻失效",
+      "更换后旧的端口和密码立刻失效",
     );
     // 确认按钮用独立文案，不和入口同名。
     expect(screen.getByRole("button", { name: "确认更换" })).toBeTruthy();

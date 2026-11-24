@@ -746,7 +746,7 @@ type CatalogSearchData = {
 - `config_id` 省略时只把节点放进池子；带 `config_id` 时按顺序追加并触发 `config-changed`。
 - 密码只进 `secrets.enc`，**不进 `data`、不进 `content`、不进 `args_preview`、不进日志**；`manual` 模式的 `password` 标 `sensitive`。
 - 只解析 / 只建节点，**不自动连接、不触发探测**。
-- **`content` 必须自足**：新增 / 跳过计数；每个新节点一行 `名称 | server:port | 加密方式`（不含密码）；跳过原因汇总（`duplicate`、坏行等）。手动模式给一行节点摘要。模型要复述的就是这些字段。
+- **`content` 必须自足**：新增 / 跳过计数；每个新节点一行 `名称 | server:port | 加密方式`（不含密码）；跳过原因汇总（`duplicate`、坏行等）。手动模式给一行节点摘要。模型要复述的就是这些字段。**逐节点明细最多 20 行**，超出写「…还有 N 个未列出」；总数与跳过汇总照常给。
 
 `data`：
 
@@ -2067,9 +2067,9 @@ type StageSelectData = {
 
 ---
 
-### 4.53 `CatalogOptions`（可选地区与规格；后续批次改名 `ServerOptions`，3.27.0 未改名）
+### 4.53 `CatalogOptions`（可选地区与规格；3.29.0 起改名 `ServerOptions`，本版未改名）
 
-> **不属于 3.27.0**：改名在 3.28.0 之后落地；3.27.0 仍叫 `CatalogOptions`，行为与返回形状见下。
+> **不属于 3.28.0**：改名计划在 3.29.0 落地；本版仍叫 `CatalogOptions`，行为与返回形状见下。
 
 原 `CatalogOptions` 与 `CatalogSearch` 都以「Catalog」命名，但一个查建机目录、一个查共享节点目录。改名只解决命名混淆，行为与返回形状不变；UI 命令名不变。
 
@@ -2485,7 +2485,7 @@ type AiProvidersData = {
 |---|---|---|---|
 | 1 | 版本升到 `3.27.0`；§1.2 重写：`content` 是模型唯一可见的通道，必须自足、可多行，`data` / `metadata` 只服务 UI；新增 §1.2.1 逐工具 `content` 验收清单；§4 中原本「事实只在 `data`」的工具补上 `content` 要求（`DiagRun` / `JobGet` / `NodeImportUrl` / `NodeImportText` / `NodeCreate` / `IssueReport` / `HttpCheck` / `NetConfigGet` / `CatalogRefresh` / `ConfigDetail` / `RuntimeLogs` / `CoreListVersions` / `CatalogSearch` / `DeepseekSetupKey` / `NodeProbe` / `RouteGet` / `RouteSetMode`） | 口径 | `ai-tools-inventory.md` P0；2026-11-24 PM 阶段 0 |
 | 2 | 删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`ConfigUpdate.targets` 删除；保留 `RouteGet` / `RouteSetMode`。工具总数 43 → **40** | 删除工具 | 产品已无按服务分流；`category_list` / `route_targets_set` / `rules_status` 三条 Host 命令保留给界面 |
-| 3 | **后续批次**：`CatalogOptions` 改名 `ServerOptions`（消除与 `CatalogSearch` 的命名冲突）；`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 如实登记为内置 `AskUserQuestion` 的包装，更正「Veyl 不重写内置工具」的旧说法 | 改名 / 更正（未落地） | 2026-11-24 PM 阶段 0 |
+| 3 | **后续批次（3.29.0）**：`CatalogOptions` 改名 `ServerOptions`（消除与 `CatalogSearch` 的命名冲突）；`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 如实登记为内置 `AskUserQuestion` 的包装，更正「Veyl 不重写内置工具」的旧说法 | 改名 / 更正（未落地） | 2026-11-24 PM 阶段 0 |
 | 4 | **后续批次（3.30.0）**：新增只读工具 `AccountBalance`（§4.58）、`TrialStatus`（§4.59）、`AiProviders`（§4.60）；手机导出与批量测速仍不给工具。总数 38 → **41** | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
 | 5 | 待回填：`ConfigUpdate.connect_mode` 的错误、`NodeImport` 手动模式的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举（后三项随 3.30.0） | 待回填 | 以实现为准，不凭空写字段 |
 | 6 | 提示词残留已处理：`resources/prompts/zh/product.md` 的「先用分类列表取到合法分类名」改为「分流只有智能 / 全局两档，没有按服务挑选」；英文版原句「Only these two — there is no per-service selection」保持不变 | 已知残留（已修） | 提示词批次；4b819ef |

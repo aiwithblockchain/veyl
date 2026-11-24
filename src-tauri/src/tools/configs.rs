@@ -458,6 +458,9 @@ impl Tool for NodeProbeTool {
     }
 }
 
+/// content 里逐节点明细的上限：订阅可达 1 MB，不能把模型上下文吃满。
+const IMPORT_CONTENT_MAX_NODES: usize = 20;
+
 /// 逐节点一行 + 跳过原因汇总 + 末尾计数：模型只看得到 content（`tools.md` §4.10）。
 fn import_outcome(data: Value) -> ToolOutcome {
     let imported = data.get("imported").and_then(Value::as_i64).unwrap_or(0);
@@ -484,8 +487,14 @@ fn import_outcome(data: Value) -> ToolOutcome {
 
     let mut lines = Vec::new();
     if let Some(nodes) = data.get("nodes").and_then(Value::as_array) {
-        for node in nodes {
+        for node in nodes.iter().take(IMPORT_CONTENT_MAX_NODES) {
             lines.push(imported_node_line(node));
+        }
+        if nodes.len() > IMPORT_CONTENT_MAX_NODES {
+            lines.push(format!(
+                "…还有 {} 个未列出",
+                nodes.len() - IMPORT_CONTENT_MAX_NODES
+            ));
         }
     }
     if skipped > 0 {
@@ -509,16 +518,30 @@ fn import_outcome(data: Value) -> ToolOutcome {
     ToolOutcome::ok(lines.join("\n"), data).with_display(facts, Changed::None)
 }
 
+/// 节点名来自订阅的 `#fragment`：换行 / 控制字符 / 竖线会破坏行结构，统一折叠。
+fn content_text(value: &str) -> String {
+    let folded: String = value
+        .chars()
+        .map(|c| if c.is_control() || c == '|' { ' ' } else { c })
+        .collect();
+    let trimmed = folded.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() {
+        "-".to_string()
+    } else {
+        trimmed
+    }
+}
+
 /// 新节点一行：名称 | server:port | 加密方式（不含密码）。
 fn imported_node_line(node: &Value) -> String {
-    let name = node.get("name").and_then(Value::as_str).unwrap_or("-");
-    let server = node.get("server").and_then(Value::as_str).unwrap_or("-");
+    let name = content_text(node.get("name").and_then(Value::as_str).unwrap_or("-"));
+    let server = content_text(node.get("server").and_then(Value::as_str).unwrap_or("-"));
     let port = node
         .get("port")
         .and_then(Value::as_u64)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let method = node.get("method").and_then(Value::as_str).unwrap_or("-");
+    let method = content_text(node.get("method").and_then(Value::as_str).unwrap_or("-"));
     format!("- {name} | {server}:{port} | {method}")
 }
 
@@ -549,13 +572,11 @@ fn unknown_update_argument(input: &Value) -> Option<AivpnError> {
 
 /// 缺来源必填字段：指名道姓，并把来源带上（`tools.md` §4.10）。
 fn missing_source_field(source: Option<&str>, field: &str) -> AivpnError {
-    let details = match source {
-        Some(source) => {
-            json!({ "reason": "missing_source_field", "source": source, "field": field })
-        }
-        None => json!({ "reason": "missing_source_field", "field": field }),
-    };
-    AivpnError::new("INVALID_ARGUMENT", format!("缺少 {field}")).with_details(details)
+    AivpnError::new("INVALID_ARGUMENT", format!("缺少 {field}")).with_details(json!({
+        "reason": "missing_source_field",
+        "source": source,
+        "field": field,
+    }))
 }
 
 /// 节点写入的三条路径合成一个工具（tools.md 3.28.0）：`source` 决定节点从哪来。
@@ -725,14 +746,43 @@ impl Tool for NodeImportTool {
                     })
                     .await
                 {
-                    Ok(data) => ToolOutcome::ok(
-                        format!("节点「{name}」已创建：{server}:{port} | {method}。密码只进本地加密文件，未回显。"),
-                        data,
-                    )
-                    .with_facts(vec![Fact::with_params(
-                        FactKey::NodeName,
-                        json!({ "name": name }),
-                    )]),
+                    Ok(data) => {
+                        // 服务层会 trim 名字 / 地址并把 method 转小写：以返回值为准，拿不到再退回入参。
+                        let shown_name = data
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&name)
+                            .to_string();
+                        let shown_server = data
+                            .get("server")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&server)
+                            .to_string();
+                        let shown_port = data
+                            .get("port")
+                            .and_then(Value::as_u64)
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| port.to_string());
+                        let shown_method = data
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&method)
+                            .to_string();
+                        ToolOutcome::ok(
+                            format!(
+                                "节点「{}」已创建：{}:{} | {}。密码只进本地加密文件，未回显。",
+                                content_text(&shown_name),
+                                content_text(&shown_server),
+                                shown_port,
+                                content_text(&shown_method)
+                            ),
+                            data,
+                        )
+                        .with_facts(vec![Fact::with_params(
+                            FactKey::NodeName,
+                            json!({ "name": shown_name }),
+                        )])
+                    }
                     Err(error) => {
                         ToolOutcome::fail(failure(error)).with_changed(Changed::Unknown)
                     }

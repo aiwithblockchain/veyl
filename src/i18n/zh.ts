@@ -1060,7 +1060,7 @@ export const zh = {
   "detail.destroy": "销毁",
   "detail.rotate": "更换连接密码",
   "detail.rotateConfirm":
-    "更换后旧的密码立刻失效，手机上已导入的配置要重新导入一次；桌面端会自动刷新。",
+    "更换后旧的端口和密码立刻失效，节点会短暂中断；手机上已导入的配置要重新导入一次，桌面端会自动刷新。",
   "detail.confirmRotate": "确认更换",
   "detail.rotating": "正在更换…",
   "detail.rotateDone": "已更换。手机上的配置要重新导入一次。",

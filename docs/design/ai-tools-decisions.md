@@ -117,6 +117,41 @@
 
 ---
 
-## 3. 后续批次（未开始）
+## 3. 第 4 组：UI 状态类工具（2026-11-24）
 
-第 4、5 组各自单独出决策单。
+### 3.1 事实
+
+| 工具 | 做什么 | 界面是否另有入口 | 提示词是否点名 |
+|---|---|---|---|
+| `CatalogOptions` | 读**建机**目录（地区 × 档位、日价、流量） | 是（建机页自己拉） | 否（只有 `StageSelect` 的描述里提到它） |
+| `StageSelect` | 写建机页的地区 / 档位选择，不建机、不扣费 | 是（用户点卡片） | 否 |
+| `OpenSettings` | 打开设置并定位到某个分区 / 行，不改任何值 | 是（用户自己点） | 否 |
+| `AskUserQuestionGuard` | 内置 `AskUserQuestion` 的包装：补一条表达约束、归一化 options | 否（内置工具） | 是（`kickoff.md` 多处直接用 `AskUserQuestion`） |
+
+### 3.2 决定
+
+1. **`CatalogOptions` 改名 `ServerOptions`**，schema 与行为不变。
+   原因：模型面前有两个「catalog」——`CatalogSearch` 查的是**共享节点目录**，`CatalogOptions` 读的是**建机目录**，语义完全不同却同前缀。改名后谁都不会认错。要同步改 `StageSelect` 描述里那句「call CatalogOptions first」。
+2. **`StageSelect` / `OpenSettings` 保留**。它们是「AI 帮用户把界面带到正确的那个位置」，不是重复界面：用户点卡片和 AI 选中是两条入口，值只写进同一处 UI 状态。删掉这两个，AI 就只能用嘴描述「在设置 › 高级里第三行」。
+3. **`AskUserQuestionGuard` 按实现登记，契约改成如实描述**：它不是新工具（`name()` 仍是 `AskUserQuestion`），是内置工具的一层包装，做两件事——补表达约束、归一化 options。契约里「Veyl 不重写内置工具」改成「不重写，但包装并补约束」，并写明它的名字与内置工具相同、不占工具名额。
+4. **工具数不变，仍是 38**；契约 **3.29.0**（改名属语义变更，按批升版本）。
+
+### 3.3 连带改动
+
+- `tools.md`：§3 与 §4.31（原 `CatalogOptions` 小节）改名，§3.1 注册示例同步；`AskUserQuestion` 那条的说明改成本文 §3.2 第 3 点；变更表加 3.29.0。
+- `tool-display.md`、`TOOL_COPY`、`toolDisplay.test.ts`：键名随之改名。
+- `commands.md`：命令 → 工具映射里 `catalog_options` 改指 `ServerOptions`，命令本身不动；升小版本并加变更记录。
+- 提示词：`kickoff.md` 未点名 `CatalogOptions`，无需改；`StageSelect` 的描述里那句引用要改。
+- `description.rs` 的英文描述：`CatalogOptions` → `ServerOptions`，`StageSelect` 里那句引用同步。
+
+### 3.4 验收
+
+- 工具数仍 38；`tools.md` §3 与 `TOOL_COPY` 逐名相等。
+- `grep -rn "CatalogOptions" src-tauri/src docs/contracts resources/prompts` 只剩「已改名（3.29.0）」语境。
+- `AskUserQuestion` 一节能让人看懂：它来自内置工具、被包装做了两件事、不占名额。
+
+---
+
+## 4. 后续批次（未开始）
+
+第 5 组（补缺口：余额 / 试用 / 服务商）单独出决策单。
