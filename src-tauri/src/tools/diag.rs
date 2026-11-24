@@ -238,6 +238,34 @@ mod tests {
     fn an_empty_check_list_says_so_instead_of_inventing_one() {
         assert_eq!(format_diag_summary(&[]), "诊断没有返回任何检查项。");
     }
+
+    /// 诊断发出的每个检查 id 都要有中文名，否则模型会看到英文 id。
+    #[test]
+    fn every_check_the_diagnosis_emits_has_a_chinese_label() {
+        let ids = [
+            "app.runtime_installed",
+            "app.process_alive",
+            "app.version",
+            "app.config_valid",
+            "app.clash_api",
+            "app.data_plane",
+            "system.proxy_services",
+            "system.dns",
+            "system.default_route",
+            "network.exit_ip",
+            "network.coverage",
+            "network.reachable_seed_source",
+            "network.reachable_github",
+            "config.current_config",
+            "config.trial_state",
+            "config.seed_available",
+            "config.seed_stale",
+        ];
+        for id in ids {
+            assert_ne!(check_label(id), id, "{id} 缺少中文名");
+        }
+        assert_eq!(check_label("future.check"), "future.check");
+    }
 }
 
 #[async_trait]

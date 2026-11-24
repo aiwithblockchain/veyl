@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-use super::display::{Changed, Fact, FactKey};
+use super::display::{remaining_days_text, Changed, Fact, FactKey};
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
@@ -252,8 +252,6 @@ impl DefaultProfileStatusTool {
     }
 }
 
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-
 /// 日期只取 ISO 8601 的前 10 位（YYYY-MM-DD）；读不到或为空时返回 `None`。
 fn iso_date(value: Option<&str>) -> Option<String> {
     value
@@ -269,32 +267,26 @@ fn trial_sentence(trial: Option<&Value>) -> Option<String> {
         .get("seed_node_count")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let expires = iso_date(trial.get("expires_at").and_then(Value::as_str));
     Some(match state {
-        "expired" => match expires {
-            Some(date) => format!(
-                "免费节点试用已到期（{date} 结束）：节点已从节点池移除，刷新不会加回。池内免费节点 {pool} 个。"
-            ),
-            None => format!(
-                "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 {pool} 个。"
-            ),
-        },
+        "expired" if pool > 0 => format!(
+            "免费节点试用已到期：免费节点将被移出节点池，刷新不会加回。池内免费节点 {pool} 个。"
+        ),
+        "expired" => {
+            "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 0 个。".into()
+        }
         "active" => {
             let remaining = trial
                 .get("remaining_ms")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let days = (remaining.saturating_add(DAY_MS - 1) / DAY_MS).max(1);
-            match expires {
-                Some(date) => format!(
-                    "免费节点试用中：还剩 {days} 天（{date} 到期）。池内免费节点 {pool} 个。"
-                ),
-                None => format!("免费节点试用中：还剩 {days} 天。池内免费节点 {pool} 个。"),
-            }
+            format!(
+                "免费节点试用中：还剩 {}。池内免费节点 {pool} 个。",
+                remaining_days_text(remaining)
+            )
         }
-        "available" => format!(
-            "免费节点试用还没有开始：第一次连上免费节点起算。池内免费节点 {pool} 个。"
-        ),
+        "available" => {
+            format!("免费节点试用还没有开始：第一次连上免费节点起算。池内免费节点 {pool} 个。")
+        }
         _ => return None,
     })
 }
@@ -346,8 +338,17 @@ impl Tool for DefaultProfileStatusTool {
                     .get("content_sha256")
                     .and_then(Value::as_str)
                     .is_some();
-                let trial = self.services.trial_status().await.ok();
-                let summary = default_profile_summary(&data, trial.as_ref());
+                let trial = self.services.trial_status().await;
+                let summary = match trial.as_ref() {
+                    Ok(trial) => default_profile_summary(&data, Some(trial)),
+                    Err(error) => {
+                        log::debug!("读取试用状态失败：{error}");
+                        format!(
+                            "{}\n试用状态暂时读不到。",
+                            default_profile_summary(&data, None)
+                        )
+                    }
+                };
                 let facts = if available {
                     let count = data
                         .get("node_count")
@@ -421,28 +422,46 @@ mod tests {
         });
         let text = default_profile_summary(&cache(2, Some(0)), Some(&trial));
         assert!(
-            text.contains("免费节点试用已到期（2026-11-20 结束）"),
+            text.starts_with(
+                "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 0 个。"
+            ),
             "{text}"
         );
-        assert!(text.contains("刷新不会加回"), "{text}");
-        assert!(text.contains("池内免费节点 0 个"), "{text}");
+        assert!(!text.contains("结束"), "{text}");
         assert!(text.contains("缓存里 2 个，检查于 1970-01-01。"), "{text}");
     }
 
     #[test]
-    fn an_active_trial_rounds_the_remaining_days_up() {
+    fn an_expired_trial_with_nodes_left_in_the_pool_says_they_will_be_removed() {
+        let trial = json!({
+            "state": "expired",
+            "expires_at": "2026-11-20T00:00:00Z",
+            "remaining_ms": 0,
+            "seed_node_count": 2,
+        });
+        let text = default_profile_summary(&cache(2, Some(0)), Some(&trial));
+        assert!(
+            text.starts_with(
+                "免费节点试用已到期：免费节点将被移出节点池，刷新不会加回。池内免费节点 2 个。"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_active_trial_floors_the_remaining_days_like_the_ui() {
         let trial = json!({
             "state": "active",
             "expires_at": "2026-12-01T00:00:00Z",
-            "remaining_ms": DAY_MS + 1,
+            "remaining_ms": 24 * 60 * 60 * 1000 + 1,
             "seed_node_count": 2,
         });
         let text = default_profile_summary(&cache(3, Some(0)), Some(&trial));
         assert!(
-            text.contains("免费节点试用中：还剩 2 天（2026-12-01 到期）"),
+            text.contains("免费节点试用中：还剩 1 天。池内免费节点 2 个。"),
             "{text}"
         );
-        assert!(text.contains("池内免费节点 2 个"), "{text}");
+        assert!(!text.contains("到期）"), "{text}");
         assert!(text.contains("\n缓存里 3 个"), "{text}");
     }
 

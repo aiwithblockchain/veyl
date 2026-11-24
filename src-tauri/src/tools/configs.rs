@@ -177,6 +177,15 @@ impl Tool for ConfigUpdateTool {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // claurst 不做 schema 校验：schema 外的键必须在这里拒绝，
+        // 否则会被静默忽略却回「配置已更新」。
+        if let Some(error) = unknown_update_argument(&input) {
+            return envelope::finish(
+                ctx,
+                "ConfigUpdate",
+                ToolOutcome::fail(error).with_changed(Changed::None),
+            );
+        }
         let Some(config_id) = input.get("config_id").and_then(Value::as_str) else {
             return envelope::finish(
                 ctx,
@@ -232,10 +241,7 @@ impl Tool for ConfigUpdateTool {
                     node_ids,
                     // 分流分类已随 CategoryList / RouteTargetsSet 退出工具面（3.27.0）。
                     targets: None,
-                    connect_mode: input
-                        .get("connect_mode")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    connect_mode: None,
                 },
             )
             .await
@@ -520,6 +526,27 @@ fn invalid(reason: &str, message: &str) -> AivpnError {
     AivpnError::new("INVALID_ARGUMENT", message).with_details(json!({ "reason": reason }))
 }
 
+/// `ConfigUpdate` 的白名单：只认 schema 里的六个键。
+const CONFIG_UPDATE_KEYS: [&str; 6] = [
+    "config_id",
+    "name",
+    "routing_mode",
+    "dns",
+    "tun_excludes",
+    "node_ids",
+];
+
+/// 返回第一个 schema 之外的键；不是对象也算无效参数。
+fn unknown_update_argument(input: &Value) -> Option<AivpnError> {
+    let Some(object) = input.as_object() else {
+        return Some(invalid("invalid_argument", "参数必须是一个对象"));
+    };
+    object
+        .keys()
+        .find(|key| !CONFIG_UPDATE_KEYS.contains(&key.as_str()))
+        .map(|key| invalid("unknown_argument", &format!("不支持的参数 {key}")))
+}
+
 /// 缺来源必填字段：指名道姓，并把来源带上（`tools.md` §4.10）。
 fn missing_source_field(source: Option<&str>, field: &str) -> AivpnError {
     let details = match source {
@@ -736,5 +763,106 @@ mod tests {
                 json!({ "name": "东京" })
             ))
         );
+    }
+
+    fn context() -> ToolContext {
+        let dir = std::env::temp_dir();
+        ToolContext {
+            working_dir: dir.clone(),
+            permission_mode: claurst_core::PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(
+                crate::agent::permission_handler::AivpnPermissionHandler::new(dir.clone()),
+            ),
+            cost_tracker: claurst_core::CostTracker::with_model("test"),
+            session_id: "config-update-test".to_string(),
+            file_history: Arc::new(parking_lot::Mutex::new(
+                claurst_core::file_history::FileHistory::new(),
+            )),
+            current_turn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config: Default::default(),
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+            user_question_tx: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            batch_rejection: Default::default(),
+        }
+    }
+
+    fn envelope_of(result: &ToolResult) -> Value {
+        result
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.get("aivpn").cloned())
+            .unwrap_or_else(|| panic!("工具结果必须带 aivpn 信封"))
+    }
+
+    fn not_wired_update() -> ConfigUpdateTool {
+        ConfigUpdateTool::new(Arc::new(crate::tools::services::NotWiredServices))
+    }
+
+    #[tokio::test]
+    async fn targets_is_rejected_as_an_unknown_argument() {
+        let result = not_wired_update()
+            .execute(
+                json!({ "config_id": "cfg_1", "targets": ["ai"] }),
+                &context(),
+            )
+            .await;
+        assert!(result.is_error);
+        let env = envelope_of(&result);
+        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
+        assert_eq!(
+            env["error"]["details"]["reason"], "unknown_argument",
+            "{env}"
+        );
+        assert_eq!(env["summary"], "不支持的参数 targets", "{env}");
+    }
+
+    #[tokio::test]
+    async fn connect_mode_is_rejected_as_an_unknown_argument() {
+        let result = not_wired_update()
+            .execute(
+                json!({ "config_id": "cfg_1", "connect_mode": "tun" }),
+                &context(),
+            )
+            .await;
+        assert!(result.is_error);
+        let env = envelope_of(&result);
+        assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
+        assert_eq!(
+            env["error"]["details"]["reason"], "unknown_argument",
+            "{env}"
+        );
+        assert_eq!(env["summary"], "不支持的参数 connect_mode", "{env}");
+    }
+
+    #[test]
+    fn schema_keys_pass_the_key_check() {
+        assert!(unknown_update_argument(&json!({
+            "config_id": "cfg_1",
+            "name": "新名字",
+            "routing_mode": "direct",
+            "dns": {},
+            "tun_excludes": [],
+            "node_ids": []
+        }))
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_known_argument_is_not_rejected_by_the_key_check() {
+        // 服务层未接线：这里只证明键校验没有误伤合法输入。
+        let result = not_wired_update()
+            .execute(
+                json!({ "config_id": "cfg_1", "name": "新名字" }),
+                &context(),
+            )
+            .await;
+        let env = envelope_of(&result);
+        assert_ne!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
     }
 }

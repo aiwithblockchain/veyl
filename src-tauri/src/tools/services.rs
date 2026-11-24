@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 
 use crate::control_plane::catalog::{fetch_catalog, Catalog, CatalogError};
 
+use super::display::remaining_days_text;
+
 /// 建机目录的取数入口：**每次现取，不做本地缓存**（`tools.md` §3.1、`commands.md` §7.14）。
 /// Worker 侧已有 5 分钟缓存；Host 缓存陈旧目录会让用户看到已下架的地区或旧价格。
 #[async_trait]
@@ -2208,19 +2210,23 @@ fn diag_check(
 /// 免费节点试用到期后的建议：缓存不删但节点已移出，刷新不会加回。
 const TRIAL_EXPIRED_REMEDIATION: &str = "换用自己的节点，或新建一台服务器";
 
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-
 /// 免费节点相关的三条检查：试用状态、缓存是否可用、缓存是否新鲜。
 /// 到期后缓存文件还在，但节点已从节点池移除、刷新被排除项挡住；
 /// 这时必须说「到期」，不能让模型去建议一次刷不回来的刷新。
-fn seed_checks(seed: &Value, trial: Option<&crate::trial::Status>) -> Vec<Value> {
+fn seed_checks(seed: &Value, trial: Option<&Value>) -> Vec<Value> {
     let seed_available = seed.get("content_sha256").and_then(Value::as_str).is_some();
     let node_count = seed.get("node_count").and_then(Value::as_i64).unwrap_or(0);
-    let phase = trial.map(|status| status.phase);
-    let expired = phase == Some(crate::trial::Phase::Expired);
+    let state = trial
+        .and_then(|trial| trial.get("state"))
+        .and_then(Value::as_str);
+    let pool = trial
+        .and_then(|trial| trial.get("seed_node_count"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let expired = state == Some("expired");
 
-    let trial_check = match phase {
-        Some(crate::trial::Phase::Available) => diag_check(
+    let trial_check = match state {
+        Some("available") => diag_check(
             "config.trial_state",
             "config",
             CheckStatus::Ok,
@@ -2228,29 +2234,35 @@ fn seed_checks(seed: &Value, trial: Option<&crate::trial::Status>) -> Vec<Value>
             None,
             None,
         ),
-        Some(crate::trial::Phase::Active) => {
-            let remaining = trial.and_then(|status| status.remaining_ms).unwrap_or(0);
-            let days = (remaining.saturating_add(DAY_MS - 1) / DAY_MS).max(1);
+        Some("active") => {
+            let remaining = trial
+                .and_then(|trial| trial.get("remaining_ms"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             diag_check(
                 "config.trial_state",
                 "config",
                 CheckStatus::Ok,
-                format!("免费节点试用中：还剩 {days} 天"),
+                format!("免费节点试用中：还剩 {}", remaining_days_text(remaining)),
                 None,
                 None,
             )
         }
-        Some(crate::trial::Phase::Expired) => diag_check(
+        Some("expired") => diag_check(
             "config.trial_state",
             "config",
             CheckStatus::Failed,
-            format!(
-                "免费节点试用已到期：免费节点已从节点池移除（缓存里还有 {node_count} 个，刷新不会加回）"
-            ),
+            if pool > 0 {
+                format!(
+                    "免费节点试用已到期：免费节点将被移出节点池，刷新不会加回。池内免费节点 {pool} 个。"
+                )
+            } else {
+                "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 0 个。".into()
+            },
             Some(TRIAL_EXPIRED_REMEDIATION),
             None,
         ),
-        None => diag_check(
+        _ => diag_check(
             "config.trial_state",
             "config",
             CheckStatus::Skipped,
@@ -2260,13 +2272,14 @@ fn seed_checks(seed: &Value, trial: Option<&crate::trial::Status>) -> Vec<Value>
         ),
     };
 
+    // S8：到期时到期事实只报一次，这条不再重复说「不可用」。
     let available_check = if expired {
         diag_check(
             "config.seed_available",
             "config",
-            CheckStatus::Failed,
-            "试用已到期，免费节点不可用".into(),
-            Some(TRIAL_EXPIRED_REMEDIATION),
+            CheckStatus::Skipped,
+            "试用已到期，见试用状态一项".into(),
+            None,
             None,
         )
     } else if seed_available {
@@ -2980,13 +2993,14 @@ mod diag_connection_tests {
 mod seed_checks_tests {
     use super::*;
 
-    fn trial(phase: crate::trial::Phase, remaining_ms: Option<i64>) -> crate::trial::Status {
-        crate::trial::Status {
-            phase,
-            started_at_ms: None,
-            expires_at_ms: None,
-            remaining_ms,
-        }
+    fn trial(state: &str, remaining_ms: Option<i64>, seed_node_count: i64) -> Value {
+        json!({
+            "state": state,
+            "started_at": null,
+            "expires_at": null,
+            "remaining_ms": remaining_ms,
+            "seed_node_count": seed_node_count,
+        })
     }
 
     fn check<'a>(checks: &'a [Value], name: &str) -> &'a Value {
@@ -3003,18 +3017,21 @@ mod seed_checks_tests {
     #[test]
     fn an_expired_trial_says_expired_and_never_suggests_refresh() {
         let seed = json!({ "content_sha256": "abc", "node_count": 2, "checked_at": 0 });
-        let expired = trial(crate::trial::Phase::Expired, Some(0));
+        let expired = trial("expired", Some(0), 0);
         let checks = seed_checks(&seed, Some(&expired));
 
         let state = check(&checks, "config.trial_state");
         assert_eq!(state["status"], "failed", "{state}");
-        assert!(detail(state).contains("已到期"), "{state}");
+        assert_eq!(
+            detail(state),
+            "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 0 个。"
+        );
 
+        // 到期事实只报一次：可用性检查转 skipped，不再重复给刷新建议。
         let available = check(&checks, "config.seed_available");
-        assert_eq!(available["status"], "failed", "{available}");
-        let remediation = available["remediation"].as_str().unwrap_or("");
-        assert!(!remediation.contains("刷新"), "{available}");
-        assert!(remediation.contains("换用"), "{available}");
+        assert_eq!(available["status"], "skipped", "{available}");
+        assert_eq!(detail(available), "试用已到期，见试用状态一项");
+        assert!(available["remediation"].is_null(), "{available}");
         assert!(available["action"].is_null(), "{available}");
 
         let stale = check(&checks, "config.seed_stale");
@@ -3024,21 +3041,34 @@ mod seed_checks_tests {
     }
 
     #[test]
-    fn an_active_trial_reports_the_remaining_days_rounded_up() {
+    fn an_expired_trial_with_nodes_left_in_the_pool_says_they_will_be_removed() {
         let seed = json!({ "content_sha256": "abc", "node_count": 2 });
-        let active = trial(crate::trial::Phase::Active, Some(DAY_MS + 1));
+        let expired = trial("expired", Some(0), 2);
+        let checks = seed_checks(&seed, Some(&expired));
+
+        let state = check(&checks, "config.trial_state");
+        assert_eq!(
+            detail(state),
+            "免费节点试用已到期：免费节点将被移出节点池，刷新不会加回。池内免费节点 2 个。"
+        );
+    }
+
+    #[test]
+    fn an_active_trial_floors_the_remaining_days_like_the_ui() {
+        let seed = json!({ "content_sha256": "abc", "node_count": 2 });
+        let active = trial("active", Some(24 * 60 * 60 * 1000 + 1), 2);
         let checks = seed_checks(&seed, Some(&active));
 
         let state = check(&checks, "config.trial_state");
         assert_eq!(state["status"], "ok", "{state}");
-        assert!(detail(state).contains("还剩 2 天"), "{state}");
+        assert_eq!(detail(state), "免费节点试用中：还剩 1 天");
     }
 
     #[test]
     fn a_trial_that_has_not_started_leaves_the_seed_checks_unchanged() {
         let seed =
             json!({ "content_sha256": "abc", "node_count": 2, "checked_at": store::now_ms() });
-        let available = trial(crate::trial::Phase::Available, None);
+        let available = trial("available", None, 2);
         let checks = seed_checks(&seed, Some(&available));
 
         let state = check(&checks, "config.trial_state");
@@ -7939,7 +7969,7 @@ impl VpnToolServices for WiredServices {
             },
         ));
 
-        let trial = crate::trial::status(&self.store.conn()).ok();
+        let trial = crate::trial::status_json(&self.store.conn()).ok();
         checks.extend(seed_checks(&seed, trial.as_ref()));
 
         let total = checks.len();

@@ -229,6 +229,19 @@ impl Display {
     }
 }
 
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// 剩余天数按界面口径向下取整（`src/myservers/labels.ts`）：不足 24 小时
+/// 写「不到 1 天」。0 或负数也走这一档——是否到期由调用方判断。
+pub(crate) fn remaining_days_text(remaining_ms: i64) -> String {
+    let days = remaining_ms / DAY_MS;
+    if days < 1 {
+        "不到 1 天".into()
+    } else {
+        format!("{days} 天")
+    }
+}
+
 /// 只读工具失败时也不能声称改动过。列表与 `tools.md` §2.4 的只读工具一致。
 pub fn is_readonly(tool: &str) -> bool {
     matches!(
@@ -407,5 +420,26 @@ mod tests {
             serde_json::to_value(fact).unwrap(),
             json!({ "key": "core.installed_count", "params": { "count": 2 } })
         );
+    }
+
+    /// 剩余天数与界面一致：向下取整，不足 24 小时「不到 1 天」。
+    #[test]
+    fn remaining_days_floor_like_the_ui() {
+        let hour = 60 * 60 * 1000;
+        let table = [
+            (0, "不到 1 天"),
+            (hour, "不到 1 天"),
+            (DAY_MS - 1, "不到 1 天"),
+            (DAY_MS, "1 天"),
+            (3 * DAY_MS, "3 天"),
+            (6 * DAY_MS + 23 * hour, "6 天"),
+        ];
+        for (remaining_ms, expected) in table {
+            assert_eq!(
+                remaining_days_text(remaining_ms),
+                expected,
+                "{remaining_ms}ms"
+            );
+        }
     }
 }
