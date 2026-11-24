@@ -33,7 +33,7 @@
 补充事实（实现时按这些走）：
 
 1. `node_create` 在 `src/agent/bridge.ts:1082` 有声明，`tauriBridge.ts:1368` 与 `mockAgent.ts:2179` 都有实现；Host 侧命令在 `src-tauri/src/agent/commands.rs:1714`。
-2. `node_create` 省略 `configId` 时与导入一致：绑定全局配置，池空时懒创建（`services.rs` 的 `import_target`）。因此**零配置也能手动添加**。
+2. `node_create` 省略 `configId` 时与导入一致：绑定全局配置，池空时懒创建（`services.rs` 的 `import_target`）。命令层支持零配置；但**界面入口在节点卡，零配置时不渲染节点卡**，所以用户要先有一套配置（如先领免费节点）才能手动添加。这是 D1 选定「只放节点卡」的已知代价，记录在案，不在本设计内扩入口。
 3. 节点进的是同一个全局节点池；Host 成功后会发 `node-list-changed`，`useVpnSession` 收到后自动重拉，节点卡无需额外同步。
 4. 密码只进本地加密文件，`node_create` 的返回值不含密码。
 
@@ -219,4 +219,4 @@ bridge.nodeCreate({ name, server, port: Number(port), method, password })
 
 1. 手动添加的节点 `source = "manual"`（Host 已经这样落库），前端**能拿到这个值**，不需要新增字段。
 2. 节点卡与连接页的行内标记（「自定义」）另行设计，不在本设计内实现；但**不要**在手动添加的文案里暗示我们能维护它——不写「自动更新」「自动修复」之类。
-3. 诊断建议按 `source` 分流属于诊断面板的设计范畴，另开一份；本文只登记这条需求，避免以后被当成 bug 反复排查。
+3. 诊断建议按 `source` 分流属于诊断面板的设计范畴，另开一份；本文只登记这条需求，避免以后被当成 bug 反复排查。**已开：`docs/design/node-diagnosis-by-source.md`。**
