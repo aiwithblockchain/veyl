@@ -151,7 +151,7 @@ X-Content-Type-Options: nosniff
 
 | 键 | 上限 | 用途 |
 |---|---|---|
-| `mobile-profile:<account_id>` | 30 次/小时 | 正常每 60 分钟一次 + 用户手动刷新，30 足够；防止误配置成秒级轮询 |
+| `mobile-profile:<account_id>` | 120 次/小时 | 多设备（同一账号可多台手机）+ 客户端手动 / 自动更新 + 失败重试；120 ≈ 每 30 秒一次，正常使用打不到，仍能挡住轮询（2026-11-24 由 30 上调） |
 | `mobile-profile-bad:<ip>` | 60 次/小时 | 令牌无效的请求。令牌是 256 bit 随机值，穷举不可行；这条只挡扫端点与刷日志 |
 | `mobile-token:<account_id>` / `mobile-token-rotate:<account_id>` | 10 次/小时 | 防止脚本反复创建 / 轮换把手机踢下线 |
 
@@ -538,7 +538,7 @@ ss://YWVzLTI1Ni1nY206czNjcmV0LXBhc3N3b3Jk@203.0.113.10:20343#%E4%B8%9C%E4%BA%AC%
 
 | 项 | 规则 |
 |---|---|
-| 限流 | 三种格式**共享** `mobile-profile:<account_id>` 的 30 次/小时预算；无效令牌仍按 `mobile-profile-bad:<ip>` 60 次/小时 |
+| 限流 | 三种格式**共享** `mobile-profile:<account_id>` 的 120 次/小时预算；无效令牌仍按 `mobile-profile-bad:<ip>` 60 次/小时 |
 | 缓存 | 三种格式全部 `Cache-Control: no-store`；`X-Content-Type-Options: nosniff` |
 | 401 | 错误信封 `UNAUTHENTICATED` + `WWW-Authenticate: Basic realm="veyl", charset="UTF-8"`，三种格式一致 |
 | 429 | `RATE_LIMITED`，`Retry-After: 3600`，三种格式一致 |
@@ -1333,7 +1333,7 @@ CREATE UNIQUE INDEX mobile_tokens_hash ON mobile_tokens(token_hash);
 
 ### 建议改（P2）
 
-9. 轮换限流 10 次/小时、profile 30 次/小时（三种格式共享）；数值可按实测调整。
+9. 轮换限流 10 次/小时、profile 120 次/小时（三种格式共享，2026-11-24 由 30 上调）；数值可按实测调整。
 10. `last_used_at` 节流写（5 分钟一次），避免每条请求都写 D1。
 11. 把 origin 校验、scheme 编码、SIP002 编码与 YAML 标量引用抽成纯函数单测，不靠真机回归；节点名要覆盖 `:`、`#`、引号、前导 `-`、emoji。
 12. 同一会话内可在 `App` 内存里保留最近一次成功结果（三种 URL + 二维码），断网重开弹层不必重新请求；**只存内存，不落盘**，退出应用即丢弃。

@@ -1107,10 +1107,10 @@ describe("GET /v1/mobile/profile", () => {
     expect(body.details.reason).toBe("account_blocked");
   });
 
-  it("三种格式共享 30 次/小时预算", async () => {
+  it("三种格式共享 120 次/小时预算", async () => {
     const { env, accessToken } = await setup();
     const token = await createToken(env, accessToken);
-    for (let attempt = 0; attempt < 29; attempt += 1) {
+    for (let attempt = 0; attempt < 119; attempt += 1) {
       const response = await handleMobile(profileRequest(token), env);
       expect(response?.status).toBe(200);
     }
@@ -1121,6 +1121,20 @@ describe("GET /v1/mobile/profile", () => {
     expect(limited?.headers.get("Retry-After")).toBe("3600");
     expect(limited?.headers.get("Cache-Control")).toBe("no-store");
     expect(limited?.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  it("订阅端点：连续 120 次 200，第 121 次 429 且可重试", async () => {
+    const { env, accessToken } = await setup();
+    const token = await createToken(env, accessToken);
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const response = await handleMobile(profileRequest(token), env);
+      expect(response?.status).toBe(200);
+    }
+    const limited = await handleMobile(profileRequest(token), env);
+    expect(limited?.status).toBe(429);
+    const body = (await limited!.json()) as { code: string; retryable: boolean };
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.retryable).toBe(true);
   });
 
   it("无效令牌按 IP 限流：第 61 次 429", async () => {

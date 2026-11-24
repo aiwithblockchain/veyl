@@ -18,7 +18,11 @@ const KEY_VERSION = 1;
 const RATE_WINDOW_MS = 3600_000;
 const TOKEN_CREATE_LIMIT = 10;
 const TOKEN_ROTATE_LIMIT = 10;
-const PROFILE_LIMIT = 30;
+/**
+ * 每账户每小时的订阅拉取上限。同一账号可多台手机，加上客户端手动 / 自动更新与失败重试，
+ * 30 太低（打满后客户端只显示 client error）；120 ≈ 每 30 秒一次，正常使用打不到，仍能挡住轮询。
+ */
+const PROFILE_LIMIT = 120;
 const PROFILE_BAD_LIMIT = 60;
 /** 手机每 ~60 分钟拉一次：5 分钟内重复请求不再写 D1。 */
 const LAST_USED_THROTTLE_MS = 5 * 60_000;
