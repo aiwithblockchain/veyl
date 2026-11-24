@@ -489,40 +489,49 @@ function noStore(response: Response): Response {
   return response;
 }
 
-/** JSON 双引号标量就是合法的 YAML 双引号标量；但 JSON.stringify 不管 U+2028/U+2029 与 NEL/DEL。 */
+/** JSON 双引号标量就是合法的 YAML 双引号标量；但 JSON.stringify 不管 U+2028/U+2029 与 C1 控制区。 */
 function yamlScalar(value: string): string {
   return JSON.stringify(value)
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029")
     // NEL 在 YAML 1.1 是换行符，DEL 是控制字符；留在双引号标量里会被部分解析器当成断行/非法。
     .replace(/\u0085/g, "\\u0085")
-    .replace(/\u007f/g, "\\u007f");
+    // 其余 C1 控制区（U+007F–U+009F）同样转义：部分解析器视为非法或不可见。
+    .replace(/[\u007f-\u009f]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
-/** 最小 Clash 配置：节点、select 组、国内分流 rule-provider 与兜底规则（§3.7.3）。 */
-function clashYaml(nodes: ExportedNode[], origin: string): string {
+/** proxies / proxy-groups 两段：Clash 与 Shadowrocket 两种输出共用同一套序列化。 */
+function clashProxyBlocks(nodes: ExportedNode[]): string[] {
   const lines: string[] = [];
   if (nodes.length === 0) {
     lines.push("proxies: []");
     lines.push("proxy-groups: []");
-  } else {
-    lines.push("proxies:");
-    for (const node of nodes) {
-      lines.push(`  - name: ${yamlScalar(node.tag)}`);
-      lines.push("    type: ss");
-      lines.push(`    server: ${yamlScalar(node.host)}`);
-      lines.push(`    port: ${node.port}`);
-      lines.push(`    cipher: ${SS_METHOD}`);
-      lines.push(`    password: ${yamlScalar(node.password)}`);
-      lines.push("    udp: true");
-    }
-    lines.push("proxy-groups:");
-    lines.push(`  - name: ${yamlScalar("Veyl")}`);
-    lines.push("    type: select");
-    lines.push("    proxies:");
-    for (const node of nodes) {
-      lines.push(`      - ${yamlScalar(node.tag)}`);
-    }
+    return lines;
+  }
+  lines.push("proxies:");
+  for (const node of nodes) {
+    lines.push(`  - name: ${yamlScalar(node.tag)}`);
+    lines.push("    type: ss");
+    lines.push(`    server: ${yamlScalar(node.host)}`);
+    lines.push(`    port: ${node.port}`);
+    lines.push(`    cipher: ${SS_METHOD}`);
+    lines.push(`    password: ${yamlScalar(node.password)}`);
+    lines.push("    udp: true");
+  }
+  lines.push("proxy-groups:");
+  lines.push(`  - name: ${yamlScalar("Veyl")}`);
+  lines.push("    type: select");
+  lines.push("    proxies:");
+  for (const node of nodes) {
+    lines.push(`      - ${yamlScalar(node.tag)}`);
+  }
+  return lines;
+}
+
+/** 最小 Clash 配置：节点、select 组、国内分流 rule-provider 与兜底规则（§3.7.3）。 */
+function clashYaml(nodes: ExportedNode[], origin: string): string {
+  const lines = clashProxyBlocks(nodes);
+  if (nodes.length > 0) {
     // 国内分流用我们自己托管的 .mrs（mihomo MRS 格式），不依赖客户端从 GitHub 拉 geodata。
     lines.push("rule-providers:");
     lines.push("  cn-domain:");
@@ -589,51 +598,20 @@ function ssList(nodes: ExportedNode[]): string {
 }
 
 /**
- * Shadowrocket 配置里的一个值。逗号、等号、引号会破坏行式语法，这类值用双引号
- * 包住；换行、制表符与其它控制字符会把一整行切断，一律压成单个空格。
- */
-function confValue(value: string): string {
-  const cleaned = value.replace(/[\s\u0000-\u001f\u007f]+/g, " ").trim();
-  if (cleaned === "") return "node";
-  if (!/[,="]/.test(cleaned)) return cleaned;
-  return `"${cleaned.replace(/"/g, "'")}"`;
-}
-
-/**
- * Shadowrocket（Surge 风格）配置：节点、select 组、国内直连与兜底（技术设计 §3.7.13）。
+ * Shadowrocket 用的 Clash YAML：节点与 select 组同 `clashYaml`，规则内联（§3.7.13）。
  *
- * 只发 ss 订阅时它手里只有节点，只能全局；把规则也放进同一份配置，
- * 才能在「全局路由 = 配置」下做到国内直连、其余走节点。
+ * 为什么不用 `rule-providers`：Shadowrocket 即使导入带 `.mrs` 远程规则集的 Clash，
+ * 也不保证去拉取，规则落空等于全部走节点。内联规则不依赖远端。
  */
-function shadowrocketConf(nodes: ExportedNode[]): string {
-  const lines: string[] = [];
-  lines.push("[General]");
-  lines.push("bypass-system = true");
-  // 国内 DNS 在前：规则命中要靠解析后的 IP，用境外解析会把国内域名判到海外。
-  lines.push("dns-server = system, 223.5.5.5, 119.29.29.29");
-  lines.push(
-    "skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, localhost, *.local",
-  );
-  lines.push("");
-  lines.push("[Proxy]");
-  for (const node of nodes) {
-    lines.push(
-      `${confValue(node.tag)} = ss, ${sip002Host(node.host)}, ${node.port}, ` +
-        `encrypt-method=${SS_METHOD}, password=${confValue(node.password)}, udp-relay=true`,
-    );
-  }
-  lines.push("");
+function shadowrocketClashYaml(nodes: ExportedNode[]): string {
+  const lines = clashProxyBlocks(nodes);
+  lines.push("rules:");
   if (nodes.length > 0) {
-    lines.push("[Proxy Group]");
-    lines.push(`Veyl = select, ${nodes.map((node) => confValue(node.tag)).join(", ")}`);
-    lines.push("");
+    // 顺序同原 Surge 配置：域名后缀先于 GEOIP，MATCH 兜底。GEOIP 用客户端自带库。
+    lines.push(`  - ${yamlScalar("DOMAIN-SUFFIX,cn,DIRECT")}`);
+    lines.push(`  - ${yamlScalar("GEOIP,CN,DIRECT")}`);
   }
-  lines.push("[Rule]");
-  // 顺序同 Clash：先域名后缀、再 GEOIP，FINAL 兜底。GEOIP 用的是客户端自带的库，
-  // 不像 mihomo 那样默认去 GitHub 拉；拉不到时规则落空，变成全部走节点。
-  lines.push("DOMAIN-SUFFIX,cn,DIRECT");
-  lines.push("GEOIP,CN,DIRECT");
-  lines.push(nodes.length === 0 ? "FINAL,DIRECT" : "FINAL,Veyl");
+  lines.push(`  - ${yamlScalar(nodes.length === 0 ? "MATCH,DIRECT" : "MATCH,Veyl")}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -792,9 +770,9 @@ async function shadowrocketProfile(
   const loaded = await loadProfileNodes(request, env);
   if (isResponse(loaded)) return loaded;
   if (loaded.nodes.length === 0 && loaded.queried > 0) return unavailableProfile();
-  return new Response(shadowrocketConf(loaded.nodes), {
+  return new Response(shadowrocketClashYaml(loaded.nodes), {
     status: 200,
-    headers: profileHeaders("text/plain; charset=utf-8"),
+    headers: profileHeaders("text/yaml; charset=utf-8"),
   });
 }
 
