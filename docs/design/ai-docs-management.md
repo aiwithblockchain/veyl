@@ -1,8 +1,8 @@
 # AI 文档管理：入口、内容与三份文档的加载与版本
 
 > 日期：2026-11-21
-> 最后核对：2026-11-24，对照 `8fbcd77`
-> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 是待落地的方案 B，前置条件（子模块策略）未定。§2–§5 是清点与设计记录，不代表全部已实现。
+> 最后核对：2026-11-24，对照 `108e6e5`
+> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。
 > 依据：`resources/prompts/{zh,en}/{system,kickoff,product,faq}.md`、`src-tauri/src/claurst_session/prompts.rs`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
 
 ---
@@ -295,38 +295,37 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 ---
 
-## 8. 系统提示词的组装方式：方案 B（待落地）
+## 8. 系统提示词的组装方式：两段下发（已落地，`108e6e5`）
 
-### 8.1 现状：claurst 是附加模式
+### 8.1 结论：做到了什么、做不到什么
 
-- `SystemPromptOptions` 是 `#[derive(Default)]`，`replace_system_prompt` 默认 `false`（`claurst/src-rust/crates/core/src/system_prompt.rs:233`、`:263`）。
-- 我们的 `system.md` 被包成 `<custom_instructions>` 放进**稳定块**（`system_prompt.rs:356-360`）。
-- 稳定块里还有 claurst 自己整套编码助手提示词：能力说明、工具使用规范、权限、协调者模式等（`system_prompt.rs:324-348`）。
-- 动态块在 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 之后（`system_prompt.rs:381-382`）；`append_system_prompt` 追加在最末（`system_prompt.rs:439-441`）。
-- `enabled_tools` 在 `build_system_prompt` 层面 `None` 表示「未知」，会把全部工具的用法说明都发出去（`system_prompt.rs:268-278`）；但查询循环在组装前会用本次真实工具集把它填上（`claurst/src-rust/crates/query/src/lib.rs:1053-1059`），所以 Veyl 会话实际不走「未知」分支。
-- Veyl 从未设置 append / replace / enabled_tools：`system_prompt` 在会话创建（`claurst_session/mod.rs:378`）和每轮（`claurst_session/mod.rs:489`）整体重拼。
-- `QueryConfig` 没有 `replace_system_prompt` 字段（`claurst/src-rust/crates/query/src/lib.rs:95-182`）；runner 里硬编码默认值（`claurst/src-rust/crates/query/src/runner/prompt.rs:28` 注释、`:41` `..Default::default()`）。
+- **做到**：稳定段（`system.md` 渲染 + 安全底线）只在会话创建时构建一次；环境与语言约束每轮走动态段；稳定段位于可缓存块，逐轮不变。
+- **做不到**：去掉 claurst 默认提示词。受子模块不可改的约束，`QueryConfig` 没有 `replace_system_prompt` 字段，`query/src/runner/prompt.rs` 里硬编码为 `false`，所以原方案 B（replace 模式）作废。我们的内容继续以 `<custom_instructions>` 形式位于稳定块，claurst 默认提示词仍然存在。
 
-### 8.2 方案 B 的目标结构
+### 8.2 现在的结构
 
-- `system_prompt` = `system.md` 渲染结果 + 安全底线 + 语言约束，会话创建时构建一次。
-- `append_system_prompt` = 环境段（地区 / 来源 / 系统推断），每轮重建。
-- `replace_system_prompt = true`：不再发送 claurst 默认提示词，身份冲突消失。
+| 段 | 内容 | 何时构建 | 落在哪 |
+|---|---|---|---|
+| 稳定段 `stable_prompt` | `system.md` 渲染 + 安全底线 | 会话创建时一次 | `query_config.system_prompt` |
+| 动态段 `dynamic_prompt` | 环境段 + 语言约束 | 每轮 | `query_config.append_system_prompt` |
+| claurst 默认提示词 | 能力说明、工具规范、权限等 | 子模块自己负责 | 稳定块（我们的内容包在 `<custom_instructions>` 里） |
 
-### 8.3 前置阻塞
+段落顺序：正文 → 安全底线 → 环境 → 语言约束。claurst 每轮在 append 之后追加的段落（todo 提醒等）会排在语言约束之后。
 
-- `QueryConfig` 缺 `replace_system_prompt` 字段，需要在子模块加字段并在 `runner/prompt.rs` 转发。
-- replace 模式目前提前 return，只输出 custom 文本加边界（`system_prompt.rs:308-312`），会丢掉 `append_system_prompt`；要「替换 + 动态段」同时成立，还需让 replace 分支也走 append。
-- 子模块策略未定：本地补丁 / upstream PR / 不改子模块。
+代码位置：`claurst_session/mod.rs:143-175`（`stable_prompt` / `dynamic_prompt` / `apply_turn_prompt`）、`:399-409`（会话创建）、`:509-520`（每轮）。`compose_system_prompt` 降为 `#[cfg(test)]` 组合助手；`AivpnSession.prompt_dir` 字段已删。
 
-### 8.4 不改子模块的退路
+### 8.3 为什么不是每轮重拼
 
-- **A 保持附加**：`system.md` 进 `system_prompt`、环境进 `append_system_prompt`。缓存友好（稳定块逐轮不变），但 claurst 默认提示词仍在，身份冲突没解决。
-- **A′ 把 `system.md` 放到 `append_system_prompt` 末尾**：靠位置压过默认提示词。代价是静态内容被标成动态、稳定缓存前缀变短，而且「最后说的算」只是概率，不是保证。
+地区、来源、系统推断每轮都可能变。把它们放进动态段后，变化只影响 `append_system_prompt`，稳定段保持逐字节一致，缓存前缀不会被打断。旧实现每轮用 `compose_system_prompt` 整体重拼，稳定块会随环境变化而变。
+
+### 8.4 已废弃 / 未采用的路线
+
+- **方案 B（replace 模式）**：作废。`QueryConfig` 无该字段，runner 硬编码 `false`；子模块不可改。
+- **A′（把 `system.md` 放进 `append_system_prompt` 末尾）**：未采用。现在 `system.md` 留在稳定段，动态段只放环境与语言。
 
 ### 8.5 待定
 
-- 子模块改不改、方案 B 的具体代码改动与验收，等 AI 工具审计结果出来再补。
+- claurst 在 append 之后追加的段落会排在语言约束之后，所以「最后一句一定是语言约束」不再成立。是否需要应用侧再加约束，等 AI 工具审计结果出来再定。
 
 ---
 
