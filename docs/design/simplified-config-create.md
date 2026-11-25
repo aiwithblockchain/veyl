@@ -62,7 +62,7 @@
 - 不做 IP 定位、不联网判断国家。
 - 不做创建时的节点测速或自动挑最快节点。
 - 新建配置本身不新增命令、不改 `config_create` 参数；地区链路的命令/工具/事件另计（§14）。
-- 不改「改接管方式必须新建配置」这条既有规则。
+- 不改「改接管方式必须新建配置」这条既有规则。（3.13.0 起 `ConfigSetMode` 可在线切换接管方式，本条已被推翻。）
 
 ---
 
@@ -1058,7 +1058,7 @@ region-changed { region: string | null, source: "system" | "ai", emitted_at }
 - 不让 AI 或界面创建空配置：`ConfigCreate` 与 `config_create` 都必须带来源（`source: "seed"` 或非空 `nodeIds`），
   都缺、`source: "empty"`、空数组一律 `INVALID_ARGUMENT / source_required`（`commands.md` §3.2、`tools.md` §4.24）。
 - 不按服务挑选：写入只有 `direct` / `proxy_all` 两档，`proxy_selected` 已下线；用户要「只有几个服务走 VPN」时如实说暂不支持。
-- 不改「改接管方式必须新建配置」。
+- 不改「改接管方式必须新建配置」。（3.13.0 起 `ConfigSetMode` 可在线切换接管方式，本条已被推翻。）
 - 不在弹窗里播报免费节点刷新对其它配置的影响（那是设置页/左栏的事）。
 
 ---
