@@ -151,7 +151,7 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 ## 4. The 10 "Ask AI" entry points
 
-The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links. Settings › Connection · `New node` is not an AI entry: it goes straight to the server wizard, and the AI help there is `Have AI choose`.
+The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links and no New node action — creating a node happens on the Console when there are no nodes yet, on the trial-expired screen, and in My servers; the server wizard is entry 5.
 
 | # | Entry | What the user usually wants | How to answer |
 |---|---|---|---|

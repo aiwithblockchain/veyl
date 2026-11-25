@@ -49,8 +49,6 @@ interface Props {
   connectMode?: ConfigConnectMode | null;
   /** 当前配置 id；接管方式切换与连接设置用它。 */
   configId?: string | null;
-  /** 新建一套配置（会先关闭设置）。 */
-  onNewConfig?: () => void;
   onClose: () => void;
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
@@ -678,7 +676,6 @@ export function Settings({
   onProxyPortSaved,
   connectMode = null,
   configId = null,
-  onNewConfig,
   onClose,
   onRestartOnboarding,
   onOpenLogs,
@@ -2219,14 +2216,7 @@ export function Settings({
             </div>
 
             {!configId ? (
-              <p className="settings-note">
-                {t("settings.connection.noConfig")}
-                {onNewConfig ? (
-                  <button type="button" className="settings-link" onClick={onNewConfig}>
-                    {t("controls.newNode")}
-                  </button>
-                ) : null}
-              </p>
+              <p className="settings-note">{t("settings.connection.noConfig")}</p>
             ) : null}
 
             <div className="settings-row" {...pointAttrs("connection.sync")}>

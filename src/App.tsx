@@ -3400,10 +3400,6 @@ export default function App() {
         connectMode={vpn.activeConfig?.connect_mode ?? null}
         configId={vpn.activeConfig?.config_id ?? null}
         onSetConnectMode={handleSetConnectMode}
-        onNewConfig={() => {
-          setSettingsOpen(false);
-          openNewNode(destination === "servers" ? "servers" : "client");
-        }}
         onClose={closeSettings}
         onRestartOnboarding={() => {
           setSettingsOpen(false);

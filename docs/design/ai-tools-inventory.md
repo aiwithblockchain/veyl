@@ -72,7 +72,7 @@
 | 23 | `VpnDisconnect` | 连接 | Write | 断开并恢复系统代理 | 契约 §4.12；product §3.1（主按钮） |
 | 24 | `DiagRun` | 诊断 | ReadOnly | 跑一次完整网络诊断 | 契约 §4.13；product §3.7、ai-docs #2 |
 | 25 | `HttpCheck` | 诊断 | ReadOnly | 只读检查一个 https 地址能否打开 | 契约 §4.54；无用户入口（AI 自查） |
-| 26 | `IssueReport` | 报告 | Write | 两阶段生成桌面问题报告 | 契约 §4.46；product #5 |
+| 26 | `IssueReport` | 报告 | Write | 两阶段生成桌面问题报告 | 契约 §4.46；product #4 |
 | 27 | `submit_issue_to_public_wall` | 问题墙 | Write | 发到公开问题墙（有确认卡） | 契约 §4.56；无 UI 入口 |
 | 28 | `read_public_issue_wall` | 问题墙 | ReadOnly | 搜索 / 读取公开问题墙 | 契约 §4.57；无 UI 入口 |
 | 29 | `DeepseekSetupKey` | AI | ReadOnly | 给出创建 DeepSeek Key 的步骤 | 契约 §4.14；product §3.6（AI） |
@@ -84,11 +84,11 @@
 | 35 | `DefaultProfileStatus` | 免费节点 | ReadOnly | 读免费节点缓存状态（不联网） | 契约 §4.21；product §3.6 |
 | 36 | `SetUserRegion` | 地区 | Write | 记录用户所在地区 | 契约 §4.47；系统环境段 mod.rs:205/225 |
 | 37 | `MyServers` | 服务器 | ReadOnly | 列我的服务器与状态 | 契约 §4.48；product §3.3 |
-| 38 | `MyServerFailure` | 服务器 | ReadOnly | 读某台服务器创建失败详情 | 契约 §4.51；product #7、ai-docs #7 |
-| 39 | `NodeRotateCredentials` | 服务器 | Execute | 更换某台服务器的连接密码（有确认卡） | 契约 §4.55；product #10（未点名） |
+| 38 | `MyServerFailure` | 服务器 | ReadOnly | 读某台服务器创建失败详情 | 契约 §4.51；product #6、ai-docs #6 |
+| 39 | `NodeRotateCredentials` | 服务器 | Execute | 更换某台服务器的连接密码（有确认卡） | 契约 §4.55；product #9（未点名） |
 | 40 | `OpenSettings` | 设置 | ReadOnly | 打开设置并指向某段 / 某行 | 契约 §4.50；product §3.6（咨询 AI） |
-| 41 | `StageSelect` | 建机 | Write | 把地区 / 规格选进新建节点舞台 | 契约 §4.52；product #6、ai-docs #6 |
-| 42 | `CatalogOptions` | 建机 | ReadOnly | 读建机可选地区与规格 | 契约 §4.53；product #6 |
+| 41 | `StageSelect` | 建机 | Write | 把地区 / 规格选进新建节点舞台 | 契约 §4.52；product #5、ai-docs #5 |
+| 42 | `CatalogOptions` | 建机 | ReadOnly | 读建机可选地区与规格 | 契约 §4.53；product #5 |
 | 43 | `AskUserQuestion` | 会话 | None（沿用内置） | 向用户提问并等待回答；Veyl 包装了参数校验 | 契约 §4.22；kickoff:10,40,113 |
 
 > 计数：注册表 43 项 = 42 个产品工具 + 1 个 `AskUserQuestionGuard`；再加 6 个基础文件工具，共 49 个工具定义。`ai-docs-management.md:298` 的「42 个」不含 guard，口径一致。
@@ -302,7 +302,6 @@
 | 首启引导 | `kickoff.md:10,40,73,79-81,113,121-124` | `AskUserQuestion`、`CatalogRefresh`、`NodeImportText`、`NodeImportUrl`、`NodeCreate`、`RouteSetMode`、`ConfigSetMode`、`VpnConnect` |
 | 连接失败 hero | `product.md:140`、`ai-docs-management.md:33` | `DiagRun` |
 | 设置页咨询 AI | `product.md:84`、`ai-docs-management.md:34` | `OpenSettings`（指路）；其余靠注入的事实 |
-| 设置 › 连接 › 新建节点 | `product.md:156`、`ai-docs-management.md:35` | 不带文本；没有工具被点名 |
 | 报告问题 | `product.md:157`、`ai-docs-management.md:36` | `IssueReport` |
 | 建机向导「让 AI 帮我选」 | `product.md:158`、`ai-docs-management.md:37` | `StageSelect`、`CatalogOptions` |
 | 服务器详情「AI 定位」 | `product.md:159`、`ai-docs-management.md:38` | `MyServerFailure` |

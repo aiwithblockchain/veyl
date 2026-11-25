@@ -73,7 +73,6 @@ function renderSettings(
     section = "network",
     runtimeView = runtime(),
     proxyPort,
-    onNewConfig,
     onAskAi,
     onReportProblem,
     routingMode,
@@ -91,7 +90,6 @@ function renderSettings(
     section?: "ai" | "network" | "account" | "advanced";
     runtimeView?: RuntimeView;
     proxyPort?: number;
-    onNewConfig?: () => void;
     onAskAi?: (text: string, section: string) => void;
     onReportProblem?: () => void;
     onConsultAi?: (prompt: string) => boolean;
@@ -106,7 +104,6 @@ function renderSettings(
       connectMode={connectMode}
       configId={configId}
       proxyPort={proxyPort}
-      onNewConfig={onNewConfig}
       onClose={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
@@ -186,15 +183,12 @@ describe("连接 tab", () => {
     await waitFor(() => expect(onSetRoutingMode).toHaveBeenCalledWith("proxy_all"));
   });
 
-  it("没有节点时只说一句，并给新建入口，不显示端口", async () => {
-    const onNewConfig = vi.fn();
-    renderSettings(makeBridge(), { connectMode: null, configId: null, onNewConfig });
+  it("没有节点时只说一句，设置里不给新建入口，不显示端口", async () => {
+    renderSettings(makeBridge(), { connectMode: null, configId: null });
     expect(await screen.findByText(/^还没有节点。/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新建节点" })).toBeNull();
     expect(screen.queryByText("本地代理端口")).toBeNull();
     expect(document.querySelector(".seed-refresh")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "新建节点" }));
-    expect(onNewConfig).toHaveBeenCalledTimes(1);
   });
 
   it("节点切换不在设置里", async () => {
