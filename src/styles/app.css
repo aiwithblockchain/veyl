@@ -2630,6 +2630,7 @@ body[data-resizing] {
 .node-import__actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   padding: 16px 20px 18px;
 }
@@ -4672,6 +4673,30 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+/* 空态没有节点卡：已有自建节点的用户从这里直接进手动添加。 */
+.start-choice__add {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--link);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.start-choice__add:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.start-choice__add:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .start-choice__picks {
   margin-top: 24px;
   display: flex;
@@ -6117,11 +6142,11 @@ details[open] > .settings-fold__summary::before {
   inset: -14px -8px;
 }
 
-/* 与「测速」相邻：两侧各让 2px，点击区不互相覆盖。 */
+/* 与「测速」相邻：右侧 8px、左侧 4px，点击区刚好相接不重叠。 */
 .stage-add::after {
   content: "";
   position: absolute;
-  inset: -14px -6px;
+  inset: -14px -4px;
 }
 
 .stage-probe:hover:not(:disabled),

@@ -561,6 +561,7 @@ export const en: Record<MessageKey, string> = {
   "trial.start.free": "Try free nodes first",
   "trial.start.freeSub": "2 nodes, 7-day trial",
   "trial.start.emptyConfig": "This configuration has no nodes left",
+  "trial.addOwnNode": "Have your own node? Add it manually",
   "trial.error.fetch": "Couldn't fetch the built-in configuration. Try again.",
   "trial.error.fetchWith": "Couldn't fetch the built-in configuration. {message}",
   "trial.error.join": "Couldn't add the free nodes. Try again.",
@@ -601,7 +602,7 @@ export const en: Record<MessageKey, string> = {
   "app.proxyRestoreFailed":
     "Network settings couldn't be restored automatically. Open Settings → Troubleshooting → Force reset network.",
   "app.importJsonOnly":
-    "You can only drop .json seed files here. Import node text from Settings › Connection › Add node.",
+    "You can only drop .json seed files here. Import node text from Add node.",
   "app.imported": "Imported {count} nodes",
   "app.sync.updatedOne": "“{name}” was updated",
   "app.sync.updatedMany": "{count} nodes were updated",
@@ -1273,6 +1274,7 @@ export const en: Record<MessageKey, string> = {
   "settings.import.manual.namePlaceholder": "Tokyo 01",
   "settings.import.manual.nameRequired": "Give the node a name so you can spot it in the list.",
   "settings.import.manual.nameTooLong": "The name can be at most 64 characters.",
+  "settings.import.manual.note": "Find the address, port, encryption method and password in your provider's panel; the password stays on this device.",
   "settings.import.manual.password": "Password",
   "settings.import.manual.passwordPlaceholder": "Connection password",
   "settings.import.manual.passwordRequired": "Enter the connection password.",
@@ -1282,10 +1284,12 @@ export const en: Record<MessageKey, string> = {
   "settings.import.manual.portPlaceholder": "8388",
   "settings.import.manual.server": "Address",
   "settings.import.manual.serverInvalid": "Enter only a hostname or IP, without https://.",
-  "settings.import.manual.serverPlaceholder": "example.com or 1.2.3.4",
-  "settings.import.manual.serverRequired": "Enter the server address.",
+  "settings.import.manual.serverTooLong":
+    "The address can be up to 253 characters; check for extra text.",
   "settings.import.manual.serverHasPort":
     "Don't put the port in the address; use the port field on the right.",
+  "settings.import.manual.serverPlaceholder": "example.com or 1.2.3.4",
+  "settings.import.manual.serverRequired": "Enter the server address.",
   "settings.import.manual.submit": "Add node",
   "settings.import.methodUnsupported": "This encryption method isn't supported; only aes-256-gcm is.",
   "settings.import.methodUnsupportedWith": "Encryption method {method} isn't supported; only aes-256-gcm is.",

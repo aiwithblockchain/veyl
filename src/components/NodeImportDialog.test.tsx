@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge } from "../agent/bridge";
+import nodesSource from "../../src-tauri/src/nodes.rs?raw";
 import { NodeImportDialog } from "./NodeImportDialog";
 
 afterEach(cleanup);
@@ -30,15 +31,22 @@ function renderDialog(over: { bridge?: AgentBridge } = {}) {
   const bridge = over.bridge ?? makeBridge();
   const onClose = vi.fn();
   const onNotice = vi.fn();
-  render(
+  const ui = (open: boolean) => (
     <NodeImportDialog
-      open
+      open={open}
       bridge={bridge}
       onClose={onClose}
       onNotice={onNotice}
-    />,
+    />
   );
-  return { bridge, onClose, onNotice };
+  const view = render(ui(true));
+  return {
+    bridge,
+    onClose,
+    onNotice,
+    container: view.container,
+    rerenderOpen: (open: boolean) => view.rerender(ui(open)),
+  };
 }
 
 function openManual() {
@@ -223,7 +231,7 @@ describe("手动填写段", () => {
     );
     expect(onNotice).toHaveBeenCalledWith({
       level: "info",
-      text: "节点已加入节点池",
+      text: "节点已加入节点池并绑定当前配置",
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -265,13 +273,6 @@ describe("手动填写段", () => {
     expect(bridge.nodeCreate).not.toHaveBeenCalled();
   });
 
-  it("加密方式是白名单下拉，默认 aes-256-gcm；密码不回显", () => {
-    renderDialog();
-    openManual();
-
-    const select = screen.getByRole("combobox", {
-      name: "加密方式",
-    }) as HTMLSelectElement;
   it("地址粘成 host:port 时报错，提示端口填右侧端口栏", () => {
     const bridge = makeBridge();
     renderDialog({ bridge });
@@ -318,6 +319,13 @@ describe("手动填写段", () => {
     );
   });
 
+  it("加密方式是白名单下拉，默认 aes-256-gcm；密码不回显", () => {
+    renderDialog();
+    openManual();
+
+    const select = screen.getByRole("combobox", {
+      name: "加密方式",
+    }) as HTMLSelectElement;
     expect(select.value).toBe("aes-256-gcm");
     expect(select.options).toHaveLength(12);
 
@@ -357,5 +365,212 @@ describe("手动填写段", () => {
     expect(
       (screen.getByPlaceholderText("东京 01") as HTMLInputElement).value,
     ).toBe("保留我");
+  });
+});
+
+describe("弹层关闭、提交态与重开", () => {
+  it("Esc、遮罩与关闭按钮都能关闭；提交中一律不关", async () => {
+    const { bridge, onClose, container, rerenderOpen } = renderDialog();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    fireEvent.mouseDown(container.querySelector(".modal-backdrop") as Element);
+    expect(onClose).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    expect(onClose).toHaveBeenCalledTimes(3);
+
+    let resolveCreate!: (value: unknown) => void;
+    (bridge as unknown as { nodeCreate: ReturnType<typeof vi.fn> }).nodeCreate =
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveCreate = resolve;
+          }),
+      );
+    rerenderOpen(false);
+    rerenderOpen(true);
+    openManual();
+    fillManual();
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    const busyButton = (await screen.findByRole("button", {
+      name: "正在添加…",
+    })) as HTMLButtonElement;
+    expect(busyButton.disabled).toBe(true);
+    expect(busyButton.getAttribute("aria-busy")).toBe("true");
+    expect(
+      (screen.getByPlaceholderText("东京 01") as HTMLInputElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(3);
+
+    resolveCreate({
+      node_id: "nd_1",
+      name: "东京 01",
+      server: "203.0.113.9",
+      port: 8388,
+      method: "aes-256-gcm",
+      protocol: "shadowsocks",
+      source: "manual",
+      created_at: 0,
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(4));
+  });
+
+  it("重新打开回到链接段并清空表单", () => {
+    const { rerenderOpen } = renderDialog();
+    openManual();
+    fillManual({ name: "保留我" });
+
+    rerenderOpen(false);
+    rerenderOpen(true);
+
+    expect(
+      screen.getByRole("button", { name: "链接 / 订阅" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "手动填写" }));
+    expect(
+      (screen.getByPlaceholderText("东京 01") as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("后端 INVALID_ARGUMENT 用设计指定文案，不用通用句", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeCreate: ReturnType<typeof vi.fn> }).nodeCreate =
+      vi.fn(async () => {
+        throw {
+          code: "INVALID_ARGUMENT",
+          message: "",
+          details: { reason: "invalid_argument" },
+        };
+      });
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual();
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(
+      await screen.findByText("没有添加成功，检查地址后再试。"),
+    ).toBeTruthy();
+    expect(screen.queryByText("参数不对，检查后重试。")).toBeNull();
+  });
+
+  it("地址按 UTF-8 字节限长，超长单独报「多贴了内容」", () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ server: "例".repeat(86) });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(
+      screen.getByText("地址最多 253 个字符，检查一下有没有多贴了内容。"),
+    ).toBeTruthy();
+    expect(bridge.nodeCreate).not.toHaveBeenCalled();
+  });
+
+  it("地址含空白或斜杠仍按格式错误报", () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ server: "203.0.113.9/32" });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(
+      screen.getByText("地址只填域名或 IP，不要带 https://。"),
+    ).toBeTruthy();
+    expect(bridge.nodeCreate).not.toHaveBeenCalled();
+  });
+
+  it("手动段说明换成服务商后台口径", () => {
+    renderDialog();
+    openManual();
+
+    expect(
+      screen.getByText(
+        "在服务商后台找到地址、端口、加密方式和密码；密码只保存在本机。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/文件里的节点密码不要外传/)).toBeNull();
+  });
+});
+
+describe("切段与改输入：旧结果不残留", () => {
+  it("改链接文本会清掉上一次的跳过原因", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportText: ReturnType<typeof vi.fn> }).nodeImportText =
+      vi.fn(async () => ({
+        imported: 0,
+        skipped: [{ name: "旧节点", reason: "duplicate" }],
+        nodes: [],
+      }));
+    renderDialog({ bridge });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    const field = within(dialog).getByRole("textbox", {
+      name: "节点链接或订阅地址",
+    });
+
+    fireEvent.change(field, { target: { value: "ss://a" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+    expect(await within(dialog).findByText("旧节点：已有同名节点")).toBeTruthy();
+
+    fireEvent.change(field, { target: { value: "ss://b" } });
+    expect(within(dialog).queryByText("旧节点：已有同名节点")).toBeNull();
+  });
+
+  it("切换分段清掉两边的错误与结果", () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    // 链接段：http 地址报错
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "http://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+    expect(
+      within(dialog).getByText("订阅地址要用 https，不能是 http。"),
+    ).toBeTruthy();
+
+    // 手动段：空提交报错
+    fireEvent.click(screen.getByRole("button", { name: "手动填写" }));
+    expect(
+      screen.queryByText("订阅地址要用 https，不能是 http。"),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+    expect(screen.getByText("填一个节点名，方便在列表里认出它。")).toBeTruthy();
+
+    // 切回链接段：手动错误也清掉
+    fireEvent.click(screen.getByRole("button", { name: "链接 / 订阅" }));
+    fireEvent.click(screen.getByRole("button", { name: "手动填写" }));
+    expect(
+      screen.queryByText("填一个节点名，方便在列表里认出它。"),
+    ).toBeNull();
+  });
+
+  it("加密方式下拉与 Host 的 SUPPORTED_METHODS 逐项一致", () => {
+    renderDialog();
+    openManual();
+
+    const select = screen.getByRole("combobox", {
+      name: "加密方式",
+    }) as HTMLSelectElement;
+    const block =
+      /pub const SUPPORTED_METHODS: &\[&str\] = &?\[([\s\S]*?)\];/.exec(
+        nodesSource,
+      )?.[1] ?? "";
+    const host = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+
+    expect(host.length).toBeGreaterThan(0);
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(host);
   });
 });

@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getAgentBridge } from "./agent";
@@ -121,6 +121,17 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.queryByRole("button", { name: "节点组" })).toBeNull();
     expect(screen.getByRole("button", { name: "设置" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /账户/ })).toBeTruthy();
+  });
+
+  it("零节点时从启动页手动添加节点", async () => {
+    await renderApp();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "已有自己的节点？手动添加" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "添加节点" });
+    expect(within(dialog).getByRole("button", { name: "手动填写" })).toBeTruthy();
   });
 
   it("先试用免费节点：三步按顺序落地，结束停在未连接，行内延迟与摘要一致", async () => {
@@ -670,6 +681,11 @@ describe("三区外壳与连接舞台", () => {
     await screen.findByRole("main", { name: "试用已到期" });
     expect(screen.queryByText("从哪里开始？")).toBeNull();
     expect(screen.getByRole("button", { name: "新建节点" })).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "已有自己的节点？手动添加" }),
+    );
+    expect(await screen.findByRole("dialog", { name: "添加节点" })).toBeTruthy();
   });
 
   it("重复点试用不会多建配置", async () => {

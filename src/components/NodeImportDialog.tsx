@@ -239,11 +239,9 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
     } else if (trimmedServer.includes(":") && !isBareIpv6(trimmedServer)) {
       // 服务商后台常给「IP:端口」，整段粘进来会建出一个连不上的节点。
       errors.server = t("settings.import.manual.serverHasPort");
-    } else if (
-      Array.from(trimmedServer).length > 253 ||
-      trimmedServer.includes("://") ||
-      /[\s/\\\u0000-\u001f\u007f]/.test(trimmedServer)
-    ) {
+    } else if (new TextEncoder().encode(trimmedServer).length > 253) {
+      errors.server = t("settings.import.manual.serverTooLong");
+    } else if (/[\s/\\\u0000-\u001f\u007f]/.test(trimmedServer)) {
       errors.server = t("settings.import.manual.serverInvalid");
     }
 
@@ -268,12 +266,22 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
   };
 
   const clearFieldError = (field: ManualField) => {
+    setManualError(null);
     setManualErrors((current) => {
       if (!current[field]) return current;
       const next = { ...current };
       delete next[field];
       return next;
     });
+  };
+
+  /** 切段只清结果与错误，保留已填内容。 */
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setLinkError(null);
+    setLinkResult(null);
+    setManualError(null);
+    setManualErrors({});
   };
 
   const validateField = (field: ManualField) => {
@@ -313,6 +321,8 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
           : null;
       if (reason === "unsupported_method") {
         setManualErrors({ method: t("settings.import.manual.methodUnsupported") });
+      } else if (bridgeError.code === "INVALID_ARGUMENT") {
+        setManualError(t("settings.import.addFailed"));
       } else {
         setManualError(errorText(error, t("settings.import.addFailed")));
       }
@@ -354,7 +364,11 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
         </header>
 
         <div className="node-import__body">
-          <p className="settings-note">{t("settings.import.note")}</p>
+          <p className="settings-note">
+            {mode === "link"
+              ? t("settings.import.note")
+              : t("settings.import.manual.note")}
+          </p>
 
           <div
             className="settings-seg node-import__seg"
@@ -366,7 +380,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
               className={mode === "link" ? "is-selected" : ""}
               aria-pressed={mode === "link"}
               disabled={busy}
-              onClick={() => setMode("link")}
+              onClick={() => switchMode("link")}
             >
               {t("settings.import.modeLink")}
             </button>
@@ -375,7 +389,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
               className={mode === "manual" ? "is-selected" : ""}
               aria-pressed={mode === "manual"}
               disabled={busy}
-              onClick={() => setMode("manual")}
+              onClick={() => switchMode("manual")}
             >
               {t("settings.import.modeManual")}
             </button>
@@ -399,6 +413,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                     onChange={(event) => {
                       setImportText(event.target.value);
                       setLinkError(null);
+                      setLinkResult(null);
                     }}
                   />
                 </div>
@@ -513,7 +528,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                   ) : null}
                 </div>
 
-                <div className="node-import__field node-import__field--port">
+                <div className="node-import__field">
                   <label htmlFor="node-import-port">
                     {t("settings.import.manual.port")}
                   </label>
@@ -647,7 +662,10 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                   <button
                     type="button"
                     className="btn btn--ghost"
-                    onClick={() => setImportFile(null)}
+                    onClick={() => {
+                      setImportFile(null);
+                      setLinkResult(null);
+                    }}
                     disabled={linkBusy}
                   >
                     {t("settings.import.useText")}

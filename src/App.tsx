@@ -114,7 +114,13 @@ type SettingsSection = "ai" | "network" | "account" | "advanced";
 type Destination = "client" | "servers";
 
 /** 免费节点试用到期：节点已被清走，只留「新建节点」。 */
-function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
+function TrialExpired({
+  onNewNode,
+  onAddNode,
+}: {
+  onNewNode: () => void;
+  onAddNode: () => void;
+}) {
   const t = useT();
   return (
     <main className="start-choice" aria-label={t("trial.expired.aria")}>
@@ -123,6 +129,9 @@ function TrialExpired({ onNewNode }: { onNewNode: () => void }) {
         <p className="start-choice__note">{t("trial.expired.note")}</p>
         <button type="button" className="trial-expired__action" onClick={onNewNode}>
           {t("trial.expired.newNode")}
+        </button>
+        <button type="button" className="start-choice__add" onClick={onAddNode}>
+          {t("trial.addOwnNode")}
         </button>
       </section>
     </main>
@@ -219,6 +228,7 @@ function StartChoice({
   busy,
   onUseFree,
   onNewNode,
+  onAddNode,
   trial,
   onRetryTrial,
   onSkipProbe,
@@ -230,6 +240,8 @@ function StartChoice({
   busy: boolean;
   onUseFree: () => void;
   onNewNode: () => void;
+  /** 手里已有自建节点：打开手动添加 / 导入弹层。 */
+  onAddNode: () => void;
   trial: TrialFlow | null;
   onRetryTrial: () => void;
   onSkipProbe: () => void;
@@ -294,6 +306,9 @@ function StartChoice({
         {emptyConfig ? (
           <p className="start-choice__empty">{t("trial.start.emptyConfig")}</p>
         ) : null}
+        <button type="button" className="start-choice__add" onClick={onAddNode}>
+          {t("trial.addOwnNode")}
+        </button>
       </section>
     </main>
   );
@@ -3191,6 +3206,7 @@ export default function App() {
             lastActionRef.current = { id: "trial_expired.new_node" };
             openNewNode("trial_expired");
           }}
+          onAddNode={() => setNodeImportOpen(true)}
         />
       ) : showsStage && !(trialFlow && trialFlow.phase !== "done") ? (
         <ConnectionStage
@@ -3255,6 +3271,7 @@ export default function App() {
             lastActionRef.current = { id: "no_nodes.new_node" };
             openNewNode("client");
           }}
+          onAddNode={() => setNodeImportOpen(true)}
           trial={trialFlow}
           onRetryTrial={handleRetryTrial}
           onSkipProbe={handleSkipTrialProbe}
