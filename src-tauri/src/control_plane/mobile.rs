@@ -31,6 +31,7 @@ const QR_PIXELS: u32 = 640;
 /// `mp_` + 32 字节 base64url（43 字符）的固定长度（§1.2）。
 const TOKEN_LEN: usize = 46;
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+const PROFILE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// 下载页 URL 的固定映射：每个客户端按平台各给一条，命令只接受客户端 id。
 ///
@@ -170,8 +171,77 @@ struct TokenResponse {
     created_at: i64,
 }
 
+/// 导出配置文件时取回的 profile 文档（仅命令层使用，不向外序列化）。
+pub enum MobileProfileDocument {
+    Ok { json: String, node_count: u32 },
+    LoginRequired,
+    NoReadyServer,
+}
+
 pub async fn get() -> Result<MobileExportData, CpError> {
     export(false).await
+}
+
+/// 取账户 profile 的原始 JSON：与 `/v1/mobile/profile` 返回的内容完全一致。
+///
+/// 令牌只在内存里经过一次；不记 URL、不记令牌、不落本地库。
+pub async fn profile_document() -> Result<MobileProfileDocument, CpError> {
+    let logged_in = super::auth::account_state().logged_in;
+    let node_count = ready_server_count();
+    if !logged_in {
+        return Ok(MobileProfileDocument::LoginRequired);
+    }
+    if node_count == 0 {
+        return Ok(MobileProfileDocument::NoReadyServer);
+    }
+
+    let origin = ProfileOrigin::parse(&env::current().base_url)?;
+    let token = match fetch_token(false).await {
+        Ok(token) => token,
+        Err(error) if is_login_required(&error) => {
+            return Ok(MobileProfileDocument::LoginRequired)
+        }
+        Err(error) => return Err(error),
+    };
+
+    let endpoint = origin.endpoint(PROFILE_PATH)?;
+    let http = super::client::http_client(PROFILE_TIMEOUT)?;
+    let response = http
+        .get(endpoint)
+        .basic_auth(PROFILE_USERNAME, Some(&token.token))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| {
+            super::client::warn_transport("mobile", "GET", PROFILE_PATH, &error);
+            CpError::network(error.is_timeout())
+        })?;
+
+    if let Some(length) = response.content_length() {
+        if length as usize > MAX_RESPONSE_BYTES {
+            return Err(CpError::invalid_response("控制面响应过大"));
+        }
+    }
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.map_err(|error| {
+        super::client::warn_transport("mobile", "GET", PROFILE_PATH, &error);
+        CpError::network(error.is_timeout())
+    })?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(CpError::invalid_response("控制面响应过大"));
+    }
+    let body = String::from_utf8(bytes.to_vec())
+        .map_err(|_| CpError::invalid_response("控制面响应不是 UTF-8"))?;
+    log::debug!("手机端导出：配置文件响应 status={status}");
+    if !(200..=299).contains(&status) {
+        return Err(error_from_body(status, &body));
+    }
+    let parsed: Value = serde_json::from_str(&body)
+        .map_err(|_| CpError::invalid_response("导出配置不是合法的 JSON"))?;
+    if !parsed.is_object() || !parsed.get("outbounds").is_some_and(Value::is_array) {
+        return Err(CpError::invalid_response("导出配置不是合法的 sing-box 配置"));
+    }
+    Ok(MobileProfileDocument::Ok { json: body, node_count })
 }
 
 pub async fn rotate() -> Result<MobileExportData, CpError> {
@@ -456,6 +526,18 @@ impl ProfileOrigin {
             .map_err(|_| insecure_origin())?;
         Ok(url.to_string())
     }
+
+    /// 不带凭据的请求地址：凭据走 Authorization 头，不放进 URL。
+    fn endpoint(&self, profile_path: &str) -> Result<String, CpError> {
+        let mut url = self.base.clone();
+        let path = format!("{}{}", url.path().trim_end_matches('/'), profile_path);
+        url.set_path(&path);
+        url.set_query(None);
+        url.set_fragment(None);
+        url.set_username("").map_err(|_| insecure_origin())?;
+        url.set_password(None).map_err(|_| insecure_origin())?;
+        Ok(url.to_string())
+    }
 }
 
 /// 扫码内容：`sing-box://import-remote-profile?url=<整体 encode>#Veyl`（§4.2）。
@@ -583,6 +665,16 @@ mod tests {
             assert_eq!(parsed.username(), "veyl");
             assert_eq!(parsed.password(), Some(TOKEN));
         }
+    }
+
+    #[test]
+    fn endpoint_has_no_userinfo_and_keeps_the_base_path() {
+        let origin = ProfileOrigin::parse("https://example.test/api/").unwrap();
+        let url = origin.endpoint(PROFILE_PATH).unwrap();
+        assert_eq!(url, "https://example.test/api/v1/mobile/profile");
+        let parsed = Url::parse(&url).unwrap();
+        assert_eq!(parsed.username(), "");
+        assert_eq!(parsed.password(), None);
     }
 
     #[test]

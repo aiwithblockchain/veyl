@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { t } from "../i18n";
 import type { MessageKey } from "../i18n";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AgentBridge,
@@ -33,6 +33,7 @@ import type {
   MobileClientsQrData,
   MobileExportData,
   MobileExportFormat,
+  MobileSaveFileData,
   MyServer,
   MyServerAccount,
   MyServerCatalog,
@@ -1154,6 +1155,21 @@ function normalizeMobileClientsQr(raw: unknown): MobileClientsQrData {
   serverDataError();
 }
 
+function normalizeMobileSaveFile(raw: unknown): MobileSaveFileData {
+  if (!raw || typeof raw !== "object") serverDataError();
+  const value = raw as Record<string, unknown>;
+  if (value.state === "login_required") return { state: "login_required" };
+  if (value.state === "no_ready_server") return { state: "no_ready_server" };
+  if (value.state === "saved" && typeof value.path === "string") {
+    return {
+      state: "saved",
+      path: value.path,
+      node_count: typeof value.node_count === "number" ? value.node_count : 0,
+    };
+  }
+  serverDataError();
+}
+
 /** 统一的 invoke 包装：失败一律抛 `BridgeError`，调用方只需要看 code / message。 */
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -1836,6 +1852,20 @@ export class TauriAgentBridge implements AgentBridge {
   async mobileClientsQr(client: MobileClientId): Promise<MobileClientsQrData> {
     return normalizeMobileClientsQr(
       await call<unknown>("mobile_clients_qr", { client }),
+    );
+  }
+
+  async pickProfileSavePath(): Promise<string | null> {
+    const path = await saveDialog({
+      defaultPath: "veyl-profile.json",
+      filters: [{ name: t("bridge.profileFileFilter"), extensions: ["json"] }],
+    });
+    return typeof path === "string" && path.trim() ? path : null;
+  }
+
+  async mobileExportSaveFile(path: string): Promise<MobileSaveFileData> {
+    return normalizeMobileSaveFile(
+      await call<unknown>("mobile_export_save_file", { path }),
     );
   }
 

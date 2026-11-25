@@ -106,11 +106,19 @@ function makeBridge(
     mobileExportGet: vi.fn(get),
     mobileExportRotate: vi.fn(rotate),
     mobileClientsQr: vi.fn(clients),
+    pickProfileSavePath: vi.fn(async () => "/tmp/veyl-profile.json"),
+    mobileExportSaveFile: vi.fn(async (path: string) => ({
+      state: "saved" as const,
+      path,
+      node_count: 2,
+    })),
   } as unknown as AgentBridge & {
     openExternal: ReturnType<typeof vi.fn>;
     mobileExportGet: ReturnType<typeof vi.fn>;
     mobileExportRotate: ReturnType<typeof vi.fn>;
     mobileClientsQr: ReturnType<typeof vi.fn>;
+    pickProfileSavePath: ReturnType<typeof vi.fn>;
+    mobileExportSaveFile: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -318,6 +326,57 @@ describe("在其它设备上使用：按设备或 App 分类", () => {
     });
     fireEvent.click(copy);
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SINGBOX_URL);
+    expect(
+      within(dialog).getByText("文件含节点密码，导入后请删除。"),
+    ).toBeTruthy();
+  });
+
+  it("veyl-cli 导出配置文件：选路径、写入并提示成功", async () => {
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    const exportButton = await within(dialog).findByRole("button", {
+      name: "导出配置文件",
+    });
+    fireEvent.click(exportButton);
+
+    expect(bridge.pickProfileSavePath).toHaveBeenCalled();
+    await within(dialog).findByText("已保存配置文件。");
+    expect(bridge.mobileExportSaveFile).toHaveBeenCalledWith(
+      "/tmp/veyl-profile.json",
+    );
+  });
+
+  it("veyl-cli 导出取消：不调用保存命令，也不提示成功", async () => {
+    const bridge = makeBridge(async () => OK);
+    bridge.pickProfileSavePath.mockResolvedValueOnce(null);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    const exportButton = await within(dialog).findByRole("button", {
+      name: "导出配置文件",
+    });
+    fireEvent.click(exportButton);
+
+    await waitFor(() => expect(bridge.pickProfileSavePath).toHaveBeenCalled());
+    expect(bridge.mobileExportSaveFile).not.toHaveBeenCalled();
+    expect(within(dialog).queryByText("已保存配置文件。")).toBeNull();
+  });
+
+  it("veyl-cli 导出失败：原位提示，不假装成功", async () => {
+    const bridge = makeBridge(async () => OK);
+    bridge.mobileExportSaveFile.mockRejectedValueOnce(new Error("disk full"));
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    const exportButton = await within(dialog).findByRole("button", {
+      name: "导出配置文件",
+    });
+    fireEvent.click(exportButton);
+
+    await within(dialog).findByText("没能保存文件，再试一次。");
+    expect(within(dialog).queryByText("已保存配置文件。")).toBeNull();
   });
 
   it("展开后是两个编号步骤：① 先下载、② 再导入，标题带 App 名", async () => {

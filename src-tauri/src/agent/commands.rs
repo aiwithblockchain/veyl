@@ -1277,6 +1277,108 @@ pub async fn mobile_clients_qr(client: Option<Value>) -> Result<Value, Value> {
     }
 }
 
+/// 导出配置文件（仅 UI，契约 §7.34）：把账户的 sing-box JSON 写到用户选择的绝对路径。
+///
+/// 文件含节点密码：不记日志、不发事件、不进 AI 上下文；成功只回路径与节点数。
+#[tauri::command]
+pub async fn mobile_export_save_file(path: Option<Value>) -> Result<Value, Value> {
+    let path = save_path_from(path.as_ref())?;
+    match crate::control_plane::mobile::profile_document().await {
+        Ok(crate::control_plane::mobile::MobileProfileDocument::Ok { json: body, node_count }) => {
+            write_profile_file(&path, body.as_bytes()).map_err(|error| {
+                log::warn!("导出配置文件：写入失败 kind={:?}", error.kind());
+                crate::control_plane::error::CpError::new(
+                    "INTERNAL",
+                    "配置文件保存失败",
+                    false,
+                    json!({ "reason": "save_failed" }),
+                )
+                .envelope()
+            })?;
+            Ok(json!({
+                "state": "saved",
+                "path": path.to_string_lossy().to_string(),
+                "node_count": node_count,
+            }))
+        }
+        Ok(crate::control_plane::mobile::MobileProfileDocument::LoginRequired) => {
+            Ok(json!({ "state": "login_required" }))
+        }
+        Ok(crate::control_plane::mobile::MobileProfileDocument::NoReadyServer) => {
+            Ok(json!({ "state": "no_ready_server" }))
+        }
+        Err(error) => Err(error.envelope()),
+    }
+}
+
+fn invalid_save_path(kind: &str) -> Value {
+    crate::control_plane::error::CpError::new(
+        "INVALID_ARGUMENT",
+        "保存路径无效",
+        false,
+        json!({ "reason": "invalid_path", "kind": kind }),
+    )
+    .envelope()
+}
+
+fn save_path_from(value: Option<&Value>) -> Result<std::path::PathBuf, Value> {
+    let path = value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if path.is_empty() {
+        return Err(invalid_save_path("missing"));
+    }
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(invalid_save_path("relative"));
+    }
+    Ok(path)
+}
+
+fn write_profile_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod save_file_tests {
+    use super::*;
+
+    #[test]
+    fn save_path_requires_an_absolute_path() {
+        let missing = save_path_from(None).unwrap_err();
+        assert_eq!(missing["details"]["reason"], "invalid_path");
+        assert_eq!(missing["details"]["kind"], "missing");
+
+        let relative = save_path_from(Some(&json!("profile.json"))).unwrap_err();
+        assert_eq!(relative["details"]["kind"], "relative");
+
+        let absolute_path = if cfg!(windows) {
+            r"C:\Temp\profile.json"
+        } else {
+            "/tmp/profile.json"
+        };
+        let absolute = save_path_from(Some(&json!(absolute_path))).unwrap();
+        assert_eq!(absolute.to_string_lossy(), absolute_path);
+    }
+}
+
 /// 显式重新注册设备（§19.2.4）：丢弃当前身份与令牌，生成新的并静默注册。
 /// 旧服务器的本地记录保留为只读；本命令只由界面上的「重新注册设备」触发。
 #[tauri::command]

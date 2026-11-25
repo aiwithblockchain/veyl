@@ -1140,6 +1140,11 @@ export const zh = {
   "mobile.veylcli.meta": "Windows / macOS",
   "mobile.veylcli.step": "在 veyl-cli 里粘贴链接",
   "mobile.veylcli.hint": "把链接粘贴到 veyl-cli 即可导入。",
+  "mobile.veylcli.exportFile": "导出配置文件",
+  "mobile.veylcli.exporting": "正在导出…",
+  "mobile.veylcli.exported": "已保存配置文件。",
+  "mobile.veylcli.exportFailed": "没能保存文件，再试一次。",
+  "mobile.veylcli.fileNote": "文件含节点密码，导入后请删除。",
   "mobile.scanWith": "用 {app} 扫码导入",
   "mobile.paidOnly": "客户端只导出你自己创建的付费节点。免费和试用节点不包含。",
   "mobile.goCreate": "去创建服务器",
@@ -1599,6 +1604,7 @@ export const zh = {
   "bridge.badProbeResult": "节点探测返回的结果不完整。",
   "bridge.missingNodeId": "后端返回的节点缺少标识",
   "bridge.nodeFileFilter": "节点文件",
+  "bridge.profileFileFilter": "配置文件",
 
   /* 批次 4：界面错误按 code + details.reason 查表（contracts/commands.md §1.6）。 */
   "error.code.unauthenticated": "需要登录后再试。",

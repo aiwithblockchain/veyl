@@ -904,6 +904,12 @@ export type MobileExportData =
   | { state: "login_required" }
   | { state: "no_ready_server" };
 
+/** 导出配置文件（commands.md §7.34）：Host 取回 profile 并写入用户选择的绝对路径。 */
+export type MobileSaveFileData =
+  | { state: "saved"; path: string; node_count: number }
+  | { state: "login_required" }
+  | { state: "no_ready_server" };
+
 export type MobileClientId =
   | "singbox"
   | "hiddify"
@@ -1179,6 +1185,10 @@ export interface AgentBridge {
   mobileExportRotate?(): Promise<MobileExportData>;
   /** 下载页二维码（2.47.0）：入参是客户端枚举，URL 由 Host 固定映射。 */
   mobileClientsQr?(client: MobileClientId): Promise<MobileClientsQrData>;
+  /** 让用户选择配置文件的保存位置；取消返回 null。 */
+  pickProfileSavePath?(): Promise<string | null>;
+  /** 导出配置文件（2.71.0）：path 来自 pickProfileSavePath。 */
+  mobileExportSaveFile?(path: string): Promise<MobileSaveFileData>;
   /** 恢复网络：撤代理 → 停运行时 → 清明文配置（不依赖 AI）。 */
   netRepair(action: NetRepairAction): Promise<NetRepairResult>;
   /** 强制重置网络：UI 专用，不注册为 AI 工具动作。 */

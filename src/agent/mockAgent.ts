@@ -32,6 +32,7 @@ import type {
   MobileClientsQrData,
   MobilePlatform,
   MobileExportData,
+  MobileSaveFileData,
   MyServerCreateInput,
   NetRepairAction,
   NetRepairResult,
@@ -831,6 +832,16 @@ export class MockAgentBridge implements AgentBridge {
         qr_data_url: MOCK_MOBILE_QR,
       })),
     };
+  }
+
+  async pickProfileSavePath(): Promise<string | null> {
+    return "/tmp/veyl-profile.json";
+  }
+
+  async mobileExportSaveFile(path: string): Promise<MobileSaveFileData> {
+    const count = this.myServers.list().servers.length;
+    if (count === 0) return { state: "no_ready_server" };
+    return { state: "saved", path, node_count: count };
   }
 
   async myServerCancelOrder(orderId: string) {

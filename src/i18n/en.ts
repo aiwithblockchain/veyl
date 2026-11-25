@@ -1204,6 +1204,11 @@ export const en: Record<MessageKey, string> = {
   "mobile.veylcli.meta": "Windows / macOS",
   "mobile.veylcli.step": "Paste the link into veyl-cli",
   "mobile.veylcli.hint": "Paste the link into veyl-cli to import.",
+  "mobile.veylcli.exportFile": "Export profile",
+  "mobile.veylcli.exporting": "Exporting…",
+  "mobile.veylcli.exported": "Profile saved.",
+  "mobile.veylcli.exportFailed": "Couldn't save the file. Try again.",
+  "mobile.veylcli.fileNote": "The file contains node credentials; delete it after importing.",
   "mobile.scanWith": "Scan the code with {app} to import",
   "mobile.paidOnly":
     "Only paid nodes you created yourself can be exported. Free and trial nodes aren't included.",
@@ -1670,6 +1675,7 @@ export const en: Record<MessageKey, string> = {
   "bridge.badProbeResult": "The node test returned incomplete data.",
   "bridge.missingNodeId": "The backend returned a node without an identifier",
   "bridge.nodeFileFilter": "Node files",
+  "bridge.profileFileFilter": "Profile file",
 
   /* Batch 4: error copy looked up by code + details.reason (contracts/commands.md §1.6). */
   "error.code.unauthenticated": "Sign in and try again.",

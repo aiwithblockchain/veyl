@@ -171,6 +171,9 @@ export function MobileExport({
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [openId, setOpenId] = useState<RowId | null>(null);
   const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [exportState, setExportState] = useState<
+    "idle" | "saving" | "saved" | "failed"
+  >("idle");
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [rotated, setRotated] = useState(false);
@@ -216,6 +219,7 @@ export function MobileExport({
     setRotated(false);
     setRotateError(null);
     setCopyState("idle");
+    setExportState("idle");
     const get = bridge.mobileExportGet;
     if (!get) {
       setPhase({ kind: "error" });
@@ -314,6 +318,7 @@ export function MobileExport({
 
   const toggleRow = (id: RowId) => {
     setCopyState("idle");
+    setExportState("idle");
     setRotated(false);
     setRotateError(null);
     setConfirming(false);
@@ -335,6 +340,28 @@ export function MobileExport({
     );
   };
 
+  const saveProfileFile = async () => {
+    const pick = bridge.pickProfileSavePath;
+    const save = bridge.mobileExportSaveFile;
+    if (!pick || !save || exportState === "saving") return;
+    let path: string | null = null;
+    try {
+      path = await pick.call(bridge);
+    } catch {
+      if (aliveRef.current) setExportState("failed");
+      return;
+    }
+    if (!path) return;
+    setExportState("saving");
+    try {
+      const result = await save.call(bridge, path);
+      if (!aliveRef.current) return;
+      setExportState(result.state === "saved" ? "saved" : "failed");
+    } catch {
+      if (aliveRef.current) setExportState("failed");
+    }
+  };
+
   const rotate = async () => {
     const source = bridge.mobileExportRotate;
     if (!source || rotating) return;
@@ -342,6 +369,7 @@ export function MobileExport({
     setRotating(true);
     setRotateError(null);
     setRotated(false);
+    setExportState("idle");
     setPhase({ kind: "loading" });
     try {
       const result = await source.call(bridge);
@@ -366,6 +394,7 @@ export function MobileExport({
 
   const startRotate = () => {
     setCopyState("idle");
+    setExportState("idle");
     setRotated(false);
     setRotateError(null);
     setConfirming(true);
@@ -398,7 +427,13 @@ export function MobileExport({
 
   const importStep = (
     app: ImportTarget,
-    opts: { withQr?: boolean; title?: ReactNode; note?: string } = {},
+    opts: {
+      withQr?: boolean;
+      title?: ReactNode;
+      note?: string;
+      extraActions?: ReactNode;
+      afterActions?: ReactNode;
+    } = {},
   ) => {
     const withQr = opts.withQr !== false;
     const title = opts.title ?? stepTitle(app);
@@ -494,6 +529,7 @@ export function MobileExport({
                     : tr("topup.copyLink")}
               </span>
             </button>
+            {opts.extraActions}
             {confirming ? null : (
               <button
                 ref={rotateLinkRef}
@@ -541,6 +577,7 @@ export function MobileExport({
               {rotateError}
             </p>
           ) : null}
+          {opts.afterActions}
         </>
       );
     }
@@ -615,6 +652,9 @@ export function MobileExport({
   };
 
   // veyl-cli：与手机端共用同一条链接，只是把二维码换成复制按钮，不需要下载步骤。
+  const canExportProfile = Boolean(
+    bridge.pickProfileSavePath && bridge.mobileExportSaveFile,
+  );
   const veylCliPanel = importStep(
     { name: "veyl-cli", format: "singbox" },
     {
@@ -625,6 +665,35 @@ export function MobileExport({
         </h3>
       ),
       note: tr("mobile.veylcli.hint"),
+      extraActions: canExportProfile ? (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={exportState === "saving"}
+          onClick={() => void saveProfileFile()}
+        >
+          {exportState === "saving"
+            ? tr("mobile.veylcli.exporting")
+            : tr("mobile.veylcli.exportFile")}
+        </button>
+      ) : null,
+      afterActions: canExportProfile ? (
+        <>
+          {exportState === "saved" ? (
+            <p className="mobile-export__status" role="status">
+              {tr("mobile.veylcli.exported")}
+            </p>
+          ) : null}
+          {exportState === "failed" ? (
+            <p className="mobile-export__error" role="alert">
+              {tr("mobile.veylcli.exportFailed")}
+            </p>
+          ) : null}
+          <p className="mobile-export__step-note">
+            {tr("mobile.veylcli.fileNote")}
+          </p>
+        </>
+      ) : null,
     },
   );
 
