@@ -553,7 +553,10 @@ pub async fn test(store: &Store, input: ProviderInput) -> Result<Value, (String,
                 return Ok(json!({
                     "ok": false,
                     "latency_ms": latency,
-                    "error": describe_http_error(status.as_u16(), detail),
+                    "error": describe_http_error(
+                        status.as_u16(),
+                        &scrub_key_literal(detail, &api_key),
+                    ),
                 }));
             }
             let shaped = if protocol == "anthropic" {
@@ -587,6 +590,17 @@ pub async fn test(store: &Store, input: ProviderInput) -> Result<Value, (String,
             },
         })),
     }
+}
+
+/// 错误体可能回显**本次**使用的 Key；`sk-` 前缀只覆盖一种厂商，
+/// 智谱式 `id.secret` 或自制代理的 Key 会被原样带出。先按 Key 原文替换，
+/// 再走通用脱敏与截断。
+fn scrub_key_literal(text: &str, api_key: &str) -> String {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return text.to_string();
+    }
+    text.replace(key, "sk-***")
 }
 
 fn describe_http_error(status: u16, detail: &str) -> String {
@@ -989,6 +1003,21 @@ mod tests {
         let text = describe_http_error(401, "Incorrect API key provided: sk-abcdefgh12345678");
         assert!(!text.contains("abcdefgh12345678"), "{text}");
         assert!(text.contains("sk-***"), "{text}");
+    }
+
+    /// 不是 `sk-` 前缀的 Key（智谱式 `id.secret`、自制代理）回显在错误体里时，
+    /// 必须按本次使用的 Key 原文替换，不能靠前缀猜。
+    #[test]
+    fn the_used_key_is_scrubbed_from_error_bodies_whatever_its_shape() {
+        let key = "3f9a1c2b7d.secretValueNOTskPrefixed";
+        let body = format!("bad credential, your key is {key}, please retry");
+        let text = describe_http_error(401, &scrub_key_literal(&body, key));
+        assert!(!text.contains(key), "{text}");
+        assert!(!text.contains("secretValueNOTskPrefixed"), "{text}");
+        assert!(text.contains("sk-***"), "{text}");
+
+        // 空 Key 不改文本。
+        assert_eq!(scrub_key_literal(&body, "  "), body);
     }
 
     #[test]

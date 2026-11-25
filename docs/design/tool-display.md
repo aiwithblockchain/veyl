@@ -3,7 +3,7 @@
 > 日期：2026-11-06
 > 状态：设计定稿，未实现
 >
-> ⚠️ 工具面随批更新：当前批次（`tools.md` 3.31.0）为 **37 个**工具（第 5 组第一片新增 `MyServerWallet`）。已落地的批次是：删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`（同名 Host 命令保留给界面，3.27.0）、节点写入三工具合并为 `NodeImport`（3.28.0）、`CatalogOptions` 改名 `ServerOptions`（3.29.0）、前置批去重删 `RuntimeStart` / `RuntimeStop`（3.30.0，不占组号）。`LlmProviders` 仍在后续批次（第 5 组第二片，3.32.0，届时 38）。数字以 `docs/contracts/tools.md` §3 为准，本文不再写死终态数量。
+> ⚠️ 工具面随批更新：当前批次（`tools.md` 3.32.0）为 **38 个**工具（第 5 组两片：3.31.0 `MyServerWallet`、3.32.0 `LlmProviders`）。已落地的批次是：删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`（同名 Host 命令保留给界面，3.27.0）、节点写入三工具合并为 `NodeImport`（3.28.0）、`CatalogOptions` 改名 `ServerOptions`（3.29.0）、前置批去重删 `RuntimeStart` / `RuntimeStop`（3.30.0，不占组号）。数字以 `docs/contracts/tools.md` §3 为准，本文不再写死终态数量。
 >
 > 涉及：`src/components/ToolCallCard.tsx`、`src/state/chatStore.ts`、
 > `src-tauri/src/tools/envelope.rs`、`src-tauri/src/claurst_session/mod.rs`、
@@ -14,6 +14,8 @@
 > **2026-11-25 同步 `tools.md` 3.30.0（前置批：工具去重，不占组号）**：工具集合 38 → **36**，删除与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`；`TOOL_COPY` 与 `tool.RuntimeStart.*` / `tool.RuntimeStop.*` 文案同步移除。
 >
 > **2026-11-25 同步 `tools.md` 3.31.0（第 5 组第一片）**：工具集合 36 → **37**，新增只读工具 `MyServerWallet`；§9 映射表加第 37 行（进行中 / 完成 / 失败要点 + `changed`），§5.1 只读族名单补入。
+>
+> **2026-11-25 同步 `tools.md` 3.32.0（第 5 组第二片）**：工具集合 37 → **38**，新增只读工具 `LlmProviders`；§9 加第 38 行，§5.1 只读族名单补入。
 >
 > **这份文档解决什么**：真机截图里用户看到的是「RuntimeStatus 调用 RuntimeStatus 0ms 完成」
 > 「ConfigList 调用 ConfigList 0ms 完成」。这不是文案不好，是**数据层把不该给用户看的东西
@@ -222,7 +224,7 @@ type ToolCallEndPayload = {
 
 | 工具族 | 失败时典型值 | 说明 |
 |---|---|---|
-| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigDetail`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`MyServerWallet`、`ServerOptions`、`HttpCheck`、`read_public_issue_wall`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
+| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigDetail`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`MyServerWallet`、`LlmProviders`、`ServerOptions`、`HttpCheck`、`read_public_issue_wall`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
 | `NodeProbe` | `none` 或 `unknown` | 探测本身只读；探不通时可能停隧道，停止失败 = `unknown` |
 | `VpnConnect` | `restored` 或 `none` | 启动前失败 = `none`；已改系统设置后失败 = `restored`（工具负责恢复再返回） |
 | `VpnDisconnect` | `restored` 或 `none` | 断开失败时网络可能仍被接管 → 不允许填 `none` 除非确认未改 |
@@ -267,13 +269,13 @@ type ToolCallEndPayload = {
 
 ### 6.2 集合相等断言
 
-`docs/contracts/tools.md` §3 的全部模型可见名（当前批次 37 个），与前端 `toolDisplay.ts` 的映射表做
+`docs/contracts/tools.md` §3 的全部模型可见名（当前批次 38 个），与前端 `toolDisplay.ts` 的映射表做
 **集合相等**断言（双向：映射表不能多、不能少），缺一个测试就红。
 
 这是唯一能保证「下次新增工具不再冒出 `FooBar 调用`」的机制。只靠兜底文案会退化成
 「已完成」，用户不知道发生了什么；只有集合断言会逼着新增工具的人补一行。
 
-建议测试形态：从 Rust 侧导出一份工具名列表（当前批次 37 个，或直接在 TS 里抄一份并加注释指向 tools.md），
+建议测试形态：从 Rust 侧导出一份工具名列表（当前批次 38 个，或直接在 TS 里抄一份并加注释指向 tools.md），
 断言 `new Set(names)` 与 `new Set(Object.keys(TOOL_DISPLAY))` 相等。
 
 ---
@@ -415,8 +417,9 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 35 | `read_public_issue_wall` | 正在查问题墙 | 已查看问题墙 | 问题墙读不到 | `none` |
 | 36 | `AskUserQuestion` | 不显示工具行 | — | — | `none` |
 | 37 | `MyServerWallet` | 正在查看余额 | 余额还有 12.34 美元（截至今天 10:20） | 余额读不到，稍后再试 | `none` |
+| 38 | `LlmProviders` | 正在查看 AI 服务商 | 当前用的是 OpenAI 兼容服务，共 2 个服务商 | 服务商列表读不到，稍后再试 | `none` |
 
-> 编号以 `docs/contracts/tools.md` §3 的 37 行为准；问题墙两个工具按 `issue-report-api.md` §2 使用 snake_case 长名，是 PascalCase 约定的例外。
+> 编号以 `docs/contracts/tools.md` §3 的 38 行为准；问题墙两个工具按 `issue-report-api.md` §2 使用 snake_case 长名，是 PascalCase 约定的例外。
 
 > `changed` 列给的是**失败路径的典型值**；同一工具可能因失败阶段不同取不同值（例如 `VpnConnect`
 > 在校验阶段失败是 `none`，改过系统设置后又撤回是 `restored`）。工具必须按实际执行到哪一步声明。
@@ -461,7 +464,7 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | # | 场景 | 期望 |
 |---|---|---|
 | 1 | 未映射的工具 | 显示「正在处理… / 已完成 / 没成功」，**不出现原始工具名** |
-| 2 | 集合断言 | 当前批次 37 个工具名与 `TOOL_DISPLAY` 键集合双向相等 |
+| 2 | 集合断言 | 当前批次 38 个工具名与 `TOOL_DISPLAY` 键集合双向相等 |
 | 3 | 连续 3 次成功 | 合并为「完成 3 步」，展开可见逐条 |
 | 4 | 连续 2 次成功 | 不合并 |
 | 5 | 中间夹一次失败 | 失败单独一行，前后成功段各自合并 |

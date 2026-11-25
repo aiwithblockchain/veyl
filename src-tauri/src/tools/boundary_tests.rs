@@ -103,6 +103,8 @@ struct FakeServices {
     trial: Option<Value>,
     /// `node_import_text` 专用：模拟解析失败时返回的错误码。
     text_error: Option<&'static str>,
+    /// `llm_providers` 专用：模拟指定服务商不存在等结构化错误。
+    llm_error: Option<&'static str>,
 }
 
 impl FakeServices {
@@ -117,6 +119,7 @@ impl FakeServices {
             data,
             trial: None,
             text_error: None,
+            llm_error: None,
         });
         (services, rec)
     }
@@ -128,6 +131,7 @@ impl FakeServices {
             data,
             trial: Some(trial),
             text_error: None,
+            llm_error: None,
         });
         (services, rec)
     }
@@ -140,6 +144,20 @@ impl FakeServices {
             data: json!({}),
             trial: None,
             text_error: Some(code),
+            llm_error: None,
+        });
+        (services, rec)
+    }
+
+    /// 模拟服务商不存在：服务层返回 `CODE: message`。
+    fn with_llm_error(code: &'static str, data: Value) -> (Arc<Self>, Arc<Recorder>) {
+        let rec = Arc::new(Recorder::default());
+        let services = Arc::new(Self {
+            rec: Arc::clone(&rec),
+            data,
+            trial: None,
+            text_error: None,
+            llm_error: Some(code),
         });
         (services, rec)
     }
@@ -174,6 +192,14 @@ impl VpnToolServices for FakeServices {
     }
     async fn my_server_wallet(&self) -> anyhow::Result<Value> {
         self.rec.record("my_server_wallet");
+        Ok(self.data.clone())
+    }
+    async fn llm_providers(&self, test_provider_id: Option<String>) -> anyhow::Result<Value> {
+        self.rec
+            .record(format!("llm_providers({test_provider_id:?})"));
+        if let Some(code) = self.llm_error {
+            return Err(anyhow::anyhow!("{code}: 服务商不存在"));
+        }
         Ok(self.data.clone())
     }
     async fn core_list_versions(&self) -> anyhow::Result<Value> {
@@ -572,7 +598,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.31.0",
+                env["contract_version"], "3.32.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -836,6 +862,8 @@ fn base_input(name: &str) -> Option<Value> {
         "ConfigUpdate" => json!({ "config_id": "cfg_1" }),
         // config_id 可选（3.21.4）：最小输入就是空对象。
         "ConfigDetail" => json!({}),
+        // test_provider_id 可选：最小输入就是空对象。
+        "LlmProviders" => json!({}),
         _ => return None,
     };
     Some(value)
@@ -1259,6 +1287,134 @@ fn my_server_wallet_takes_no_arguments() {
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["properties"], json!({}), "{schema}");
     assert_eq!(schema["additionalProperties"], false, "{schema}");
+}
+
+/// AI 服务商：schema 只有可选的 `test_provider_id`；投影不含任何 Key 字段。
+#[tokio::test]
+async fn llm_providers_schema_and_projection_keep_keys_out() {
+    let (svc, rec) = FakeServices::with_data(json!({
+        "active_provider_id": "deepseek",
+        "providers": [
+            {
+                "provider_id": "deepseek", "name": "DeepSeek", "protocol": "openai",
+                "model": "deepseek-flash", "base_url": "https://sk-xxx@api.deepseek.com",
+                "has_key": true, "is_active": true, "is_builtin": true,
+                "api_key": "sk-secret", "masked": "sk-***",
+            },
+            {
+                "provider_id": "p2", "name": "本地 Ollama", "protocol": "openai",
+                "model": "qwen", "base_url": null, "has_key": false,
+            }
+        ],
+    }));
+    let all = tools(svc);
+
+    let schema = tool(&all, "LlmProviders").input_schema();
+    assert_eq!(schema["properties"]["test_provider_id"]["type"], "string");
+    assert_eq!(
+        schema["properties"].as_object().map(|props| props.len()),
+        Some(1),
+        "只允许 test_provider_id：{schema}"
+    );
+    assert!(
+        schema.get("required").is_none(),
+        "test_provider_id 必须可选：{schema}"
+    );
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+
+    // 多余参数明确拒绝，不能静默忽略。
+    let (is_error, env) = run(tool(&all, "LlmProviders"), json!({ "provider_id": "x" })).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "INVALID_ARGUMENT", "{env}");
+
+    rec.take();
+    let (is_error, env) = run(tool(&all, "LlmProviders"), json!({})).await;
+    assert!(!is_error, "{env}");
+    assert_eq!(rec.take(), vec!["llm_providers(None)".to_string()]);
+    let providers = env["data"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[0]["id"], "deepseek");
+    assert!(
+        providers[0].get("active").is_none(),
+        "契约外字段 active 不能出现；当前项由 active_provider_id 表达：{providers:?}"
+    );
+    let base = providers[0]["base_url"].as_str().unwrap_or_default();
+    assert!(!base.contains("sk-xxx"), "base_url 里的 userinfo 必须剥掉：{base}");
+    assert!(base.contains("api.deepseek.com"), "{base}");
+    assert!(
+        providers[1]["base_url"].is_null(),
+        "用官方地址时 base_url 为 null：{providers:?}"
+    );
+    assert_eq!(env["data"]["active_provider_id"], "deepseek");
+    for provider in providers {
+        for hidden in ["api_key", "masked", "provider_id", "is_builtin", "is_active", "active"] {
+            assert!(
+                provider.get(hidden).is_none(),
+                "{hidden} 不能进 AI 上下文：{provider}"
+            );
+        }
+        assert!(
+            provider.get("last_result").is_none(),
+            "没要求测试时不能有 last_result：{provider}"
+        );
+    }
+    let content = env["summary"].as_str().unwrap_or("");
+    assert!(content.contains("DeepSeek"), "{content}");
+    assert!(content.contains("当前"), "{content}");
+    assert!(!content.contains("sk-secret"), "{content}");
+}
+
+/// 测试只落在被请求的那一项；服务层说没有这个 id 时是 `NOT_FOUND`。
+#[tokio::test]
+async fn llm_providers_tests_one_provider_and_reports_not_found() {
+    let (svc, rec) = FakeServices::with_data(json!({
+        "active_provider_id": "p1",
+        "tested_provider_id": "p2",
+        "last_result": { "ok": true, "latency_ms": 321, "error": null },
+        "providers": [
+            { "provider_id": "p1", "name": "A", "model": "m1", "has_key": true },
+            { "provider_id": "p2", "name": "B", "model": "m2", "has_key": true },
+        ],
+    }));
+    let all = tools(svc);
+    let (is_error, env) = run(
+        tool(&all, "LlmProviders"),
+        json!({ "test_provider_id": "p2" }),
+    )
+    .await;
+    assert!(!is_error, "{env}");
+    assert_eq!(
+        rec.take(),
+        vec!["llm_providers(Some(\"p2\"))".to_string()]
+    );
+    let providers = env["data"]["providers"].as_array().unwrap();
+    assert!(
+        providers[0].get("last_result").is_none(),
+        "只测被请求的那一项：{providers:?}"
+    );
+    assert_eq!(providers[1]["last_result"]["ok"], true);
+    assert_eq!(providers[1]["last_result"]["latency_ms"], 321);
+    assert!(
+        providers[1]["last_result"]["error"].is_null(),
+        "成功时 error 为 null：{providers:?}"
+    );
+    assert!(
+        env["summary"].as_str().unwrap_or("").contains("B"),
+        "{env}"
+    );
+
+    let (svc, _) = FakeServices::with_llm_error("NOT_FOUND", json!({}));
+    let (is_error, env) = run(
+        tool(&tools(svc), "LlmProviders"),
+        json!({ "test_provider_id": "nope" }),
+    )
+    .await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "NOT_FOUND", "{env}");
+    assert!(
+        !env["summary"].as_str().unwrap_or("").contains("测试结果"),
+        "不存在要整个失败，不能折成一次测试结果：{env}"
+    );
 }
 
 #[tokio::test]

@@ -294,6 +294,13 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.retryLater",
     true,
   ),
+  LlmProviders: entry(
+    "tool.LlmProviders.running",
+    "tool.LlmProviders.done",
+    "tool.LlmProviders.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
   NodeRotateCredentials: entry(
     "tool.NodeRotateCredentials.running",
     "tool.NodeRotateCredentials.done",

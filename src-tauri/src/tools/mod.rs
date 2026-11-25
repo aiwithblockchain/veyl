@@ -17,6 +17,7 @@ pub mod http_check;
 pub mod issue_report;
 pub mod issue_wall;
 pub mod job;
+pub mod llm_providers;
 pub mod my_servers;
 pub mod net;
 pub mod node_rotate;
@@ -194,6 +195,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(my_servers::MyServersTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServerFailureTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServerWalletTool::new(Arc::clone(&services))),
+        Box::new(llm_providers::LlmProvidersTool::new(Arc::clone(&services))),
         Box::new(node_rotate::NodeRotateCredentialsTool::new()),
         Box::new(settings::OpenSettingsTool::new()),
         Box::new(stage_select::StageSelectTool::new(server_catalog.clone())),

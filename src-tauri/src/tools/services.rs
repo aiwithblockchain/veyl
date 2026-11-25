@@ -213,6 +213,12 @@ pub trait VpnToolServices: Send + Sync {
         not_wired("钱包余额")
     }
 
+    /// 只读：已保存的 AI 服务商与当前项；带 `test_provider_id` 时对该项跑一次连接测试。
+    /// 返回值不含任何 Key，只有 `has_key`。
+    async fn llm_providers(&self, _test_provider_id: Option<String>) -> anyhow::Result<Value> {
+        not_wired("AI 服务商")
+    }
+
     /// 只读：某台服务器这次创建失败的详情（`tools.md` §4.51）。
     /// 只读本地镜像与内存里的订单事件，不访问云厂商 API。
     async fn my_server_failure(&self, _server_id: &str) -> anyhow::Result<Value> {
@@ -5857,6 +5863,66 @@ impl VpnToolServices for WiredServices {
             "currency": wallet.currency,
             "updated_at": wallet.updated_at,
         }))
+    }
+
+    async fn llm_providers(&self, test_provider_id: Option<String>) -> anyhow::Result<Value> {
+        let store = crate::store::global()
+            .ok_or_else(|| svc_error("INTERNAL", "存储暂不可用"))?;
+        crate::llm::ensure_migrated(store);
+        let records = crate::llm::records(store);
+        let active = crate::llm::active_id(store);
+        let providers: Vec<Value> = records
+            .iter()
+            .map(|record| {
+                json!({
+                    "provider_id": record.provider_id,
+                    "name": record.name,
+                    "protocol": record.protocol,
+                    "model": record.model,
+                    // 只有用户自定义的端点才有值；官方地址由界面/调用方按协议补。
+                    "base_url": record.base_url,
+                    "has_key": crate::llm::has_key(&record.provider_id),
+                })
+            })
+            .collect();
+        let mut data = json!({
+            "active_provider_id": active,
+            "providers": providers,
+        });
+
+        if let Some(provider_id) = test_provider_id {
+            let record = records
+                .iter()
+                .find(|record| record.provider_id == provider_id)
+                .ok_or_else(|| {
+                    svc_error_with_details(
+                        "NOT_FOUND",
+                        "服务商不存在",
+                        json!({ "reason": "provider_not_found" }),
+                    )
+                })?;
+            let input = crate::llm::ProviderInput {
+                provider_id: Some(record.provider_id.clone()),
+                name: record.name.clone(),
+                protocol: record.protocol.clone(),
+                base_url: record.base_url.clone(),
+                model: record.model.clone(),
+                api_key: None,
+            };
+            // 复用 Host 既有的连接判定；连不上是正常结果（ok=false），配置本身不对时
+            // 也折成 last_result，让模型能说明原因而不是整个工具报错。
+            let result = match crate::llm::test(store, input).await {
+                Ok(result) => result,
+                Err((_code, message)) => json!({
+                    "ok": false,
+                    "latency_ms": Value::Null,
+                    "error": message,
+                }),
+            };
+            data["tested_provider_id"] = json!(provider_id);
+            data["last_result"] = result;
+        }
+        Ok(data)
     }
 
     async fn my_server_failure(&self, server_id: &str) -> anyhow::Result<Value> {

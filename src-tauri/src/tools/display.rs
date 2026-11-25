@@ -263,6 +263,7 @@ pub fn is_readonly(tool: &str) -> bool {
             | "ServerOptions"
             | "MyServerFailure"
             | "MyServerWallet"
+            | "LlmProviders"
     )
 }
 
