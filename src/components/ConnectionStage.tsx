@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import type {
   ConfigConnectMode,
   ConfigDetail,
@@ -102,6 +108,9 @@ interface Props {
 /** 待接入节点类型对外导出：调用方与测试都从这里取。 */
 export type { PendingServerNode };
 
+/** 节点来源三分：我的服务器 / 自定义节点 / 免费节点。 */
+type NodeSourceGroup = "owned" | "custom" | "free";
+
 /**
  * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
  * 旧 Console 的结构（大计时器 + 右侧小按钮 + 底部节点面板）不再使用。
@@ -158,6 +167,10 @@ export function ConnectionStage({
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removedNotice, setRemovedNotice] = useState<string | null>(null);
+  /** 用户手动选的来源标签；null 跟随当前节点所在的组。 */
+  const [pickedSource, setPickedSource] = useState<NodeSourceGroup | null>(null);
+  const [nodeQuery, setNodeQuery] = useState("");
+  const nodeListRef = useRef<HTMLDivElement | null>(null);
   const menuWrapRef = useRef<HTMLSpanElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const removedTimerRef = useRef<number | null>(null);
@@ -165,6 +178,12 @@ export function ConnectionStage({
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  // 换配置等于换一批节点：来源标签与搜索都回到「跟随当前节点」。
+  useEffect(() => {
+    setPickedSource(null);
+    setNodeQuery("");
+  }, [config?.config_id]);
 
   useEffect(() => {
     if (menuFor === null) return;
@@ -622,11 +641,6 @@ export function ConnectionStage({
 
   /** 免费组标题右侧：与「我的服务器」空态共用同一条取整规则；已过期与无时间分开说。 */
   const trialHint = trialGroupHint(null, trialExpiresAt, now);
-  /** 只渲染一组时，组头的试用口径与卡头重复，不再显示 hint。 */
-  const groupCount =
-    (ownedEntries.length > 0 || pendingEntries.length > 0 ? 1 : 0) +
-    (customEntries.length > 0 ? 1 : 0) +
-    (freeEntries.length > 0 ? 1 : 0);
 
   /** 试用到期但 Host 还没清池（最多约 5 分钟）：免费行就地拒绝，避免先连上再被断开。 */
   const isExpiredSeed = (node: { source: string }) =>
@@ -655,6 +669,148 @@ export function ConnectionStage({
    * 免费节点、停机删除的悬挂节点都不算——它们各有自己的说法。
    */
   const selectedNode = nodes.find((node) => node.node_id === selectedId) ?? null;
+
+  const groupLabel = (key: NodeSourceGroup): string =>
+    key === "owned"
+      ? t("console.group.owned")
+      : key === "custom"
+        ? t("console.group.custom")
+        : t("console.group.free");
+  const sourceOfNode = (node: { source: string }): NodeSourceGroup =>
+    node.source === "owned"
+      ? "owned"
+      : node.source === "seed"
+        ? "free"
+        : "custom";
+
+  /** 三组按「付费在前、免费垫底」；三个来源常驻，空组显示 0 与空态。 */
+  const sourceGroups = [
+    {
+      key: "owned" as const,
+      label: groupLabel("owned"),
+      nodes: ownedEntries,
+      pending: pendingEntries,
+    },
+    {
+      key: "custom" as const,
+      label: groupLabel("custom"),
+      nodes: customEntries,
+      pending: [] as PendingServerNode[],
+    },
+    {
+      key: "free" as const,
+      label: groupLabel("free"),
+      nodes: freeEntries,
+      pending: [] as PendingServerNode[],
+    },
+  ];
+
+  const selectedSource = selectedNode ? sourceOfNode(selectedNode) : null;
+  const firstNonEmpty =
+    sourceGroups.find(
+      (group) => group.nodes.length + group.pending.length > 0,
+    )?.key ?? "owned";
+  const activeSource: NodeSourceGroup =
+    pickedSource ?? selectedSource ?? firstNonEmpty;
+  const activeGroup =
+    sourceGroups.find((group) => group.key === activeSource) ?? null;
+
+  /** 当前组超过 12 个节点才值得给搜索；否则搜索框只是噪音。 */
+  const activeRowCount =
+    (activeGroup?.nodes.length ?? 0) + (activeGroup?.pending.length ?? 0);
+  const nonEmptyGroupCount = sourceGroups.filter(
+    (group) => group.nodes.length + group.pending.length > 0,
+  ).length;
+  const searchable = activeRowCount > 12;
+  const normalizedQuery = nodeQuery.trim().toLocaleLowerCase();
+  const matchesQuery = (name: string) =>
+    normalizedQuery !== "" && name.toLocaleLowerCase().includes(normalizedQuery);
+  const visibleNodes =
+    normalizedQuery !== "" && activeGroup
+      ? activeGroup.nodes.filter(
+          ({ node, index }) =>
+            matchesQuery(displayNames[index] ?? node.name) ||
+            matchesQuery(node.name),
+        )
+      : (activeGroup?.nodes ?? []);
+  const visiblePending =
+    normalizedQuery !== "" && activeGroup
+      ? activeGroup.pending.filter((pending) => matchesQuery(pending.name))
+      : (activeGroup?.pending ?? []);
+  const noMatches =
+    normalizedQuery !== "" &&
+    visibleNodes.length === 0 &&
+    visiblePending.length === 0;
+  const hasAnyNode = nodes.length > 0 || pendingEntries.length > 0;
+  /** 空组：标签仍显示（让三个来源的边界稳定），列表里给一句空态。 */
+  const emptyGroup =
+    hasAnyNode && activeRowCount === 0 && normalizedQuery === "";
+  const emptyGroupText = (key: NodeSourceGroup): string =>
+    key === "owned"
+      ? t("console.group.empty.owned")
+      : key === "custom"
+        ? t("console.group.empty.custom")
+        : t("console.group.empty.free");
+
+  const selectedIndex = selectedNode
+    ? nodes.findIndex((node) => node.node_id === selectedNode.node_id)
+    : -1;
+  const selectedName =
+    selectedNode !== null
+      ? (displayNames[selectedIndex] ?? selectedNode.name)
+      : null;
+
+  const selectSource = (key: NodeSourceGroup) => {
+    setPickedSource(key);
+    setNodeQuery("");
+  };
+
+  /** 当前节点行：切回它所在的组并把那一行滚进视野。只做导航，不换节点。 */
+  const locateCurrent = () => {
+    if (selectedNode === null) return;
+    const key = sourceOfNode(selectedNode);
+    if (key !== activeSource) selectSource(key);
+    else setNodeQuery("");
+    window.requestAnimationFrame(() => {
+      nodeListRef.current
+        ?.querySelector<HTMLElement>(`[data-node-id="${selectedNode.node_id}"]`)
+        ?.scrollIntoView?.({ block: "nearest" });
+    });
+  };
+
+  /** 当前节点名跟着状态词显示；点它回到所在分组。 */
+  const stateNodeLabel =
+    selectedNode !== null && selectedName !== null ? (
+      <button
+        type="button"
+        className="state-line__node"
+        onClick={locateCurrent}
+        title={t("console.current.locateAria", { name: selectedName })}
+        aria-label={t("console.current.locateAria", { name: selectedName })}
+      >
+        {selectedName}
+      </button>
+    ) : null;
+
+  const onSourceKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (sourceGroups.length < 2 || activeSource === null) return;
+    const index = sourceGroups.findIndex((group) => group.key === activeSource);
+    if (index < 0) return;
+    const last = sourceGroups.length - 1;
+    let next = index;
+    if (event.key === "ArrowRight") next = index === last ? 0 : index + 1;
+    else if (event.key === "ArrowLeft") next = index === 0 ? last : index - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+    else return;
+    event.preventDefault();
+    const key = sourceGroups[next].key;
+    selectSource(key);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`stage-tab-${key}`)?.focus();
+    });
+  };
+
   const selfOwnedUnreachable =
     selectedNode !== null &&
     selectedNode.source !== "seed" &&
@@ -782,6 +938,7 @@ export function ConnectionStage({
     return (
       <div
         key={node.node_id}
+        data-node-id={node.node_id}
         role="option"
         aria-selected={active}
         aria-disabled={rowLocked || undefined}
@@ -915,335 +1072,414 @@ export function ConnectionStage({
   return (
     <main className="connection-stage" aria-label={t("console.aria.main")}>
       <div className="connection-stage__col">
-        <section className="stage-band" aria-live="polite">
-          <p className="sr-only" role="status">
-            {connected
-              ? noTraffic
-                ? t("console.srNoTraffic", { action: noTrafficAction })
-                : degraded
-                  ? t("console.state.degraded")
-                  : t("console.state.connected")
-              : stateText}
-          </p>
-          {connected && !noTraffic ? (
-            <span className="state-line">
-              <span className={`state-line__label ${degraded ? "is-warn" : ""}`}>
-                <span className={`led ${degraded ? "is-warn" : "is-ok"}`} aria-hidden />
-                {degraded ? t("console.state.degraded") : t("console.state.connected")}
-              </span>
-              {showTimer ? (
-                <span className="timecode num">{formatClock(seconds)}</span>
-              ) : null}
-            </span>
-          ) : (
-            <h1 className="state-word">
-              <span className={`led ${stateTone}`} aria-hidden />
-              {stateText}
-            </h1>
-          )}
-        </section>
-
-        {actionCards.map((card) => (
-          <section className="action-card" key={card.id} aria-label={card.title}>
-            <h3 className="action-card__title">{card.title}</h3>
-            {card.detail ? <p className="action-card__detail">{card.detail}</p> : null}
-            <div className="action-card__actions">
-              {card.actions.map((action) => (
-                <button
-                  key={action.id}
-                  type="button"
-                  className={
-                    action.kind === "primary"
-                      ? "btn btn--primary action-card__btn"
-                      : "btn btn--ghost action-card__btn"
-                  }
-                  onClick={() => onActionCardAction?.(action)}
+        <div className="stage-hero">
+          <section className="stage-band" aria-live="polite">
+            <p className="sr-only" role="status">
+              {connected
+                ? noTraffic
+                  ? t("console.srNoTraffic", { action: noTrafficAction })
+                  : degraded
+                    ? t("console.state.degraded")
+                    : t("console.state.connected")
+                : stateText}
+            </p>
+            {connected && !noTraffic ? (
+              <span className="state-line">
+                <span
+                  className={`state-line__label ${degraded ? "is-warn" : ""}`}
                 >
-                  {action.label}
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
-
-        <section className="stage-card" aria-label={t("console.aria.nodes")}>
-          <header className="stage-card__head">
-            <h2 className="stage-card__title">{t("console.title.nodes")}</h2>
-            <div className="stage-card__subrow">
-              <p className="stage-card__sub">
-                {allSeed
-                  ? t("console.nodes.countTrial", { count: nodes.length })
-                  : t("console.nodes.count", { count: nodes.length })}
-              </p>
-              <div className="stage-card__actions">
-                {onProbe && nodes.length > 0 ? (
-                  <button
-                    type="button"
-                    className="stage-probe"
-                    disabled={!canProbe}
-                    title={probeTitle}
-                    onClick={() => {
-                      if (!canProbe) return;
-                      manualProbeRef.current = true;
-                      onProbe();
-                    }}
-                  >
-                    {probeRunning ? (
-                      <>
-                        <span className="stage-step__dots" aria-hidden="true">
-                          <span />
-                          <span />
-                          <span />
-                        </span>
-                        {t("console.probing")}
-                      </>
-                    ) : probeAllFailed ? (
-                      t("console.probe.again")
-                    ) : (
-                      t("console.probe.action")
-                    )}
-                  </button>
+                  <span
+                    className={`led ${degraded ? "is-warn" : "is-ok"}`}
+                    aria-hidden
+                  />
+                  {degraded
+                    ? t("console.state.degraded")
+                    : t("console.state.connected")}
+                </span>
+                {stateNodeLabel}
+                {showTimer ? (
+                  <span className="timecode num">{formatClock(seconds)}</span>
                 ) : null}
-                {onAddNode ? (
+              </span>
+            ) : (
+              <h1 className="state-word">
+                <span className={`led ${stateTone}`} aria-hidden />
+                {stateText}
+              </h1>
+            )}
+            {connected && !noTraffic ? null : stateNodeLabel}
+          </section>
+
+          <button
+            type="button"
+            className="stage-primary"
+            onClick={onPrimary}
+            disabled={primaryDisabled}
+            aria-label={
+              heroKind === "disconnect"
+                ? t("console.primary.disconnectAria")
+                : heroKind === "connect"
+                  ? t("console.primary.connectAria")
+                  : heroLabel
+            }
+          >
+            {heroLabel}
+          </button>
+
+          {connectBlocked ? (
+            <p className="stage-note">
+              {connectTargetDangling
+                ? hasUsableNode
+                  ? t("console.blocked.danglingHasOther")
+                  : t("console.blocked.danglingNoOther")
+                : hasUsableNode
+                  ? t("console.blocked.expiredHasOther")
+                  : t("console.blocked.expiredNoOther")}
+            </p>
+          ) : null}
+
+          {showStaleConfig ? (
+            <p className="stage-note">{t("console.staleConfig")}</p>
+          ) : null}
+
+          {failed ? (
+            <button
+              type="button"
+              className="stage-secondary"
+              onClick={onStart}
+              disabled={!connectTargetUsable}
+            >
+              {t("console.reconnect")}
+            </button>
+          ) : null}
+
+          {failed ? (
+            <p className="stage-note stage-note--error">
+              {failureHeadline(failedAfterConnected)}
+              {runtime.last_error ? ` ${errorText(runtime.last_error, "")}` : ""}
+              {onReportProblem ? (
+                <button
+                  type="button"
+                  className="stage-note__link"
+                  onClick={onReportProblem}
+                  disabled={reportBusy}
+                >
+                  {t("stage.reportProblem")}
+                </button>
+              ) : null}
+            </p>
+          ) : noTraffic ? (
+            <p className="stage-note">
+              {noTrafficAction}
+              {onReportProblem ? (
+                <button
+                  type="button"
+                  className="stage-note__link"
+                  onClick={onReportProblem}
+                  disabled={reportBusy}
+                >
+                  {t("stage.reportProblem")}
+                </button>
+              ) : null}
+            </p>
+          ) : null}
+
+          {config && nodes.length > 0 && onSetConnectMode && onSetRoutingMode ? (
+            <StageQuickToggles
+              connectMode={config.connect_mode}
+              routingMode={routingMode}
+              connected={connected}
+              modeLocked={starting || stopping}
+              helperPreparing={helperPreparing}
+              onSetConnectMode={onSetConnectMode}
+              onSetRoutingMode={onSetRoutingMode}
+              onReportProblem={failed || noTraffic ? undefined : onReportProblem}
+              reportBusy={reportBusy}
+              onAskAi={onAskAi}
+            />
+          ) : null}
+        </div>
+
+        <div className="stage-nodes">
+          {switchError || summary ? (
+            <p
+              className={`stage-note${switchError ? " stage-note--error" : ""}${
+                !switchError && summary ? " stage-note--summary" : ""
+              }`}
+              role={switchError ? "alert" : undefined}
+            >
+              {switchError ??
+                (summary
+                  ? manualProbed || summary.fastestMs === null
+                    ? t("console.summary.joined", { count: summary.count })
+                    : t("console.summary.fastest", {
+                        base: t("console.summary.joined", {
+                          count: summary.count,
+                        }),
+                        ms: Math.round(summary.fastestMs),
+                      })
+                  : null)}
+            </p>
+          ) : null}
+
+          {removedNotice ? (
+            <p className="stage-note" role="status">
+              {removedNotice}
+            </p>
+          ) : null}
+
+          <section className="stage-card" aria-label={t("console.aria.nodes")}>
+            <header className="stage-card__head">
+              <div className="stage-card__titlerow">
+                <h2 className="stage-card__title">{t("console.title.nodes")}</h2>
+                <p className="stage-card__sub">
+                  {allSeed
+                    ? t("console.nodes.countTrial", { count: nodes.length })
+                    : t("console.nodes.count", { count: nodes.length })}
+                </p>
+                <div className="stage-card__actions">
+                  {onProbe && nodes.length > 0 ? (
+                    <button
+                      type="button"
+                      className="stage-probe"
+                      disabled={!canProbe}
+                      title={probeTitle}
+                      onClick={() => {
+                        if (!canProbe) return;
+                        manualProbeRef.current = true;
+                        onProbe();
+                      }}
+                    >
+                      {probeRunning ? (
+                        <>
+                          <span className="stage-step__dots" aria-hidden="true">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                          {t("console.probing")}
+                        </>
+                      ) : probeAllFailed ? (
+                        t("console.probe.again")
+                      ) : (
+                        t("console.probe.action")
+                      )}
+                    </button>
+                  ) : null}
+                  {onAddNode ? (
+                    <button type="button" className="stage-add" onClick={onAddNode}>
+                      {t("settings.import.title")}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              {probeAllFailed ? (
+                <p className="stage-card__probe-note">
+                  {t("console.probe.allFailed")}
+                </p>
+              ) : probeAllUntested ? (
+                <p className="stage-card__probe-note">
+                  {t("console.probe.allUntested")}
+                </p>
+              ) : probeMixedUntested ? (
+                <p className="stage-card__probe-note">
+                  {t("console.probe.mixed", { count: probeUntestedCount })}
+                </p>
+              ) : null}
+              {selfOwnedUnreachable ? (
+                <p className="stage-card__probe-note">
+                  {t("console.selfOwnedUnreachable")}
+                </p>
+              ) : null}
+            </header>
+
+            {hasAnyNode ? (
+              <div
+                className="stage-tabs"
+                role="tablist"
+                aria-label={t("console.sources.aria")}
+                onKeyDown={onSourceKeyDown}
+              >
+                {sourceGroups.map((group) => (
+                  <button
+                    key={group.key}
+                    type="button"
+                    role="tab"
+                    id={`stage-tab-${group.key}`}
+                    aria-selected={group.key === activeSource}
+                    aria-controls="stage-node-list"
+                    tabIndex={group.key === activeSource ? 0 : -1}
+                    className={`stage-tabs__tab ${
+                      group.key === activeSource ? "is-selected" : ""
+                    }`}
+                    onClick={() => selectSource(group.key)}
+                  >
+                    <span className="stage-tabs__label">{group.label}</span>
+                    <span className="stage-tabs__count num">
+                      {group.nodes.length + group.pending.length}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            {searchable ? (
+              <div className="stage-search">
+                <input
+                  type="search"
+                  className="stage-search__input"
+                  value={nodeQuery}
+                  onChange={(event) => setNodeQuery(event.target.value)}
+                  placeholder={t("console.search.placeholder")}
+                  aria-label={t("console.search.placeholder")}
+                />
+              </div>
+            ) : null}
+
+            <div
+              className="stage-card__nodes"
+              id="stage-node-list"
+              role="listbox"
+              aria-label={t("console.aria.nodes")}
+              ref={nodeListRef}
+            >
+              {activeGroup && activeRowCount > 0 ? (
+                <div
+                  className="stage-node-group"
+                  role="group"
+                  aria-label={activeGroup.label}
+                >
+                  {visibleNodes.map(renderNode)}
+                  {visiblePending.map(renderPendingNode)}
+                </div>
+              ) : null}
+            </div>
+
+            {emptyGroup ? (
+              <p className="stage-group-empty">
+                <span>{emptyGroupText(activeSource)}</span>
+                {activeSource === "custom" && onAddNode ? (
                   <button type="button" className="stage-add" onClick={onAddNode}>
                     {t("settings.import.title")}
                   </button>
                 ) : null}
-              </div>
-            </div>
-            {probeAllFailed ? (
-              <p className="stage-card__probe-note">{t("console.probe.allFailed")}</p>
-            ) : probeAllUntested ? (
-              <p className="stage-card__probe-note">{t("console.probe.allUntested")}</p>
-            ) : probeMixedUntested ? (
-              <p className="stage-card__probe-note">
-                {t("console.probe.mixed", { count: probeUntestedCount })}
               </p>
             ) : null}
-            {selfOwnedUnreachable ? (
-              <p className="stage-card__probe-note">
-                {t("console.selfOwnedUnreachable")}
-              </p>
-            ) : null}
-          </header>
-          <div className="stage-card__nodes" role="listbox" aria-label={t("console.aria.nodes")}>
-            {ownedEntries.length > 0 || pendingEntries.length > 0 ? (
-              <div
-                className="stage-node-group"
-                role="group"
-                aria-label={t("console.group.owned")}
-              >
-                <div className="stage-node-group__head">
-                  <span>{t("console.group.owned")}</span>
-                </div>
-                {ownedEntries.map(renderNode)}
-                {pendingEntries.map(renderPendingNode)}
-              </div>
-            ) : null}
-            {customEntries.length > 0 ? (
-              <div
-                className="stage-node-group"
-                role="group"
-                aria-label={t("console.group.custom")}
-              >
-                <div className="stage-node-group__head">
-                  <span>{t("console.group.custom")}</span>
-                </div>
-                {customEntries.map(renderNode)}
-              </div>
-            ) : null}
-            {freeEntries.length > 0 ? (
-              <div
-                className="stage-node-group"
-                role="group"
-                aria-label={t("console.group.free")}
-              >
-                <div className="stage-node-group__head">
-                  <span>{t("console.group.free")}</span>
-                  {groupCount > 1 ? (
-                    <span className="stage-node-group__hint">{trialHint}</span>
-                  ) : null}
-                </div>
-                {freeEntries.map(renderNode)}
-              </div>
-            ) : null}
-          </div>
-          {confirmFor ? (
-            <div
-              className="stage-node-confirm"
-              role="alertdialog"
-              aria-labelledby="stage-node-remove-title"
-              aria-describedby="stage-node-remove-body"
-              onMouseDown={(event) => event.stopPropagation()}
-              onKeyDown={(event) => {
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                closeRemoveConfirm();
-              }}
-            >
-              <p
-                id="stage-node-remove-title"
-                className="stage-node-confirm__title"
-              >
-                {t("console.node.removeTitle", { name: confirmFor.name })}
-              </p>
-              <p
-                id="stage-node-remove-body"
-                className="stage-node-confirm__body"
-              >
-                {t("console.node.removeBody")}
-              </p>
-              {selectedId === confirmFor.id ? (
-                <p className="stage-node-confirm__body">
-                  {t("console.node.removeCurrent")}
-                </p>
-              ) : null}
-              {removeError ? (
-                <p className="stage-node-confirm__error" role="alert">
-                  {removeError}
-                </p>
-              ) : null}
-              <div className="stage-node-confirm__actions">
+
+            {noMatches ? (
+              <p className="stage-search__empty">
+                <span>{t("console.search.empty")}</span>
                 <button
                   type="button"
-                  className="btn btn--ghost"
-                  autoFocus
-                  disabled={removeBusy}
-                  onClick={closeRemoveConfirm}
+                  className="stage-note__link"
+                  onClick={() => setNodeQuery("")}
                 >
-                  {t("common.cancel")}
+                  {t("console.search.clear")}
                 </button>
-                <button
-                  type="button"
-                  className="btn btn--danger-ghost"
-                  disabled={removeBusy}
-                  onClick={() => void confirmRemove()}
+              </p>
+            ) : null}
+
+            {activeGroup?.key === "free" &&
+            activeRowCount > 0 &&
+            nonEmptyGroupCount > 1 ? (
+              <p className="stage-node-group__hint stage-card__hint">
+                {trialHint}
+              </p>
+            ) : null}
+
+            {config !== null &&
+            nodes.length === 0 &&
+            pendingEntries.length === 0 ? (
+              <p className="stage-note stage-card__empty">{t("console.empty")}</p>
+            ) : null}
+
+            {confirmFor ? (
+              <div
+                className="stage-node-confirm"
+                role="alertdialog"
+                aria-labelledby="stage-node-remove-title"
+                aria-describedby="stage-node-remove-body"
+                onMouseDown={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  closeRemoveConfirm();
+                }}
+              >
+                <p
+                  id="stage-node-remove-title"
+                  className="stage-node-confirm__title"
                 >
-                  {removeBusy
-                    ? t("console.node.removing")
-                    : t("console.node.removeConfirm")}
-                </button>
+                  {t("console.node.removeTitle", { name: confirmFor.name })}
+                </p>
+                <p
+                  id="stage-node-remove-body"
+                  className="stage-node-confirm__body"
+                >
+                  {t("console.node.removeBody")}
+                </p>
+                {selectedId === confirmFor.id ? (
+                  <p className="stage-node-confirm__body">
+                    {t("console.node.removeCurrent")}
+                  </p>
+                ) : null}
+                {removeError ? (
+                  <p className="stage-node-confirm__error" role="alert">
+                    {removeError}
+                  </p>
+                ) : null}
+                <div className="stage-node-confirm__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    autoFocus
+                    disabled={removeBusy}
+                    onClick={closeRemoveConfirm}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--danger-ghost"
+                    disabled={removeBusy}
+                    onClick={() => void confirmRemove()}
+                  >
+                    {removeBusy
+                      ? t("console.node.removing")
+                      : t("console.node.removeConfirm")}
+                  </button>
+                </div>
               </div>
-            </div>
-          ) : null}
-        </section>
-
-        {config !== null && nodes.length === 0 && pendingEntries.length === 0 ? (
-          <p className="stage-note">{t("console.empty")}</p>
-        ) : null}
-
-        {removedNotice ? (
-          <p className="stage-note" role="status">
-            {removedNotice}
-          </p>
-        ) : null}
-
-        {showStaleConfig ? (
-          <p className="stage-note">{t("console.staleConfig")}</p>
-        ) : null}
-
-        <button
-          type="button"
-          className="stage-primary"
-          onClick={onPrimary}
-          disabled={primaryDisabled}
-          aria-label={
-            heroKind === "disconnect"
-              ? t("console.primary.disconnectAria")
-              : heroKind === "connect"
-                ? t("console.primary.connectAria")
-                : heroLabel
-          }
-        >
-          {heroLabel}
-        </button>
-
-        {connectBlocked ? (
-          <p className="stage-note">
-            {connectTargetDangling
-              ? hasUsableNode
-                ? t("console.blocked.danglingHasOther")
-                : t("console.blocked.danglingNoOther")
-              : hasUsableNode
-                ? t("console.blocked.expiredHasOther")
-                : t("console.blocked.expiredNoOther")}
-          </p>
-        ) : null}
-
-        {failed ? (
-          <button
-            type="button"
-            className="stage-secondary"
-            onClick={onStart}
-            disabled={!connectTargetUsable}
-          >
-            {t("console.reconnect")}
-          </button>
-        ) : null}
-
-        {/* 失败/无流量时下方已经有一个「报告问题」，这里不再重复。 */}
-        {config && nodes.length > 0 && onSetConnectMode && onSetRoutingMode ? (
-          <StageQuickToggles
-            connectMode={config.connect_mode}
-            routingMode={routingMode}
-            connected={connected}
-            modeLocked={starting || stopping}
-            helperPreparing={helperPreparing}
-            onSetConnectMode={onSetConnectMode}
-            onSetRoutingMode={onSetRoutingMode}
-            onReportProblem={failed || noTraffic ? undefined : onReportProblem}
-            reportBusy={reportBusy}
-            onAskAi={onAskAi}
-          />
-        ) : null}
-
-        {failed ? (
-          <p className="stage-note stage-note--error">
-            {failureHeadline(failedAfterConnected)}
-            {runtime.last_error ? ` ${errorText(runtime.last_error, "")}` : ""}
-            {onReportProblem ? (
-              <button
-                type="button"
-                className="stage-note__link"
-                onClick={onReportProblem}
-                disabled={reportBusy}
-              >
-                {t("stage.reportProblem")}
-              </button>
             ) : null}
-          </p>
-        ) : noTraffic ? (
-          <p className="stage-note">
-            {noTrafficAction}
-            {onReportProblem ? (
-              <button
-                type="button"
-                className="stage-note__link"
-                onClick={onReportProblem}
-                disabled={reportBusy}
-              >
-                {t("stage.reportProblem")}
-              </button>
-            ) : null}
-          </p>
-        ) : switchError || summary ? (
-          <p
-            className={`stage-note${switchError ? " stage-note--error" : ""}${
-              !switchError && summary ? " stage-note--summary" : ""
-            }`}
-            role={switchError ? "alert" : undefined}
-          >
-            {switchError ??
-              (summary
-                ? manualProbed || summary.fastestMs === null
-                  ? t("console.summary.joined", { count: summary.count })
-                  : t("console.summary.fastest", {
-                      base: t("console.summary.joined", { count: summary.count }),
-                      ms: Math.round(summary.fastestMs),
-                    })
-                : null)}
-          </p>
-        ) : null}
+          </section>
+        </div>
+
+        <div className="stage-flow">
+          {actionCards.map((card) => (
+            <section className="action-card" key={card.id} aria-label={card.title}>
+              <h3 className="action-card__title">{card.title}</h3>
+              {card.detail ? (
+                <p className="action-card__detail">{card.detail}</p>
+              ) : null}
+              <div className="action-card__actions">
+                {card.actions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className={
+                      action.kind === "primary"
+                        ? "btn btn--primary action-card__btn"
+                        : "btn btn--ghost action-card__btn"
+                    }
+                    onClick={() => onActionCardAction?.(action)}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
       </div>
     </main>
   );

@@ -5984,12 +5984,12 @@ details[open] > .settings-fold__summary::before {
   cursor: pointer;
 }
 
-/* ---------- 连接舞台（44px 状态带 + 400 卡片 + 整宽主按钮） ---------- */
+/* ---------- 连接舞台（Hero 固定 + 节点卡固定 + 中间滚动） ---------- */
 
 .connection-stage {
   min-width: 0;
   display: flex;
-  align-items: safe center;
+  align-items: stretch;
   justify-content: center;
   padding: 24px;
   /* 右侧多 4px：滚动条不贴着助手分栏。 */
@@ -6008,6 +6008,8 @@ details[open] > .settings-fold__summary::before {
   width: min(960px, 100%);
   max-width: 960px;
   flex: none;
+  display: block;
+  height: auto;
   container-type: inline-size;
 }
 
@@ -6016,7 +6018,36 @@ details[open] > .settings-fold__summary::before {
      按可用宽取 42%，仍以 400 为下限（窄窗口的阅读宽）、520 为上限（再宽行就散了）。 */
   width: clamp(400px, 42%, 520px);
   max-width: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  row-gap: 12px;
 }
+
+/* 状态、主按钮与连接参数：固定在顶部，节点再多也不会被推走。 */
+.stage-hero {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* AI 编排区：整列里唯一滚动的一块，内容为空时就是留白。 */
+.stage-flow {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 节点区固定在底部；提示行与卡片一起贴底。 */
+.stage-nodes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.stage-nodes > .stage-note { margin: 0; }
 
 .stage-band {
   display: flex;
@@ -6069,7 +6100,6 @@ details[open] > .settings-fold__summary::before {
 }
 
 .stage-card {
-  margin-top: 20px;
   border: 1px solid var(--hair);
   border-radius: var(--r-md);
   background: var(--card);
@@ -6087,27 +6117,22 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink);
 }
 
-.stage-card__sub {
-  margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--ink-3);
-}
-
-.stage-card__subrow {
+.stage-card__titlerow {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 4px;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
-.stage-card__subrow .stage-card__sub {
+.stage-card__sub {
   min-width: 0;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink-3);
 }
 
 .stage-card__actions {
@@ -6115,6 +6140,8 @@ details[open] > .settings-fold__summary::before {
   align-items: center;
   gap: 12px;
   flex: none;
+  margin-left: auto;
+  align-self: center;
 }
 
 /* 手动测速与添加节点：文字链接，不是第二个实心按钮。 */
@@ -6177,9 +6204,147 @@ details[open] > .settings-fold__summary::before {
   color: var(--warn-text);
 }
 
-.stage-card__nodes { display: flex; flex-direction: column; }
+/* 当前节点名跟在状态词后：点它只回到所在分组，不换节点。
+   字号与字重沿用原「当前节点」行（15 / 500），状态词仍是 13。 */
+.state-line__node {
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
 
-/* 按来源分三组：我的服务器 / 你自己的节点 / 免费节点；空组不渲染。 */
+.state-line__node:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.state-line__node:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 来源分段标签：一次只看一组；选中段用卡片底，不用实心主按钮色。 */
+.stage-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 16px 10px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+.stage-tabs__tab {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.stage-tabs__tab:hover { color: var(--ink); }
+
+.stage-tabs__tab.is-selected {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.stage-tabs__tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.stage-tabs__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-tabs__count {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+/* 搜索：只有当前组超过 12 个节点才出现。 */
+.stage-search { padding: 0 16px 10px; }
+
+.stage-search__input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--hair-strong);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.stage-search__input::placeholder { color: var(--ink-3); }
+
+.stage-search__input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.stage-search__empty {
+  margin: 0;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.stage-group-empty {
+  margin: 0;
+  padding: 14px 16px 16px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.stage-card__hint { padding: 10px 16px 12px; }
+
+.stage-card__empty { margin: 0; padding: 0 16px 16px; }
+
+.stage-card__nodes {
+  display: flex;
+  flex-direction: column;
+  /* 最多约 6 行；窗口变矮时先压列表，保证 Hero 与节点卡同屏。 */
+  max-height: clamp(96px, calc(100vh - 460px), 312px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 按来源分三组：我的服务器 / 自定义节点 / 免费节点；空组显示 0 与空态。 */
 .stage-node-group {
   display: flex;
   flex-direction: column;

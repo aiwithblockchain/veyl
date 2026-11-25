@@ -435,7 +435,7 @@ describe("连接舞台", () => {
     expect(screen.queryByText(/meshflux69/)).toBeNull();
   });
 
-  it("已连接时状态标签与计时器是同一行的前后两个子节点", async () => {
+  it("已连接时状态标签、当前节点与计时器在同一行", async () => {
     renderStage({
       connection: "connected",
       runtime: runtime({
@@ -454,7 +454,8 @@ describe("连接舞台", () => {
     expect(line).not.toBeNull();
     const children = [...(line?.children ?? [])];
     expect(children[0].className).toContain("state-line__label");
-    expect(children[1].className).toContain("timecode");
+    expect(children[1].className).toContain("state-line__node");
+    expect(children[2].className).toContain("timecode");
     // jsdom 不计算 flex 布局：这里只锁结构顺序与类名，
     // 真正的一行排列由 `app.css` 的 `.state-line { flex-direction: row }` 保证。
   });
@@ -1620,25 +1621,102 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.queryByRole("heading", { name: "免费节点" })).toBeNull();
   });
 
-  it("两类同池：自建组在前、免费组在后，副行只写数量", () => {
+  it("两类同池：标签按服务器在前、免费在后，默认只看当前节点所在组", () => {
     renderStage({ config: configWith([FREE, OWNED]) });
 
-    const groups = screen.getAllByRole("group");
-    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-      "我的服务器",
-      "免费节点",
-    ]);
-    expect(within(groups[0]).getByText("东京 1 号")).toBeTruthy();
-    expect(within(groups[1]).getByText("洛杉矶 02")).toBeTruthy();
-    expect(within(groups[1]).getByText("试用中")).toBeTruthy();
-    expect(within(groups[0]).queryByText("试用中")).toBeNull();
+    const tabs = screen.getAllByRole("tab");
+    expect(
+      tabs.map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器1", "自定义节点0", "免费节点1"]);
+    expect(tabs[2].getAttribute("aria-selected")).toBe("true");
+
+    // 当前节点是免费节点：只渲染免费组，自建组的行不在 DOM 里。
+    expect(
+      within(screen.getByRole("group", { name: "免费节点" })).getByText(
+        "洛杉矶 02",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("东京 1 号")).toBeNull();
+
+    fireEvent.click(tabs[0]);
+    expect(
+      within(screen.getByRole("group", { name: "我的服务器" })).getByText(
+        "东京 1 号",
+      ),
+    ).toBeTruthy();
+    // 当前节点行始终保留免费节点的名字，但本组列表里没有它。
+    expect(
+      within(screen.getByRole("group", { name: "我的服务器" })).queryByText(
+        "洛杉矶 02",
+      ),
+    ).toBeNull();
 
     expect(screen.getByText("2 个节点")).toBeTruthy();
     expect(screen.queryByText(/7 天试用/)).toBeNull();
   });
 
-  it("只有一类时只出现那一组的标题，组头不再重复试用 hint", () => {
+  it("切换来源标签只改视图：不切换节点、不发连接命令", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    const onStart = vi.fn();
+    renderStage({
+      config: configWith([FREE, OWNED]),
+      onSwitchNode,
+      onStart,
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    expect(onSwitchNode).not.toHaveBeenCalled();
+    expect(onStart).not.toHaveBeenCalled();
+
+    // 方向键在标签之间移动：免费 → 右 → 回到我的服务器。
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    fireEvent.keyDown(screen.getByRole("tab", { name: /免费节点/ }), {
+      key: "ArrowRight",
+    });
+    expect(
+      screen.getByRole("tab", { name: /我的服务器/ }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+  });
+
+  it("当前节点显示在状态行：切到别的组仍显示，点它回到所在组", () => {
+    renderStage({ config: configWith([OWNED, FREE]) });
+
+    const heroNode = screen.getByRole("button", {
+      name: /当前节点.*东京 1 号/,
+    });
+    expect(heroNode.closest(".stage-band")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    expect(
+      within(screen.getByRole("group", { name: "免费节点" })).queryByText(
+        "东京 1 号",
+      ),
+    ).toBeNull();
+    // 状态行仍写着当前节点，不会因为切组而消失。
+    const current = screen.getByRole("button", {
+      name: /当前节点.*东京 1 号/,
+    });
+
+    fireEvent.click(current);
+    expect(
+      screen.getByRole("tab", { name: /我的服务器/ }).getAttribute(
+        "aria-selected",
+      ),
+    ).toBe("true");
+    expect(
+      within(screen.getByRole("group", { name: "我的服务器" })).getByText(
+        "东京 1 号",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("只有一类节点时三个来源仍常驻，空组显示 0", () => {
     const { rerender } = renderStage();
+    expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器0", "自定义节点0", "免费节点2"]);
     expect(
       screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
     ).toEqual(["免费节点"]);
@@ -1647,72 +1725,103 @@ describe("混池节点卡：试用 + 自建", () => {
 
     rerender(stageElement({ config: configWith([OWNED]) }));
     expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器1", "自定义节点0", "免费节点0"]);
+    expect(
       screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
     ).toEqual(["我的服务器"]);
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("只有自定义节点时只出现「你自己的节点」一组，行内保留「自定义」小标", () => {
+  it("空组可切换：自定义组给「添加节点」入口，不发连接命令", () => {
+    const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
+    const onAddNode = vi.fn();
+    renderStage({ config: configWith([FREE]), onSwitchNode, onAddNode });
+
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    const empty = document.querySelector(".stage-group-empty") as HTMLElement;
+    expect(within(empty).getByText("还没有添加自己的节点")).toBeTruthy();
+    expect(screen.queryByRole("group")).toBeNull();
+
+    fireEvent.click(within(empty).getByRole("button", { name: "添加节点" }));
+    expect(onAddNode).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    expect(screen.getByText("还没有服务器节点")).toBeTruthy();
+    expect(onSwitchNode).not.toHaveBeenCalled();
+  });
+
+  it("只有自定义节点时只出现「自定义节点」一组，行内保留「自定义」小标", () => {
     renderStage({ config: configWith([CUSTOM]) });
 
     const groups = screen.getAllByRole("group");
     expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-      "你自己的节点",
+      "自定义节点",
     ]);
     expect(within(groups[0]).getByText("自建 03")).toBeTruthy();
     expect(within(groups[0]).getByText("自定义")).toBeTruthy();
   });
 
-  it("三类同池：服务器 → 自己的节点 → 免费，自定义小标只在第二组", () => {
+  it("三类同池：标签按服务器 → 自己的节点 → 免费，行内小标只属于自定义组", () => {
     renderStage({ config: configWith([FREE, CUSTOM, OWNED]) });
 
-    const groups = screen.getAllByRole("group");
-    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-      "我的服务器",
-      "你自己的节点",
-      "免费节点",
-    ]);
-    expect(within(groups[0]).getByText("东京 1 号")).toBeTruthy();
-    expect(within(groups[0]).queryByText("自定义")).toBeNull();
-    expect(within(groups[1]).getByText("自建 03")).toBeTruthy();
-    expect(within(groups[1]).getByText("自定义")).toBeTruthy();
-    expect(within(groups[2]).getByText("洛杉矶 02")).toBeTruthy();
-    expect(within(groups[2]).queryByText("自定义")).toBeNull();
+    expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器1", "自定义节点1", "免费节点1"]);
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    const owned = screen.getByRole("group", { name: "我的服务器" });
+    expect(within(owned).getByText("东京 1 号")).toBeTruthy();
+    expect(within(owned).queryByText("自定义")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    const custom = screen.getByRole("group", { name: "自定义节点" });
+    expect(within(custom).getByText("自建 03")).toBeTruthy();
+    expect(within(custom).getByText("自定义")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    const free = screen.getByRole("group", { name: "免费节点" });
+    expect(within(free).getByText("洛杉矶 02")).toBeTruthy();
+    expect(within(free).queryByText("自定义")).toBeNull();
   });
 
-  it("三类 + 待接入行：待接入行排在「我的服务器」组末尾，另外两组不受影响", () => {
+  it("三类 + 待接入行：待接入行排在「我的服务器」组末尾", () => {
     renderStage({
       config: configWith([FREE, CUSTOM, OWNED]),
       pendingServerNodes: [{ nodeId: "local_pending", name: "待接入机器" }],
     });
 
-    const groups = screen.getAllByRole("group");
-    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-      "我的服务器",
-      "你自己的节点",
-      "免费节点",
-    ]);
-    const ownedOptions = groups[0].querySelectorAll('[role="option"]');
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    const owned = screen.getByRole("group", { name: "我的服务器" });
+    const ownedOptions = owned.querySelectorAll('[role="option"]');
     expect(ownedOptions).toHaveLength(2);
     expect(ownedOptions[0].textContent).toContain("东京 1 号");
-    expect(ownedOptions[ownedOptions.length - 1].textContent).toContain("待接入机器");
-    expect(groups[1].querySelectorAll('[role="option"]')).toHaveLength(1);
-    expect(within(groups[1]).getByText("自建 03")).toBeTruthy();
-    expect(groups[2].querySelectorAll('[role="option"]')).toHaveLength(1);
-    expect(within(groups[2]).getByText("洛杉矶 02")).toBeTruthy();
+    expect(ownedOptions[ownedOptions.length - 1].textContent).toContain(
+      "待接入机器",
+    );
+    // 待接入只属于「我的服务器」，另外两组不重复出现。
+    expect(screen.getAllByText("待接入机器")).toHaveLength(1);
   });
 
-  it("免费组节点被清理后只剩自建：免费组整组消失", () => {
+  it("免费组节点被清理后只剩自建：免费标签计数归零", () => {
     const { rerender } = renderStage({ config: configWith([OWNED, FREE]) });
-    expect(screen.getAllByRole("group")).toHaveLength(2);
+    expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器1", "自定义节点0", "免费节点1"]);
 
     rerender(stageElement({ config: configWith([OWNED]) }));
     expect(
+      screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
+    ).toEqual(["我的服务器1", "自定义节点0", "免费节点0"]);
+    expect(
       screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
     ).toEqual(["我的服务器"]);
-    expect(screen.queryByText("免费节点")).toBeNull();
     expect(screen.queryByText("试用中")).toBeNull();
-    expect(screen.getByText("东京 1 号")).toBeTruthy();
+    expect(
+      within(screen.getByRole("group", { name: "我的服务器" })).getByText(
+        "东京 1 号",
+      ),
+    ).toBeTruthy();
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
@@ -1727,6 +1836,8 @@ describe("混池节点卡：试用 + 自建", () => {
       config: configWith([OWNED, FREE]),
       trialExpiresAt: inDays(3.2),
     });
+    // 试用口径只属于免费组：切到免费标签才出现。
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
     expect(hintText()).toBe("3 天后到期");
     expect(hintText()).not.toBe("试用中");
     expect(hintText()).not.toBe("已到期");
@@ -1764,8 +1875,7 @@ describe("混池节点卡：试用 + 自建", () => {
       preselect: { configId: "cfg_1", nodeId: "f2", nonce: 1, markFastest: true },
     });
 
-    const groups = screen.getAllByRole("group");
-    const freeGroup = groups[1];
+    const freeGroup = screen.getByRole("group", { name: "免费节点" });
     expect(freeGroup.querySelector(".stage-node-group__head .stage-node__fastest")).toBeNull();
     expect(
       within(freeGroup as HTMLElement)
@@ -1850,6 +1960,54 @@ describe("混池节点卡：试用 + 自建", () => {
     });
     expect(screen.getAllByText(/线路不通很常见/)).toHaveLength(1);
   });
+
+  it("单组超过 12 个节点才出现搜索；搜索只过滤当前组", () => {
+    const many = Array.from({ length: 13 }, (_, index) => ({
+      ...OWNED,
+      node_id: `o${index + 1}`,
+      name: `东京 ${String(index + 1).padStart(2, "0")} 号`,
+    }));
+    renderStage({ config: configWith(many) });
+
+    const search = screen.getByRole("searchbox");
+    expect(search).toBeTruthy();
+    expect(screen.getAllByRole("option")).toHaveLength(13);
+
+    fireEvent.change(search, { target: { value: "13" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByText("东京 13 号")).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: "没有这个" } });
+    expect(screen.getByText("没有匹配的节点")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "清除搜索" }));
+    expect(screen.getAllByRole("option")).toHaveLength(13);
+  });
+
+  it("12 个及以下不出现搜索框", () => {
+    const nodes = Array.from({ length: 12 }, (_, index) => ({
+      ...OWNED,
+      node_id: `o${index + 1}`,
+      name: `东京 ${String(index + 1).padStart(2, "0")} 号`,
+    }));
+    renderStage({ config: configWith(nodes) });
+
+    expect(screen.queryByRole("searchbox")).toBeNull();
+  });
+
+  it("主按钮固定在 Hero 内，排在节点卡之前", () => {
+    renderStage();
+
+    const hero = document.querySelector(".stage-hero") as HTMLElement;
+    expect(hero).toBeTruthy();
+    const primary = screen.getByRole("button", { name: "连接节点" });
+    expect(hero.contains(primary)).toBe(true);
+
+    const card = document.querySelector(".stage-card") as HTMLElement;
+    expect(
+      primary.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });
 
 describe("免费节点到期后就地拒绝", () => {
@@ -1894,7 +2052,9 @@ describe("免费节点到期后就地拒绝", () => {
       onStart,
     });
 
-    const freeRow = screen.getAllByRole("option")[1] as HTMLElement;
+    const freeRow = within(
+      screen.getByRole("group", { name: "免费节点" }),
+    ).getByRole("option") as HTMLElement;
     expect(freeRow.getAttribute("aria-disabled")).toBe("true");
     expect(freeRow.classList.contains("is-expired")).toBe(true);
     expect(freeRow.querySelector(".stage-node__sub")?.textContent).toBe("已到期");
@@ -1918,7 +2078,12 @@ describe("免费节点到期后就地拒绝", () => {
       screen.getByText("当前节点已到期，换一个节点再连接。"),
     ).toBeTruthy();
 
-    fireEvent.click(screen.getAllByRole("option")[0]);
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "我的服务器" })).getByRole(
+        "option",
+      ),
+    );
     expect(
       screen.queryByText("当前节点已到期，换一个节点再连接。"),
     ).toBeNull();
@@ -1949,8 +2114,14 @@ describe("免费节点到期后就地拒绝", () => {
       onSwitchNode,
     });
 
-    const [ownedRow, freeRow] = screen.getAllByRole("option") as HTMLElement[];
+    const ownedRow = within(
+      screen.getByRole("group", { name: "我的服务器" }),
+    ).getByRole("option");
     expect(ownedRow.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    const freeRow = within(
+      screen.getByRole("group", { name: "免费节点" }),
+    ).getByRole("option");
     expect(freeRow.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(freeRow);
     expect(onSwitchNode).not.toHaveBeenCalled();
@@ -2012,7 +2183,10 @@ describe("免费节点到期后就地拒绝", () => {
       onSwitchNode,
     });
 
-    const freeRow = screen.getAllByRole("option")[1] as HTMLElement;
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    const freeRow = within(
+      screen.getByRole("group", { name: "免费节点" }),
+    ).getByRole("option") as HTMLElement;
     expect(freeRow.getAttribute("aria-disabled")).toBeNull();
     expect(freeRow.classList.contains("is-expired")).toBe(false);
     expect(freeRow.querySelector(".stage-node__sub")).toBeNull();
@@ -2066,6 +2240,7 @@ describe("待接入的服务器节点", () => {
       onSwitchNode,
     });
 
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
     const ownedGroup = screen.getByRole("group", { name: "我的服务器" });
     const pendingRow = within(ownedGroup)
       .getByText("你的服务器4gUQ")
@@ -2098,13 +2273,15 @@ describe("待接入的服务器节点", () => {
       ],
     });
 
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
     expect(screen.queryByText("已入池的服务器")).toBeNull();
     expect(screen.getAllByText("东京 1 号")).toHaveLength(1);
     expect(screen.getAllByText("同一台服务器")).toHaveLength(1);
     // 去重后只剩一条待接入行。
     expect(screen.getAllByText("重新连接后可用")).toHaveLength(1);
-    // 2 个可用节点 + 1 个待接入行。
-    expect(screen.getAllByRole("option")).toHaveLength(3);
+    // 本组：1 个可用节点 + 1 个待接入行；免费节点在另一个标签里。
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("tab", { name: /免费节点/ })).toBeTruthy();
   });
 });
 
@@ -2427,9 +2604,6 @@ describe("测不通时的智能诊断入口", () => {
     const analyze = within(rows[0]).getByRole("button", {
       name: "对悉尼0.2u进行智能诊断",
     });
-    expect(
-      within(rows[1]).queryByRole("button", { name: /智能诊断/ }),
-    ).toBeNull();
 
     fireEvent.click(analyze);
     expect(onAnalyzeNode).toHaveBeenCalledWith({
@@ -2439,6 +2613,12 @@ describe("测不通时的智能诊断入口", () => {
     expect(onAskAi).not.toHaveBeenCalled();
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
+
+    // 免费节点在另一个标签里：切过去也不给智能诊断。
+    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    expect(
+      screen.queryByRole("button", { name: /智能诊断/ }),
+    ).toBeNull();
   });
 
   it("手动导入节点测不通：没有任何诊断入口", () => {

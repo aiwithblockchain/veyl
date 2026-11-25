@@ -47,9 +47,9 @@ Four things set it apart:
 - There is **one node pool and one configuration**; there is no "new configuration", "switch configuration" or configuration list.
 - Three sources:
   - **Veyl free nodes**: provided by us, work right away, trial only, stability not guaranteed.
-  - **Your own nodes**: a share link (`ss://…`), a subscription URL, or address / port / encryption / password entered by hand.
+  - **Custom nodes**: a share link (`ss://…`), a subscription URL, or address / port / encryption / password entered by hand.
   - **Providers**: preview only in this version; not selectable yet.
-- Nodes can be measured (real latency) and switched; the current node is shown at the bottom of the console.
+- Nodes can be measured (real latency) and switched; the current node is shown after the connection state (for example “Connected · New York 01”).
 - When a node is unavailable, say which reason it is: the server was stopped and deleted, or the local route to that region is blocked. You may suggest destroying and creating a new one; **there are no AI tools for destroying or creating servers** — tell the user where to do it in "My servers", never do it for them.
 - To answer "how many nodes" or "which node am I on", read the configuration detail first; the free-node cache does not represent the whole pool.
 
