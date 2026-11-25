@@ -11,6 +11,8 @@ interface Props {
   wallet: MyServerWallet | null;
   /** 从未取到值且请求在途：只有这时才写「读取中」，否则写「—」。 */
   walletLoading?: boolean;
+  /** 余额刷新在途：在金额旁给一个轻量状态。 */
+  walletRefreshing?: boolean;
   walletError: string | null;
   /** 显示的是上次的余额：只写一行小字，不加按钮、不加角标。 */
   walletStale?: boolean;
@@ -32,6 +34,7 @@ export function AccountMenu({
   email,
   wallet,
   walletLoading = false,
+  walletRefreshing = false,
   walletError,
   walletStale = false,
   disabled = false,
@@ -51,7 +54,7 @@ export function AccountMenu({
   const [switching, setSwitching] = useState(false);
   const [reRegisterError, setReRegisterError] = useState<string | null>(null);
   useFocusTrap(true, panelRef);
-  // 菜单是条件渲染的：挂载即打开。打开即刷，30 秒节流在 refreshWallet 里。
+  // 菜单是条件渲染的：挂载即打开。打开即强制刷新，绕过 30 秒门禁。
   const refreshOnMountRef = useRef(onRefreshWallet);
   useEffect(() => {
     refreshOnMountRef.current("open_menu");
@@ -158,13 +161,21 @@ export function AccountMenu({
                     </button>
                   </span>
                 ) : (
-                  <span className="account-menu__amount num">
-                    {wallet
-                      ? formatUsdCents(wallet.balance_cents)
-                      : walletLoading
-                        ? t("account.loading")
-                        : "—"}
-                  </span>
+                  <div className="account-menu__amount-row">
+                    <span className="account-menu__amount num">
+                      {wallet
+                        ? formatUsdCents(wallet.balance_cents)
+                        : walletLoading
+                          ? t("account.loading")
+                          : "—"}
+                    </span>
+                    {walletRefreshing && wallet ? (
+                      <span className="account-menu__refreshing" role="status">
+                        <span className="account-menu__spinner" aria-hidden="true" />
+                        {t("settings.account.refreshing")}
+                      </span>
+                    ) : null}
+                  </div>
                 )}
               </div>
               <button

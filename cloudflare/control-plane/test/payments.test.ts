@@ -68,6 +68,10 @@ async function makeEnv(db: FakeD1, environment = "dev") {
     PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": 30 }),
     TOPUP_DENOMINATIONS_CENTS: JSON.stringify(TOPUP_TIERS),
     APP_PAYMENT_RETURN_URL: "https://control.example.com/payment/return",
+    PUBLIC_SITE_URL:
+      environment === "production"
+        ? "https://veyl.dessage.xyz"
+        : "https://veyl-edge-dev.pages.dev",
     token,
   };
 }
@@ -383,7 +387,9 @@ describe("充值", () => {
     expect(form.get("branding_settings[font_family]")).toBe("inter");
     expect(form.get("branding_settings[border_style]")).toBe("rounded");
     expect(form.get("branding_settings[logo][type]")).toBe("url");
-    expect(form.get("branding_settings[logo][url]")).toBe("https://veyl.dessage.xyz/logo.png");
+    expect(form.get("branding_settings[logo][url]")).toBe(
+      "https://veyl-edge-dev.pages.dev/logo.png",
+    );
     expect(form.get("custom_text[submit][message]")).toBe(
       "Your service credits are added to your Veyl account after payment.",
     );
@@ -394,6 +400,21 @@ describe("充值", () => {
     expect(form.get("payment_method_types")).toBeNull();
     expect(form.get("payment_method_options[wechat_pay][client]")).toBe("web");
     expect(upstream.checkoutHeaders?.get("idempotency-key")).toBe(db.rows("topups")[0].id);
+  });
+
+  it("生产环境 logo 跟随生产站 origin", async () => {
+    const db = new FakeD1();
+    const env = {
+      ...(await makeEnv(db, "production")),
+      STRIPE_SECRET_KEY: "sk_live_wallet",
+    };
+    const upstream = stubUpstream();
+
+    const res = await handleTopups(topupRequest(env, 1200), env as never);
+    expect(res?.status).toBe(200);
+    expect(upstream.checkoutForm?.get("branding_settings[logo][url]")).toBe(
+      "https://veyl.dessage.xyz/logo.png",
+    );
   });
 
   it("Stripe 建会话失败时把 pending 标 failed，不返回上游原文", async () => {

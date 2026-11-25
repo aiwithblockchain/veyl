@@ -306,4 +306,13 @@ describe("账号菜单的余额陈旧提示", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(refresh).toHaveBeenCalledWith("open_menu");
   });
+
+  it("余额刷新在途：金额旁显示轻量状态，结束即收起", () => {
+    const { rerenderMenu } = renderMenu({ walletRefreshing: true });
+    expect(screen.getByText("刷新中")).toBeTruthy();
+    expect(document.querySelector(".account-menu__spinner")).not.toBeNull();
+
+    rerenderMenu({ walletRefreshing: false });
+    expect(screen.queryByText("刷新中")).toBeNull();
+  });
 });

@@ -3025,6 +3025,7 @@ export default function App() {
               walletError={myServers.walletError}
               walletStale={myServers.walletStale}
               identityProblem={myServers.identityProblem}
+              walletRefreshing={myServers.walletRefreshing}
               onTopUp={() => myServers.openTopUp()}
               onRefreshWallet={(trigger) =>
                 void myServers.refreshWallet({ trigger })
@@ -3296,9 +3297,8 @@ export default function App() {
         <MyServerTopUp
           wallet={myServers.wallet}
           loading={myServers.walletLoading}
-          refreshing={myServers.walletRefreshing}
           error={myServers.walletError}
-          onRetry={() => myServers.refreshWallet({ trigger: "retry" })}
+          onRetry={() => void myServers.refreshWallet({ trigger: "retry" })}
           onTopUp={myServers.topup}
           onClose={myServers.closeTopUp}
         />

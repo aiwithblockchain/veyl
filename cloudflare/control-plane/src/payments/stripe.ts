@@ -3,10 +3,13 @@
 
 import type { PaymentConfigEnv } from "../lib/config";
 import { toHex } from "../lib/crypto";
+import { siteBase } from "../issues";
 
 export interface StripeEnv extends PaymentConfigEnv {
   STRIPE_SECRET_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  /** 站点 origin；收银台 logo 跟随它，dev 不引用生产图。 */
+  PUBLIC_SITE_URL?: string;
 }
 
 const STRIPE_API = "https://api.stripe.com/v1/checkout/sessions";
@@ -87,7 +90,8 @@ export async function createCheckoutSession(
   form.set("branding_settings[font_family]", "inter");
   form.set("branding_settings[border_style]", "rounded");
   form.set("branding_settings[logo][type]", "url");
-  form.set("branding_settings[logo][url]", "https://veyl.dessage.xyz/logo.png");
+  // logo 跟随站点 origin：prod 用生产站，dev 用 dev Pages，避免引用未部署的图。
+  form.set("branding_settings[logo][url]", `${siteBase(env)}/logo.png`);
   form.set("success_url", withSessionId(input.returnUrl));
   form.set("cancel_url", withQuery(input.returnUrl, "canceled=1"));
   form.set("customer_email", input.email);

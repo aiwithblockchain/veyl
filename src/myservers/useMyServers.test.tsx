@@ -1062,10 +1062,10 @@ describe("余额刷新的日志", () => {
 
     const before = wallet.mock.calls.length;
     await act(async () => {
-      await view.result.current.refreshWallet({ trigger: "open_menu" });
+      await view.result.current.refreshWallet({ trigger: "visible" });
     });
     expect(wallet.mock.calls.length).toBe(before);
-    expect(matching(/^debug refresh seq=\d+ trigger=open_menu$/).length).toBe(1);
+    expect(matching(/^debug refresh seq=\d+ trigger=visible$/).length).toBe(1);
     expect(
       matching(/^debug refresh seq=\d+ skipped reason=gate elapsed_ms=\d+$/).length,
     ).toBe(1);
@@ -1090,7 +1090,23 @@ describe("余额刷新的日志", () => {
     expect(lines()).toContain(`debug refresh seq=${doneSeq} trigger=manual`);
     const gate = lines().find((line) => line.includes("reason=gate")) as string;
     const gateSeq = gate.match(/seq=(\d+)/)?.[1];
-    expect(lines()).toContain(`debug refresh seq=${gateSeq} trigger=open_menu`);
+    expect(lines()).toContain(`debug refresh seq=${gateSeq} trigger=visible`);
+  });
+
+  it("open_menu 是显式动作：30 秒内也强制刷新", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    const before = wallet.mock.calls.length;
+
+    await act(async () => {
+      await view.result.current.refreshWallet({ trigger: "open_menu" });
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
   });
 
   it("在途去重也记一行 skipped", async () => {

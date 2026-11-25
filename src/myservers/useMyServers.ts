@@ -271,8 +271,9 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
         uiLog("debug", `refresh seq=${seq} skipped reason=inflight`);
         return { ok: false, reason: "skipped" };
       }
-      // 显式动作不受门禁限制：手动刷新和失败后的「重试」都要立刻发。
-      const forced = options.force === true || trigger === "retry";
+      // 显式动作不受门禁限制：手动刷新、失败重试和打开账号菜单都要立刻发。
+      const forced =
+        options.force === true || trigger === "retry" || trigger === "open_menu";
       const sinceSuccess = Date.now() - walletSuccessAtRef.current;
       // 手上没有值时门禁毫无意义：拦下来只会把界面钉在「读取中」。
       if (

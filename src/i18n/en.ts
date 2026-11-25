@@ -1028,11 +1028,6 @@ export const en: Record<MessageKey, string> = {
   "topup.pick": "Pick an amount.",
   "topup.reopenCheckout": "Reopen checkout",
   "topup.copyLink": "Copy link",
-  "topup.refreshBalance": "Refresh balance",
-  "topup.refreshingBalance": "Refreshing balance…",
-  "topup.balanceUpdated": "Balance updated · {amount}",
-  "topup.refreshFailed": "Balance didn't update. Try again.",
-  "topup.opened": "Checkout is open. After paying, come back here and the balance refreshes automatically.",
   "topup.charged": "Topped up {amount}.",
   "topup.invalidDenomination": "This amount isn't available right now. Pick another.",
   "topup.checkoutUnavailable":

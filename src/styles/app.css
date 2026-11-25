@@ -3207,15 +3207,6 @@ body[data-resizing] {
   font-variant-numeric: tabular-nums;
 }
 
-.myservers-topup__spinner {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1.5px solid currentColor;
-  border-top-color: transparent;
-  animation: spin 0.9s linear infinite;
-}
-
 .myservers__detail {
   display: flex;
   flex-direction: column;
@@ -5099,6 +5090,31 @@ body[data-resizing] {
   height: 36px;
   padding: 0 8px;
   border: 0;
+.account-menu__amount-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.account-menu__refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.account-menu__spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
   border-radius: 6px;
   background: transparent;
   color: var(--red);

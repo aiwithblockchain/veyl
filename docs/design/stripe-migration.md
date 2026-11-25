@@ -86,7 +86,7 @@ Stripe-Version: 2026-11-18.endive
 | `branding_settings[font_family]` | `inter` | 最接近 APP 系统 sans 的 Stripe 支持字体 |
 | `branding_settings[border_style]` | `rounded` | 圆角与 APP 一致 |
 | `branding_settings[logo][type]` | `url` | |
-| `branding_settings[logo][url]` | `https://veyl.dessage.xyz/logo.png` | Pages 直出；上线前必须 `curl -I` 确认真实 200，否则收银台引用 404 图 |
+| `branding_settings[logo][url]` | `${siteBase(env)}/logo.png` | 跟随 `PUBLIC_SITE_URL`：prod 为 `https://veyl.dessage.xyz/logo.png`，dev 为 `https://veyl-edge-dev.pages.dev/logo.png`；部署对应 Pages 并 `curl -I` 确认真实 200，否则收银台引用 404 图 |
 | `success_url` | `https://<控制面>/payment/return?session_id={CHECKOUT_SESSION_ID}` | `{CHECKOUT_SESSION_ID}` 是**字面占位符**，由 Stripe 替换；不要自己拼 |
 | `cancel_url` | `https://<控制面>/payment/return?canceled=1` | 取消回跳带 `canceled=1`；页面据此显示 "Payment not completed"，不再与成功页混用 |
 | `customer_email` | 账户邮箱 | 预填，用户仍可在收银台改 |
@@ -113,7 +113,7 @@ branding_settings[button_color]=#14161C
 branding_settings[font_family]=inter
 branding_settings[border_style]=rounded
 branding_settings[logo][type]=url
-branding_settings[logo][url]=https://veyl.dessage.xyz/logo.png
+branding_settings[logo][url]=<PUBLIC_SITE_URL>/logo.png
 success_url=https://dev.veyl.dessage.xyz/payment/return?session_id={CHECKOUT_SESSION_ID}
 cancel_url=https://dev.veyl.dessage.xyz/payment/return?canceled=1
 customer_email=buyer@example.com
@@ -372,7 +372,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 - **Webhook 端点**：`https://<prod>/v1/webhooks/stripe`，只订阅 `checkout.session.completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` 四个事件；每个端点用自己的 `whsec_`。
 - **Live secret**：`STRIPE_SECRET_KEY` 必须是 `sk_live_`，`STRIPE_WEBHOOK_SECRET` 必须是 live 端点的 `whsec_`；`ENVIRONMENT=production` 时两者缺一不可（代码 fail closed，不建单）。
 - **回跳 URL**：`APP_PAYMENT_RETURN_URL` 指向控制面 `/payment/return`，不是站点根。
-- **Branding（一次性）**：Dashboard → Branding 配置同一 logo（`https://veyl.dessage.xyz/logo.png`）、背景 `#FAFAF8`、按钮 `#14161C`、Inter、rounded；用于收据 / 邮件等非 Checkout 场景。Session 级 `branding_settings` 只影响收银台。
+- **Branding（一次性）**：Dashboard → Branding 配置同一 logo（生产站 `https://veyl.dessage.xyz/logo.png`）、背景 `#FAFAF8`、按钮 `#14161C`、Inter、rounded；用于收据 / 邮件等非 Checkout 场景。Session 级 `branding_settings` 只影响收银台，且 logo 跟随 `PUBLIC_SITE_URL`（dev 用 dev Pages）。
 - **商品与账单描述**：`product_data.name = Veyl Service Credits`；statement descriptor 建议 `VEYL`（Dashboard 账户级设置，最多 22 字符）。
 
 ### 9.2 回滚与 Dodo 吊销
@@ -445,7 +445,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 
 | 位置 | 具体 |
 |---|---|
-| 客户端 i18n（中文） | `src/i18n/zh.ts`：`account.balance`、`account.walletError`、`account.stale`、`topup.balance`、`topup.refreshBalance`、`topup.opened`、`serversPage.loginText`、`detail.destroyConfirm`、`wizard.billing`、`wizard.balanceShort`、`wizard.balanceShortBare`、`settings.account.balance`、`settings.account.billingNote`、`settings.consult.fact.balance`、`myservers.tombstone.text`、`myservers.billing.pastDueNoGrace`、`myservers.billing.pastDueGrace`、`myservers.billing.expired`、`app.billsNotice`、`tool.fact.server.destroyed.billingUnpaid`、`error.reason.insufficientBalance`、`error.reason.insufficientBalanceBare`、`error.reason.settleInsufficient`、`error.failure.billingUnpaid` |
+| 客户端 i18n（中文） | `src/i18n/zh.ts`：`account.balance`、`account.walletError`、`account.stale`、`topup.balance`、`serversPage.loginText`、`detail.destroyConfirm`、`wizard.billing`、`wizard.balanceShort`、`wizard.balanceShortBare`、`settings.account.balance`、`settings.account.billingNote`、`settings.consult.fact.balance`、`myservers.tombstone.text`、`myservers.billing.pastDueNoGrace`、`myservers.billing.pastDueGrace`、`myservers.billing.expired`、`app.billsNotice`、`tool.fact.server.destroyed.billingUnpaid`、`error.reason.insufficientBalance`、`error.reason.insufficientBalanceBare`、`error.reason.settleInsufficient`、`error.failure.billingUnpaid` |
 | 客户端 i18n（英文） | `src/i18n/en.ts` 的**同名 key**；中英文必须同一批改，不能只改中文 |
 | Host 固定串 | `src-tauri/src/tools/my_servers.rs`（`因余额不足停机删除`、`余额不足，已停机删除`，含工具描述）；`src-tauri/src/control_plane/error.rs`（`余额不足，服务器没有开通`）。这些会出现在界面与 AI 工具说明里，不能漏 |
 | 控制面展示文案 | `cloudflare/control-plane/src/index.ts` 的 `/payment/return` 页：`余额变化` → `服务额度变化`；`orders.ts` 的 `余额不足，先充值`；`servers.ts` 的墓碑原因 `余额不足，已停机删除` |

@@ -1,8 +1,7 @@
 /** @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
-import type { WalletRefreshResult } from "../myservers/useMyServers";
 import { MyServerTopUp } from "./MyServerTopUp";
 
 const WALLET: MyServerWallet = {
@@ -22,24 +21,49 @@ afterEach(cleanup);
 
 function renderTopUp(
   onTopUp: (cents: number) => Promise<MyServerTopup> = async () => TOPUP,
-  onRetry: () => Promise<WalletRefreshResult> = async () => ({ ok: true, wallet: WALLET }),
-  refreshing = false,
+  onRetry: () => void = () => {},
+  onClose: () => void = () => {},
 ) {
   const { container } = render(
     <MyServerTopUp
       wallet={WALLET}
       loading={false}
-      refreshing={refreshing}
       error={null}
       onRetry={onRetry}
       onTopUp={onTopUp}
-      onClose={() => {}}
+      onClose={onClose}
     />,
   );
   return container;
 }
 
 describe("充值弹层", () => {
+  it("成功打开收银台后直接关闭弹窗，不显示「已打开支付页面」", async () => {
+    const onClose = vi.fn();
+    renderTopUp(async () => TOPUP, () => {}, onClose);
+
+    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/已打开支付页面/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "刷新余额" })).toBeNull();
+  });
+
+  it("checkout_url 为空：保留直接到账提示，不关闭弹窗", async () => {
+    const onClose = vi.fn();
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
+      topup_id: "top_1",
+      checkout_url: null,
+      denomination_cents: 1000,
+    }));
+    renderTopUp(onTopUp, () => {}, onClose);
+
+    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
+
+    expect(await screen.findByText("已充值 $10.00。")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("收银台打不开：不说已打开，给重新打开与可复制链接", async () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => {
       throw {
@@ -93,129 +117,5 @@ describe("充值弹层", () => {
     last.focus();
     fireEvent.keyDown(document, { key: "Tab" });
     expect(document.activeElement).toBe(buttons[0]);
-  });
-
-  it("刷新余额：进行中禁用，成功后提示并恢复", async () => {
-    let resolveRefresh: (result: WalletRefreshResult) => void = () => {};
-    const onRetry = vi.fn(
-      () =>
-        new Promise<WalletRefreshResult>((resolve) => {
-          resolveRefresh = resolve;
-        }),
-    );
-    renderTopUp(undefined, onRetry);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    fireEvent.click(await screen.findByRole("button", { name: "刷新余额" }));
-
-    const busy = await screen.findByRole("button", { name: /正在刷新余额/ });
-    expect((busy as HTMLButtonElement).disabled).toBe(true);
-    expect(onRetry).toHaveBeenCalledTimes(1);
-
-    resolveRefresh({ ok: true, wallet: { ...WALLET, balance_cents: 200 } });
-
-    expect(await screen.findByText("余额已更新 · $2.00")).toBeTruthy();
-    const idle = screen.getByRole("button", { name: "刷新余额" });
-    expect((idle as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it("刷新余额失败：给出提示并恢复", async () => {
-    const onRetry = vi.fn(async (): Promise<WalletRefreshResult> => ({
-      ok: false,
-      reason: "failed",
-    }));
-    renderTopUp(undefined, onRetry);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    fireEvent.click(await screen.findByRole("button", { name: "刷新余额" }));
-
-    expect(await screen.findByText("余额没更新，稍后再试。")).toBeTruthy();
-    const idle = screen.getByRole("button", { name: "刷新余额" });
-    expect((idle as HTMLButtonElement).disabled).toBe(false);
-  });
-
-  it("刷新余额被跳过时不报失败", async () => {
-    const onRetry = vi.fn(async (): Promise<WalletRefreshResult> => ({
-      ok: false,
-      reason: "skipped",
-    }));
-    renderTopUp(undefined, onRetry);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    fireEvent.click(await screen.findByRole("button", { name: "刷新余额" }));
-
-    await waitFor(() =>
-      expect((screen.getByRole("button", { name: "刷新余额" }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
-    );
-    expect(screen.queryByText("余额没更新，稍后再试。")).toBeNull();
-  });
-
-  it("后台刷新在途时按钮禁用", async () => {
-    const onRetry = vi.fn(async (): Promise<WalletRefreshResult> => ({
-      ok: true,
-      wallet: WALLET,
-    }));
-    renderTopUp(undefined, onRetry, true);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    const busy = await screen.findByRole("button", { name: /正在刷新余额/ });
-    expect((busy as HTMLButtonElement).disabled).toBe(true);
-
-    fireEvent.click(busy);
-    expect(onRetry).not.toHaveBeenCalled();
-  });
-
-  it("成功提示 2.5 秒后自动消失", async () => {
-    let resolveRefresh: (result: WalletRefreshResult) => void = () => {};
-    const onRetry = vi.fn(
-      () =>
-        new Promise<WalletRefreshResult>((resolve) => {
-          resolveRefresh = resolve;
-        }),
-    );
-    renderTopUp(undefined, onRetry);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    fireEvent.click(await screen.findByRole("button", { name: "刷新余额" }));
-
-    vi.useFakeTimers();
-    try {
-      await act(async () => {
-        resolveRefresh({ ok: true, wallet: { ...WALLET, balance_cents: 200 } });
-        await Promise.resolve();
-      });
-      expect(screen.getByText("余额已更新 · $2.00")).toBeTruthy();
-
-      await act(async () => {
-        vi.advanceTimersByTime(2500);
-      });
-      expect(screen.queryByText("余额已更新 · $2.00")).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("刷新余额：连点只发一次", async () => {
-    let resolveRefresh: (result: WalletRefreshResult) => void = () => {};
-    const onRetry = vi.fn(
-      () =>
-        new Promise<WalletRefreshResult>((resolve) => {
-          resolveRefresh = resolve;
-        }),
-    );
-    renderTopUp(undefined, onRetry);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-    const button = await screen.findByRole("button", { name: "刷新余额" });
-    fireEvent.click(button);
-    fireEvent.click(button);
-
-    expect(onRetry).toHaveBeenCalledTimes(1);
-    resolveRefresh({ ok: true, wallet: WALLET });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "刷新余额" })).toBeTruthy(),
-    );
   });
 });
