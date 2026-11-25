@@ -359,38 +359,195 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>, parts: Parts) -> tauri::Result
 /// 托盘状态的兜底轮询间隔。
 ///
 /// 2.20.0 起 TUN 的状态变化也并进 manager 的同一条广播（`RuntimeManager::publish_state`），
-/// 托盘与主界面订阅的是同一条流，不会再一个说断开、一个说连着。短超时轮询保留作兜底：
-/// 事件丢失、或 App 重启接手已有 TUN 时，一两秒内也能算对；循环启动时先算一次。
+/// 托盘与主界面订阅的是同一条流，不会再一个说断开、一个说连着。**事件是主线**：
+/// 收到 `runtime-state-changed` 就立刻重算。这一拍只兜底——事件丢失、或 App 重启
+/// 接手已有 TUN 时，一两秒内也能算对。
 const TRAY_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 单次外部调用的等待上限：读运行时状态、等 TUN 探测结果、把图标画到主线程。
+///
+/// 超时只保持上一个图标并记日志。任何一次调用都不允许把整条循环拖住：托盘安静地
+/// 停在一个旧状态上、日志里又什么都没有，是这件事最难查的地方。
+const TRAY_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn spawn_tray_state_loop<R: Runtime>(
     app: AppHandle<R>,
     manager: Arc<RuntimeManager>,
     tun: Arc<TunSession>,
 ) {
-    let mut events = manager.subscribe();
     tauri::async_runtime::spawn(async move {
-        let mut current =
-            combined_tray_state(manager.status().await.state, tun_running(&tun));
-        set_tray_icon(&app, current);
-        loop {
-            let next = match tokio::time::timeout(TRAY_RECHECK_INTERVAL, events.recv()).await {
-                Ok(Ok(RuntimeEvent::StateChanged(payload))) => {
-                    combined_tray_state(payload.to, tun_running(&tun))
-                }
-                Ok(Ok(RuntimeEvent::HealthChanged(_))) => continue,
-                // 事件丢了或这一轮没有事件：直接问两条路径的当前状态。
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) | Err(_) => {
-                    combined_tray_state(manager.status().await.state, tun_running(&tun))
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-            };
-            if next != current {
-                current = next;
-                set_tray_icon(&app, current);
-            }
+        // 循环里任何一次 panic 都会让任务静默消失、托盘从此不动且不留痕迹。
+        // 兜住它并留下一条 error：宁可少更新一次，也不能查不出原因。
+        let flow = std::panic::AssertUnwindSafe(tray_state_loop(app, manager, tun));
+        if flow.catch_unwind().await.is_err() {
+            log::error!("托盘状态循环因 panic 退出，图标将停住不再更新");
         }
     });
+}
+
+async fn tray_state_loop<R: Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<RuntimeManager>,
+    tun: Arc<TunSession>,
+) {
+    let mut events = manager.subscribe();
+    // 「循环到底有没有跑」的唯一判据，用 info：不设 RUST_LOG 时也看得见。
+    log::info!("托盘状态循环启动 id={TRAY_ID}");
+
+    let (probe_tx, mut probe_rx) = tokio::sync::mpsc::channel::<bool>(1);
+    let mut current: Option<TrayState> = None;
+    // 两个来源各自「最近一次已知值」；读不到时保持旧值，不拿默认值去猜。
+    let mut manager_state = match tokio::time::timeout(TRAY_STATUS_TIMEOUT, manager.status()).await
+    {
+        Ok(status) => Some(status.state),
+        Err(_) => {
+            log::warn!("托盘：启动读运行时状态超过 {TRAY_STATUS_TIMEOUT:?}，先按未连接画");
+            None
+        }
+    };
+    // 启动先算一次：App 重启接手已有 TUN 时，第一帧就该是对的，不能先闪一下盾牌。
+    // 探测本身仍在阻塞线程池里跑，这里只等 1 秒；等的期间不阻塞任何异步工作线程。
+    kick_tun_probe(&tun, &probe_tx);
+    let mut probing = true;
+    let mut probe_started: Option<tokio::time::Instant>;
+    let mut tun_running_known =
+        match tokio::time::timeout(TRAY_STATUS_TIMEOUT, probe_rx.recv()).await {
+            Ok(Some(running)) => {
+                probing = false;
+                probe_started = None;
+                Some(running)
+            }
+            _ => {
+                log::warn!("托盘：启动 TUN 探测超过 {TRAY_STATUS_TIMEOUT:?} 未返回，先按未连接画");
+                probe_started = None;
+                None
+            }
+        };
+    // 广播关了不等于该停止画图标：兜底轮询还得继续，否则图标永远停在最后一个状态上。
+    let mut events_alive = true;
+    let mut probe_wanted = false;
+    // 启动那一轮刚算过，兜底从下一个间隔开始，不立刻再读一遍。
+    let mut next_fallback = tokio::time::Instant::now() + TRAY_RECHECK_INTERVAL;
+
+    apply_tray_state(&app, &mut current, manager_state, tun_running_known).await;
+
+    loop {
+        tokio::select! {
+            event = events.recv(), if events_alive => {
+                match event {
+                    Ok(RuntimeEvent::StateChanged(payload)) => {
+                        log::debug!(
+                            "托盘：收到状态事件 {} {:?} → {:?}",
+                            payload.event,
+                            payload.from,
+                            payload.to
+                        );
+                        manager_state = Some(payload.to);
+                        probe_wanted = true;
+                    }
+                    Ok(RuntimeEvent::HealthChanged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        log::warn!("托盘：漏掉 {skipped} 条事件，改为直接读状态");
+                        probe_wanted = true;
+                        next_fallback = tokio::time::Instant::now();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        log::warn!("托盘：运行时事件流已关闭，只剩兜底轮询");
+                        events_alive = false;
+                        next_fallback = tokio::time::Instant::now();
+                    }
+                }
+            }
+            Some(running) = probe_rx.recv(), if probing => {
+                probing = false;
+                probe_started = None;
+                log::debug!("托盘：TUN 探测返回 running={running}");
+                tun_running_known = Some(running);
+            }
+            _ = tokio::time::sleep_until(
+                probe_started
+                    .map(|at| at + TRAY_STATUS_TIMEOUT)
+                    .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
+            ), if probe_started.is_some() => {
+                // 只提醒一次。阻塞调用取消不了，结果回来时照常由上面的分支收下。
+                log::warn!(
+                    "托盘：TUN 状态探测超过 {TRAY_STATUS_TIMEOUT:?} 仍未返回，先保持上一个图标"
+                );
+                probe_started = None;
+            }
+            _ = tokio::time::sleep_until(next_fallback) => {
+                next_fallback = tokio::time::Instant::now() + TRAY_RECHECK_INTERVAL;
+                match tokio::time::timeout(TRAY_STATUS_TIMEOUT, manager.status()).await {
+                    Ok(status) => manager_state = Some(status.state),
+                    Err(_) => log::warn!(
+                        "托盘：读运行时状态超过 {TRAY_STATUS_TIMEOUT:?}，保持上一个图标"
+                    ),
+                }
+                probe_wanted = true;
+            }
+        }
+
+        apply_tray_state(&app, &mut current, manager_state, tun_running_known).await;
+
+        // 事件本身不告诉我们 TUN 在不在跑（那是另一条进程路径），状态可能变了
+        // 就补一次权威探测；在飞时不重复起。
+        if probe_wanted && !probing {
+            probe_wanted = false;
+            probing = true;
+            probe_started = Some(tokio::time::Instant::now());
+            kick_tun_probe(&tun, &probe_tx);
+        }
+    }
+}
+
+/// 起一次 TUN 探测，结果走 channel 回来。
+///
+/// `TunSession::status()` 是同步调用，缓存过期时会做一次最长 10 秒的特权助手探测：
+/// 必须放阻塞线程池，绝不在异步工作线程上直接跑。同一时刻只允许一个在飞，
+/// 否则每次超时都再起一个，迟早堆满阻塞线程池。
+fn kick_tun_probe(tun: &Arc<TunSession>, tx: &tokio::sync::mpsc::Sender<bool>) {
+    let probe_tun = Arc::clone(tun);
+    let tx = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = tx.blocking_send(tun_running(&probe_tun));
+    });
+}
+
+/// 合成并画托盘。两个来源都是「最近一次已知值」：状态没变时什么都不做。
+///
+/// manager 侧一次都没读到过（`None`）不直接放弃：TUN 的 sing-box 本来就不归 manager 管，
+/// TUN 明确在跑时托盘必须能独立点亮，否则 manager 一旦卡住，托盘就再也点不亮。
+async fn apply_tray_state<R: Runtime>(
+    app: &AppHandle<R>,
+    current: &mut Option<TrayState>,
+    manager_state: Option<RuntimeState>,
+    tun_running_known: Option<bool>,
+) {
+    let next = match (manager_state, tun_running_known) {
+        (Some(manager_state), _) => {
+            combined_tray_state(manager_state, tun_running_known.unwrap_or(false))
+        }
+        (None, Some(true)) => TrayState::Connected,
+        // manager 与 TUN 都不知道：不猜，保持现状。
+        (None, _) => return,
+    };
+    if *current == Some(next) {
+        return;
+    }
+    // 进入 Connected 那一跳用 info：真机验收时要能直接 grep 到，不必为看托盘开 debug。
+    if next == TrayState::Connected {
+        log::info!(
+            "托盘状态变化 {:?} → {next:?}（来源 manager={manager_state:?} tun_running={tun_running_known:?}）",
+            *current
+        );
+    } else {
+        log::debug!(
+            "托盘状态变化 {:?} → {next:?}（来源 manager={manager_state:?} tun_running={tun_running_known:?}）",
+            *current
+        );
+    }
+    *current = Some(next);
+    update_tray_icon(app.clone(), next).await;
 }
 
 fn tun_running(tun: &TunSession) -> bool {
@@ -527,14 +684,32 @@ fn tray_icon(state: TrayState) -> Image<'static> {
     Image::from_bytes(bytes).expect("内置托盘图标必须是合法 PNG")
 }
 
+/// 画图标。
+///
+/// Tauri 的 `set_icon_with_as_template` 内部把闭包丢给主线程并**一直等到它执行完**，
+/// 主线程一忙（弹窗、长任务），调用线程就停在那里。所以放到阻塞线程池并加超时：
+/// 拖住的是那一个线程，不是整条状态循环。
+async fn update_tray_icon<R: Runtime>(app: AppHandle<R>, state: TrayState) {
+    let painting = tokio::task::spawn_blocking(move || set_tray_icon(&app, state));
+    match tokio::time::timeout(TRAY_STATUS_TIMEOUT, painting).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!("托盘：更新图标的线程异常结束：{error}"),
+        Err(_) => log::warn!(
+            "托盘：更新图标超过 {TRAY_STATUS_TIMEOUT:?} 未完成（主线程可能被占用），状态={state:?}"
+        ),
+    }
+}
+
 fn set_tray_icon<R: Runtime>(app: &AppHandle<R>, state: TrayState) {
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        // 原子设置图标与 template：单独 set_icon 会丢掉 template，macOS 下会显示成黑块或闪烁。
-        if let Err(error) =
-            tray.set_icon_with_as_template(Some(tray_icon(state)), cfg!(target_os = "macos"))
-        {
-            log::warn!("更新托盘图标失败：{error}");
-        }
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        // 以前这里静默什么都不做：托盘不动时根本看不出是「拿不到句柄」。
+        log::warn!("托盘句柄缺失 id={TRAY_ID}，{state:?} 没能画上去");
+        return;
+    };
+    // 原子设置图标与 template：单独 set_icon 会丢掉 template，macOS 下会显示成黑块或闪烁。
+    match tray.set_icon_with_as_template(Some(tray_icon(state)), cfg!(target_os = "macos")) {
+        Ok(()) => log::debug!("托盘图标已更新 {state:?}"),
+        Err(error) => log::warn!("更新托盘图标失败 {state:?}：{error}"),
     }
 }
 
