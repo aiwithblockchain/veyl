@@ -3,6 +3,7 @@ import type {
   ConfigConnectMode,
   ConfigDetail,
   ConfigRouteMode,
+  NodeSummary,
   RuntimeView,
 } from "../agent/protocol";
 import type { VpnConnectionState } from "../config/useVpnSession";
@@ -27,6 +28,12 @@ interface Props {
   onStop: () => void;
   onReconnect: () => void;
   onSwitchNode: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 移除自定义节点（url / manual）；结果由行内确认区展示。 */
+  onRemoveNode?: (nodeId: string) => Promise<{
+    ok: boolean;
+    message?: string;
+    wasCurrent?: boolean;
+  }>;
   nodeProbes: NodeProbesController;
   /** 最近一次失败是否来自已连接态：决定失败标题。 */
   failedAfterConnected: boolean;
@@ -105,6 +112,7 @@ export function ConnectionStage({
   onStop,
   onReconnect,
   onSwitchNode,
+  onRemoveNode,
   nodeProbes,
   failedAfterConnected,
   helperPreparing,
@@ -138,10 +146,39 @@ export function ConnectionStage({
   const [now, setNow] = useState(() => Date.now());
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [confirmFor, setConfirmFor] = useState<{ id: string; name: string } | null>(
+    null,
+  );
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removedNotice, setRemovedNotice] = useState<string | null>(null);
+  const menuWrapRef = useRef<HTMLSpanElement | null>(null);
+  const moreButtonRef = useRef<HTMLButtonElement | null>(null);
+  const removedTimerRef = useRef<number | null>(null);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (menuFor === null) return;
+    const onDown = (event: MouseEvent) => {
+      if (menuWrapRef.current?.contains(event.target as Node)) return;
+      setMenuFor(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuFor]);
+
+  useEffect(
+    () => () => {
+      if (removedTimerRef.current !== null) {
+        window.clearTimeout(removedTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const degraded = runtime.state === "degraded";
@@ -353,6 +390,101 @@ export function ConnectionStage({
       ownTargetRef.current = null;
       setSwitchError(result.message ?? t("console.switchFailed"));
     }
+  };
+
+  const openRemoveConfirm = (node: NodeSummary, name: string) => {
+    setMenuFor(null);
+    setRemoveError(null);
+    setConfirmFor({ id: node.node_id, name });
+  };
+
+  const closeRemoveConfirm = () => {
+    setConfirmFor(null);
+    setRemoveError(null);
+    moreButtonRef.current?.focus();
+  };
+
+  const confirmRemove = async () => {
+    if (!confirmFor || !onRemoveNode || removeBusy) return;
+    const target = confirmFor;
+    setRemoveBusy(true);
+    setRemoveError(null);
+    const result = await onRemoveNode(target.id);
+    setRemoveBusy(false);
+    if (!result.ok) {
+      setRemoveError(result.message ?? t("console.node.removeFailed"));
+      return;
+    }
+    setConfirmFor(null);
+    if (removedTimerRef.current !== null) {
+      window.clearTimeout(removedTimerRef.current);
+    }
+    setRemovedNotice(t("console.node.removed", { name: target.name }));
+    removedTimerRef.current = window.setTimeout(
+      () => setRemovedNotice(null),
+      4000,
+    );
+  };
+
+  /** 自定义节点的「⋯ → 移除节点」。托管 / 免费节点不给入口。 */
+  const renderMore = (node: NodeSummary, name: string) => {
+    if (onRemoveNode === undefined) return null;
+    if (node.source !== "url" && node.source !== "manual") return null;
+    const open = menuFor === node.node_id;
+    return (
+      <span
+        className="stage-node__more-wrap"
+        ref={open ? menuWrapRef : undefined}
+      >
+        <button
+          type="button"
+          className="stage-node__more"
+          aria-label={t("console.node.more", { name })}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={(event) => {
+            event.stopPropagation();
+            moreButtonRef.current = event.currentTarget;
+            setConfirmFor(null);
+            setRemoveError(null);
+            setMenuFor(open ? null : node.node_id);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            setMenuFor(null);
+          }}
+        >
+          ⋯
+        </button>
+        {open ? (
+          <span
+            className="stage-node__menu"
+            role="menu"
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.stopPropagation();
+              setMenuFor(null);
+              moreButtonRef.current?.focus();
+            }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className="stage-node__menu-item"
+              autoFocus
+              onClick={(event) => {
+                event.stopPropagation();
+                openRemoveConfirm(node, name);
+              }}
+            >
+              {t("console.node.remove")}
+            </button>
+          </span>
+        ) : null}
+      </span>
+    );
   };
 
   const probeTitle = probeRunning
@@ -675,6 +807,7 @@ export function ConnectionStage({
             >
               {t("diagnosis.entry")}
             </button>
+            {renderMore(node, displayNames[index] ?? node.name)}
           </span>
         ) : canAskInRow ? (
           <span className="stage-node__actions">
@@ -705,14 +838,18 @@ export function ConnectionStage({
             >
               {t("console.node.askAi")}
             </button>
+            {renderMore(node, displayNames[index] ?? node.name)}
           </span>
         ) : dangling ? null : (
-          <span
-            className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
-            aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
-            title={probeError || undefined}
-          >
-            {msText}
+          <span className="stage-node__tail">
+            <span
+              className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
+              aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
+              title={probeError || undefined}
+            >
+              {msText}
+            </span>
+            {renderMore(node, displayNames[index] ?? node.name)}
           </span>
         )}
       </div>
@@ -894,10 +1031,74 @@ export function ConnectionStage({
               </>
             )}
           </div>
+          {confirmFor ? (
+            <div
+              className="stage-node-confirm"
+              role="alertdialog"
+              aria-labelledby="stage-node-remove-title"
+              aria-describedby="stage-node-remove-body"
+              onMouseDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                closeRemoveConfirm();
+              }}
+            >
+              <p
+                id="stage-node-remove-title"
+                className="stage-node-confirm__title"
+              >
+                {t("console.node.removeTitle", { name: confirmFor.name })}
+              </p>
+              <p
+                id="stage-node-remove-body"
+                className="stage-node-confirm__body"
+              >
+                {t("console.node.removeBody")}
+              </p>
+              {selectedId === confirmFor.id ? (
+                <p className="stage-node-confirm__body">
+                  {t("console.node.removeCurrent")}
+                </p>
+              ) : null}
+              {removeError ? (
+                <p className="stage-node-confirm__error" role="alert">
+                  {removeError}
+                </p>
+              ) : null}
+              <div className="stage-node-confirm__actions">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  autoFocus
+                  disabled={removeBusy}
+                  onClick={closeRemoveConfirm}
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger-ghost"
+                  disabled={removeBusy}
+                  onClick={() => void confirmRemove()}
+                >
+                  {removeBusy
+                    ? t("console.node.removing")
+                    : t("console.node.removeConfirm")}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
 
         {config !== null && nodes.length === 0 && pendingEntries.length === 0 ? (
           <p className="stage-note">{t("console.empty")}</p>
+        ) : null}
+
+        {removedNotice ? (
+          <p className="stage-note" role="status">
+            {removedNotice}
+          </p>
         ) : null}
 
         {showStaleConfig ? (

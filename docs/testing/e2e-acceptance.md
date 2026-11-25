@@ -1182,6 +1182,38 @@ grep -E '连接开始|连接完成|stop|start' "$APP_LOG" | tail -10
 
 ---
 
+### E2-05 移除自定义节点
+
+- **目的**：验证订阅（`url`）与手动（`manual`）节点能从这台电脑的节点池移除；移除当前节点会先断开；托管与免费节点不给入口、直调命令也被拒。
+- **前置条件**：节点卡里至少有一个订阅节点与一个手动节点（E2-01 / E2-04 产物）；另有一个托管节点或免费节点做反例；记下移除前的节点总数与 `nodes` 行数。
+- **步骤（人做）**
+  1. 选中一个订阅节点并连接，确认顶部显示「已连接」。
+  2. 悬停该节点行，点右侧 `⋯` → `移除节点`；确认框里应出现「当前正在使用，会先断开连接」。
+  3. 点确认；观察顶部连接状态与节点卡。
+  4. 对另一个手动节点重复一次（这次不连接），确认直接移除、无断开提示。
+  5. 在托管节点和免费节点行上悬停并点 `⋯`：不应出现「移除节点」这一项。
+  6. 重启应用，确认被移除的两个节点不再出现；随后刷新该订阅，确认订阅里的节点按文案说明重新出现。
+- **AI 取证**
+  ```bash
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select id, source from nodes order by source;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select node_id, count(*) from config_nodes group by node_id;"
+  sqlite3 -readonly "$HOME/.veyl/veyl.db" "select count(*) from config_nodes where node_id not in (select id from nodes);"
+  tail -n 120 "$APP_LOG" | grep -E 'node_removed|node_not_removable|runtime_stop|error|warn' | tail -10
+  ```
+  看什么：被移除的两个 `nodes` 行消失；`config_nodes` 里没有指向它们的行，悬空行计数为 0；日志里有 `runtime_stop`（移除当前节点那次）与 `node_deleted` 事件。
+- **可观察预期**
+  - 确认框只在用户点 `⋯` 后出现，就地展开，不弹系统框；标题带节点名，正文说明「只从这台电脑移除、订阅刷新还会回来」。
+  - 移除当前节点后顶部落回「未连接」，节点卡行数减一。
+  - 成功提示为一行「已移除」；失败只在该行显示错误，不整块变错误态。
+  - 托管与免费节点没有「移除节点」菜单项；绕过界面直调命令返回 `PRECONDITION_FAILED / node_not_removable`，且节点仍在。
+  - 中英文各过一遍；文案里不出现 config、pool、node_id 这类词。
+- **判定**
+  - [ ] 通过
+  - [ ] 失败
+- **失败时收集**：移除前后节点卡截图、确认框截图、SQL 输出、日志尾。
+
+---
+
 ## 3. 代理模式
 
 本章验证「只给一个代理地址」的连接方式：连接、状态、端口生效、断开后系统代理还原。代理模式**不需要管理员授权**。

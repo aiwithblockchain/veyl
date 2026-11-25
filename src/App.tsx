@@ -2114,6 +2114,24 @@ export default function App() {
     return vpn.switchNode(nodeId);
   };
 
+  /** 移除自定义节点：Host 先停当前隧道，成功后列表随 node-list-changed 重拉。 */
+  const handleRemoveNode = async (
+    nodeId: string,
+  ): Promise<{ ok: boolean; message?: string; wasCurrent?: boolean }> => {
+    lastActionRef.current = { id: "client.node_remove", value: nodeId };
+    try {
+      const result = await bridge.nodeRemove({ nodeId });
+      // 事件会刷新列表；这里再拉一次，保证 demo / 事件迟到时也不留旧行。
+      void vpn.reload();
+      return { ok: true, wasCurrent: result.wasCurrent };
+    } catch (error) {
+      return {
+        ok: false,
+        message: errorText(error, translate("console.node.removeFailed")),
+      };
+    }
+  };
+
   // 连接页行内「问 AI」（非自有节点）：只发固定提示，不做修复。
   const handleAskAiAboutNode = (_nodeId: string, prompt: string) => {
     askAiInPanel(prompt);
@@ -3217,6 +3235,7 @@ export default function App() {
           onStop={() => void handleVpnStop()}
           onReconnect={handleVpnReconnect}
           onSwitchNode={handleSwitchNode}
+          onRemoveNode={handleRemoveNode}
           nodeProbes={nodeProbes}
           failedAfterConnected={failedAfterConnected}
           helperPreparing={vpn.preparingHelper}

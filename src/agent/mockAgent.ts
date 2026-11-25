@@ -65,6 +65,8 @@ import type {
   NodeAttachResult,
   NodeForgetInput,
   NodeForgetResult,
+  NodeRemoveInput,
+  NodeRemoveResult,
   NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
@@ -2247,6 +2249,74 @@ export class MockAgentBridge implements AgentBridge {
     } catch {
       return { forgotten: false };
     }
+  }
+
+  async nodeRemove(input: NodeRemoveInput): Promise<NodeRemoveResult> {
+    await sleep(150);
+    const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+    if (!raw) {
+      throw {
+        code: "NOT_FOUND",
+        message: "",
+        details: { reason: "node_not_found" },
+      };
+    }
+    const store = JSON.parse(raw) as {
+      configs?: ConfigDetail[];
+      activeId?: string | null;
+    };
+    let target: NodeSummary | null = null;
+    for (const config of store.configs ?? []) {
+      const found = (config.nodes ?? []).find(
+        (node) => node.node_id === input.nodeId,
+      );
+      if (found) {
+        target = found;
+        break;
+      }
+    }
+    if (!target) {
+      throw {
+        code: "NOT_FOUND",
+        message: "",
+        details: { reason: "node_not_found" },
+      };
+    }
+    if (target.source !== "url" && target.source !== "manual") {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "",
+        details: { reason: "node_not_removable", source: target.source },
+      };
+    }
+
+    let wasCurrent = false;
+    let total = 0;
+    for (const config of store.configs ?? []) {
+      const nodes = config.nodes ?? [];
+      config.nodes = nodes.filter((node) => node.node_id !== input.nodeId);
+      config.node_count = config.nodes.length;
+      if (config.current_node_id === input.nodeId) {
+        config.current_node_id = null;
+        if (config.config_id === store.activeId) wasCurrent = true;
+      }
+      total += config.nodes.length;
+    }
+    localStorage.setItem(MOCK_CONFIG_STORAGE_KEY, JSON.stringify(store));
+    // 真实 Host 删当前节点前会先停运行时；demo 里同样落回未连接，不能停在「已连接」。
+    if (wasCurrent) await this.runtimeStop();
+    this.emit({
+      name: AGENT_EVENTS.nodeListChanged,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        reason: "node_deleted",
+        config_id: null,
+        node_count_total: total,
+        changed_node_ids: [input.nodeId],
+        emitted_at: now(),
+      },
+    });
+    return { removed: true, wasCurrent };
   }
 
   async nodeImportUrl(url: string): Promise<NodeImportResult> {

@@ -1,7 +1,7 @@
 # 移除自定义节点（订阅 / 手动）
 
 > 日期：2026-11-24
-> 状态：**待实现**。含一条需要新增的 Host 命令与契约版本变更。
+> 状态：**已实现**（2026-11-25）。含一条新增的 Host 命令与契约版本变更。
 > 触发：连接页现在没有任何移除 `url` / `manual` 节点的入口，用户加错一个节点就永久留在列表里。
 > 相关：`docs/design/node-list-grouping.md`（三组显示）、`docs/design/node-import-ui.md`（手动添加）。
 
@@ -27,7 +27,7 @@
 | 唯一的删除入口是托管节点的停机墓碑 | `src-tauri/src/agent/commands.rs:930` `node_forget` → `forget_owned_node`，前提是有对应 server |
 | 界面没有任何调用 | `bridge.nodeForget` 无组件使用 |
 
-也就是说：**`delete_node` 单独调用会留下 `config_nodes` 的悬空行**，运行配置重建时会撞上「节点不存在」的路径。所以新命令必须在一个事务里同时清掉关联。
+也就是说：**只调 `delete_node` 依赖外键级联清关联**。`001_init.sql` 的 `config_nodes.node_id` 确实带 `ON DELETE CASCADE`，且连接上 `foreign_keys = ON`，所以单纯删 `nodes` 不会留下悬空行；但外键开关是连接级设置，新命令仍在一个事务里**显式**删 `config_nodes` 再删 `nodes`，让行为不依赖调用方。
 
 ---
 
@@ -65,7 +65,7 @@ node_remove { nodeId: string } -> { removed: boolean, wasCurrent: boolean }
 
 ## 4. 契约
 
-- `commands.md` 新增一条命令，升小版本（当前 2.66.0 → 2.67.0），变更表写一行。
+- `commands.md` 新增一条命令，升小版本（当前 2.67.0 → 2.68.0），变更表写一行。
 - `tools.md`：**不新增 AI 工具**。AI 没有删除节点的能力是刻意的——删节点会改变用户的连接选择，属于界面动作。
 - `commands.md` §12/§13 的命令 → 工具映射里这一条写「无 AI 工具」。
 

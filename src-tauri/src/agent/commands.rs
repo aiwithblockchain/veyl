@@ -957,6 +957,146 @@ pub async fn node_forget(state: State<'_, Arc<AppState>>, node_id: String) -> Re
     .await
 }
 
+/// 移除自定义节点（`source = url / manual`）。仅 UI；托管与免费节点不受理。
+#[tauri::command]
+pub async fn node_remove(
+    state: State<'_, Arc<AppState>>,
+    node_id: String,
+) -> Result<Value, Value> {
+    let Some(store) = crate::store::global().cloned() else {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "INTERNAL",
+            "message": "",
+            "retryable": true,
+            "details": { "reason": "store_unavailable" },
+            "request_id": "",
+        }));
+    };
+
+    let state = state.inner().clone();
+    remove_custom_node(&store, &node_id, || async {
+        if super::server_watch::runtime_is_live(&state).await {
+            if let Err(error) = state.services.runtime_stop(false).await {
+                log::warn!("移除节点前停止运行时失败：{error}");
+            }
+        }
+    })
+    .await
+}
+
+/// `node_remove` 的可测主体：`pause` 由调用方注入，测试不碰运行时。
+pub(crate) async fn remove_custom_node<P, PF>(
+    store: &crate::store::Store,
+    node_id: &str,
+    pause: P,
+) -> Result<Value, Value>
+where
+    P: Fn() -> PF,
+    PF: std::future::Future<Output = ()>,
+{
+    let (source, password_ref, was_current) = {
+        let conn = store.conn();
+        let node = match crate::store::configs::get_node(&conn, node_id) {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "NOT_FOUND",
+                    "message": "",
+                    "retryable": false,
+                    "details": { "reason": "node_not_found" },
+                    "request_id": "",
+                }));
+            }
+            Err(error) => {
+                log::warn!("读取本地节点失败：{error}");
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INTERNAL",
+                    "message": "",
+                    "retryable": true,
+                    "details": { "reason": "store_error" },
+                    "request_id": "",
+                }));
+            }
+        };
+        // 读不到当前配置就不知道这条节点是否正在连着：吞错会跳过停隧道再删掉它。
+        let current = match crate::store::configs::active(&conn) {
+            Ok(config) => config.and_then(|config| config.current_node_id),
+            Err(error) => {
+                log::warn!("读取当前配置失败：{error}");
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INTERNAL",
+                    "message": "",
+                    "retryable": true,
+                    "details": { "reason": "store_error" },
+                    "request_id": "",
+                }));
+            }
+        };
+        (node.source, node.password_ref, current.as_deref() == Some(node_id))
+    };
+
+    if source != crate::store::configs::SOURCE_URL
+        && source != crate::store::configs::SOURCE_MANUAL
+    {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "PRECONDITION_FAILED",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "node_not_removable", "source": source },
+            "request_id": "",
+        }));
+    }
+
+    // 当前节点先停隧道：删除后 current_node_id 会被置空，不能留一条指向不存在节点的连接。
+    if was_current {
+        pause().await;
+    }
+
+    let removed = {
+        let conn = store.conn();
+        match crate::store::configs::remove_node(&conn, node_id) {
+            Ok(removed) => removed,
+            Err(error) => {
+                log::warn!("删除本地节点失败 node={node_id}：{error}");
+                return Err(json!({
+                    "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+                    "code": "INTERNAL",
+                    "message": "",
+                    "retryable": true,
+                    "details": { "reason": "store_error" },
+                    "request_id": "",
+                }));
+            }
+        }
+    };
+    if !removed {
+        return Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": "NOT_FOUND",
+            "message": "",
+            "retryable": false,
+            "details": { "reason": "node_not_found" },
+            "request_id": "",
+        }));
+    }
+
+    // 节点行已删，密码不再有任何引用；删不掉只记日志，不让命令失败。
+    if !password_ref.is_empty() {
+        if let Err(error) = crate::secrets::delete_secret(&password_ref) {
+            log::warn!("删除节点密码失败 node={node_id}：{error}");
+        }
+    }
+
+    let changed = [node_id.to_string()];
+    crate::seed::emit_node_list_changed(store, "node_deleted", None, &changed);
+    Ok(json!({ "removed": true, "was_current": was_current }))
+}
+
 /// `node_forget` 的可测主体：`dismiss` 与 `pause` 由调用方注入，测试不碰网络与运行时。
 pub(crate) async fn forget_owned_node<D, DF, P, PF>(
     store: &crate::store::Store,
@@ -973,7 +1113,7 @@ where
     // 只允许删自己名下（source = 'owned'）的节点：种子 / 手动节点有别的清理路径，
     // 这个命令只服务于「余额不足停机」留下的墓碑。
     // `source_key` 就是控制面服务器 id：镜像行缺失时也靠它找到要 dismiss 的服务器。
-    let dismiss_ids = {
+    let (dismiss_ids, password_ref) = {
         let conn = store.conn();
         let node = match crate::store::configs::get_node(&conn, node_id) {
             Ok(Some(node)) => node,
@@ -1010,7 +1150,7 @@ where
         if !node.source_key.is_empty() && !ids.iter().any(|id| id == &node.source_key) {
             ids.push(node.source_key.clone());
         }
-        ids
+        (ids, node.password_ref)
     };
 
     // 控制面先落定：任何一台没被忽略都整体失败，本地一行都不动（可重试）。
@@ -1084,6 +1224,11 @@ where
     };
 
     if removed {
+        if !password_ref.is_empty() {
+            if let Err(error) = crate::secrets::delete_secret(&password_ref) {
+                log::warn!("删除节点密码失败 node={node_id}：{error}");
+            }
+        }
         let changed = [node_id.to_string()];
         crate::seed::emit_node_list_changed(store, "node_deleted", None, &changed);
     }
@@ -3767,6 +3912,148 @@ mod node_forget_tests {
             None,
             "删节点后 current_node_id 由外键置 NULL"
         );
+    }
+}
+
+#[cfg(test)]
+mod node_remove_tests {
+    use super::remove_custom_node;
+    use crate::store::configs::{
+        self, NewConfig, NewNode, SOURCE_MANUAL, SOURCE_OWNED, SOURCE_SEED, SOURCE_URL,
+    };
+    use crate::store::Store;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn seeded(source: &'static str, current: bool) -> Store {
+        let store = Store::open_in_memory().unwrap();
+        {
+            let conn = store.conn();
+            let dns = json!({ "mode": "auto", "local": [], "remote": [] });
+            let excludes = json!([]);
+            configs::create(
+                &conn,
+                &NewConfig {
+                    id: "cfg_1",
+                    name: "默认配置",
+                    connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: configs::ROUTING_PROXY_ALL,
+                    listen_port: Some(7890),
+                    dns: &dns,
+                    tun_excludes: &excludes,
+                },
+            )
+            .unwrap();
+            configs::upsert_node(
+                &conn,
+                &NewNode {
+                    id: "nd_1",
+                    name: "节点",
+                    server: "203.0.113.9",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nd_1",
+                    source,
+                    source_key: "key_1",
+                },
+            )
+            .unwrap();
+            configs::activate(&conn, "cfg_1").unwrap();
+            configs::attach_node(&conn, "cfg_1", "nd_1").unwrap();
+            if current {
+                conn.execute(
+                    "UPDATE configs SET current_node_id = 'nd_1' WHERE id = 'cfg_1'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn a_current_url_node_is_removed_after_pausing_the_tunnel() {
+        let store = seeded(SOURCE_URL, true);
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let pauses_in = Arc::clone(&pauses);
+
+        let value = remove_custom_node(&store, "nd_1", move || {
+            let pauses = Arc::clone(&pauses_in);
+            async move {
+                pauses.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value["removed"], true);
+        assert_eq!(value["was_current"], true);
+        assert_eq!(pauses.load(Ordering::SeqCst), 1);
+        let conn = store.conn();
+        assert!(configs::get_node(&conn, "nd_1").unwrap().is_none());
+        assert!(configs::list_nodes(&conn, "cfg_1").unwrap().is_empty());
+        assert_eq!(
+            configs::active(&conn).unwrap().unwrap().current_node_id,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_manual_node_that_is_not_current_is_removed_without_pausing() {
+        let store = seeded(SOURCE_MANUAL, false);
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let pauses_in = Arc::clone(&pauses);
+
+        let value = remove_custom_node(&store, "nd_1", move || {
+            let pauses = Arc::clone(&pauses_in);
+            async move {
+                pauses.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value["removed"], true);
+        assert_eq!(value["was_current"], false);
+        assert_eq!(pauses.load(Ordering::SeqCst), 0);
+        assert!(configs::get_node(&store.conn(), "nd_1").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn seed_and_owned_nodes_are_rejected_and_left_in_place() {
+        for source in [SOURCE_SEED, SOURCE_OWNED] {
+            let store = seeded(source, false);
+            let pauses = Arc::new(AtomicUsize::new(0));
+            let pauses_in = Arc::clone(&pauses);
+
+            let error = remove_custom_node(&store, "nd_1", move || {
+                let pauses = Arc::clone(&pauses_in);
+                async move {
+                    pauses.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(error["code"], "PRECONDITION_FAILED");
+            assert_eq!(error["details"]["reason"], "node_not_removable");
+            assert_eq!(error["details"]["source"], source);
+            assert_eq!(pauses.load(Ordering::SeqCst), 0);
+            assert!(configs::get_node(&store.conn(), "nd_1").unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_node_is_not_found() {
+        let store = seeded(SOURCE_URL, false);
+
+        let error = remove_custom_node(&store, "nd_missing", || async {})
+            .await
+            .unwrap_err();
+
+        assert_eq!(error["code"], "NOT_FOUND");
+        assert_eq!(error["details"]["reason"], "node_not_found");
     }
 }
 

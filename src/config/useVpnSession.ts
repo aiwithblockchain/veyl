@@ -399,6 +399,21 @@ export function useVpnSession(
       const store = readMock();
       mockStore.current = store;
       applyMock(store);
+      // 当前节点被移除后活动配置已经没有可连的节点：演示里的连接态跟着落回未连接。
+      const active = store.configs.find(
+        (config) => config.config_id === store.activeId,
+      );
+      if (
+        connectedConfigId !== null &&
+        connectedConfigId === store.activeId &&
+        !active?.current_node_id
+      ) {
+        clearTimer();
+        pendingConfigIdRef.current = null;
+        setConnection("idle");
+        setConnectedConfigId(null);
+        setStartingConfigId(null);
+      }
       return;
     }
     setLoading(true);
@@ -406,7 +421,7 @@ export function useVpnSession(
     void refreshReal().finally(() => {
       if (!disposed.current) setLoading(false);
     });
-  }, [mock, applyMock, refreshReal]);
+  }, [mock, applyMock, refreshReal, connectedConfigId]);
 
   useEffect(() => {
     if (mock) return;

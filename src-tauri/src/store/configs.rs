@@ -671,6 +671,18 @@ pub fn delete_node(conn: &Connection, id: &str) -> StoreResult<bool> {
     Ok(changed > 0)
 }
 
+/// 删除本地节点及其全部配置关联（一个事务）。
+///
+/// `config_nodes` 有 `ON DELETE CASCADE`，但外键开关是连接级设置；这里显式清关联，
+/// 让「不会留下悬空绑定」不依赖调用方是否打开了外键。
+pub fn remove_node(conn: &Connection, id: &str) -> StoreResult<bool> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM config_nodes WHERE node_id = ?1", params![id])?;
+    let changed = tx.execute("DELETE FROM nodes WHERE id = ?1", params![id])?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
 /// 把本地节点行的显示名同步成服务器名（`my_server_rename` 后调用）。
 ///
 /// **只改展示用字段**：不触发配置重建、不碰运行时——正在连着的人不该因为
@@ -1198,6 +1210,40 @@ mod tests {
         delete(&conn, "cfg_1").unwrap();
         assert_eq!(list_nodes(&conn, "cfg_2").unwrap().len(), 1);
         assert!(get_node(&conn, "node_1").unwrap().is_some());
+    }
+
+    #[test]
+    fn remove_node_deletes_the_node_and_every_binding() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        create(&conn, &config("cfg_1", "A")).unwrap();
+        create(&conn, &config("cfg_2", "B")).unwrap();
+        upsert_node(&conn, &node("node_1", "203.0.113.10")).unwrap();
+        attach_node(&conn, "cfg_1", "node_1").unwrap();
+        attach_node(&conn, "cfg_2", "node_1").unwrap();
+        conn.execute(
+            "UPDATE configs SET current_node_id = 'node_1' WHERE id = 'cfg_1'",
+            [],
+        )
+        .unwrap();
+
+        assert!(remove_node(&conn, "node_1").unwrap());
+        assert!(get_node(&conn, "node_1").unwrap().is_none());
+        assert!(list_nodes(&conn, "cfg_1").unwrap().is_empty());
+        assert!(list_nodes(&conn, "cfg_2").unwrap().is_empty());
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM config_nodes WHERE node_id = 'node_1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+        assert_eq!(
+            get(&conn, "cfg_1").unwrap().unwrap().current_node_id,
+            None
+        );
+        assert!(!remove_node(&conn, "node_1").unwrap());
     }
 
     /// 改服务器名只同步节点行的显示名：连接参数与创建时刻不动。

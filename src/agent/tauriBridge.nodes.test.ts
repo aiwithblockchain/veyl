@@ -167,3 +167,15 @@ describe("新建配置用到的节点命令", () => {
     });
   });
 });
+
+describe("移除自定义节点", () => {
+  it("node_remove 传 nodeId 并把 was_current 归一化成 wasCurrent", async () => {
+    invoke.mockResolvedValueOnce({ removed: true, was_current: true });
+    const bridge = new TauriAgentBridge();
+
+    const result = await bridge.nodeRemove({ nodeId: "nd_1" });
+
+    expect(invoke).toHaveBeenCalledWith("node_remove", { nodeId: "nd_1" });
+    expect(result).toEqual({ removed: true, wasCurrent: true });
+  });
+});

@@ -608,6 +608,17 @@ export interface NodeForgetResult {
   forgotten: boolean;
 }
 
+/** 移除自定义节点（`node_remove`，仅 UI）：只接受 source = url / manual。 */
+export interface NodeRemoveInput {
+  nodeId: string;
+}
+
+export interface NodeRemoveResult {
+  removed: boolean;
+  /** 删的是当前连接节点：Host 已先停运行时。 */
+  wasCurrent: boolean;
+}
+
 /** 服务分类（commands.md §10.7）。`proxy_selected` 的 targets 只能取这里的 id。 */
 export interface Category {
   id: string;

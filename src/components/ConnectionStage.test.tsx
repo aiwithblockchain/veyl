@@ -150,6 +150,11 @@ interface StageOverrides {
   onReconnect?: () => void;
   failedAfterConnected?: boolean;
   onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
+  onRemoveNode?: (nodeId: string) => Promise<{
+    ok: boolean;
+    message?: string;
+    wasCurrent?: boolean;
+  }>;
   preselect?: {
     configId: string;
     nodeId: string;
@@ -198,6 +203,7 @@ function stageElement(over: StageOverrides = {}) {
       onStop={over.onStop ?? vi.fn()}
       onReconnect={over.onReconnect ?? vi.fn()}
       onSwitchNode={over.onSwitchNode ?? (async () => ({ ok: true }))}
+      onRemoveNode={over.onRemoveNode}
       nodeProbes={over.nodeProbes ?? probes()}
       failedAfterConnected={over.failedAfterConnected ?? false}
       helperPreparing={false}
@@ -2549,5 +2555,96 @@ describe("自定义节点标记", () => {
     renderStage({ config: withSource("seed") });
 
     expect(customTag()).toBeNull();
+  });
+});
+
+describe("自定义节点移除", () => {
+  const CUSTOM_CONFIG: ConfigDetail = {
+    ...CONFIG,
+    node_count: 3,
+    current_node_id: "n3",
+    nodes: [
+      CONFIG.nodes[0],
+      {
+        node_id: "n2",
+        name: "托管 01",
+        server: "203.0.113.3",
+        port: 8388,
+        method: "aes-256-gcm",
+        protocol: "shadowsocks",
+        source: "owned",
+        created_at: 0,
+      },
+      {
+        node_id: "n3",
+        name: "美国 01",
+        server: "203.0.113.4",
+        port: 8388,
+        method: "aes-256-gcm",
+        protocol: "shadowsocks",
+        source: "url",
+        created_at: 0,
+      },
+    ],
+  };
+
+  it("只有 url / manual 节点有「更多」入口", () => {
+    renderStage({ config: CUSTOM_CONFIG, onRemoveNode: vi.fn() });
+
+    expect(
+      screen.getByRole("button", { name: "更多操作：美国 01" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "更多操作：托管 01" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "更多操作：东京 01" })).toBeNull();
+  });
+
+  it("菜单 → 就地确认 → 移除成功", async () => {
+    const onRemoveNode = vi.fn(async () => ({ ok: true, wasCurrent: true }));
+    renderStage({ config: CUSTOM_CONFIG, onRemoveNode });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作：美国 01" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "移除节点" }));
+
+    const dialog = screen.getByRole("alertdialog");
+    expect(within(dialog).getByText("移除「美国 01」？")).toBeTruthy();
+    expect(
+      within(dialog).getByText(/只从这台电脑的节点池移除/),
+    ).toBeTruthy();
+    expect(
+      within(dialog).getByText("当前正在使用，会先断开连接。"),
+    ).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "移除" }));
+
+    await waitFor(() => expect(onRemoveNode).toHaveBeenCalledWith("n3"));
+    expect(await screen.findByText("已移除「美国 01」")).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("移除失败留在确认区，错误就地显示", async () => {
+    const onRemoveNode = vi.fn(async () => ({
+      ok: false,
+      message: "没能移除，稍后再试。",
+    }));
+    renderStage({ config: CUSTOM_CONFIG, onRemoveNode });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作：美国 01" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "移除节点" }));
+    fireEvent.click(screen.getByRole("button", { name: "移除" }));
+
+    expect(await screen.findByText("没能移除，稍后再试。")).toBeTruthy();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+
+  it("取消不调用移除", () => {
+    const onRemoveNode = vi.fn();
+    renderStage({ config: CUSTOM_CONFIG, onRemoveNode });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作：美国 01" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "移除节点" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(onRemoveNode).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 });

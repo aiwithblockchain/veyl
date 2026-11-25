@@ -1,5 +1,9 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  MOCK_CONFIG_STORAGE_KEY,
+  createMockConfig,
+} from "../config/model";
 import { MockAgentBridge } from "./mockAgent";
 
 let bridge: MockAgentBridge | null = null;
@@ -61,8 +65,33 @@ describe("浏览器演示用的节点命令", () => {
     });
   });
 
-  it("服务目录可搜索", async () => {
-    const all = await bridge!.categoryList();
+  it("移除当前节点会先结束连接，并回报 wasCurrent", async () => {
+    const node = await bridge!.nodeCreate({
+      name: "自建",
+      server: "203.0.113.9",
+      port: 8388,
+      method: "aes-256-gcm",
+      password: "secret",
+    });
+    const config = createMockConfig("本机", "system_proxy", {
+      nodeIds: [node.node_id],
+    });
+    config.current_node_id = node.node_id;
+    localStorage.setItem(
+      MOCK_CONFIG_STORAGE_KEY,
+      JSON.stringify({ configs: [config], activeId: config.config_id }),
+    );
+
+    await bridge!.runtimeStart(config.config_id);
+    expect((await bridge!.getRuntimeSnapshot())?.state).not.toBe("idle");
+
+    const result = await bridge!.nodeRemove({ nodeId: node.node_id });
+
+    expect(result).toEqual({ removed: true, wasCurrent: true });
+    expect((await bridge!.getRuntimeSnapshot())?.state).toBe("idle");
+  });
+
+  it("服务目录可搜索", async () => {    const all = await bridge!.categoryList();
     expect(all.categories.length).toBeGreaterThan(3);
     const filtered = await bridge!.categoryList("chat");
     expect(filtered.categories.map((category) => category.id)).toEqual(["chatgpt"]);
