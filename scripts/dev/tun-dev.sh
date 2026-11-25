@@ -330,6 +330,18 @@ if [ -n "$RUNNING_PIDS" ]; then
     if [ -n "$REMAINING" ]; then
       die "结束旧实例失败（PID：$(printf '%s' "$REMAINING" | tr '\n' ' ')）。先手动退出再重试。"
     fi
+    # ---- 租约/隧道时序（2026-11-25 定，改这里之前先看完） ----
+    # TERM 旧 App 的那一刻内核就关掉它的 presence 租约，helper 随即开始
+    # LEASE_LOSS_GRACE（20 秒）倒计时；倒计时里没有新租约就停隧道并退出。
+    # 所以「装包 → 拉起新 App」必须在这 20 秒内完成，新 App 启动最早的后台
+    # 动作就是登记 presence 租约，helper 一看到租约就撤销拆隧判定。
+    #
+    # 这里**不 bootout / 不 kill helper**：那会立刻拆掉用户正在用的隧道，
+    # 也正是本脚本开头承诺不做的事（App 退出不等于隧道结束）。安装只替换磁盘
+    # 文件，运行中的 helper 仍持有旧映像继续服务；新 App 的静默升级会等隧道
+    # 断开后再换 helper（helper_update.rs 的 pending-until-disconnect）。
+    # 如果哪天这条链路变慢（构建/签名挪到这里之后），20 秒会被顶穿，
+    # 隧道会被当成「App 真没了」回收。
   else
     die "$PRODUCT 正在运行（PID：$(printf '%s' "$RUNNING_PIDS" | tr '\n' ' ')）。
   先退出 App（菜单里「退出 Veyl」），或加 --kill-existing 让脚本结束它。"

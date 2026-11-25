@@ -49,8 +49,14 @@ const RESTART_EXIT_CODE: i32 = 75;
 /// 0 是正常退出，`KeepAlive.SuccessfulExit=false` 不会把它拉起来。
 const IDLE_EXIT_AFTER: Duration = Duration::from_secs(10 * 60);
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-/// 租约断开后等多久再停隧道：给 App 重连/重启留出窗口。
-const LEASE_LOSS_GRACE: Duration = Duration::from_secs(5);
+/// 租约断开后等多久再停隧道：给 App 重启/重连留出窗口。
+///
+/// 20 秒的依据（2026-11-25 实测）：App 冷启动约 3.2 秒，再叠加后台登记租约的
+/// 偏差；原来的 5 秒只要新 App 晚到 0.69 秒就会把用户正在用的隧道拆掉，启动
+/// 自检/测速恰好裁决在拆卸瞬间。20 秒覆盖慢启动（首次安装、debug 构建、磁盘
+/// 忙）与 `tun-dev.sh --kill-existing` 重建，同时把「App 真没了」的回收上界
+/// 控制在可接受范围内。App 侧已经把 presence 登记提到启动最前面，这里只是兜底。
+const LEASE_LOSS_GRACE: Duration = Duration::from_secs(20);
 /// 连接期复核系统 DNS 的最小间隔：`status` 是轮询热路径，`scutil` 要起进程。
 const DNS_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -75,6 +81,9 @@ enum LeaseLossAction {
 }
 
 /// `generation_changed`：租约断开后又有新的 start（新实例接手），不能动它。
+/// `start_in_progress`：租约断开时已经有一次 start 正在跑（它先于断开开始，
+/// 所以 generation 没变）。这时拆隧道等于把别人正在建的东西拆掉，等它跑完
+/// 再判（调用方负责下一轮）。
 ///
 /// 已知限制：另一个实例存活（租约非空）但不再新建连接时，崩溃方留下的隧道
 /// 会一直残留到该实例退出或发起下一次 start。受 macOS 单实例约束，正常路径
@@ -84,8 +93,9 @@ fn lease_loss_action(
     leases: usize,
     running: bool,
     generation_changed: bool,
+    start_in_progress: bool,
 ) -> LeaseLossAction {
-    if generation_changed || leases > 0 {
+    if generation_changed || start_in_progress || leases > 0 {
         LeaseLossAction::Ignore
     } else if running {
         LeaseLossAction::StopAndExit
@@ -492,34 +502,50 @@ fn handle_message(
         },
         "status" => {
             let status = supervisor.status();
-            unsafe { xpc::dict_set_bool(reply, "ok", true) };
-            unsafe { xpc::dict_set_bool(reply, "running", status.is_some()) };
-            if let Some(build) = helper_build() {
-                unsafe { xpc::dict_set_string(reply, "helper_build", build) };
-            }
-            unsafe {
-                xpc::dict_set_string(reply, "helper_version", env!("CARGO_PKG_VERSION"))
-            };
-            match status {
-                Some(running) => {
-                    unsafe { xpc::dict_set_int64(reply, "pid", running.pid as i64) };
-                    unsafe { xpc::dict_set_string(reply, "clash_addr", &running.clash_addr) };
-                    unsafe { xpc::dict_set_string(reply, "clash_secret", &running.clash_secret) };
-                    unsafe { xpc::dict_set_string(reply, "since", &running.since) };
-                    // DNS 接管结果随之回报：设置失败时界面要能说「国外网站可能较慢」。
-                    if let Some(dns) = supervisor.last_dns() {
-                        unsafe { xpc::dict_set_bool(reply, "dns_applied", dns.applied) };
-                        if let Some(reason) = &dns.reason {
-                            unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
+            // 最后一条 presence 租约已断开、宽限期正在走：明确拒绝，告诉 App
+            // 「这条隧道即将被拆」。复用既有的 precondition_failed 码，不新增
+            // 字段：App 侧对 Err 的处理本来就是「不 adopt、下次再探」，而报
+            // running=true 会让它把一条正在被拆的隧道当已连接（2026-11-25）。
+            if status.is_some()
+                && supervisor.shutting_down_pending()
+                && supervisor.lease_count() == 0
+            {
+                Err(ProtocolError::new(
+                    protocol::ERR_PRECONDITION_FAILED,
+                    "presence 租约已断开，隧道将在宽限期结束后停止",
+                ))
+            } else {
+                unsafe { xpc::dict_set_bool(reply, "ok", true) };
+                unsafe { xpc::dict_set_bool(reply, "running", status.is_some()) };
+                if let Some(build) = helper_build() {
+                    unsafe { xpc::dict_set_string(reply, "helper_build", build) };
+                }
+                unsafe {
+                    xpc::dict_set_string(reply, "helper_version", env!("CARGO_PKG_VERSION"))
+                };
+                match status {
+                    Some(running) => {
+                        unsafe { xpc::dict_set_int64(reply, "pid", running.pid as i64) };
+                        unsafe { xpc::dict_set_string(reply, "clash_addr", &running.clash_addr) };
+                        unsafe {
+                            xpc::dict_set_string(reply, "clash_secret", &running.clash_secret)
+                        };
+                        unsafe { xpc::dict_set_string(reply, "since", &running.since) };
+                        // DNS 接管结果随之回报：设置失败时界面要能说「国外网站可能较慢」。
+                        if let Some(dns) = supervisor.last_dns() {
+                            unsafe { xpc::dict_set_bool(reply, "dns_applied", dns.applied) };
+                            if let Some(reason) = &dns.reason {
+                                unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
+                            }
                         }
                     }
+                    // 未运行时三项都不写，客户端按缺失处理成 null（契约 §3.2）。
+                    None => {
+                        unsafe { xpc::dict_set_int64(reply, "pid", 0) };
+                    }
                 }
-                // 未运行时三项都不写，客户端按缺失处理成 null（契约 §3.2）。
-                None => {
-                    unsafe { xpc::dict_set_int64(reply, "pid", 0) };
-                }
+                Ok(())
             }
-            Ok(())
         }
         other => Err(ProtocolError::new(
             protocol::ERR_BAD_REQUEST,
@@ -647,30 +673,56 @@ impl Drop for RequestGuard<'_> {
     }
 }
 
-/// presence 租约断开后等 5 秒再判：期间 App 重启/重连会重新登记租约。
+/// presence 租约断开后等宽限期再判：期间 App 重启/重连会重新登记租约。
 ///
 /// 租约是 **App 启动到退出** 的存活信号：没有新租约说明 App 已经不在了。
 /// 还有隧道就先停，然后正常退出（0）；KeepAlive 不会拉起，下一次请求由
 /// launchd 按需启动。
+///
+/// 等待期间 helper 会置 `shutting_down`：这时 `status` 回 `precondition_failed`，
+/// 新启动的 App 不会把一条**即将被拆**的隧道 adopt 成「已连接」。新租约一旦
+/// 登记就撤销这个状态（判定的线程看到租约会 Ignore）。
 fn spawn_lease_loss_check(supervisor: &Arc<Supervisor>, generation: u64) {
     let supervisor = Arc::clone(supervisor);
     std::thread::spawn(move || {
-        std::thread::sleep(LEASE_LOSS_GRACE);
-        let leases = supervisor.lease_count();
-        let running = supervisor.status().is_some();
-        let generation_changed = supervisor.generation.load(Ordering::SeqCst) != generation;
-        match lease_loss_action(leases, running, generation_changed) {
-            LeaseLossAction::Ignore => {}
-            LeaseLossAction::StopAndExit => {
-                supervisor.note("[diag] presence 租约断开且无新租约，停止隧道后退出");
-                supervisor.stop_child("lease_lost");
-                clear_start_record(&supervisor.root);
-                std::process::exit(0);
-            }
-            LeaseLossAction::Exit => {
-                supervisor.note("[diag] presence 租约断开且无隧道，退出");
-                clear_start_record(&supervisor.root);
-                std::process::exit(0);
+        // 换租约（先建新再放旧）也会触发一次 invalidation，但那时租约集合非空，
+        // 不能因此把「正在关闭」挂出去。
+        if supervisor.lease_count() == 0 {
+            supervisor.mark_shutting_down(true);
+            supervisor.note(&format!(
+                "[diag] presence 租约断开，进入 {} 秒宽限",
+                LEASE_LOSS_GRACE.as_secs()
+            ));
+        }
+        loop {
+            std::thread::sleep(LEASE_LOSS_GRACE);
+            // start 进行中先不判：它可能先于断开开始（generation 没变），
+            // 拆隧道会把别人正在建的东西拆掉。锁一直持到本轮结论之后，
+            // 新的 start 排队等这一轮。
+            let start_guard = supervisor.start_lock.try_lock();
+            let start_in_progress = start_guard.is_err();
+            let leases = supervisor.lease_count();
+            let running = supervisor.status().is_some();
+            let generation_changed = supervisor.generation.load(Ordering::SeqCst) != generation;
+            match lease_loss_action(leases, running, generation_changed, start_in_progress) {
+                // start 还在跑：保持「正在关闭」，下一轮再判。
+                LeaseLossAction::Ignore if start_in_progress => continue,
+                LeaseLossAction::Ignore => {
+                    // 新租约/新 start 接手了：撤销「正在关闭」，status 恢复正常。
+                    supervisor.mark_shutting_down(false);
+                    return;
+                }
+                LeaseLossAction::StopAndExit => {
+                    supervisor.note("[diag] presence 租约断开且无新租约，停止隧道后退出");
+                    supervisor.stop_child("lease_lost");
+                    clear_start_record(&supervisor.root);
+                    std::process::exit(0);
+                }
+                LeaseLossAction::Exit => {
+                    supervisor.note("[diag] presence 租约断开且无隧道，退出");
+                    clear_start_record(&supervisor.root);
+                    std::process::exit(0);
+                }
             }
         }
     });
@@ -717,6 +769,10 @@ struct Supervisor {
     last_uid: Mutex<Option<u32>>,
     /// TUN 运行期间 App 保持的会话租约（按连接指针记）。
     leases: Mutex<std::collections::HashSet<usize>>,
+    /// 最后一条 presence 租约已断开、宽限期正在走：`status` 会回
+    /// `precondition_failed`，让新启动的 App 不要把即将被拆的隧道 adopt 成
+    /// 「已连接」。新租约一登记、或判定为 Ignore 就撤销。
+    shutting_down: AtomicBool,
     /// 最近一次连接的系统 DNS 接管结果。`None` = 没有连接或已停止。
     /// 单独存一份而不是塞进 `Running`：激活发生在 `register_child` 之后，
     /// 但 status 可能在激活完成前被问到。
@@ -761,6 +817,7 @@ impl Supervisor {
             pending_notes: Mutex::new(Vec::new()),
             last_uid: Mutex::new(None),
             leases: Mutex::new(std::collections::HashSet::new()),
+            shutting_down: AtomicBool::new(false),
             last_dns: Mutex::new(None),
             dns_target: Mutex::new(None),
             dns_checked_at: Mutex::new(None),
@@ -784,7 +841,18 @@ impl Supervisor {
     /// 登记一条会话租约。连接断开时由事件处理器释放。
     fn register_lease(&self, connection: xpc::xpc_connection_t) {
         self.leases.lock().unwrap().insert(connection as usize);
+        // App 回来了：撤销「正在关闭」，status 立刻恢复成正常快照。
+        self.shutting_down.store(false, Ordering::SeqCst);
         self.note("[diag] 租约建立");
+    }
+
+    fn mark_shutting_down(&self, pending: bool) {
+        self.shutting_down.store(pending, Ordering::SeqCst);
+    }
+
+    /// 是否处于「最后一条租约已断开、宽限期计时中」。
+    fn shutting_down_pending(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     /// 释放租约；返回 `true` 表示这条连接原本持有租约。
@@ -4576,28 +4644,41 @@ mod tests {
     fn lease_loss_respects_generation_and_other_leases() {
         // 还有新租约：不动。
         assert_eq!(
-            lease_loss_action(1, false, false),
+            lease_loss_action(1, false, false, false),
             LeaseLossAction::Ignore
         );
         assert_eq!(
-            lease_loss_action(1, true, false),
+            lease_loss_action(1, true, false, false),
             LeaseLossAction::Ignore,
             "另一个实例还活着，不能动隧道"
         );
         // 租约断开后又有新 start（新实例接手）：不动它的隧道。
         assert_eq!(
-            lease_loss_action(0, true, true),
+            lease_loss_action(0, true, true, false),
             LeaseLossAction::Ignore
+        );
+        // 租约断开时 start 正在跑（先于断开开始，generation 未变）：等它跑完再判。
+        assert_eq!(
+            lease_loss_action(0, true, false, true),
+            LeaseLossAction::Ignore,
+            "start 进行中不能拆隧道"
         );
         // 没有租约、没有新 start：停隧道再退出。
         assert_eq!(
-            lease_loss_action(0, true, false),
+            lease_loss_action(0, true, false, false),
             LeaseLossAction::StopAndExit
         );
         assert_eq!(
-            lease_loss_action(0, false, false),
+            lease_loss_action(0, false, false, false),
             LeaseLossAction::Exit
         );
+    }
+
+    /// 宽限期必须覆盖「App 冷启动 + 早期登记租约」：5 秒在真机上只差 0.69 秒就翻车。
+    #[test]
+    fn lease_grace_covers_a_cold_app_start() {
+        // App 冷启动实测约 3.2 秒；留出两倍以上余量。
+        assert!(LEASE_LOSS_GRACE >= Duration::from_secs(15));
     }
 
     #[test]

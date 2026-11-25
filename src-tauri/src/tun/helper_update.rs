@@ -25,6 +25,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// TUN 断开后再等这么久才换 helper，避开连接刚结束的清理窗口。
 const PENDING_AFTER_DISCONNECT: Duration = Duration::from_secs(5);
 const PERIODIC_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
+/// 启动时登记 presence 的快速重试次数与间隔。
+///
+/// helper 的宽限期从**旧租约断开**那一刻开始算，而 App 冷启动本身要约 3 秒。
+/// 晚登记就可能落进「旧 helper 已判租约丢失」的窗口，隧道被拆（2026-11-25）。
+/// 首轮放在后台线程最前面，失败（未安装/未批准/launchd 正在拉起）只快速重试
+/// 几次就交给 6 小时周期：不拖慢启动，也不弹任何窗口。
+const PRESENCE_RETRY_ATTEMPTS: u32 = 3;
+const PRESENCE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,8 +110,13 @@ pub struct HelperUpdater {
     backend: Arc<dyn TunBackend>,
     flags: Mutex<Flags>,
     /// App 启动到退出的 presence 租约。进程结束时内核关闭连接，helper 据此
-    /// 在 5 秒后停隧道并退出——崩溃/强杀也一样。
+    /// 在宽限期（helper 侧 `LEASE_LOSS_GRACE`，当前 20 秒）后停隧道并退出——
+    /// 崩溃/强杀也一样。
     presence: Mutex<Option<TunLease>>,
+    /// 串行化「查了没有 → 去建」这一段。没有它，并发调用会各建一条连接、
+    /// 后写的那条把前一条挤掉，日志里出现两条「租约已建立」而 helper 侧
+    /// 实际只该看到一条（2026-11-25 启动自检就带着两个租约）。
+    presence_gate: Mutex<()>,
     /// 弹管理员授权对话框的唯一出口；测试里换成计数器。
     #[cfg(target_os = "macos")]
     admin_restart: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -122,6 +135,7 @@ impl HelperUpdater {
             backend,
             flags: Mutex::new(Flags::default()),
             presence: Mutex::new(None),
+            presence_gate: Mutex::new(()),
             #[cfg(target_os = "macos")]
             admin_restart: Arc::new(macos::run_admin_restart),
             #[cfg(target_os = "macos")]
@@ -142,6 +156,7 @@ impl HelperUpdater {
             backend,
             flags: Mutex::new(Flags::default()),
             presence: Mutex::new(None),
+            presence_gate: Mutex::new(()),
             admin_restart,
             // 测试进程本身是裸二进制；默认按「打包后」跑，专门的用例再改。
             in_app_bundle: Mutex::new(true),
@@ -151,28 +166,56 @@ impl HelperUpdater {
     }
 
     /// 建立 presence 租约（幂等）。helper 未安装/未批准时只记 debug，不打扰用户。
+    ///
+    /// 整段「查 → 建 → 写」都在 `presence_gate` 里，任何时刻最多一条租约；
+    /// 并发调用只有一个会真正建连接。
     pub fn ensure_presence(&self) {
+        let _gate = self.presence_gate.lock().unwrap();
         if self.presence.lock().unwrap().is_some() {
             return;
         }
         match self.backend.acquire_lease() {
             Ok(Some(lease)) => {
-                let mut slot = self.presence.lock().unwrap();
-                if slot.is_none() {
-                    *slot = Some(lease);
-                    log::info!("presence 租约已建立");
-                }
+                *self.presence.lock().unwrap() = Some(lease);
+                log::info!("presence 租约已建立");
             }
             Ok(None) => {}
             Err(error) => log::debug!("presence 租约暂时不可用：{}", error.message),
         }
     }
 
-    /// helper 换映像后旧连接已失效：换一条新的 presence 租约。
-    /// 返回 `true` 表示当前确实持有租约。
-    fn refresh_presence(&self) -> bool {
-        self.presence.lock().unwrap().take();
-        self.ensure_presence();
+    /// 续租/换租但**不制造空窗**：先建新连接，成功后再放旧的。
+    ///
+    /// 先放后建会有一小段时间 helper 看到 0 条租约；它若正好在判「租约丢失」，
+    /// 就会进入宽限期并置「正在关闭」，用户正在用的隧道随后被拆。旧连接已经
+    /// 死了（helper 被外部重启）时，新连接能建起来就自动补上；建不起来则保留
+    /// 旧对象，等下一轮/连接路径再换。
+    ///
+    /// 返回**是否新建成功**，不是「当前有没有租约」：连接路径必须知道这次
+    /// 真的换到了新租约，不能拿一条可能已经失效的旧连接冒充。
+    fn renew_presence(&self) -> bool {
+        let _gate = self.presence_gate.lock().unwrap();
+        match self.backend.acquire_lease() {
+            Ok(Some(lease)) => {
+                let previous = self.presence.lock().unwrap().replace(lease);
+                if previous.is_none() {
+                    log::info!("presence 租约已建立");
+                }
+                // 旧连接在锁外释放：Drop 会 cancel，helper 侧看到「一条连接断开，
+                // 但租约集合仍非空」，不会触发拆隧判定。
+                drop(previous);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                log::debug!("presence 续租暂时不可用：{}", error.message);
+                false
+            }
+        }
+    }
+
+    /// 当前是否持有 presence 租约（只读）。
+    fn has_presence(&self) -> bool {
         self.presence.lock().unwrap().is_some()
     }
 
@@ -364,8 +407,9 @@ impl HelperUpdater {
         }
 
         let ok = self.poll_until_fresh();
-        // 换映像后旧 presence 连接已断：立刻给新 helper 一条新租约。
-        let _ = self.refresh_presence();
+        // 换映像后旧 presence 连接已断：给新 helper 续一条。先建后放，新 helper
+        // 的租约集本来就是空的，失败也只是保留旧对象，不制造 0 租约窗口。
+        let _ = self.renew_presence();
         {
             let mut flags = self.flags.lock().unwrap();
             if ok {
@@ -453,10 +497,13 @@ impl HelperUpdater {
                 return Err((error.message, error.code.ui_reason()));
             }
             // 强制换一条新租约，避免 helper 被外部重启后「有隧道、无租约」。
+            // 先建后放：换失败时旧租约还在，隧道不会因为短暂 0 租约被宽限拆掉；
+            // 但连接路径必须确认**这次新建成功**，否则本次连接失败（不是拿旧
+            // 连接冒充——它可能正是 helper 重启前的那条死连接）。
             let info = self.info();
             match info.state {
                 HelperState::Running => {
-                    if !self.refresh_presence() {
+                    if !self.renew_presence() {
                         return Err((
                             "无法建立后台组件会话租约，暂时不能接管全部流量。代理模式与直连仍可用。"
                                 .into(),
@@ -503,8 +550,10 @@ impl HelperUpdater {
     /// 启动时弹 root 密码框。旧 helper 只记 `needs_admin_restart`，等用户请求
     /// TUN（或自己点「重启」）时再授权。
     pub fn check_and_upgrade(&self) {
-        // 每轮都刷新 presence：helper 被外部重启/空闲退出过也能自动补上。
-        let _ = self.refresh_presence();
+        // 每轮都续租：helper 被外部重启/空闲退出过也能自动补上。
+        // 必须用 renew（先建后放）：refresh 先放旧的，续不上的那一瞬 helper 会看到
+        // 0 条租约，正在跑的隧道就可能被按「租约丢失」拆掉。
+        let _ = self.renew_presence();
         let info = self.info();
         if info.state != HelperState::Stale {
             return;
@@ -535,12 +584,25 @@ impl HelperUpdater {
         );
     }
 
-    /// 启动后台检查线程：先等 3 秒，之后每 6 小时一次。
+    /// 启动后台检查线程：**先登记 presence**，之后每 6 小时一次。
+    ///
+    /// 不再先等 3 秒：旧租约在旧 App 收到 SIGTERM 时就开始计时，App 冷启动本身
+    /// 又要 3 秒左右，晚登记会把新实例落到实处（2026-11-25：新租约比 helper 的
+    /// 宽限晚 0.69 秒，隧道被拆、启动自检测速全部失败）。这里立刻建，建不上
+    /// （未安装/未批准/launchd 正在拉起）只快速重试几次，整段都在后台线程，
+    /// 不阻塞 UI、不弹窗。
     pub fn spawn_background(self: &Arc<Self>) {
         let updater = Arc::clone(self);
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(3));
-            updater.ensure_presence();
+            for attempt in 0..PRESENCE_RETRY_ATTEMPTS {
+                updater.ensure_presence();
+                if updater.has_presence() {
+                    break;
+                }
+                if attempt + 1 < PRESENCE_RETRY_ATTEMPTS {
+                    std::thread::sleep(PRESENCE_RETRY_INTERVAL);
+                }
+            }
             loop {
                 updater.check_and_upgrade();
                 std::thread::sleep(PERIODIC_CHECK);

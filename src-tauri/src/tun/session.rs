@@ -38,6 +38,18 @@ pub enum TunState {
     Running { pid: u32 },
 }
 
+/// helper 在 presence 租约断开、宽限期计时中会拒绝 `status`，wire 码是
+/// `precondition_failed`。这是**明确的「即将停止」**，不是连接失败：
+/// 两个探测路径都不能据它 adopt，也不能继续报已连接。
+fn helper_is_shutting_down(error: &TunError) -> bool {
+    error
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("wire_code"))
+        .and_then(|code| code.as_str())
+        == Some("precondition_failed")
+}
+
 /// 一次在途启动的登记。
 struct Launching {
     seq: u64,
@@ -790,8 +802,17 @@ impl TunSession {
                 }
                 None => TunState::Stopped,
             },
-            Err(_) => {
+            Err(error) => {
                 // 问不到不等于没在跑；复位标志，让下一次还能再试。
+                // helper 在 presence 租约断开、宽限期计时中会明确回
+                // precondition_failed（隧道即将被拆）：这里**绝不能**拿上一份
+                // 快照 adopt，否则界面会把一条正在被拆的隧道当成已连接，
+                // 几秒后再跳回未连接（2026-11-25 真机现象）。
+                if helper_is_shutting_down(&error) {
+                    log::debug!("helper 报告租约已断开、隧道即将停止，暂不接手：{error}");
+                } else {
+                    log::debug!("探测 TUN 状态失败，暂不接手（下次再试）：{error}");
+                }
                 self.probed.store(false, Ordering::SeqCst);
                 TunState::Stopped
             }
@@ -814,6 +835,13 @@ impl TunSession {
                     TunState::Stopped
                 }
             },
+            Err(error) if helper_is_shutting_down(&error) => {
+                // 明确了「隧道即将被拆」的答复不是「问不到」：它就是断开。
+                // 保留缓存会让界面继续显示已连接，直到 helper 真正停掉。
+                log::warn!("TUN 后端报告租约已断开、隧道即将停止，连接状态回到未连接：{error}");
+                self.clear_state();
+                TunState::Stopped
+            }
             // 后端暂时问不到：保留缓存，不把「问不到」当成「已断开」。
             Err(error) => {
                 log::debug!("复核 TUN 状态失败，暂时保留已连接（下次再试）：{error}");

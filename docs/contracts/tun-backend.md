@@ -1,6 +1,6 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.7.0`
+> 契约版本：`1.8.0`
 > 状态：**已定稿，实现已落地**（2026-11-05 定稿；macOS 已上线，Windows 后端已接入，真机待验收）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
@@ -204,7 +204,12 @@ type TunSnapshot = {
 - 两者**只用于诊断展示**：版本协商以 `restart` 是否返回 `bad_request` 为准（§1.1.1），不要用这两个字段做新旧判断。
 - `last_error` 只在「最近一次 start 失败且此后没有成功 start」时非 null；成功 start 后清空。
 - `status` 在未运行时**不是错误**：返回 `running: false` 与 `pid: null`。
-- App 崩溃重启后，`status` 必须仍能返回 `pid` 与 `clash_api`——这是 TUN 的流量/延迟采样与「删配置守卫」的前提（`review-checklist` GAP-03 的根因之一）。
+- **例外：隧道即将被拆**。App 的 presence 租约已断开、helper 正在走宽限期（20 秒）时，
+  `status` 返回 `{ ok: false, code: "precondition_failed" }`，而不是 `running: true`。
+  这是明确的「即将停止」：客户端**不得**据此接手隧道，也不得继续显示已连接；新租约一登记
+  （或进行中的 `start` 收尾）就恢复正常快照。`precondition_failed` 是 wire 码，客户端按
+  `details.wire_code` 识别（§4.2）。
+- App 崩溃重启后，`status` 必须仍能返回 `pid` 与 `clash_api`——这是 TUN 的流量/延迟采样与「删配置守卫」的前提（`review-checklist` GAP-03 的根因之一）。**前提是 App 先登记了 presence 租约**；租约断开进入宽限期的那一条例外见上一项。
 - `dns_hijack` 随 `status` 一起返回：helper 重启后界面仍要能说清这次连接有没有接管 DNS。未运行时为 `{ applied: false, reason: null }`，不要拿它推断别的。
 
 ### 3.3 `TunError`
@@ -243,6 +248,7 @@ type TunError = {
 | `rule_set_missing` | 配置引用了本地没有的 rule_set tag | ✅ 已有 |
 | `runtime_missing` | 本构建没有随包运行时（哈希为空），或运行时校验不过 | ✅ 已有 |
 | `tun_start_failed` | 进程起不来、立即退出、端口不可用、写盘失败 | ✅ 已有 |
+| `precondition_failed` | `status`：presence 租约已断开、宽限期计时中，隧道即将被拆；`restart`：正在进行的 `start` 拒绝重启（按 busy 处理，不是故障） | ✅ 已有 |
 | `internal` | 其余未分类错误。**不得**用来掩盖上面任何一类 | ⬜ 新增 |
 
 **明确不存在 `already_running` 与 `not_running`**（实施计划里列了这两个，与实现不符）：
@@ -458,7 +464,7 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 | 3 | 未连任何对端时向管道/服务发送配置，**不产生任何副作用**（无进程、无写盘） |
 | 4 | `start` 连调两次：第二次成功，pid 变化，第一次的子进程已退出 |
 | 5 | `stop` 连调两次：两次都 `Ok` |
-| 6 | App 崩溃后重启，第一次 `status` 返回 `running: true` 且 `clash_api` 非 null |
+| 6 | App 崩溃后重启，先登记 presence 租约，第一次 `status` 返回 `running: true` 且 `clash_api` 非 null；租约未登记（宽限期计时中）时按 §3.2 例外返回 `precondition_failed` |
 | 7 | 用户拒绝授权后再次连接，`ensure_available` 会**再次**触发系统弹窗（`tun-mode.md` §8） |
 | 8 | 任何 TUN 失败路径都不调用 `proxy.enable()`（B5-04） |
 | 9 | `status` 不做磁盘校验、不遍历目录、不扫进程、不 spawn 进程；以 2s 间隔连续调用 5 分钟，进程数与文件 I/O 无增长（§2.1） |
@@ -485,6 +491,16 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.8.0（2026-11-25，presence 租约时序与「即将被拆」信号）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | §3.2：租约断开、宽限期计时中时 `status` 回 `precondition_failed`，不再报 `running: true`；客户端不得接手、不得继续显示已连接 | 行为修正（破坏性） | 真机：新 App 在旧 helper 拆卸前 4 秒把隧道 adopt 成「已连接」，随后又跳回未连接（16:32 重启 --kill-existing） |
+| 2 | helper 的 presence 宽限期由 `5 s` 改为 `20 s`；宽限期内开始新一轮 `start` 不拆隧道 | 语义变更 | 新 App 冷启动约 3.2 s，旧宽限只差 0.69 s 就拆掉了用户正在用的隧道 |
+| 3 | App 侧 presence 登记提前到启动后台线程第一步（去掉 3 s 延迟），并发登记串行化；所有换租约先建新再放旧（连接路径要求新建成功），不制造 0 租约空窗 | 行为新增 | 同上：租约先于宽限到达，helper 撤销拆隧判定 |
+| 4 | §4.2 补 `precondition_failed` 行（`status` 即将停止；`restart` 忙） | 文档补齐 | 该码早已在 `restart` 使用，表里一直缺 |
+| 5 | 本文件版本升到 `1.8.0` | 元数据 | — |
 
 ### 1.7.0（2026-11-12，还原后验证与公网兜底）
 
