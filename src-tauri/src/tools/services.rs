@@ -10170,7 +10170,16 @@ impl WiredServices {
         // 关代理、停运行时、删明文配置是一整段会改运行时的操作：进锁并推进代数。
         let verified = {
             let _ops = self.lock_runtime_ops().await?;
-            self.bump_runtime_epoch();
+            // TUN 的 sing-box 是 helper 的子进程，manager.stop 碰不到它；只停
+            // manager 会报「已恢复直连」而隧道还在接管流量。在锁内用缓存判一次
+            // （与重建同一口径），TUN 在跑/在启动就走完整断开路径。
+            let connection = self.connection_state_cached().await;
+            let tun_live = connection.tun || connection.launching;
+            if tun_live {
+                self.runtime_stop_inner(false).await?;
+            } else {
+                self.bump_runtime_epoch();
+            }
             let mut verified = self.proxy.disable().is_ok();
             if let Some(endpoint) = applied {
                 verified = verified
@@ -10180,9 +10189,18 @@ impl WiredServices {
                         .map(|in_use| in_use.is_empty())
                         .unwrap_or(false);
             }
-            let _ = self.manager.stop().await;
+            if !tun_live {
+                let _ = self.manager.stop().await;
+            }
             crate::config::remove_all_profile_configs(&self.config_dir());
-            verified && self.manager.status().await.state == crate::runtime::RuntimeState::Idle
+            verified
+                && self.manager.status().await.state == crate::runtime::RuntimeState::Idle
+                // 停 TUN 失败时 runtime_stop_inner 已经报错；这里再对一次状态，
+                // 防止「报成功但特权侧还活着」。
+                && matches!(
+                    self.tun.status_cached(),
+                    crate::tun::session::TunState::Stopped
+                )
         };
 
         let exit_ip =
@@ -12124,6 +12142,112 @@ mod config_service_tests {
         assert_eq!(snapshot["state"], "idle");
         assert!(!services.tun.is_launching(), "断开必须取消在途启动");
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 在跑时 `restore_direct` 必须先真正停 TUN。
+    ///
+    /// TUN 的 sing-box 是 helper 的子进程，`manager.stop()` 碰不到它；只停
+    /// manager 会报「已恢复直连」而隧道还在接管流量。
+    #[tokio::test]
+    async fn restore_direct_stops_a_running_tun_before_claiming_success() {
+        let dir = temp_dir();
+        let mut services = services(&dir);
+        let backend = Arc::new(QuietBackend::default());
+        services.tun = Arc::new(crate::tun::session::TunSession::with_backend(
+            backend.clone(),
+            "quiet",
+        ));
+        services.tun.force_running_for_test(4242, Some("cfg_tun"));
+
+        let value = services
+            .repair_restore_direct(None)
+            .await
+            .expect("TUN 停掉后应当成功");
+
+        assert_eq!(
+            backend.stops.load(Ordering::SeqCst),
+            1,
+            "restore_direct 必须先真正停 TUN"
+        );
+        assert!(
+            matches!(
+                services.tun.status_cached(),
+                crate::tun::session::TunState::Stopped
+            ),
+            "报成功时 TUN 必须已经停了"
+        );
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(value["verified"], true, "{value}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TUN 停不掉时必须报失败，不能返回「已恢复直连」。
+    #[tokio::test]
+    async fn restore_direct_fails_when_the_tun_cannot_stop() {
+        struct StuckBackend;
+
+        impl TunBackend for StuckBackend {
+            fn availability(
+                &self,
+            ) -> Result<crate::tun::privilege::HelperStatus, TunError> {
+                Ok(crate::tun::privilege::HelperStatus::Enabled)
+            }
+
+            fn ensure_available(
+                &self,
+            ) -> Result<crate::tun::privilege::HelperStatus, TunError> {
+                Ok(crate::tun::privilege::HelperStatus::Enabled)
+            }
+
+            fn start(&self, _config: &str) -> Result<StartReply, TunError> {
+                unreachable!("这个用例不起进程")
+            }
+
+            fn stop(&self) -> Result<(), TunError> {
+                Err(TunError::new(
+                    crate::tun::backend::TunErrorCode::HelperMissing,
+                    "helper 不可用",
+                ))
+            }
+
+            fn status(&self) -> Result<TunSnapshot, TunError> {
+                Ok(TunSnapshot {
+                    running: false,
+                    pid: None,
+                    clash_api: None,
+                    since: None,
+                    last_error: None,
+                    dns_hijack: Default::default(),
+                    helper_build: None,
+                    helper_version: None,
+                    helper_pid: None,
+                })
+            }
+
+            fn restart(&self) -> Result<(), TunError> {
+                Ok(())
+            }
+        }
+
+        let dir = temp_dir();
+        let mut services = services(&dir);
+        services.tun = Arc::new(crate::tun::session::TunSession::with_backend(
+            Arc::new(StuckBackend),
+            "stuck",
+        ));
+        services.tun.force_running_for_test(4242, Some("cfg_tun"));
+
+        let error = services
+            .repair_restore_direct(None)
+            .await
+            .expect_err("TUN 停不掉时不能报成功");
+        assert!(
+            error.to_string().contains("没有停掉"),
+            "错误要说清是 TUN 没停掉：{error}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

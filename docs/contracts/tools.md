@@ -1241,7 +1241,7 @@ type NetConfigData = {
 
 | action | 行为 | 是否需要 `port` |
 |---|---|---|
-| `restore_direct` | 撤掉 Veyl 设置的系统代理并恢复备份 → 停运行时 → 删渲染配置 → 不带代理探测一次出口 IP | 否（给 `port` 按 `INVALID_ARGUMENT` 拒绝） |
+| `restore_direct` | 撤掉 Veyl 设置的系统代理并恢复备份 → 停运行时 → 删渲染配置 → 不带代理探测一次出口 IP。**TUN 连接中走完整断开路径，先真正停掉 TUN**（helper 子进程，`manager.stop()` 碰不到）；TUN 停不掉时整个动作失败，不得报成功 | 否（给 `port` 按 `INVALID_ARGUMENT` 拒绝） |
 | `flush_dns` | macOS：`dscacheutil -flushcache` + `killall -HUP mDNSResponder`，**经特权助手以 root 执行**（普通用户 HUP 不动 mDNSResponder）；Windows：`ipconfig /flushdns`。**不动代理、不停运行时**；`verified` 以探针域名能否解析为准 | 否 |
 | `set_proxy` | 把系统代理指向 **Veyl 自己的** mixed 端口 | **必填** |
 | `clear_proxy` | 撤掉系统代理并恢复备份（不停运行时），等价于 `restore_direct` 的第 1 步 | 否 |
@@ -2483,6 +2483,7 @@ type AiProvidersData = {
 | 2 | `AskUserQuestionGuard` 按实现如实登记：它不是新工具，`name()` 仍是 `AskUserQuestion`，包装只做两件事——补表达约束、归一化 `options`；名字与内置工具相同，**不占额外工具名额**（§3 的 38 个里只有 `AskUserQuestion` 这一个名字）。旧说法「Veyl 不重写内置工具」改为「不重写，但包装并补约束」 | 说明更正 | `src-tauri/src/tools/mod.rs` 的 `AskUserQuestionGuard` |
 | 3 | `RouteGet` 的 `content` 补界面标签：`direct` 写「界面上的「智能」/ Smart」，`proxy_all` 写「界面上的「全局」/ Global」；机器值保留。`display`、`data`、权限不变，不升版本 | 内容口径（补记） | 2026-11-25 PM：冒烟时模型把 `direct` 猜成「全部走 VPN」 |
 | 4 | `HttpCheck` 直连 pin 地址改为 IPv4 优先；TUN 连接只 pin IPv4（TUN 不接管 IPv6），纯 IPv6 域名立即返回失败而不是静默等到超时；失败 `data` 新增可选 `address_families`（只族名、不含 IP）。权限、成功返回与 `content` 不变，不升版本 | 行为修正（补记） | 2026-11-25 冒烟：TUN + 智能下 YouTube 检查误报 |
+| 5 | `NetRepair` 的 `restore_direct` 在 TUN 连接中先走完整断开路径真正停掉 TUN（helper 子进程，`manager.stop()` 碰不到）；TUN 停不掉时动作失败，不再报「已恢复直连」+ 出口 IP。权限、`data` 形状不变，不升版本 | 行为修正（补记） | 2026-11-25 复核：对没发生的事报成功 |
 
 ### 3.28.0（未发布，2026-11-24：第 3 组落地，节点写入三工具合并）
 
