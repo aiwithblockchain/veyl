@@ -207,6 +207,12 @@ pub trait VpnToolServices: Send + Sync {
         Err(anyhow::anyhow!("我的服务器未接入"))
     }
 
+    /// 只读：账户余额快照（`MyServerWallet`）。只回余额、币种与更新时间；
+    /// 充值档位是收银台参数，不进工具面。
+    async fn my_server_wallet(&self) -> anyhow::Result<Value> {
+        not_wired("钱包余额")
+    }
+
     /// 只读：某台服务器这次创建失败的详情（`tools.md` §4.51）。
     /// 只读本地镜像与内存里的订单事件，不访问云厂商 API。
     async fn my_server_failure(&self, _server_id: &str) -> anyhow::Result<Value> {
@@ -5840,6 +5846,17 @@ impl VpnToolServices for WiredServices {
             })
             .collect();
         Ok(json!({ "servers": summaries }))
+    }
+
+    async fn my_server_wallet(&self) -> anyhow::Result<Value> {
+        let wallet = crate::control_plane::servers::wallet()
+            .await
+            .map_err(|error| svc_error(&error.code, error.message.clone()))?;
+        Ok(json!({
+            "balance_cents": wallet.balance_cents,
+            "currency": wallet.currency,
+            "updated_at": wallet.updated_at,
+        }))
     }
 
     async fn my_server_failure(&self, server_id: &str) -> anyhow::Result<Value> {

@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.30.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）与前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）；其余工具面变更在后续批次——第 5 组补缺口（`MyServerWallet` / `LlmProviders`）计划 3.31.0。
+> 契约版本：`3.31.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组第一片（新增 `MyServerWallet`，36 → 37，3.31.0）；第 5 组第二片（`LlmProviders`，37 → 38）计划 3.32.0。
 >
-> ⚠️ 本文件 3.30.0 已落地的工具面是 **36 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`。§4.58–§4.60 记录的是**后续批次**（第 5 组新增只读工具）的提案，不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.31.0 落地的工具面是 **37 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组第一片新增只读工具 `MyServerWallet`（§4.58）。§4.59 / §4.60 记录的是**后续批次**的提案（`TrialStatus` 已撤回、`LlmProviders` 计划 3.32.0），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -96,6 +96,7 @@ pub struct ToolResult {
 | `IssueReport` | 阶段、报告目录、文件清单；收集阶段给材料摘要与日志文件 / 行号 |
 | `SetUserRegion` | 记下的地区名 |
 | `MyServers` | 逐台明细（见 §4.48） |
+| `MyServerWallet` | 余额金额、币种、读取时间（Host 本地取；余额是快照，可能旧） |
 | `ConfigSetMode` | 目标方式、是否已切换、连接是否恢复、回滚是否成功 |
 | `OpenSettings` | 打开的分段与是否定位到行 |
 | `MyServerFailure` | 阶段、原因、是否可重试、订单事件摘要 |
@@ -110,7 +111,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.30.0";
+  contract_version: "3.31.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -295,16 +296,16 @@ type CallSource = "ui" | "agent";
 
 ```ts
 // src/components/toolDisplay.ts（设计文档里也称 TOOL_DISPLAY）
-export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 36 个工具名完全相等
+export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 的 37 个工具名完全相等
 ```
 
-进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 36 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
+进行中 / 兜底的静态文案来自这张表；完成与失败的具体文案、`changed` 来自 `tool-call-end.display`（`events.md` §3.4）。映射表必须**双向**相等：少一个名字，新工具就会露出原始名；多一个名字，说明工具已删除但文案还在。`AskUserQuestion` 是 37 个之一，但**渲染层必须跳过它的工具行**——提问由 `ask-user-question` 的问答浮层承担，两处说同一件事是重复。
 
 **提示词只降低出错概率，最终闸门在渲染层**：UI 永远不渲染工具名、JSON、错误码；不做输出正则改写（静默替换模型正文比漏一句更难排查）。
 
 边界与落点：
 
-- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「36 个名字必须都有」与「`AskUserQuestion` 不占行」。
+- **映射表以 `docs/design/tool-display.md` 为准**；本契约只锁「37 个名字必须都有」与「`AskUserQuestion` 不占行」。
 - **running 状态文案**同样来自映射表（`events.md` §3.5）：不得拼工具名，未知工具固定「正在处理…」。
 - **工具 description**：通用表达约束放末尾。系统提示不再渲染能力清单（`capability_catalog` 已移除），description 全文只作为工具 schema；第一行仍应是该工具的一句话用途，便于模型选工具。
 - **「怎么说话」八条与 `SAFETY_RULES` 新增两条由契约测试防回归**：删任一条即红。
@@ -366,8 +367,9 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 34 | `submit_issue_to_public_wall` | `SubmitIssueToPublicWallTool` | 把问题发到公开问题墙（**有确认点**，提交即公开） | `Write` | 中（公开可见） |
 | 35 | `read_public_issue_wall` | `ReadPublicIssueWallTool` | 搜索 / 读取问题墙与运营答复（**无需登录**） | `ReadOnly` | 只读 |
 | 36 | `AskUserQuestion` | （Claurst 内置；`AskUserQuestionGuard` 包装） | 向用户提问 | `None` | 低 |
+| 37 | `MyServerWallet` | `MyServerWalletTool` | 读账户余额（最近一次快照） | `ReadOnly` | 只读 |
 
-> 3.30.0 工具总数是 **36**：删除与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`（38 → 36），`ConfigUpdate` 去掉 `routing_mode`（工具数不变）。3.29.0 的 `CatalogOptions` 改名 `ServerOptions`、3.27.0 删三个旧分流工具（43 → 40）、3.28.0 合并节点写入三工具（40 → 38）都仍有效。新增 `MyServerWallet` / `LlmProviders` 仍在**后续批次（3.31.0）**，不属于本版。本节序号只是清单编号，§4 的章节号是稳定引用。
+> 3.31.0 工具总数是 **37**：第 5 组第一片新增只读工具 `MyServerWallet`（36 → 37）；第 5 组第二片 `LlmProviders` 计划 3.32.0（37 → 38）。此前的 3.30.0 删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`（38 → 36）并让 `ConfigUpdate` 去掉 `routing_mode`（工具数不变）；3.29.0 的 `CatalogOptions` 改名 `ServerOptions`、3.27.0 删三个旧分流工具（43 → 40）、3.28.0 合并节点写入三工具（40 → 38）都仍有效。本节序号只是清单编号，§4 的章节号是稳定引用。
 
 > `AskUserQuestion` 的 schema 与执行由 `claurst-tools` 提供；Veyl 用 `AskUserQuestionGuard` 包装（description 末尾加一行约束、校验 `options` 为字符串数组并过滤空白项），其余委托内置实现（§4.22）。它不是新工具：`name()` 仍是 `AskUserQuestion`，不占额外工具名额。**3.29.0 更正**：旧文「Veyl 不重写这个工具」与实现不符，实际是「不重写，但包装并补约束」。
 
@@ -418,6 +420,8 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 我的服务器（只读）
     Box::new(MyServersTool::new(services.clone())),
     Box::new(MyServerFailureTool::new(services.clone())),
+    // 余额（3.31.0，只读快照；不返回充值档位）
+    Box::new(MyServerWalletTool::new(services.clone())),
     // 更换连接密码（有确认点）
     Box::new(NodeRotateCredentialsTool::new()),
     // 在线切换接管方式（有确认点）
@@ -888,7 +892,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.30.0";
+  contract_version: "3.31.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1092,7 +1096,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.30.0";
+  contract_version: "3.31.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1302,7 +1306,7 @@ type DefaultProfileStatusData = {
 
 工具实现与 schema 由 `claurst-tools` 提供（`crates/tools/src/lib.rs:109-116`）。Veyl 用 `AskUserQuestionGuard` 包一层：在 description 末尾加一行约束、校验 `options` 为字符串数组并过滤空白项，其余全部委托内置实现（`src-tauri/src/tools/mod.rs:51-98`）。**不改内置工具的 schema 与执行逻辑**。
 
-**它不是新工具**：`name()` 仍是 `AskUserQuestion`，与内置工具同名；§3 的 36 个工具名里有且只有 `AskUserQuestion` 这一个名字，包装不占额外名额。
+**它不是新工具**：`name()` 仍是 `AskUserQuestion`，与内置工具同名；§3 的 37 个工具名里有且只有 `AskUserQuestion` 这一个名字，包装不占额外名额。
 
 行为：
 
@@ -2236,35 +2240,33 @@ type SubmitIssueToPublicWallData = {
 
 ---
 
-### 4.58 `AccountBalance`（余额与登录态，后续批次 3.31.0 提案；第 5 组决策单定名 `MyServerWallet`）
+### 4.58 `MyServerWallet`（余额，3.31.0 新增；原 `AccountBalance` 提案）
 
-> **§4.58–§4.60 都不属于本版**：它们是后续批次（3.31.0）的提案，3.30.0 未注册这些工具；名称与取舍以 `docs/design/ai-tools-group5-gaps.md` 为准。
+> **§4.58 属于本版（3.31.0 落地）**；§4.59 已撤回、§4.60 仍是后续批次（`LlmProviders` 计划 3.32.0）。名称与取舍以 `docs/design/ai-tools-group5-gaps.md` 为准。
 
-> 本节是提案原文，命名已由第 5 组决策单改为 `MyServerWallet`，正式定义随 3.31.0 落地时重写。
-
-只读。回答「我还有多少余额 / 登录了吗 / 能不能充值」，不发起充值、不改账户。
+只读。回答「我还有多少余额」，不发起充值、不改账户、不返回充值档位。
 
 ```json
 { "type": "object", "properties": {}, "additionalProperties": false }
 ```
 
 ```ts
-type AccountBalanceData = {
-  logged_in: boolean;
-  balance_cents: number | null;      // 未登录或控制面不可用时为 null
+type MyServerWalletData = {
+  balance_cents: number;   // 最近一次快照，非负
   currency: "USD";
-  topup_available: boolean;          // 充值入口是否可用（已登录且服务端返回了档位）
-  denominations_cents: number[];     // 服务端白名单；没有时为 []
+  updated_at: string;      // ISO 8601 UTC，Host 读取余额的时刻（控制面不提供）
 };
 ```
 
-- `PermissionLevel::ReadOnly`；数据源与界面同一份 `GET /v1/wallet`，不自行推算余额。
-- **未登录不是工具错误**：返回 `ok: true`、`logged_in: false`、`balance_cents: null`，`content` 说明「还没登录，登录后才能看余额和充值」。控制面不可达才是 `UPSTREAM_ERROR`。
-- **`content` 必须给出余额、登录态与充值入口状态**；余额未知写「还不知道」，不要写 0。
+- `PermissionLevel::ReadOnly`；数据源与界面同一份 `GET /v1/wallet`（命令 `my_server_wallet`，`commands.md` §7.18），不自行推算余额。
+- **未登录返回 `PRECONDITION_FAILED / auth_required`**（与 `MyServers` 一致），不返回余额；控制面不可达才是 `UPSTREAM_ERROR`。
+- **不返回 `denominations_cents`**：充值面额是界面动作（支付），模型不该拿到并承诺金额。
+- **`content` 必须一句话给出金额（含币种）+ 读取时间**，示例：「余额 12.34 美元，截至 2026-11-25 19:40。这是最近一次快照。」；余额是快照，可能旧，失败时明说「显示的是上次的余额」，不要写 0。
 - 不读充值记录、不读订单、不发起支付；手机导出与批量测速同样不给工具。
-- **待回填**：匿名设备是否能读余额、`topup_available` 的具体判据，以实现为准。
+- **`updated_at` 不是控制面字段**：由 Host 在读取余额时用本地时间覆盖（`control_plane/servers.rs:786`），控制面不提供；它记的是读取时刻，不是余额变化时刻。
+- **待回填**：匿名设备是否能读余额，以实现为准。
 
-错误：`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`。
+错误：`PRECONDITION_FAILED`、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`。
 
 ---
 
@@ -2294,9 +2296,9 @@ type TrialStatusData = {
 
 ---
 
-### 4.60 `AiProviders`（AI 服务商，后续批次 3.31.0 提案；第 5 组决策单定名 `LlmProviders`）
+### 4.60 `AiProviders`（AI 服务商，后续批次 3.32.0 提案；3.32.0 落地为 `LlmProviders`）
 
-> 本节是提案原文，命名已由第 5 组决策单改为 `LlmProviders`，正式定义随 3.31.0 落地时重写。
+> 本节是提案原文，下一片（3.32.0）落地为 `LlmProviders`，正式定义随 3.32.0 重写。
 
 只读。列出已支持的 AI 服务商与当前项，**不返回 Key**，不测试连接、不切换服务商。
 
@@ -2423,16 +2425,26 @@ type AiProvidersData = {
 
 ## 8. 变更记录
 
+### 3.31.0（未发布，2026-11-25：第 5 组第一片，新增 `MyServerWallet`，36 → 37）
+
+> 第 5 组补缺口拆两片：本片只加 `MyServerWallet`（36 → **37**），`LlmProviders` 留给 3.32.0（37 → 38）。两片各自验收、各自提交；每片只新增一个工具，版本按片升。
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.31.0`；新增只读工具 `MyServerWallet`（`ReadOnly`，schema 为空对象，§4.58 由原 `AccountBalance` 提案改写而来）：`data` 为 `{ balance_cents, currency, updated_at }`，**不返回 `denominations_cents`**（充值面额属界面动作）；未登录 → `PRECONDITION_FAILED / auth_required`；`content` 一句话给金额、币种与读取时间。§3 序号 37，§1.2.1 验收清单加一行。工具总数 36 → **37** | 新增工具 | 第 5 组决策单 §2.1 / §3；用户问「我余额还有多少」时模型必须能答（`docs/design/ai-tools-group5-gaps.md`） |
+| 2 | 连带：`vpn_tools()` 注册、`TOOL_COPY` 与展示文案、`tool-display.md`、mock LLM 剧本与契约检查按新工具补齐；`my_server_wallet` 命令保留给界面，AI 侧改指本工具 | 连带 | 新增工具必须同步的地方 |
+| 3 | **下一片（3.32.0）**：新增只读工具 `LlmProviders`（原 `AiProviders` 提案），总数 37 → **38** | 新增工具（未落地） | 第 5 组决策单 §2.6 / §3 |
+
 ### 3.30.0（未发布，2026-11-25：前置批：工具去重，38 → 36）
 
-> 本版删除与现有工具完全重复的 `RuntimeStart` / `RuntimeStop`，工具总数 38 → **36**；`ConfigUpdate` 去掉 `routing_mode`（工具数不变），分流只留 `RouteSetMode` 一个写入口。两条 Host 命令 `runtime_start` / `runtime_stop` 保留给界面，bridge 方法不动。本批是**前置批，不占组号**——「第 5 组」仍指 3.31.0 的补缺口（`MyServerWallet` / `LlmProviders`）。
+> 本版删除与现有工具完全重复的 `RuntimeStart` / `RuntimeStop`，工具总数 38 → **36**；`ConfigUpdate` 去掉 `routing_mode`（工具数不变），分流只留 `RouteSetMode` 一个写入口。两条 Host 命令 `runtime_start` / `runtime_stop` 保留给界面，bridge 方法不动。本批是**前置批，不占组号**——「第 5 组」仍指补缺口，分两片：3.31.0 `MyServerWallet`、3.32.0 `LlmProviders`。
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 版本升到 `3.30.0`；`RuntimeStart` 删除（与 `VpnConnect` 是同一服务方法的两个名字，旧描述「不设置系统代理」与实现不符）；`RuntimeStop` 删除（与 `VpnDisconnect` 完全重复，都停运行库并恢复系统代理）。§3 序号重排，§4.2 / §4.3 标「已删除（3.30.0）」并保留 Host 命令说明。工具总数 38 → **36** | 删除工具 | 用户 2026-11-25：先做合并；`docs/design/ai-tools-boundary-audit.md` §3.1 / §3.1b |
 | 2 | `ConfigUpdate` 去掉 `routing_mode`：schema 不再接受（传入 → `INVALID_ARGUMENT / unknown_argument`），实现不再透传；分流写入口只剩 `RouteSetMode`。工具描述与 `content` 验收清单同步 | schema 收缩 | 同一轮去重；分流只有一个写入口 |
 | 3 | 连带清理：`vpn_tools()` 注册、`runtime.rs` 两个 Tool 实现、`description_en`、`TOOL_COPY` 与 `tool.RuntimeStart.*` / `tool.RuntimeStop.*` 文案、`tool-display.md`、边界测试、mock LLM 错误剧本 | 连带 | 删除工具必须同步的地方 |
-| 4 | **后续批次（3.31.0）**：新增只读工具 `MyServerWallet` / `LlmProviders`（原 `AccountBalance` / `AiProviders` 提案按第 5 组补缺口决策单改名，`TrialStatus` 不新增）；总数 36 → **38** | 新增工具（未落地） | `docs/design/ai-tools-group5-gaps.md` |
+| 4 | **后续批次（3.31.0）**：新增只读工具 `MyServerWallet` / `LlmProviders`（原 `AccountBalance` / `AiProviders` 提案按第 5 组补缺口决策单改名，`TrialStatus` 不新增）；总数 36 → **38**（按两片执行：3.31.0 `MyServerWallet`（37）、3.32.0 `LlmProviders`（38）） | 新增工具（未落地） | `docs/design/ai-tools-group5-gaps.md` |
 
 ### 3.29.0（未发布，2026-11-25：第 4 组落地，`CatalogOptions` 改名 `ServerOptions`）
 
@@ -2463,7 +2475,7 @@ type AiProvidersData = {
 |---|---|---|---|
 | 1 | 版本升到 `3.27.0`；§1.2 重写：`content` 是模型唯一可见的通道，必须自足、可多行，`data` / `metadata` 只服务 UI；新增 §1.2.1 逐工具 `content` 验收清单；§4 中原本「事实只在 `data`」的工具补上 `content` 要求（`DiagRun` / `JobGet` / `NodeImportUrl` / `NodeImportText` / `NodeCreate` / `IssueReport` / `HttpCheck` / `NetConfigGet` / `CatalogRefresh` / `ConfigDetail` / `RuntimeLogs` / `CoreListVersions` / `CatalogSearch` / `DeepseekSetupKey` / `NodeProbe` / `RouteGet` / `RouteSetMode`） | 口径 | `ai-tools-inventory.md` P0；2026-11-24 PM 阶段 0 |
 | 2 | 删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`ConfigUpdate.targets` 删除；保留 `RouteGet` / `RouteSetMode`。工具总数 43 → **40** | 删除工具 | 产品已无按服务分流；`category_list` / `route_targets_set` / `rules_status` 三条 Host 命令保留给界面 |
-| 3 | **后续批次（3.31.0）**：新增只读工具 `MyServerWallet` / `LlmProviders`（原 `AccountBalance` / `TrialStatus` / `AiProviders` 提案按第 5 组补缺口决策单调整：`TrialStatus` 不新增、另两个改名）；手机导出与批量测速仍不给工具。总数 36 → **38** | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
+| 3 | **后续批次（3.31.0）**：新增只读工具 `MyServerWallet` / `LlmProviders`（原 `AccountBalance` / `TrialStatus` / `AiProviders` 提案按第 5 组补缺口决策单调整：`TrialStatus` 不新增、另两个改名）；手机导出与批量测速仍不给工具。总数 36 → **38**（按两片执行：3.31.0 `MyServerWallet`（37）、3.32.0 `LlmProviders`（38）） | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
 | 4 | 待回填：`NodeImport` 手动模式的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举（后三项随 3.30.0） | 待回填 | 以实现为准，不凭空写字段 |
 | 5 | 提示词残留已处理：`resources/prompts/zh/product.md` 的「先用分类列表取到合法分类名」改为「分流只有智能 / 全局两档，没有按服务挑选」；英文版原句「Only these two — there is no per-service selection」保持不变 | 已知残留（已修） | 提示词批次；4b819ef |
 

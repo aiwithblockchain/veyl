@@ -262,6 +262,7 @@ pub fn is_readonly(tool: &str) -> bool {
             | "OpenSettings"
             | "ServerOptions"
             | "MyServerFailure"
+            | "MyServerWallet"
     )
 }
 

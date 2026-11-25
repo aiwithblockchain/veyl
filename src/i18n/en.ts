@@ -309,6 +309,9 @@ export const en: Record<MessageKey, string> = {
   "tool.MyServerFailure.running": "Checking where the creation failed",
   "tool.MyServerFailure.done": "Checked the failure details",
   "tool.MyServerFailure.failed": "Couldn't read the failure details",
+  "tool.MyServerWallet.running": "Checking the balance",
+  "tool.MyServerWallet.done": "Loaded the balance",
+  "tool.MyServerWallet.failed": "Couldn't load the balance",
   "tool.NodeRotateCredentials.running":
     "Changing the node's connection password…",
   "tool.NodeRotateCredentials.done":

@@ -14,7 +14,7 @@
 1. **给 AI = 用户在对话里问得出、模型必须能答**。只读数据优先；写入要有「用户明确点了才发生」的替代路径。
 2. **只给 UI = 有安全、副作用或交互理由**，并且能一句话说清为什么。
 
-工具数从 **36 → 38**，契约 `tools.md` 升到 **3.31.0**（一批一次升，不拆）。`TrialStatus` 不新增（`DefaultProfileStatus` 已覆盖模型可见的试用状态，见 §2.2）。
+工具数从 **36 → 38**，分**两片**落地，每片独立验收、独立提交：**3.31.0 `MyServerWallet`（36 → 37）**、**3.32.0 `LlmProviders`（37 → 38）**。每片只加一个工具，版本按片升，不再「一批一次升」。`TrialStatus` 不新增（`DefaultProfileStatus` 已覆盖模型可见的试用状态，见 §2.2）。
 
 ---
 
@@ -81,18 +81,29 @@
 
 ---
 
-## 3. 工具数与契约 3.31.0
+## 3. 工具数与契约（两片：3.31.0 / 3.32.0）
 
-| 变化 | 工具数 |
-|---|---|
-| 基线（3.30.0） | 36 |
-| + `MyServerWallet` / `LlmProviders` | **38** |
+| 变化 | 工具数 | 契约 |
+|---|---|---|
+| 基线（3.30.0） | 36 | 3.30.0 |
+| 第一片：+ `MyServerWallet` | **37** | 3.31.0 |
+| 第二片：+ `LlmProviders` | **38** | 3.32.0 |
 
-`tools.md` 要改：§3 注册清单加两行；新增两个工具小节（`MyServerWallet` / `LlmProviders`）；`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动；变更表加 3.31.0。
+两片各自验收、各自提交；第二片在 37 的基础上再加一个。
 
-`commands.md`：`my_server_wallet` / `llm_provider_list` / `llm_provider_test` 三条命令的「无 AI 工具」标注要改指新工具；`trial_status` **保持「无 AI 工具」**（`TrialStatus` 不新增，见 §2.2）；`my_server_list` 一行的 AI 侧说明补字段；升小版本并加变更记录。
+**第一片（3.31.0，`MyServerWallet`）**
 
-`tool-display.md` / `TOOL_COPY`：两个新工具的中文展示文案与事实行（金额、服务商名）。
+- `tools.md`：§3 注册清单加一行；§4.58 由原 `AccountBalance` 提案改写为正式小节；§1.2.1 验收清单加一行；变更表加 3.31.0。
+- `commands.md`：`my_server_wallet` 的「无 AI 工具」标注改指 `MyServerWallet`；升小版本并加变更记录。
+- `tool-display.md` / `TOOL_COPY`：`MyServerWallet` 的中文展示文案与事实行（金额 + 币种 + 快照时间）。
+
+**第二片（3.32.0，`LlmProviders`）**
+
+- `tools.md`：§3 加一行；§4.60 由 `AiProviders` 提案改写；变更表加 3.32.0。
+- `commands.md`：`llm_provider_list` / `llm_provider_test` 两条命令的「无 AI 工具」标注改指 `LlmProviders`；`trial_status` **保持「无 AI 工具」**（`TrialStatus` 不新增，见 §2.2）；升小版本并加变更记录。
+- `tool-display.md` / `TOOL_COPY`：`LlmProviders` 的展示文案与事实行（服务商名）。
+
+`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动。
 
 ---
 
@@ -104,7 +115,7 @@
 4. 「帮我把所有节点测一遍」→ 模型明确拒绝长跑，引导到节点卡的测速入口；单点仍可用 `NodeProbe`。
 5. 「手机上怎么用」→ 讲步骤并把用户带到设置 › 账户 › 在手机上使用；**不出现任何令牌或链接**。
 6. 「我现在用的哪个服务商 / 帮我测一下连接」→ `LlmProviders` 列出当前服务商并给测试结果；「换一个服务商」引导到设置。
-7. 工具数 38；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
+7. 工具数 38（**两片结束后的终值**：3.31.0 后为 37，3.32.0 后为 38）；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
 
 ---
 

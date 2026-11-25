@@ -172,6 +172,10 @@ impl VpnToolServices for FakeServices {
         self.rec.record(format!("my_server_failure({server_id})"));
         Ok(self.data.clone())
     }
+    async fn my_server_wallet(&self) -> anyhow::Result<Value> {
+        self.rec.record("my_server_wallet");
+        Ok(self.data.clone())
+    }
     async fn core_list_versions(&self) -> anyhow::Result<Value> {
         self.rec.record("core_list_versions");
         Ok(self.data.clone())
@@ -568,7 +572,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.30.0",
+                env["contract_version"], "3.31.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1160,6 +1164,101 @@ async fn my_servers_requires_a_logged_in_account() {
     assert_eq!(env["error"]["details"]["reason"], "auth_required");
 
     auth::clear_tokens_for_test();
+}
+
+/// 钱包：未登录必须要求登录（不能报 0）；登录后只回三个字段，充值档位不进 AI 上下文。
+#[tokio::test]
+async fn my_server_wallet_requires_login_and_exposes_only_the_balance() {
+    use crate::control_plane::auth;
+    let _guard = crate::test_support::AUTH_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    crate::test_support::install_test_secrets();
+    auth::clear_tokens_for_test();
+    auth::store_device_for_test("dev_wallet");
+
+    let (svc, rec) = FakeServices::with_data(json!({
+        "balance_cents": 1234,
+        "currency": "USD",
+        "updated_at": "2026-11-25T11:40:00.000Z",
+        "denominations_cents": [1000, 2000],
+        "password": "pw-secret",
+    }));
+    let all = tools(svc);
+
+    // 匿名设备身份不是登录态：要求登录，且不去读钱包。
+    let device_tokens = auth::TokenSet {
+        account_id: "acct_dev".into(),
+        device_id: "dev_wallet".into(),
+        access_token: "access".into(),
+        access_expires_at: "2099-01-01T00:00:00Z".into(),
+        refresh_token: "refresh".into(),
+        refresh_expires_at: "2099-01-01T00:00:00Z".into(),
+        account_kind: "device".into(),
+        email: None,
+    };
+    auth::store_tokens_for_test(&device_tokens);
+    rec.take();
+    let (is_error, env) = run(tool(&all, "MyServerWallet"), json!({})).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "PRECONDITION_FAILED");
+    assert_eq!(env["error"]["details"]["reason"], "auth_required");
+    assert!(rec.take().is_empty(), "未登录不能去读钱包：{env}");
+
+    // 邮箱登录后返回余额快照；data 只有契约里的三个字段。
+    let session = auth::TokenSet {
+        account_kind: "email".into(),
+        email: Some("a@example.com".into()),
+        ..device_tokens
+    };
+    auth::store_tokens_for_test(&session);
+    let (is_error, env) = run(tool(&all, "MyServerWallet"), json!({})).await;
+    assert!(!is_error, "{env}");
+    let data = env["data"].as_object().expect("data 必须是对象");
+    assert_eq!(data.len(), 3, "只留三个字段：{data:?}");
+    assert_eq!(data["balance_cents"], 1234);
+    assert_eq!(data["currency"], "USD");
+    assert_eq!(data["updated_at"], "2026-11-25T11:40:00.000Z");
+    assert!(
+        !data.contains_key("denominations_cents"),
+        "充值档位是收银台参数，不进展示：{data:?}"
+    );
+
+    let content = env["summary"].as_str().unwrap_or("");
+    assert!(content.contains("12.34"), "content 要能直接说金额：{content}");
+    assert!(content.contains("美元"), "content 要带币种：{content}");
+    assert!(content.contains("截至"), "content 要带读取时间：{content}");
+    // 充值档位只进界面；content 里也不能出现档位数字。
+    assert!(
+        !content.contains("1000") && !content.contains("2000"),
+        "充值档位不能进 content：{content}"
+    );
+    assert!(!content.contains("pw-secret"), "{content}");
+
+    // 服务层缺余额字段：报数据不完整，不能默认成 0。
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "currency": "USD",
+        "updated_at": "2026-11-25T11:40:00.000Z",
+    }));
+    let (is_error, env) = run(tool(&tools(svc), "MyServerWallet"), json!({})).await;
+    assert!(is_error, "{env}");
+    assert_eq!(env["error"]["code"], "INTERNAL", "{env}");
+    let content = env["summary"].as_str().unwrap_or("");
+    assert!(content.contains("不完整"), "要说数据不完整：{content}");
+    assert!(!content.contains("0.00"), "缺余额时不能报 0：{content}");
+
+    auth::clear_tokens_for_test();
+}
+
+/// 钱包没有参数：schema 必须明确拒绝多余键，模型不能往里塞充值档位。
+#[test]
+fn my_server_wallet_takes_no_arguments() {
+    let (svc, _rec) = FakeServices::new();
+    let all = tools(svc);
+    let schema = tool(&all, "MyServerWallet").input_schema();
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"], json!({}), "{schema}");
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
 }
 
 #[tokio::test]

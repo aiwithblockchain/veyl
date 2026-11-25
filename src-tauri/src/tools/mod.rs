@@ -193,6 +193,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(region::SetUserRegionTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServersTool::new(Arc::clone(&services))),
         Box::new(my_servers::MyServerFailureTool::new(Arc::clone(&services))),
+        Box::new(my_servers::MyServerWalletTool::new(Arc::clone(&services))),
         Box::new(node_rotate::NodeRotateCredentialsTool::new()),
         Box::new(settings::OpenSettingsTool::new()),
         Box::new(stage_select::StageSelectTool::new(server_catalog.clone())),

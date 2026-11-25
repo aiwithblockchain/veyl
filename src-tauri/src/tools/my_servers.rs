@@ -248,6 +248,120 @@ fn summarise_servers(servers: &[Value]) -> String {
     lines.join("\n")
 }
 
+// ---------- MyServerWallet ----------
+
+/// 余额对模型只说人话：分换算成金额，币种用用户看得懂的词。
+fn amount_text(balance_cents: i64, currency: &str) -> String {
+    let unit = match currency {
+        "USD" => "美元",
+        other => other,
+    };
+    format!("{:.2} {unit}", balance_cents as f64 / 100.0)
+}
+
+/// 控制面不给时间，`updated_at` 是 Host 取的 UTC 时刻；按本机时区显示。
+fn friendly_time(updated_at: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(updated_at)
+        .ok()
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+}
+
+/// 只留契约里的三个字段：充值档位等收银台参数不进 AI 上下文。
+fn visible_wallet(data: &Value) -> Value {
+    let currency = data
+        .get("currency")
+        .and_then(Value::as_str)
+        .filter(|currency| !currency.trim().is_empty())
+        .unwrap_or("USD");
+    json!({
+        "balance_cents": data.get("balance_cents").and_then(Value::as_i64),
+        "currency": currency,
+        "updated_at": data.get("updated_at").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()),
+    })
+}
+
+fn summarise_wallet(wallet: &Value) -> String {
+    let Some(cents) = wallet.get("balance_cents").and_then(Value::as_i64) else {
+        return "余额数据不完整。".to_string();
+    };
+    let currency = wallet
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or("USD");
+    let amount = amount_text(cents, currency);
+    match wallet.get("updated_at").and_then(Value::as_str) {
+        Some(time) => match friendly_time(time) {
+            Some(local) => format!("余额 {amount}，截至 {local}。这是最近一次快照。"),
+            None => format!("余额 {amount}，读取时间未知。这是最近一次快照。"),
+        },
+        None => format!("余额 {amount}，读取时间未知。这是最近一次快照。"),
+    }
+}
+
+pub struct MyServerWalletTool {
+    services: Arc<dyn VpnToolServices>,
+}
+
+impl MyServerWalletTool {
+    pub fn new(services: Arc<dyn VpnToolServices>) -> Self {
+        Self { services }
+    }
+}
+
+#[async_trait]
+impl Tool for MyServerWalletTool {
+    fn name(&self) -> &str {
+        "MyServerWallet"
+    }
+
+    fn description(&self) -> &str {
+        "读账户余额，返回最近一次快照（带读取时间）。只读；充值属于界面动作，不要替用户发起。\
+         金额按工具返回的分换算成用户说法（例如 12.34 美元），不要推算还能用几天；\
+         未登录时说还没登录，不要说余额为 0。\n\
+         说「余额」和金额；不出现 balance_cents、钱包接口或充值档位。"
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    async fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        // 未登录 / 会话过期时没有余额可言：要求先登录，不能拿 0 冒充。
+        if !crate::control_plane::auth::account_state().logged_in {
+            let error = AivpnError::new("PRECONDITION_FAILED", "需要先登录才能查看余额")
+                .with_details(json!({ "reason": "auth_required" }));
+            return envelope::finish(
+                ctx,
+                "MyServerWallet",
+                ToolOutcome::fail(error).with_changed(Changed::None),
+            );
+        }
+        let outcome = match self.services.my_server_wallet().await {
+            Ok(data) => {
+                let wallet = visible_wallet(&data);
+                // 缺余额时不能默认成 0：宁可报数据不完整，也不能编一个金额。
+                if wallet.get("balance_cents").and_then(Value::as_i64).is_none() {
+                    ToolOutcome::fail(AivpnError::new("INTERNAL", "余额数据不完整"))
+                        .with_changed(Changed::None)
+                } else {
+                    let summary = summarise_wallet(&wallet);
+                    ToolOutcome::ok(summary, wallet).with_changed(Changed::None)
+                }
+            }
+            Err(error) => ToolOutcome::fail(failure(error)).with_changed(Changed::None),
+        };
+        envelope::finish(ctx, "MyServerWallet", outcome)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

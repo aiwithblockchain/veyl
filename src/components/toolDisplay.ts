@@ -287,6 +287,13 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.retryCreate",
     true,
   ),
+  MyServerWallet: entry(
+    "tool.MyServerWallet.running",
+    "tool.MyServerWallet.done",
+    "tool.MyServerWallet.failed",
+    "tool.advice.retryLater",
+    true,
+  ),
   NodeRotateCredentials: entry(
     "tool.NodeRotateCredentials.running",
     "tool.NodeRotateCredentials.done",
