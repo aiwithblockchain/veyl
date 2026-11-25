@@ -14,7 +14,7 @@
 1. **给 AI = 用户在对话里问得出、模型必须能答**。只读数据优先；写入要有「用户明确点了才发生」的替代路径。
 2. **只给 UI = 有安全、副作用或交互理由**，并且能一句话说清为什么。
 
-工具数从 **38 → 41**，契约 `tools.md` 升到 **3.30.0**（一批一次升，不拆）。
+工具数从 **38 → 40**，契约 `tools.md` 升到 **3.30.0**（一批一次升，不拆）。`TrialStatus` 不新增（`DefaultProfileStatus` 已覆盖模型可见的试用状态，见 §2.2）。
 
 ---
 
@@ -23,7 +23,7 @@
 | # | 能力 | 现有命令 | 现有 AI 工具 | 数据够不够 |
 |---|---|---|---|---|
 | 1 | 余额 | `my_server_wallet`（仅 UI） | 无 | 够（`balance_cents` / `currency` / `updated_at`） |
-| 2 | 试用状态 | `trial_status`（仅 UI） | 无 | 够（`state` / `expires_at` / `remaining_ms` / `seed_node_count`） |
+| 2 | 试用状态 | `trial_status`（仅 UI） | `DefaultProfileStatus` 的 content 已给 state + 剩余天数 + 池内节点数 | 够回答状态与剩余天数；`expires_at` / `started_at` 两个工具都没下发 |
 | 3 | 节点 / 服务器到期 | `MyServers`（工具）缺字段；免费节点在 `trial_status` | `MyServers` 已注册，但**没有**到期与计费字段 | 服务器有 `paid_until` / `billing_state`，只是没下发；免费节点在试用数据里；自建 / 导入节点没有到期概念 |
 | 4 | 批量测速 | `node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`（仅 UI） | `NodeProbe` 单点；批量**明确禁止**用循环模拟（`tools.md`） | 够，但执行要起临时运行时 |
 | 5 | 手机导出 | `mobile_export_get` / `mobile_export_rotate` / `mobile_clients_qr`（仅 UI） | 无 | 够，但返回里带导出令牌 |
@@ -40,11 +40,12 @@
 - 方案：`MyServerWallet {}` → `{ balance_cents, currency, updated_at }`。**不返回充值档位**（那是 UI 的收银台参数，模型用不到）；**不做充值工具**（支付属界面动作，与建机同一口径）。
 - 权限：Read。
 
-### 2.2 试用状态：**给 AI**（新增 `TrialStatus`，只读）
+### 2.2 试用状态：**不新增 `TrialStatus`**
 
-- 理由：免费节点是「仅供试用」，用户会问「试用还剩几天 / 是不是过期了」；判断依据是 `state` 与 `remaining_ms`，模型不该从节点数量反推。
-- 方案：`TrialStatus {}` → `{ state, started_at, expires_at, remaining_ms, seed_node_count }`，与命令一一对应，不加工。
-- 权限：Read。
+- 事实：`DefaultProfileStatus` 的 `content` 已经给「试用状态句 + 剩余天数 + 池内免费节点数」（`src-tauri/src/tools/net.rs:295-311`），只是 `data` 里没有试用字段，也没有 `expires_at` / `started_at`。
+- 决定：**不新增工具**。模型已经能回答「试用还剩几天 / 是不是过期了」；再加 `TrialStatus` 只会让模型在两个工具之间选错。
+- 若将来确实需要精确到期时间：先扩 `DefaultProfileStatus` 的 `content`（把 `expires_at` 写成一句人话），仍不拆工具。
+- 权限：沿用 `DefaultProfileStatus` 的 `ReadOnly`。
 
 ### 2.3 节点 / 服务器到期：**不给新工具，扩 `MyServers` 字段**
 
@@ -85,9 +86,9 @@
 | 变化 | 工具数 |
 |---|---|
 | 基线（3.29.0） | 38 |
-| + `MyServerWallet` / `TrialStatus` / `LlmProviders` | **41** |
+| + `MyServerWallet` / `LlmProviders` | **40** |
 
-`tools.md` 要改：§3 注册清单加三行；新增三个工具小节（`MyServerWallet` / `TrialStatus` / `LlmProviders`）；`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动；变更表加 3.30.0。
+`tools.md` 要改：§3 注册清单加两行；新增两个工具小节（`MyServerWallet` / `LlmProviders`）；`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动；变更表加 3.30.0。
 
 `commands.md`：`my_server_wallet` / `trial_status` / `llm_provider_list` / `llm_provider_test` 四条命令的「无 AI 工具」标注要改指新工具；`my_server_list` 一行的 AI 侧说明补字段；升小版本并加变更记录。
 
@@ -98,12 +99,12 @@
 ## 4. 验收（能回答什么问题）
 
 1. 「我余额还有多少」→ `MyServerWallet` 直接答，并说明是外部快照。
-2. 「试用还剩几天 / 过期没有」→ `TrialStatus` 答 `remaining_ms` 与 `state`。
+2. 「试用还剩几天 / 过期没有」→ `DefaultProfileStatus` 的 content 答 `state` + 剩余天数（没有精确 `expires_at`，不要编）。
 3. 「我这台服务器什么时候扣费 / 本期到哪天」→ `MyServers` 的 `paid_until` + `billing_state`；`active` 且已过时间的口径仍按「本期已过，服务正常」。
 4. 「帮我把所有节点测一遍」→ 模型明确拒绝长跑，引导到节点卡的测速入口；单点仍可用 `NodeProbe`。
 5. 「手机上怎么用」→ 讲步骤并把用户带到设置 › 账户 › 在手机上使用；**不出现任何令牌或链接**。
 6. 「我现在用的哪个服务商 / 帮我测一下连接」→ `LlmProviders` 列出当前服务商并给测试结果；「换一个服务商」引导到设置。
-7. 工具数 41；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
+7. 工具数 40；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
 
 ---
 
@@ -112,3 +113,4 @@
 - 不做充值、建机、销毁、手机导出、批量测速的工具（支付与长任务属界面）。
 - 不做服务商保存 / 删除 / 切换（密钥输入不经模型）。
 - 不做「约可运行 N 天」「下次扣费具体时刻」这类派生值。
+- 不新增 `TrialStatus`（`DefaultProfileStatus` 已覆盖；见 §2.2）。
