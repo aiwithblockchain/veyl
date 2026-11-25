@@ -73,10 +73,12 @@ system.md
 数据源：`capabilities.md` 的能力表。逐条渲染成：
 
 ```
-A1 建立连接 · 工具 RuntimeStart · 用户能看到：顶部按钮
-A2 断开连接 · 工具 RuntimeStop
+A1 建立连接 · 工具 VpnConnect · 用户能看到：顶部按钮
+A2 断开连接 · 工具 VpnDisconnect
 ...
 ```
+
+> **2026-11-25 覆盖（`tools.md` 3.30.0）**：示例里的连接 / 断开工具已从 `RuntimeStart` / `RuntimeStop` 改为 `VpnConnect` / `VpnDisconnect`——前者在 3.30.0 前置批删除（与后者是同一服务方法的两个名字），`runtime_start` / `runtime_stop` 两条命令仍保留给界面。
 
 规则：
 

@@ -568,7 +568,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.29.0",
+                env["contract_version"], "3.30.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1049,22 +1049,42 @@ async fn config_set_mode_does_not_ask_when_disconnected() {
     );
 }
 
-/// 三个写入路径的 schema 只收两档；`proxy_selected` 已下线。
+/// 分流写入路径的 schema 只收两档；`proxy_selected` 已下线。
 #[test]
 fn routing_mode_schemas_only_allow_two_values() {
     let (svc, _rec) = FakeServices::new();
     let all = tools(svc);
-    for (name, key) in [
-        ("ConfigUpdate", "routing_mode"),
-        ("RouteSetMode", "mode"),
-    ] {
-        let schema = tool(&all, name).input_schema();
-        assert_eq!(
-            schema["properties"][key]["enum"],
-            json!(["direct", "proxy_all"]),
-            "{name}"
-        );
-    }
+    let schema = tool(&all, "RouteSetMode").input_schema();
+    assert_eq!(
+        schema["properties"]["mode"]["enum"],
+        json!(["direct", "proxy_all"])
+    );
+
+    // 改分流只有一个写入口：ConfigUpdate 的 schema 里不能再有 routing_mode。
+    let update = tool(&all, "ConfigUpdate").input_schema();
+    assert!(
+        update["properties"].get("routing_mode").is_none(),
+        "{update}"
+    );
+}
+
+/// 分流只留 `RouteSetMode` 一个写入口：ConfigUpdate 收到 routing_mode 要拒绝，
+/// 不能静默忽略后回「配置已更新」。
+#[tokio::test]
+async fn config_update_rejects_routing_mode_as_unknown_argument() {
+    let (svc, rec) = FakeServices::new();
+    let all = tools(svc);
+    let env = expect_rejected(
+        tool(&all, "ConfigUpdate"),
+        json!({ "config_id": "cfg_1", "routing_mode": "proxy_all" }),
+        "ConfigUpdate 不再接受 routing_mode",
+    )
+    .await;
+    assert_eq!(
+        env["error"]["details"]["reason"], "unknown_argument",
+        "{env}"
+    );
+    assert!(rec.take().is_empty(), "被拒绝的输入不应落到服务层");
 }
 
 #[tokio::test]
@@ -1517,7 +1537,6 @@ async fn zero_argument_tools_work() {
 
     for name in [
         "RuntimeStatus",
-        "RuntimeStop",
         "VpnDisconnect",
         "NetConfigGet",
         "RouteGet",

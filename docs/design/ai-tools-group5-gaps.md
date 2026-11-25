@@ -14,7 +14,7 @@
 1. **给 AI = 用户在对话里问得出、模型必须能答**。只读数据优先；写入要有「用户明确点了才发生」的替代路径。
 2. **只给 UI = 有安全、副作用或交互理由**，并且能一句话说清为什么。
 
-工具数从 **38 → 40**，契约 `tools.md` 升到 **3.30.0**（一批一次升，不拆）。`TrialStatus` 不新增（`DefaultProfileStatus` 已覆盖模型可见的试用状态，见 §2.2）。
+工具数从 **36 → 38**，契约 `tools.md` 升到 **3.31.0**（一批一次升，不拆）。`TrialStatus` 不新增（`DefaultProfileStatus` 已覆盖模型可见的试用状态，见 §2.2）。
 
 ---
 
@@ -81,18 +81,18 @@
 
 ---
 
-## 3. 工具数与契约 3.30.0
+## 3. 工具数与契约 3.31.0
 
 | 变化 | 工具数 |
 |---|---|
-| 基线（3.29.0） | 38 |
-| + `MyServerWallet` / `LlmProviders` | **40** |
+| 基线（3.30.0） | 36 |
+| + `MyServerWallet` / `LlmProviders` | **38** |
 
-`tools.md` 要改：§3 注册清单加两行；新增两个工具小节（`MyServerWallet` / `LlmProviders`）；`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动；变更表加 3.30.0。
+`tools.md` 要改：§3 注册清单加两行；新增两个工具小节（`MyServerWallet` / `LlmProviders`）；`MyServers` 的可见字段表补两个字段（`paid_until` / `billing_state`）；§1.4 错误码表如无新码则不动；变更表加 3.31.0。
 
-`commands.md`：`my_server_wallet` / `trial_status` / `llm_provider_list` / `llm_provider_test` 四条命令的「无 AI 工具」标注要改指新工具；`my_server_list` 一行的 AI 侧说明补字段；升小版本并加变更记录。
+`commands.md`：`my_server_wallet` / `llm_provider_list` / `llm_provider_test` 三条命令的「无 AI 工具」标注要改指新工具；`trial_status` **保持「无 AI 工具」**（`TrialStatus` 不新增，见 §2.2）；`my_server_list` 一行的 AI 侧说明补字段；升小版本并加变更记录。
 
-`tool-display.md` / `TOOL_COPY`：三个新工具的中文展示文案与事实行（金额、剩余时间、服务商名）。
+`tool-display.md` / `TOOL_COPY`：两个新工具的中文展示文案与事实行（金额、服务商名）。
 
 ---
 
@@ -104,7 +104,7 @@
 4. 「帮我把所有节点测一遍」→ 模型明确拒绝长跑，引导到节点卡的测速入口；单点仍可用 `NodeProbe`。
 5. 「手机上怎么用」→ 讲步骤并把用户带到设置 › 账户 › 在手机上使用；**不出现任何令牌或链接**。
 6. 「我现在用的哪个服务商 / 帮我测一下连接」→ `LlmProviders` 列出当前服务商并给测试结果；「换一个服务商」引导到设置。
-7. 工具数 40；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
+7. 工具数 38；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
 
 ---
 

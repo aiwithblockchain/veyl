@@ -36,7 +36,7 @@
 
 ## 2. 客户端：两个 AI 工具
 
-模型可见名用 **snake_case 长名**（2026-11-22 拍板）：名字长一点、下划线分隔，一看就知道干什么。这与现有 41 个工具的 PascalCase 不同，实现时在 `tools.md` 里登记为**约定例外**，`TOOL_COPY` 的键就是下面这两个字符串。**不要复用 3.15.0 已移除的 `IssueList` / `IssueGet`**——那两个是本地问题列表，语义不同。
+模型可见名用 **snake_case 长名**（2026-11-22 拍板）：名字长一点、下划线分隔，一看就知道干什么。这与现有 36 个工具的 PascalCase 不同，实现时在 `tools.md` 里登记为**约定例外**，`TOOL_COPY` 的键就是下面这两个字符串。**不要复用 3.15.0 已移除的 `IssueList` / `IssueGet`**——那两个是本地问题列表，语义不同。
 
 ### 2.1 `submit_issue_to_public_wall`（上报，`PermissionLevel::Write`）
 

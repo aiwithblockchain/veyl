@@ -159,8 +159,6 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
     let server_catalog = services.server_catalog();
     vec![
         Box::new(runtime::RuntimeStatusTool::new(Arc::clone(&services))),
-        Box::new(runtime::RuntimeStartTool::new(Arc::clone(&services))),
-        Box::new(runtime::RuntimeStopTool::new(Arc::clone(&services))),
         Box::new(runtime::RuntimeRestartTool::new(Arc::clone(&services))),
         Box::new(runtime::RuntimeLogsTool::new(Arc::clone(&services))),
         Box::new(core::CoreListVersionsTool::new(Arc::clone(&services))),

@@ -1,6 +1,6 @@
 # 工具错误路径剧本
 
-15 条失败剧本，覆盖 `docs/contracts/tools.md` 3.18.0 里常见的工具失败路径。用途：让 E2E 能稳定复现「工具失败 → Agent 给出可执行建议」这条路径，而不是靠手工制造故障。
+13 条失败剧本，覆盖 `docs/contracts/tools.md` 3.18.0 里常见的工具失败路径。用途：让 E2E 能稳定复现「工具失败 → Agent 给出可执行建议」这条路径，而不是靠手工制造故障。
 
 ## 怎么用
 
@@ -12,7 +12,7 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
   -d '{"model":"deepseek-chat","stream":false,"messages":[{"role":"user","content":"[scenario:err-VpnConnect]"}]}'
 ```
 
-剧本本身只负责「发出这次工具调用」。**工具是否真的失败，取决于被测环境**——例如 `err-RuntimeStart` 要求运行时确实没装，`err-CatalogSearch` 需要 `?_fault=500` 或停掉目录服务。前置条件写在下表。
+剧本本身只负责「发出这次工具调用」。**工具是否真的失败，取决于被测环境**——例如 `err-VpnConnect` 要求还没有该节点的本地配置，`err-CatalogSearch` 需要 `?_fault=500` 或停掉目录服务。前置条件写在下表。
 
 ## 字段
 
@@ -27,20 +27,18 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 | # | 工具 | 期望 | 契约依据 | 触发条件 |
 |---|---|---|---|---|
 | 1 | `RuntimeStatus` | `INTERNAL` | §4.1 | 快照损坏/权限不足（需故障注入） |
-| 2 | `RuntimeStart` | `RUNTIME_NOT_INSTALLED` | §4.2 | 运行时未安装 |
-| 3 | `RuntimeStop` | `RUNTIME_EXITED` | §4.3 | 进程已退出后再停 |
-| 4 | `RuntimeRestart` | `RUNTIME_NOT_INSTALLED` | **无** | 运行时未安装 |
-| 5 | `RuntimeLogs` | `INTERNAL` | **无** | 日志文件缺失 |
-| 6 | `CoreListVersions` | `INTERNAL` | **无** | 内置清单损坏 |
-| 7 | `CatalogSearch` | `CATALOG_UNAVAILABLE` | §4.8 | 目录服务不可达 |
-| 8 | `NodeImport`（`source = "url"`） | `UPSTREAM_ERROR` | §4.10 | 订阅地址当前拉不到 |
-| 9 | `VpnConnect` | `PRECONDITION_FAILED` | §4.11 | 未导入配置就连接 |
-| 10 | `VpnDisconnect` | `PRECONDITION_FAILED` | **无** | 未连接时断开 |
-| 11 | `DiagRun` | `INTERNAL` | **无** | 诊断内部失败 |
-| 12 | `DeepseekSetupKey` | **成功**（`expect_ok`） | §4.14 | 离线仍返回步骤，契约明确不报错 |
-| 13 | `DeepseekSaveKey` | `INVALID_ARGUMENT` | §4.15（schema `minLength: 20`） | Key 长度不足 |
-| 14 | `JobGet` | `NOT_FOUND` | §4.16 | 查询不存在或过期的 job |
-| 15 | `AskUserQuestion` | `USER_DISMISSED` | **无**（Claurst 内置） | 用户关闭提问 |
+| 2 | `RuntimeRestart` | `RUNTIME_NOT_INSTALLED` | **无** | 运行时未安装 |
+| 3 | `RuntimeLogs` | `INTERNAL` | **无** | 日志文件缺失 |
+| 4 | `CoreListVersions` | `INTERNAL` | **无** | 内置清单损坏 |
+| 5 | `CatalogSearch` | `CATALOG_UNAVAILABLE` | §4.8 | 目录服务不可达 |
+| 6 | `NodeImport`（`source = "url"`） | `UPSTREAM_ERROR` | §4.10 | 订阅地址当前拉不到 |
+| 7 | `VpnConnect` | `PRECONDITION_FAILED` | §4.11 | 未导入配置就连接 |
+| 8 | `VpnDisconnect` | `PRECONDITION_FAILED` | **无** | 未连接时断开 |
+| 9 | `DiagRun` | `INTERNAL` | **无** | 诊断内部失败 |
+| 10 | `DeepseekSetupKey` | **成功**（`expect_ok`） | §4.14 | 离线仍返回步骤，契约明确不报错 |
+| 11 | `DeepseekSaveKey` | `INVALID_ARGUMENT` | §4.15（schema `minLength: 20`） | Key 长度不足 |
+| 12 | `JobGet` | `NOT_FOUND` | §4.16 | 查询不存在或过期的 job |
+| 13 | `AskUserQuestion` | `USER_DISMISSED` | **无**（Claurst 内置） | 用户关闭提问 |
 
 ## 需要架构师补契约的 6 处
 
@@ -48,7 +46,7 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 
 | 工具 | 缺什么 |
 |---|---|
-| `RuntimeRestart` | 错误码列表（大概率与 `RuntimeStart` 相同，但没写） |
+| `RuntimeRestart` | 错误码列表（大概率与 `VpnConnect` 相同，但没写） |
 | `RuntimeLogs` | 错误码列表（日志文件缺失时返回什么） |
 | `CoreListVersions` | 错误码列表（清单损坏时返回什么） |
 | `VpnDisconnect` | 错误码列表（未连接时是否报错，还是幂等成功） |

@@ -2,7 +2,7 @@
 
 > 日期：2026-11-25
 > 范围：在**装包后的应用**里，用真实 AI 逐条问，核对工具调用与回答事实。只读冒烟，不含建机、充值、销毁。
-> 依据：`docs/design/ai-tools-decisions.md` §1–§3、`docs/design/ai-tools-group5-gaps.md` §4、`docs/contracts/tools.md`（3.29.0，第 5 组上线后为 3.30.0）。
+> 依据：`docs/design/ai-tools-decisions.md` §1–§3、`docs/design/ai-tools-group5-gaps.md` §4、`docs/contracts/tools.md`（3.29.0；前置批去重后为 3.30.0，第 5 组补缺口上线后为 3.31.0）。
 > 做法：每条原话照念，不替模型补充上下文；每问完记录回复摘要与 `tool_calls` 里的工具名。
 
 ---

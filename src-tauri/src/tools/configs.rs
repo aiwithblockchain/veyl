@@ -152,8 +152,9 @@ impl Tool for ConfigUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "编辑一套配置（名称 / 分流 / DNS / 节点集）。分流只有 direct / proxy_all 两档。\
-         没有 connect_mode：改接管方式必须新建配置。node_ids 是整体替换。\n配置 ID 只用于你自己匹配，不要念给用户。"
+        "编辑一套配置（名称 / DNS / 节点集）。\
+         没有 connect_mode：改接管方式用 ConfigSetMode。node_ids 是整体替换。\
+         分流模式不在这里改，用 RouteSetMode。\n配置 ID 只用于你自己匹配，不要念给用户。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -166,7 +167,6 @@ impl Tool for ConfigUpdateTool {
             "properties": {
                 "config_id": { "type": "string" },
                 "name": { "type": "string", "maxLength": 40 },
-                "routing_mode": { "type": "string", "enum": ["direct", "proxy_all"] },
                 "dns": { "type": "object" },
                 "tun_excludes": { "type": "array", "items": { "type": "string" } },
                 "node_ids": { "type": "array", "items": { "type": "string" } }
@@ -216,16 +216,7 @@ impl Tool for ConfigUpdateTool {
                             )
                         }
                     },
-                    routing_mode: match super::optional_string(&input, "routing_mode") {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return envelope::finish(
-                                ctx,
-                                "ConfigUpdate",
-                                ToolOutcome::fail(error).with_changed(Changed::None),
-                            )
-                        }
-                    },
+                    routing_mode: None,
                     listen_port: None,
                     dns: input.get("dns").cloned(),
                     tun_excludes: input
@@ -549,11 +540,10 @@ fn invalid(reason: &str, message: &str) -> AivpnError {
     AivpnError::new("INVALID_ARGUMENT", message).with_details(json!({ "reason": reason }))
 }
 
-/// `ConfigUpdate` 的白名单：只认 schema 里的六个键。
-const CONFIG_UPDATE_KEYS: [&str; 6] = [
+/// `ConfigUpdate` 的白名单：只认 schema 里的五个键。
+const CONFIG_UPDATE_KEYS: [&str; 5] = [
     "config_id",
     "name",
-    "routing_mode",
     "dns",
     "tun_excludes",
     "node_ids",
@@ -564,9 +554,12 @@ fn unknown_update_argument(input: &Value) -> Option<AivpnError> {
     let Some(object) = input.as_object() else {
         return Some(invalid("invalid_argument", "参数必须是一个对象"));
     };
-    // 契约给了专用错误码：字段名没写错，是这个改动必须新建配置。
+    // 契约给了专用错误码：字段名没写错，是这个键不归 ConfigUpdate 管。
     if object.contains_key("connect_mode") {
-        return Some(invalid("connect_mode_immutable", "改接管方式需要新建配置"));
+        return Some(invalid(
+            "connect_mode_immutable",
+            "接管方式用 ConfigSetMode 在线切换",
+        ));
     }
     object
         .keys()
@@ -891,7 +884,7 @@ mod tests {
             env["error"]["details"]["reason"], "connect_mode_immutable",
             "{env}"
         );
-        assert_eq!(env["summary"], "改接管方式需要新建配置", "{env}");
+        assert_eq!(env["summary"], "接管方式用 ConfigSetMode 在线切换", "{env}");
     }
 
     #[test]
@@ -899,12 +892,21 @@ mod tests {
         assert!(unknown_update_argument(&json!({
             "config_id": "cfg_1",
             "name": "新名字",
-            "routing_mode": "direct",
             "dns": {},
             "tun_excludes": [],
             "node_ids": []
         }))
         .is_none());
+        // 分流只走 RouteSetMode：这个键必须按未知参数拒绝，不能静默忽略。
+        let error = unknown_update_argument(&json!({
+            "config_id": "cfg_1",
+            "routing_mode": "proxy_all"
+        }))
+        .expect("routing_mode 必须被拒绝");
+        assert_eq!(
+            error.details.as_ref().unwrap()["reason"],
+            "unknown_argument"
+        );
     }
 
     #[tokio::test]

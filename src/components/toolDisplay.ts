@@ -91,20 +91,6 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.retryLater",
     true,
   ),
-  RuntimeStart: entry(
-    "tool.RuntimeStart.running",
-    "tool.RuntimeStart.done",
-    "tool.RuntimeStart.failed",
-    "tool.advice.retry",
-    false,
-  ),
-  RuntimeStop: entry(
-    "tool.RuntimeStop.running",
-    "tool.RuntimeStop.done",
-    "tool.RuntimeStop.failed",
-    "tool.advice.retry",
-    false,
-  ),
   RuntimeRestart: entry(
     "tool.RuntimeRestart.running",
     "tool.RuntimeRestart.done",

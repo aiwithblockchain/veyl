@@ -20,7 +20,8 @@
 | 第 2 组 | 删 `RouteTargetsSet` / `CategoryList` / `RulesStatus` | 40 | 3.27.0 |
 | 第 3 组 | 节点写入三工具合并为 `NodeImport` | 38 | 3.28.0 |
 | 第 4 组 | UI 状态类工具去留（改名 `ServerOptions`，工具数不变） | 38 | 3.29.0（已落地 `8da37db`） |
-| 第 5 组 | 补缺口（余额 / 试用 / 服务商等） | 待定 | 3.30.0 |
+| 前置批：工具去重（不占组号） | 删 `RuntimeStart` / `RuntimeStop`，`ConfigUpdate` 去掉 `routing_mode` | 36 | 3.30.0（已落地工具面） |
+| 第 5 组 | 补缺口（余额 / 服务商等；`TrialStatus` 不新增） | 38 | 3.31.0（待实现） |
 
 `tool-display.md` 里那句「工具集合为 41 个」不成立，改为「随批更新」，数字以 `tools.md` 为准。
 

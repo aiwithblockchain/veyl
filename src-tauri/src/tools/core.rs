@@ -126,7 +126,7 @@ fn summarise_versions(data: &Value) -> String {
     if available.is_empty() {
         lines.push("可安装：无（内置清单里没有当前平台可用的版本）".to_string());
         if !installed.is_empty() {
-            lines.push("已安装的版本可以直接调用 RuntimeStart。".to_string());
+            lines.push("已安装的版本可以直接用 VpnConnect 连接。".to_string());
         }
     } else {
         lines.push("可安装：".to_string());
@@ -231,6 +231,6 @@ mod version_summary_tests {
         });
         let text = summarise_versions(&data);
         assert!(text.contains("可安装：无"), "{text}");
-        assert!(text.contains("RuntimeStart"), "{text}");
+        assert!(text.contains("VpnConnect"), "{text}");
     }
 }

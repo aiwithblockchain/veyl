@@ -2142,8 +2142,6 @@ mod prompt_tests {
             "VpnConnect",
             "VpnDisconnect",
             "RuntimeStatus",
-            "RuntimeStart",
-            "RuntimeStop",
             "RuntimeRestart",
             "CoreUpgrade",
             "NodeSwitch",

@@ -82,7 +82,7 @@ pub enum RuntimeState {
 | `stopping` | 正在优雅退出 | 断开中 |
 | `failed` | 无法启动或已放弃重启 | 连接失败，需人工介入 |
 
-> `failed` **不会自动重试**。只有用户显式操作（`RuntimeStart` 或 UI 按钮）才能离开 `failed`。
+> `failed` **不会自动重试**。只有用户显式操作（`VpnConnect` 或 UI 按钮）才能离开 `failed`。
 
 ### 2.2 运行模式
 
@@ -290,12 +290,12 @@ type AivpnError = {
 
 | 事件 | 触发来源 |
 |---|---|
-| `START_REQ` | `RuntimeStart` 工具 / UI「连接」/ 启动恢复 |
+| `START_REQ` | `VpnConnect` 工具 / UI「连接」/ 启动恢复 |
 | `PROCESS_READY` | Clash API `GET /version` 首次返回 200 |
 | `HEALTH_OK` | 一次完整健康检查全部通过 |
 | `HEALTH_FAIL` | 一次健康检查失败 |
 | `CRASH` | 进程非预期退出，或启动超时 |
-| `STOP_REQ` | `RuntimeStop` 工具 / UI「断开」/ 应用退出 |
+| `STOP_REQ` | `VpnDisconnect` 工具 / UI「断开」/ 应用退出 |
 | `RESTART_REQ` | `RuntimeRestart` 工具 / 恢复策略 |
 | `STOPPED` | 进程已退出并被回收 |
 | `GIVE_UP` | 重启次数耗尽 |
