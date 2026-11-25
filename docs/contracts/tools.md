@@ -1594,6 +1594,7 @@ type DefaultProfileStatusData = {
 - `applied_mode` / `applied_revision` 取自 `RuntimeSnapshot`，不是从库里推。
 - 只读，不联网。用户问「我现在怎么分的」时用它，不要从 `ConfigDetail` 猜。
 - **`content` 必须包含分流模式、当前生效模式与是否已应用**；只写「已读取」不够。
+- **模式枚举必须带界面标签**：`direct` 写成「direct（界面上的「智能」/ Smart）」，`proxy_all` 写成「proxy_all（界面上的「全局」/ Global）」。只给机器值会让模型自己猜，曾猜出「界面写智能、实际全部走 VPN」这种不存在的矛盾；写「界面上的」是为了让它知道两者是一回事。
 
 权限：`ReadOnly`。
 
@@ -2128,6 +2129,7 @@ type HttpCheckData = {
   server: string | null;        // `server` 响应头原样
   cf_mitigated: string | null;  // `cf-mitigated` 响应头原样，如 "challenge"
   tls_ok: boolean;
+  address_families?: ("ipv4" | "ipv6")[]; // 失败时实际尝试的地址族；不含 IP
   error: { code: string; message: string } | null;
 };
 ```
@@ -2138,6 +2140,7 @@ type HttpCheckData = {
 - **网络 / TLS / DNS 解析失败都是工具成功返回**：`status: null`、`error.code = "HTTP_CHECK_FAILED"`，`message` 可直接转述；`tls_ok` 说明握手是否成功。**DNS 解析失败（域名不存在、解析超时）属于这一类**；只有「解析成功但地址落在私网」才是 `INVALID_ARGUMENT / private_address`。
 - 参数非法、非 `https`、非 443、解析到私网 → `INVALID_ARGUMENT`（`details.reason` 取 `invalid_url` / `insecure_scheme` / `unsupported_port` / `private_address`）。
 - **SSRF 约束（必须实现）**：只允许 `https://` 且端口 443；解析全部 A/AAAA，任一落在 loopback / 私网 / 链路本地 / ULA / 组播 / unspecified 即拒绝；跟随重定向最多 5 次，**每一跳重新解析并重新校验**（代理路径同样拒绝首跳私网解析）；不发 Cookie / Authorization / 请求体，只发 `User-Agent: Veyl-Check/1.0`；**只读响应头，正文根本不读**（64 KiB 上限只用于响应头）；直连路径（未连接 / TUN）把已校验地址 pin 给连接层并显式 `no_proxy`，rebinding 无效。
+- **直连 pin 的地址族**：IPv4 优先。TUN 只分配 IPv4、不接管 IPv6，所以 TUN 连接只 pin IPv4——把 AAAA 交给它只会静默挂起。域名在 TUN 下只有 IPv6 时立即返回 `HTTP_CHECK_FAILED`（`address_families: ["ipv6"]`），不等到整体超时；代理路径由 sing-box 解析，不做此过滤。失败结果的 `data.address_families` 只写族名，不写 IP，便于区分「试了哪条路」。
 - **经本机代理（Proxy 连接中）时，目标最终由 sing-box 再解析，我们无法 pin**：该路径仍在每跳做静态解析校验，但存在 TOCTOU 窗口。窗口内最多造成**一次到私网 443 的连接尝试**——**正常情况下 TLS 证书不可能匹配**所请求的域名，握手即失败，**不能被用来读取**本机或内网的内容。例外：装了企业 MITM 根证书、且 TLS 检查盒正好在被 rebound 的私网地址上时，握手可能成功，但请求落在企业代理上，仍读不到内网内容。本工具只读响应头、只允许 https/443。
 - **「读不到响应内容」不等于「什么也学不到」**：失败文案会区分「连接被拒 / 超时 / TLS 失败」，模型据此能判断某个内网地址的 443 是否通。这是**已接受的残余信息泄露**，不得把它写成「无信息泄露」。
 - **错误文案不携带地址**：失败文案只给粗分类——`等响应超时` / `TLS 握手失败` / `连接没有建立（被拒绝或不可达）` / `响应无法解析` / `请求失败`——**不拼接底层库的原始错误串**，也不回解析到的地址。因此可推断的信息止于「该地址的 443 通不通」，不包含「解析到了哪个内网 IP」。
@@ -2476,6 +2479,8 @@ type AiProvidersData = {
 |---|---|---|---|
 | 1 | 版本升到 `3.29.0`；`CatalogOptions` 改名 `ServerOptions`（Rust 类型 `ServerOptionsTool`、模型可见名、§4.53 小节、§3.1 注册清单、英文描述与 `TOOL_COPY` 键名同步）。schema、权限、行为与返回形状不变；`StageSelect` 中文 / 英文描述里「先调 `CatalogOptions`」同步改为 `ServerOptions`。工具总数仍是 **38** | 改名 | 两个「catalog」语义不同却同前缀：`CatalogSearch` 查共享节点目录，本工具读建机目录；`docs/design/ai-tools-decisions.md` §3 |
 | 2 | `AskUserQuestionGuard` 按实现如实登记：它不是新工具，`name()` 仍是 `AskUserQuestion`，包装只做两件事——补表达约束、归一化 `options`；名字与内置工具相同，**不占额外工具名额**（§3 的 38 个里只有 `AskUserQuestion` 这一个名字）。旧说法「Veyl 不重写内置工具」改为「不重写，但包装并补约束」 | 说明更正 | `src-tauri/src/tools/mod.rs` 的 `AskUserQuestionGuard` |
+| 3 | `RouteGet` 的 `content` 补界面标签：`direct` 写「界面上的「智能」/ Smart」，`proxy_all` 写「界面上的「全局」/ Global」；机器值保留。`display`、`data`、权限不变，不升版本 | 内容口径（补记） | 2026-11-25 PM：冒烟时模型把 `direct` 猜成「全部走 VPN」 |
+| 4 | `HttpCheck` 直连 pin 地址改为 IPv4 优先；TUN 连接只 pin IPv4（TUN 不接管 IPv6），纯 IPv6 域名立即返回失败而不是静默等到超时；失败 `data` 新增可选 `address_families`（只族名、不含 IP）。权限、成功返回与 `content` 不变，不升版本 | 行为修正（补记） | 2026-11-25 冒烟：TUN + 智能下 YouTube 检查误报 |
 
 ### 3.28.0（未发布，2026-11-24：第 3 组落地，节点写入三工具合并）
 

@@ -193,6 +193,16 @@ fn route_set_mode_outcome(data: Value) -> ToolOutcome {
     ToolOutcome::ok(summarise_route_change(&data), data).with_display(facts, Changed::None)
 }
 
+/// 机器枚举之外补上界面标签：模型看到 `direct` / `proxy_all` 时要能和界面
+/// 上的「智能」/「全局」对上，否则只能猜。工具内容只有中文，中英标签一并写出。
+fn mode_with_label(mode: &str) -> String {
+    match mode {
+        "direct" => format!("{mode}（界面上的「智能」/ Smart）"),
+        "proxy_all" => format!("{mode}（界面上的「全局」/ Global）"),
+        _ => mode.to_string(),
+    }
+}
+
 fn summarise_route(data: &Value) -> String {
     let mode = data
         .get("routing_mode")
@@ -218,7 +228,9 @@ fn summarise_route(data: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("next_connection");
     format!(
-        "分流模式 {mode}，当前生效 {applied}{}。生效状态：{effective}。",
+        "分流模式 {}，当前生效 {}{}。生效状态：{effective}。",
+        mode_with_label(mode),
+        mode_with_label(applied),
         if targets.is_empty() {
             String::new()
         } else {
@@ -416,6 +428,41 @@ mod tests {
             "reconnect": "not_running",
         }));
         assert!(text.contains("目标分类：social、streaming"), "{text}");
+    }
+
+    /// 模型看到 `direct` 要能和界面上的「智能」对上，否则会猜出
+    /// 「界面写智能、实际全部走 VPN」这种不存在的矛盾。
+    #[test]
+    fn route_get_content_labels_direct_as_smart() {
+        let text = summarise_route(&json!({
+            "routing_mode": "direct",
+            "applied_mode": "direct",
+            "effective": "current_connection",
+            "targets": [],
+        }));
+        assert!(
+            text.contains("分流模式 direct（界面上的「智能」/ Smart）"),
+            "{text}"
+        );
+        assert!(
+            text.contains("当前生效 direct（界面上的「智能」/ Smart）"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn route_get_content_labels_proxy_all_as_global() {
+        let text = summarise_route(&json!({
+            "routing_mode": "proxy_all",
+            "applied_mode": null,
+            "effective": "next_connection",
+            "targets": [],
+        }));
+        assert!(
+            text.contains("分流模式 proxy_all（界面上的「全局」/ Global）"),
+            "{text}"
+        );
+        assert!(text.contains("当前生效 未生效"), "{text}");
     }
 
     /// 重连失败时 `abort_connection` 只撤代理、不停 runtime：
