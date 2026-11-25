@@ -47,6 +47,8 @@ const DETAIL_RETRY_DELAYS = [1000, 2000, 4000, 8000];
 const DETAIL_ERROR_AFTER_MS = 10_000;
 /** 打开任一面时，距上次成功刷新不足这么久就直接用缓存。 */
 export const WALLET_REFRESH_GATE_MS = 30_000;
+/** 反复开合账号菜单时的短下限：上一次 open_menu 刷新不足这么久就跳过。 */
+export const WALLET_OPEN_MENU_MIN_MS = 5_000;
 /** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
 const PROVISIONING_POLL_MS = 2000;
 
@@ -190,6 +192,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const [walletFailed, setWalletFailed] = useState(false);
   const walletSuccessAtRef = useRef(0);
   const walletInFlightRef = useRef(false);
+  /** 上一次 open_menu 刷新的时刻：开合菜单的短下限，0 = 本轮账户还没开过。 */
+  const walletOpenMenuAtRef = useRef(0);
   /** 在途请求的令牌：只有仍持有令牌的请求才能清掉在途标记。 */
   const walletTokenRef = useRef(0);
   /** 账户代次：登出 / 换账号时 +1；晚到的旧账户响应据此丢弃。 */
@@ -222,6 +226,7 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     walletEpochRef.current += 1;
     walletSuccessAtRef.current = 0;
     walletInFlightRef.current = false;
+    walletOpenMenuAtRef.current = 0;
     walletRef.current = null;
     setWallet(null);
     setWalletError(null);
@@ -270,6 +275,22 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       if (walletInFlightRef.current) {
         uiLog("debug", `refresh seq=${seq} skipped reason=inflight`);
         return { ok: false, reason: "skipped" };
+      }
+      // 打开即刷新要保住，但反复开合不能每次都打一遍：5 秒内重复打开直接用缓存。
+      // `force` 是显式动作，不受这个短下限约束。
+      if (trigger === "open_menu" && options.force !== true) {
+        const sinceOpen = Date.now() - walletOpenMenuAtRef.current;
+        if (
+          walletOpenMenuAtRef.current !== 0 &&
+          sinceOpen < WALLET_OPEN_MENU_MIN_MS
+        ) {
+          uiLog(
+            "debug",
+            `refresh seq=${seq} skipped reason=open_menu_floor elapsed_ms=${sinceOpen}`,
+          );
+          return { ok: false, reason: "skipped" };
+        }
+        walletOpenMenuAtRef.current = Date.now();
       }
       // 显式动作不受门禁限制：手动刷新、失败重试和打开账号菜单都要立刻发。
       const forced =

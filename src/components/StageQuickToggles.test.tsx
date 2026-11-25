@@ -1,9 +1,13 @@
 /** @vitest-environment jsdom */
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setLanguage } from "../i18n";
 import { StageQuickToggles } from "./StageQuickToggles";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setLanguage("zh");
+});
 
 function renderToggles(
   overrides: Partial<Parameters<typeof StageQuickToggles>[0]> = {},
@@ -36,6 +40,11 @@ describe("两个 chip 的「问 AI」", () => {
     // 结构固定：先接管方式、再流量范围，两种情况分别说清楚。
     expect(prompt).toContain("一、接管方式");
     expect(prompt).toContain("二、流量范围");
+    // 三个场景少一个都不行：只留章节标题时这条会红。
+    expect(prompt).toContain("1. 只需要浏览器能访问网站");
+    expect(prompt).toContain("2. 希望 App 也能走");
+    expect(prompt).toContain("3. 希望所有软件都能走");
+    expect(prompt).toContain("逐个给 App 配代理");
     expect(prompt).toContain("不要出现 HTTP/3、QUIC、分流、规则、DNS 这类词");
   });
 
@@ -48,6 +57,18 @@ describe("两个 chip 的「问 AI」", () => {
 
     const prompt = onAskAi.mock.calls[0][0] as string;
     expect(prompt).toContain("「Tun 模式」+「全局」");
+  });
+
+  it("英文提示词同样带三种场景与流量范围", () => {
+    setLanguage("en");
+    const { onAskAi } = renderToggles();
+    fireEvent.click(screen.getByRole("button", { name: "Ask AI" }));
+
+    const prompt = onAskAi.mock.calls[0][0] as string;
+    expect(prompt).toContain("Capture mode");
+    expect(prompt).toContain("Traffic scope");
+    expect(prompt).toContain("Only the browser needs to reach websites");
+    expect(prompt).toContain("configuring proxies one by one");
   });
 
   it("正在请求授权时不出现「问 AI」", () => {

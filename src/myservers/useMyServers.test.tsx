@@ -1109,6 +1109,63 @@ describe("余额刷新的日志", () => {
     expect(wallet.mock.calls.length).toBe(before + 1);
   });
 
+  it("5 秒内重复开合菜单只刷一次，跳过记一行 open_menu_floor", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+    vi.mocked(uiLog).mockClear();
+    const before = wallet.mock.calls.length;
+
+    await act(async () => {
+      await view.result.current.refreshWallet({ trigger: "open_menu" });
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
+
+    await act(async () => {
+      await view.result.current.refreshWallet({ trigger: "open_menu" });
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
+    expect(
+      matching(/skipped reason=open_menu_floor elapsed_ms=\d+$/).length,
+    ).toBe(1);
+  });
+
+  it("超过 5 秒后再次打开会恢复刷新", async () => {
+    const list = { current: [] as MyServer[] };
+    const bridge = makeBridge(list);
+    const wallet = vi.mocked(bridge.myServerWallet);
+    const view = renderHook(() =>
+      useMyServers(bridge, { active: true, rootSignal: 0 }),
+    );
+    await waitFor(() => expect(view.result.current.wallet).not.toBeNull());
+
+    // 只推进时钟，不动定时器：waitFor 仍跑在真实时间上。
+    let clock = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      vi.mocked(uiLog).mockClear();
+      const before = wallet.mock.calls.length;
+
+      await act(async () => {
+        await view.result.current.refreshWallet({ trigger: "open_menu" });
+      });
+      expect(wallet.mock.calls.length).toBe(before + 1);
+
+      clock += 5_001;
+      await act(async () => {
+        await view.result.current.refreshWallet({ trigger: "open_menu" });
+      });
+      expect(wallet.mock.calls.length).toBe(before + 2);
+      expect(matching(/skipped reason=open_menu_floor/).length).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("在途去重也记一行 skipped", async () => {
     let release: (value: unknown) => void = () => {};
     const list = { current: [] as MyServer[] };
