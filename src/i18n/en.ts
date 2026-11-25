@@ -1266,7 +1266,7 @@ export const en: Record<MessageKey, string> = {
   "settings.import.failed": "Import failed. Try again.",
   "settings.import.httpsOnly": "Subscription URLs must use https, not http.",
   "settings.import.invalidJson": "This file isn't a valid node file.",
-  "settings.import.manual.added": "Node added to the node pool",
+  "settings.import.manual.added": "Node added to the node pool and bound to the current config",
   "settings.import.manual.method": "Encryption method",
   "settings.import.manual.methodUnsupported": "This encryption method isn't supported. Pick another one.",
   "settings.import.manual.name": "Node name",
@@ -1284,6 +1284,8 @@ export const en: Record<MessageKey, string> = {
   "settings.import.manual.serverInvalid": "Enter only a hostname or IP, without https://.",
   "settings.import.manual.serverPlaceholder": "example.com or 1.2.3.4",
   "settings.import.manual.serverRequired": "Enter the server address.",
+  "settings.import.manual.serverHasPort":
+    "Don't put the port in the address; use the port field on the right.",
   "settings.import.manual.submit": "Add node",
   "settings.import.methodUnsupported": "This encryption method isn't supported; only aes-256-gcm is.",
   "settings.import.methodUnsupportedWith": "Encryption method {method} isn't supported; only aes-256-gcm is.",

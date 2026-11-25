@@ -29,6 +29,20 @@ function fileNameOf(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/** 地址栏只收主机名：带 `:` 的必须是裸 IPv6，否则多半是把端口一起粘进来了。 */
+function isBareIpv6(value: string): boolean {
+  if (!value.includes(":")) return true;
+  if (!/^[0-9a-fA-F:.]+$/.test(value)) return false;
+  // 单个冒号一律当成 host:port；IPv6 至少两个冒号（含 `::` 简写）。
+  if ((value.match(/:/g) ?? []).length < 2) return false;
+  try {
+    new URL(`http://[${value}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function describeFileImportError(error: unknown): string {
   const bridgeError = toBridgeError(error);
   const reason =
@@ -220,6 +234,11 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
     const trimmedServer = server.trim();
     if (!trimmedServer) {
       errors.server = t("settings.import.manual.serverRequired");
+    } else if (trimmedServer.includes("://")) {
+      errors.server = t("settings.import.manual.serverInvalid");
+    } else if (trimmedServer.includes(":") && !isBareIpv6(trimmedServer)) {
+      // 服务商后台常给「IP:端口」，整段粘进来会建出一个连不上的节点。
+      errors.server = t("settings.import.manual.serverHasPort");
     } else if (
       Array.from(trimmedServer).length > 253 ||
       trimmedServer.includes("://") ||

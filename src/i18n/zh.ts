@@ -1195,7 +1195,7 @@ export const zh = {
   "settings.import.failed": "导入失败，请重试。",
   "settings.import.httpsOnly": "订阅地址要用 https，不能是 http。",
   "settings.import.invalidJson": "这个文件不是有效的节点文件。",
-  "settings.import.manual.added": "节点已加入节点池",
+  "settings.import.manual.added": "节点已加入节点池并绑定当前配置",
   "settings.import.manual.method": "加密方式",
   "settings.import.manual.methodUnsupported": "不支持这种加密方式，换一个再试。",
   "settings.import.manual.name": "节点名",
@@ -1213,6 +1213,8 @@ export const zh = {
   "settings.import.manual.serverInvalid": "地址只填域名或 IP，不要带 https://。",
   "settings.import.manual.serverPlaceholder": "example.com 或 1.2.3.4",
   "settings.import.manual.serverRequired": "填服务器的地址。",
+  "settings.import.manual.serverHasPort":
+    "地址里不要带端口，端口填在右边的端口栏。",
   "settings.import.manual.submit": "添加节点",
   "settings.import.methodUnsupported": "不支持这种加密方式，目前只支持 aes-256-gcm。",
   "settings.import.methodUnsupportedWith": "不支持加密方式 {method}，目前只支持 aes-256-gcm。",

@@ -272,6 +272,52 @@ describe("手动填写段", () => {
     const select = screen.getByRole("combobox", {
       name: "加密方式",
     }) as HTMLSelectElement;
+  it("地址粘成 host:port 时报错，提示端口填右侧端口栏", () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ server: "1.2.3.4:8388" });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(
+      screen.getByText("地址里不要带端口，端口填在右边的端口栏。"),
+    ).toBeTruthy();
+    const field = screen.getByPlaceholderText("example.com 或 1.2.3.4");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(bridge.nodeCreate).not.toHaveBeenCalled();
+  });
+
+  it("裸 IPv6 地址照常通过", async () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ server: "2001:db8::1" });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ server: "2001:db8::1" }),
+      ),
+    );
+  });
+
+  it("普通域名与 IPv4 地址不受影响", async () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ server: "example.com" });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeCreate).toHaveBeenCalledWith(
+        expect.objectContaining({ server: "example.com" }),
+      ),
+    );
+  });
+
     expect(select.value).toBe("aes-256-gcm");
     expect(select.options).toHaveLength(12);
 
