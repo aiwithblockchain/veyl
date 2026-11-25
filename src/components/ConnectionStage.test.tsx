@@ -2687,6 +2687,50 @@ describe("自定义节点移除", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it("菜单放不下时向上展开，放得下就向下", () => {
+    const rect = (top: number, bottom: number) =>
+      ({
+        top,
+        bottom,
+        left: 0,
+        right: 0,
+        width: 0,
+        height: bottom - top,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const { unmount } = renderStage({
+      config: CUSTOM_CONFIG,
+      onRemoveNode: vi.fn(),
+      onEditNode: vi.fn(),
+    });
+    const card = document.querySelector(".stage-card") as HTMLElement;
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(0, 400));
+    const tight = screen.getByRole("button", { name: "更多操作：美国 01" });
+    vi.spyOn(tight, "getBoundingClientRect").mockReturnValue(rect(380, 420));
+    fireEvent.click(tight);
+    expect(
+      document.querySelector(".stage-node__menu")?.className,
+    ).toContain("stage-node__menu--up");
+    unmount();
+
+    renderStage({
+      config: CUSTOM_CONFIG,
+      onRemoveNode: vi.fn(),
+      onEditNode: vi.fn(),
+    });
+    const tallCard = document.querySelector(".stage-card") as HTMLElement;
+    vi.spyOn(tallCard, "getBoundingClientRect").mockReturnValue(rect(0, 900));
+    const roomy = screen.getByRole("button", { name: "更多操作：美国 01" });
+    vi.spyOn(roomy, "getBoundingClientRect").mockReturnValue(rect(380, 420));
+    fireEvent.click(roomy);
+    expect(
+      document.querySelector(".stage-node__menu")?.className,
+    ).not.toContain("stage-node__menu--up");
+  });
+
   it("菜单 → 就地确认 → 移除成功", async () => {
     const onRemoveNode = vi.fn(async () => ({ ok: true, wasCurrent: true }));
     renderStage({ config: CUSTOM_CONFIG, onRemoveNode });

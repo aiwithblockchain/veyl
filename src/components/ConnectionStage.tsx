@@ -150,6 +150,8 @@ export function ConnectionStage({
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  /** 菜单放不下时向上展开：卡片 overflow:hidden，向下会被底边裁掉。 */
+  const [menuUp, setMenuUp] = useState(false);
   const [confirmFor, setConfirmFor] = useState<{ id: string; name: string } | null>(
     null,
   );
@@ -450,7 +452,17 @@ export function ConnectionStage({
             moreButtonRef.current = event.currentTarget;
             setConfirmFor(null);
             setRemoveError(null);
-            setMenuFor(open ? null : node.node_id);
+            if (open) {
+              setMenuFor(null);
+              return;
+            }
+            // 估计菜单高度（两项 + 分隔线 + 内边距）；放不下就向上开。
+            const rect = event.currentTarget.getBoundingClientRect();
+            const card = event.currentTarget
+              .closest(".stage-card")
+              ?.getBoundingClientRect();
+            setMenuUp(card ? rect.bottom + 96 > card.bottom : false);
+            setMenuFor(node.node_id);
           }}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
@@ -462,7 +474,7 @@ export function ConnectionStage({
         </button>
         {open ? (
           <span
-            className="stage-node__menu"
+            className={`stage-node__menu${menuUp ? " stage-node__menu--up" : ""}`}
             role="menu"
             onMouseDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {

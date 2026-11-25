@@ -6408,6 +6408,12 @@ details[open] > .settings-fold__summary::before {
   box-shadow: 0 8px 24px rgba(23, 22, 20, 0.1);
 }
 
+/* 靠近卡片底边时向上展开，避免被卡片的 overflow:hidden 裁掉。 */
+.stage-node__menu--up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
 .stage-node__menu-item {
   display: flex;
   align-items: center;
