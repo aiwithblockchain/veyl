@@ -260,6 +260,8 @@ const MOCK_CLIENT_URLS: Record<
 
 /** 预览里的智能修复端口：每次 +1，让人看得出「确实换了」。 */
 let mockRotatePort = 8443;
+/** 预览里已经点过检查升级的服务器：第一次报有新版，之后报已是最新。 */
+const mockUpgradedServers = new Set<string>();
 
 export class MockAgentBridge implements AgentBridge {
   readonly mode = "mock" as const;
@@ -876,6 +878,18 @@ export class MockAgentBridge implements AgentBridge {
     this.myServers.get(serverId);
     mockRotatePort += 1;
     return { ok: true as const, port: mockRotatePort, refreshed: true };
+  }
+
+  async nodeUpgradeSingbox(serverId: string) {
+    // 形状与真桥一致：第一次报有新版，之后再点报已是最新。
+    this.myServers.get(serverId);
+    const upgraded = !mockUpgradedServers.has(serverId);
+    mockUpgradedServers.add(serverId);
+    return {
+      installed: upgraded ? "1.14.4" : "1.15.0",
+      target: "1.15.0",
+      upgraded,
+    };
   }
 
   async myServerRegisterDevice() {

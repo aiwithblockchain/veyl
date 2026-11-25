@@ -18,6 +18,7 @@ import { isTombstone } from "../myservers/tombstones";
 import { rotateNodeCredentials } from "../myservers/rotateCredentials";
 import { copyText } from "../ui/clipboard";
 import { t, useT } from "../i18n";
+import type { MessageKey } from "../i18n";
 import { errorText as describeError, failureText } from "../i18n/errorText";
 
 interface Props {
@@ -60,6 +61,39 @@ function errorText(error: unknown): string {
     ? t("detail.error.noChangeRetry")
     : t("detail.error.noChange");
   return `${describeError(problem, t("detail.error.incomplete"))}${tail}`;
+}
+
+/** 检查升级的就地反馈：一次只落一条，换服务器时收回。 */
+type UpgradePhase =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "latest"; version: string }
+  | { kind: "upgraded"; version: string }
+  | { kind: "failed"; messageKey: MessageKey };
+
+/** 失败文案按后端 reason 选；不认识的码一律走兜底，不把原文抛给用户。 */
+function upgradeFailureKey(error: unknown): MessageKey {
+  const reason = toBridgeError(error).details?.reason;
+  switch (reason) {
+    case "agent_unreachable":
+      return "detail.upgradeFailed.unreachable";
+    case "agent_timeout":
+      return "detail.upgradeFailed.timeout";
+    case "agent_token_unavailable":
+      // 控制面没给出门票：这不是节点的问题，别把用户引去查节点。
+      return "detail.upgradeFailed.controlPlane";
+    case "agent_token_rejected":
+    case "agent_not_registered":
+    case "agent_key_missing":
+    case "not_ready":
+      return "detail.upgradeFailed.unavailable";
+    case "agent_busy":
+      return "detail.upgradeFailed.busy";
+    case "agent_tool_failed":
+      return "detail.upgradeFailed.node";
+    default:
+      return "detail.upgradeFailed.generic";
+  }
 }
 
 /** 服务器详情：事实 + 底部操作行（销毁在左，主按钮在右）。 */
@@ -106,6 +140,10 @@ export function MyServerDetail({
   const lastRotateArm = useRef(0);
   const serverIdRef = useRef(server.server_id);
   serverIdRef.current = server.server_id;
+  /** sing-box 升级：与更换密码同一条通道，结果只落在事实区下方。 */
+  const [upgradePhase, setUpgradePhase] = useState<UpgradePhase>({ kind: "idle" });
+  const upgradeButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreUpgradeFocus = useRef(false);
 
   // 换一台服务器：复位复制结果，别把上一台的话带过来。
   useEffect(() => {
@@ -245,6 +283,68 @@ export function MyServerDetail({
     if (!canRotate) setRotatePhase("idle");
   }, [canRotate]);
 
+  /** 与更换密码同一前提：建好的机器、有控制面节点 id、Host 接了这条命令。 */
+  const canUpgrade =
+    !readOnly &&
+    (server.state === "healthy" || server.state === "active") &&
+    (server.node_id ?? "").trim() !== "" &&
+    typeof bridge.nodeUpgradeSingbox === "function";
+
+  /** 检查升级：按钮本身就是确认；进行中锁住操作，结果就地显示，不弹窗不跳页。 */
+  const runUpgrade = async () => {
+    const upgrade = bridge.nodeUpgradeSingbox;
+    if (busy || !upgrade) return;
+    const targetId = server.server_id;
+    setUpgradePhase({ kind: "running" });
+    setBusy(true);
+    try {
+      const result = await upgrade.call(bridge, server.server_id);
+      // 请求在途时换了服务器：结果属于上一台，不能落到新面板上。
+      if (serverIdRef.current !== targetId) return;
+      // 契约里读不到已安装版本时给字符串 "unknown"（§7.35），不能当版本显示。
+      const installed = result.installed.trim();
+      const version =
+        result.target.trim() ||
+        (installed.toLowerCase() === "unknown" ? "" : installed) ||
+        tr("detail.singboxUnknown");
+      restoreUpgradeFocus.current = true;
+      setUpgradePhase(
+        result.upgraded
+          ? { kind: "upgraded", version }
+          : { kind: "latest", version },
+      );
+      // 控制面的版本列要等节点上报后才变：先就地显示 target，再回源一次。
+      // 这里只借用 onRenamed 的「对象替换」（列表与详情都换成 Host 返回的完整对象），
+      // 不触发任何改名副作用——入口只是回填，不要把它当成改名调用。
+      if (onRenamed) {
+        void bridge
+          .myServerGet(server.server_id)
+          .then((fresh) => {
+            if (serverIdRef.current === targetId) onRenamed(fresh);
+          })
+          .catch(() => {
+            // 回源失败不影响已经成功的升级；原地显示的 target 仍然有效。
+          });
+      } else {
+        onChanged();
+      }
+    } catch (err) {
+      if (serverIdRef.current !== targetId) return;
+      restoreUpgradeFocus.current = true;
+      setUpgradePhase({ kind: "failed", messageKey: upgradeFailureKey(err) });
+    } finally {
+      // 同样要守卫：别把新面板上正在跑的操作解锁。
+      if (serverIdRef.current === targetId) setBusy(false);
+    }
+  };
+
+  // 结果出来后把焦点送回入口（与轮换一致）；换服务器时由下面的复位收走。
+  useEffect(() => {
+    if (upgradePhase.kind === "running" || !restoreUpgradeFocus.current) return;
+    restoreUpgradeFocus.current = false;
+    upgradeButtonRef.current?.focus();
+  }, [upgradePhase]);
+
   /** 确认态的收回倒计时：块内交互重新计时，请求在途时不收。 */
   const armRotateTimer = useCallback(() => {
     lastRotateArm.current = Date.now();
@@ -310,6 +410,8 @@ export function MyServerDetail({
     setRenameError(null);
     setNameDraft("");
     setRotatePhase("idle");
+    restoreUpgradeFocus.current = false;
+    setUpgradePhase({ kind: "idle" });
   }, [server.server_id]);
 
   useEffect(() => {
@@ -415,6 +517,12 @@ export function MyServerDetail({
     !failed;
   // 就绪后进度块整块抽走（ServerProgress 返回 null）：事实区会随之上移，接受这点位移。
   const ready = server.state === "healthy" || server.state === "active";
+  /** 升级成功后先用返回的 target 就地显示：控制面的版本列要等节点上报才更新。 */
+  const shownVersion =
+    upgradePhase.kind === "latest" || upgradePhase.kind === "upgraded"
+      ? upgradePhase.version
+      : (server.singbox_version ?? "").trim() ||
+        tr("detail.singboxUnknown");
   const chargedCents = server.charged_cents;
   const refundedCents = server.refunded_cents;
   /** 就绪后扣费时余额不够：机器没开通，这笔根本没扣。 */
@@ -564,6 +672,30 @@ export function MyServerDetail({
               </dd>
             </div>
           ) : null}
+          {ready ? (
+            <div>
+              <dt>sing-box</dt>
+              <dd className="myservers__ip">
+                <span className="num">{shownVersion}</span>
+                {canUpgrade ? (
+                  <button
+                    ref={upgradeButtonRef}
+                    type="button"
+                    className="copy-btn"
+                    disabled={locked || upgradePhase.kind === "running"}
+                    aria-busy={
+                      upgradePhase.kind === "running" || undefined
+                    }
+                    onClick={() => void runUpgrade()}
+                  >
+                    {upgradePhase.kind === "running"
+                      ? tr("detail.upgradeChecking")
+                      : tr("detail.upgradeCheck")}
+                  </button>
+                ) : null}
+              </dd>
+            </div>
+          ) : null}
           {isServerNodeReady(server) ? (
             <div>
               <dt>{tr("detail.node")}</dt>
@@ -585,6 +717,26 @@ export function MyServerDetail({
             </div>
           ) : null}
         </dl>
+        {canUpgrade && upgradePhase.kind === "running" ? (
+          <p className="myservers__hint" role="status">
+            {tr("detail.upgradeRunningHint")}
+          </p>
+        ) : null}
+        {canUpgrade && upgradePhase.kind === "latest" ? (
+          <p className="myservers__hint" role="status">
+            {tr("detail.upgradeLatest", { version: upgradePhase.version })}
+          </p>
+        ) : null}
+        {canUpgrade && upgradePhase.kind === "upgraded" ? (
+          <p className="myservers__hint" role="status">
+            {tr("detail.upgradeDone", { version: upgradePhase.version })}
+          </p>
+        ) : null}
+        {canUpgrade && upgradePhase.kind === "failed" ? (
+          <p className="myservers__error" role="alert">
+            {tr(upgradePhase.messageKey)}
+          </p>
+        ) : null}
       </div>
 
       {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}

@@ -188,3 +188,50 @@ describe("智能修复命令", () => {
     expect(rotateFailureReason(error)).toBe("agent_timeout");
   });
 });
+
+describe("检查升级命令（2.75.0）", () => {
+  it("命令名与参数键传对，三个字段原样返回", async () => {
+    invoke.mockResolvedValueOnce({
+      installed: "1.14.4",
+      target: "1.15.0",
+      upgraded: true,
+    });
+
+    const result = await new TauriAgentBridge().nodeUpgradeSingbox("srv_1");
+
+    expect(invoke).toHaveBeenCalledWith("node_upgrade_singbox", {
+      serverId: "srv_1",
+    });
+    expect(result).toEqual({
+      installed: "1.14.4",
+      target: "1.15.0",
+      upgraded: true,
+    });
+  });
+
+  it("回包形状不对按上游错误处理", async () => {
+    invoke.mockResolvedValueOnce({ installed: "1.14.4", target: "1.15.0" });
+
+    await expect(
+      new TauriAgentBridge().nodeUpgradeSingbox("srv_1"),
+    ).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
+  });
+
+  it("失败信封的 code 与 reason 原样保留", async () => {
+    invoke.mockRejectedValueOnce({
+      code: "TIMEOUT",
+      message: "",
+      retryable: true,
+      details: { reason: "agent_timeout" },
+    });
+
+    const error = await new TauriAgentBridge()
+      .nodeUpgradeSingbox("srv_1")
+      .catch((err: unknown) => err);
+
+    expect(error).toMatchObject({
+      code: "TIMEOUT",
+      details: { reason: "agent_timeout" },
+    });
+  });
+});

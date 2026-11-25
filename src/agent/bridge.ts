@@ -722,7 +722,7 @@ export interface MyServer {
   /** 进入「安装服务端」「检查是否可用」的时刻；旧 Host 不返回。 */
   installing_at?: string | null;
   verifying_at?: string | null;
-  /** 正在安装的 sing-box 版本；没有就不显示。 */
+  /** 节点最近一次上报的 sing-box 版本；从未上报过为 null，详情页显示「未知」，升级入口仍可点。 */
   singbox_version?: string | null;
   /** 已付到哪个时刻（ISO 8601）；开通成功扣费后才写入，待开通时为 null。 */
   paid_until: string | null;
@@ -772,6 +772,16 @@ export interface NodeRotateCredentialsResult {
   port: number;
   /** Host 是否已顺手重读过服务器/节点数据。 */
   refreshed: boolean;
+}
+
+/** 桥 / 封装的统一结果：Host 的 `node_upgrade_singbox` 原样返回（契约 2.75.0）。 */
+export interface NodeUpgradeSingboxResult {
+  /** 升级前节点上已安装的版本；节点读不到时契约给字符串 `"unknown"`（§7.35）。 */
+  installed: string;
+  /** 控制面本次期望的版本（已去掉 `v` 前缀）。 */
+  target: string;
+  /** false = 节点已是最新，这次什么都没装。 */
+  upgraded: boolean;
 }
 
 export type MyServerOrderState =
@@ -1161,6 +1171,8 @@ export interface AgentBridge {
   nodeRotateCredentials?(
     serverId: string,
   ): Promise<NodeRotateCredentialsResult>;
+  /** 检查并升级节点上的 sing-box；走与更换密码相同的一次性门票通道。Host 没接时省略。 */
+  nodeUpgradeSingbox?(serverId: string): Promise<NodeUpgradeSingboxResult>;
   /** 取 SSH 登录信息；仅 UI 通道。 */
   myServerSshCredentials(serverId: string): Promise<MyServerSshCredentials>;
   /** 身份丢失后的显式重新注册；丢弃旧身份，旧服务器记录保留为只读。 */

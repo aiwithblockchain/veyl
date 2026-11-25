@@ -90,6 +90,9 @@ pub struct MyServer {
     pub installing_at: Option<String>,
     #[serde(default)]
     pub verifying_at: Option<String>,
+    /// 节点最近一次上报的 sing-box 版本（不带 `v`）；还没上报过为 null，界面显示「未知」。
+    #[serde(default)]
+    pub singbox_version: Option<String>,
     #[serde(default)]
     pub ip: Option<String>,
     #[serde(default)]
@@ -1045,6 +1048,7 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             ready_at: None,
             installing_at: None,
             verifying_at: None,
+            singbox_version: None,
             ip: None,
             port: None,
             node_id: None,
@@ -1453,6 +1457,7 @@ pub(crate) fn local_server(server_id: &str) -> Option<MyServer> {
         ready_at: None,
         installing_at: None,
         verifying_at: None,
+        singbox_version: None,
         ip: None,
         port: None,
         node_id: node_id.clone(),
@@ -1573,6 +1578,7 @@ mod tests {
             ready_at: None,
             installing_at: None,
             verifying_at: None,
+            singbox_version: None,
             ip: None,
             port: None,
             node_id: None,

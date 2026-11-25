@@ -48,8 +48,10 @@ struct RotateReport {
 }
 
 /// 失败分类就是给模型看的四类原因（外加协议 / 网络细分），`details.reason` 落在信封里。
+///
+/// `pub(crate)`：升级（`agent::upgrade`）复用同一条通道，也复用这套失败分类。
 #[derive(Debug, Clone)]
-enum AgentFailure {
+pub(crate) enum AgentFailure {
     /// 控制面没给令牌：码与 reason 原样保留（`not_ready` / `agent_not_registered` / ...）。
     ControlPlane(CpError),
     /// 控制面或 agent 回了结构不对的数据（不是用户能修的问题）。
@@ -58,17 +60,19 @@ enum AgentFailure {
     TlsUntrusted(String),
     /// agent 不认这次令牌（401 / 403）。
     TokenRejected,
-    /// 90 秒内没跑完。
+    /// 预算内没跑完（轮换 90 秒 / 升级 180 秒）。
     Timeout,
     /// 连不上或连接中断。
     Transport(String),
     /// agent 明确回了 `{ok:false}`。
     ToolFailed { message: String, retryable: bool },
+    /// agent 的 busy 锁被另一件写操作占着（升级专用，`kind = retryable`）。
+    Busy,
 }
 
 impl AgentFailure {
-    /// 失败原因的稳定短码（契约 `commands.md` §7.27 的七类）。
-    fn reason_code(&self) -> &str {
+    /// 失败原因的稳定短码（契约 `commands.md` §7.27 的七类，外加 `agent_busy`）。
+    pub(crate) fn reason_code(&self) -> &str {
         match self {
             Self::ControlPlane(error) => error.reason().unwrap_or("agent_token_unavailable"),
             Self::BadResponse(_) => "agent_bad_response",
@@ -77,6 +81,7 @@ impl AgentFailure {
             Self::Timeout => "agent_timeout",
             Self::Transport(_) => "agent_unreachable",
             Self::ToolFailed { .. } => "agent_tool_failed",
+            Self::Busy => "agent_busy",
         }
     }
 
@@ -88,7 +93,7 @@ impl AgentFailure {
         }
     }
 
-    fn into_aivpn(self) -> AivpnError {
+    pub(crate) fn into_aivpn(self) -> AivpnError {
         match self {
             Self::ControlPlane(error) => {
                 let reason = error
@@ -133,6 +138,14 @@ impl AgentFailure {
                     "retryable": retryable,
                 }))
             }
+            Self::Busy => {
+                let mut error = AivpnError::new("INTERNAL", "节点正在执行其他操作，稍后再试");
+                error.retryable = true;
+                error.with_details(json!({
+                    "reason": "agent_busy",
+                    "retryable": true,
+                }))
+            }
         }
     }
 }
@@ -174,6 +187,14 @@ impl TicketSource for ControlPlaneTickets {
 
 struct HttpMcpRunner;
 
+/// 信任链只有两条：有 CA 就加根证书交给正常校验；没有 CA 才按叶子指纹 pin。
+fn client_for(ticket: &AgentTicket, trust: TrustMode) -> Result<reqwest13::Client, AgentFailure> {
+    match trust {
+        TrustMode::Ca => ca_client(ticket.ca_pem.as_deref().unwrap_or_default()),
+        TrustMode::Fingerprint => pinned_client(ticket.fingerprint),
+    }
+}
+
 #[async_trait]
 impl McpRunner for HttpMcpRunner {
     async fn rotate(
@@ -181,10 +202,7 @@ impl McpRunner for HttpMcpRunner {
         ticket: &AgentTicket,
         trust: TrustMode,
     ) -> Result<RotateReport, AgentFailure> {
-        let client = match trust {
-            TrustMode::Ca => ca_client(ticket.ca_pem.as_deref().unwrap_or_default())?,
-            TrustMode::Fingerprint => pinned_client(ticket.fingerprint)?,
-        };
+        let client = client_for(ticket, trust)?;
         run_mcp(ticket, client).await
     }
 }
@@ -203,31 +221,87 @@ impl LiveBackend {
     }
 }
 
+/// 一次操作 = 一张票 + 同一张票内的 CA→指纹回退 + 给定预算。
+///
+/// 令牌是一次性的，重新开票换不来第二次机会，所以回退必须复用同一张票。
+async fn with_ticket<T, F, Fut>(
+    tickets: &dyn TicketSource,
+    server_id: &str,
+    log_tag: &str,
+    timeout: Duration,
+    call: F,
+) -> Result<T, AgentFailure>
+where
+    F: Fn(AgentTicket, TrustMode) -> Fut,
+    Fut: std::future::Future<Output = Result<T, AgentFailure>>,
+{
+    let ticket = tickets.fetch(server_id).await?;
+    let first_trust = if ticket.ca_pem.is_some() {
+        TrustMode::Ca
+    } else {
+        TrustMode::Fingerprint
+    };
+    let attempt = async {
+        match call(ticket.clone(), first_trust).await {
+            Err(AgentFailure::TlsUntrusted(_)) if first_trust == TrustMode::Ca => {
+                log::info!("[{log_tag}] trust=ca_failed fallback=fingerprint");
+                call(ticket.clone(), TrustMode::Fingerprint).await
+            }
+            other => other,
+        }
+    };
+    match tokio::time::timeout(timeout, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(AgentFailure::Timeout),
+    }
+}
+
 #[async_trait]
 impl RotateBackend for LiveBackend {
     async fn rotate(&self, server_id: &str) -> Result<RotateReport, AgentFailure> {
-        let ticket = self.tickets.fetch(server_id).await?;
-        let first_trust = if ticket.ca_pem.is_some() {
-            TrustMode::Ca
-        } else {
-            TrustMode::Fingerprint
-        };
-        let attempt = async {
-            match self.runner.rotate(&ticket, first_trust).await {
-                // CA 链校验失败（证书链不完整、CA 换过）时，用同一张票的指纹再试一次：
-                // 令牌是一次性的，重新开票换不来第二次机会。
-                Err(AgentFailure::TlsUntrusted(_)) if first_trust == TrustMode::Ca => {
-                    log::info!("[node_rotate] trust=ca_failed fallback=fingerprint");
-                    self.runner.rotate(&ticket, TrustMode::Fingerprint).await
-                }
-                other => other,
-            }
-        };
-        match tokio::time::timeout(MCP_TIMEOUT, attempt).await {
-            Ok(result) => result,
-            Err(_) => Err(AgentFailure::Timeout),
-        }
+        let runner = Arc::clone(&self.runner);
+        with_ticket(
+            self.tickets.as_ref(),
+            server_id,
+            "node_rotate",
+            MCP_TIMEOUT,
+            move |ticket, trust| {
+                let runner = Arc::clone(&runner);
+                async move { runner.rotate(&ticket, trust).await }
+            },
+        )
+        .await
     }
+}
+
+/// 共享通道：取一次性门票 → 连 agent 控制端口 → 调一次工具 → 解析 JSON 回包。
+///
+/// 轮换与升级共用取票、TLS 信任与 MCP 会话生命周期；成功信封的形状由调用方解读。
+/// `timeout` 是整次调用的预算（轮换 90 秒，升级 180 秒），`log_tag` 是日志前缀
+/// （`node_rotate` / `node_upgrade`）。失败分类与轮换同一套。
+pub(crate) async fn call_agent_tool(
+    server_id: &str,
+    tool: &str,
+    arguments: Value,
+    timeout: Duration,
+    log_tag: &str,
+) -> Result<(Value, bool), AgentFailure> {
+    let tickets = ControlPlaneTickets;
+    with_ticket(
+        &tickets,
+        server_id,
+        log_tag,
+        timeout,
+        move |ticket, trust| {
+            let tool = tool.to_string();
+            let arguments = arguments.clone();
+            async move {
+                let client = client_for(&ticket, trust)?;
+                call_agent_tool_once(&ticket, client, &tool, arguments).await
+            }
+        },
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -387,6 +461,25 @@ async fn run_mcp(
     ticket: &AgentTicket,
     client: reqwest13::Client,
 ) -> Result<RotateReport, AgentFailure> {
+    let (value, is_error) = call_agent_tool_once(
+        ticket,
+        client,
+        AGENT_TOOL,
+        json!({ "reason": AGENT_REASON }),
+    )
+    .await?;
+    interpret_rotate_value(is_error, &value)
+}
+
+/// 打开会话、确认工具在场、调用一次；返回（解析后的回包, 是否 is_error）。
+///
+/// 轮换与升级共用这一层；成功信封的形状不同，解读留给各自的调用方。
+async fn call_agent_tool_once(
+    ticket: &AgentTicket,
+    client: reqwest13::Client,
+    tool: &str,
+    arguments: Value,
+) -> Result<(Value, bool), AgentFailure> {
     let config = StreamableHttpClientTransportConfig::with_uri(ticket.endpoint.clone())
         .auth_header(ticket.token.clone());
     let transport = StreamableHttpClientTransport::with_client(client, config);
@@ -400,20 +493,18 @@ async fn run_mcp(
         .list_all_tools()
         .await
         .map_err(classify_service_error)?;
-    if !tools.iter().any(|tool| tool.name.as_ref() == AGENT_TOOL) {
+    if !tools
+        .iter()
+        .any(|candidate| candidate.name.as_ref() == tool)
+    {
         let _ = running.cancel().await;
-        return Err(AgentFailure::BadResponse(
-            "agent 没有暴露 rotate_credentials".into(),
-        ));
+        return Err(AgentFailure::BadResponse(format!("agent 没有暴露 {tool}")));
     }
 
-    let arguments = json!({ "reason": AGENT_REASON })
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let arguments = arguments.as_object().cloned().unwrap_or_default();
     let call = running
         .peer()
-        .call_tool(CallToolRequestParams::new(AGENT_TOOL).with_arguments(arguments))
+        .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(arguments))
         .await
         .map_err(classify_service_error);
     let _ = running.cancel().await;
@@ -423,29 +514,26 @@ async fn run_mcp(
         .content
         .iter()
         .find_map(|content| content.as_text().map(|text| text.text.as_str()));
-    interpret_tool_output(result.is_error.unwrap_or(false), text)
+    let value = parse_reply(text)?;
+    Ok((value, result.is_error.unwrap_or(false)))
+}
+
+fn parse_reply(text: Option<&str>) -> Result<Value, AgentFailure> {
+    text.and_then(|text| serde_json::from_str(text).ok())
+        .ok_or_else(|| AgentFailure::BadResponse("agent 回包不是 JSON".into()))
 }
 
 /// agent 的回包只有两种形状（`agent/src/server.rs`）：
 /// `{ok:true, port}` 与 `{ok:false, error:{kind, message}}`。
+#[cfg(test)]
 fn interpret_tool_output(is_error: bool, text: Option<&str>) -> Result<RotateReport, AgentFailure> {
-    let value: Value = text
-        .and_then(|text| serde_json::from_str(text).ok())
-        .ok_or_else(|| AgentFailure::BadResponse("agent 回包不是 JSON".into()))?;
+    interpret_rotate_value(is_error, &parse_reply(text)?)
+}
+
+fn interpret_rotate_value(is_error: bool, value: &Value) -> Result<RotateReport, AgentFailure> {
     let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if !ok || is_error {
-        let message = value
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("节点没有说明原因")
-            .to_string();
-        let retryable = value
-            .get("error")
-            .and_then(|error| error.get("kind"))
-            .and_then(Value::as_str)
-            == Some("retryable");
-        return Err(AgentFailure::ToolFailed { message, retryable });
+        return Err(tool_failure(value));
     }
     let port = value
         .get("port")
@@ -453,6 +541,30 @@ fn interpret_tool_output(is_error: bool, text: Option<&str>) -> Result<RotateRep
         .filter(|port| (1..=65_535).contains(port))
         .ok_or_else(|| AgentFailure::BadResponse("agent 回包缺少 port".into()))?;
     Ok(RotateReport { port: port as u16 })
+}
+
+/// agent 失败信封 `{ok:false, error:{kind, message}}` → 统一的工具失败。
+pub(crate) fn tool_failure(value: &Value) -> AgentFailure {
+    let message = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("节点没有说明原因")
+        .to_string();
+    let retryable = value
+        .get("error")
+        .and_then(|error| error.get("kind"))
+        .and_then(Value::as_str)
+        == Some("retryable");
+    AgentFailure::ToolFailed { message, retryable }
+}
+
+/// agent 失败信封里的稳定 reason（升级用它把 busy 与一般失败分开）。
+pub(crate) fn failure_reason(value: &Value) -> Option<&str> {
+    value
+        .get("error")
+        .and_then(|error| error.get("reason"))
+        .and_then(Value::as_str)
 }
 
 fn classify_service_error(error: ServiceError) -> AgentFailure {
@@ -794,7 +906,7 @@ fn parse_server_id(input: &Value) -> Result<String, AivpnError> {
 }
 
 /// id 要拼进控制面路径：只接受 `srv_` + base64url 字符，挡住 `/` 与 `..`。
-fn valid_server_id(value: &str) -> bool {
+pub(crate) fn valid_server_id(value: &str) -> bool {
     value.len() > 4
         && value.len() <= 64
         && value.starts_with("srv_")
@@ -1156,6 +1268,7 @@ RQIgKRu7fnqRYfmbbDwQTMY55uP7fqGikGtELEYkQqfKk0gCIQDaf+68TPGDnsFU
                 "INTERNAL",
                 "agent_tool_failed",
             ),
+            (AgentFailure::Busy, "INTERNAL", "agent_busy"),
         ];
         for (failure, code, reason) in cases {
             let error = failure.into_aivpn();

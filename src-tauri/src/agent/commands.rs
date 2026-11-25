@@ -921,6 +921,26 @@ pub async fn node_rotate_credentials(server_id: Option<Value>) -> Result<Value, 
     }
 }
 
+/// 详情页「检查升级」：与 `node_rotate_credentials` 共用一次性门票通道
+/// （`agent::upgrade::upgrade_from_ui` → `tools::node_rotate::call_agent_tool`）。
+///
+/// Host 只负责取票与转发，不判断版本、不接受版本号 / URL；失败 reason 与轮换同套
+/// （外加 `agent_busy`），前端按 reason 选文案。成功不需要刷新本地凭据。
+#[tauri::command]
+pub async fn node_upgrade_singbox(server_id: Option<Value>) -> Result<Value, Value> {
+    match crate::agent::upgrade::upgrade_from_ui(server_id).await {
+        Ok(value) => Ok(value),
+        Err(error) => Err(json!({
+            "contract_version": crate::runtime::EVENT_CONTRACT_VERSION,
+            "code": error.code,
+            "message": "",
+            "retryable": error.retryable,
+            "details": error.details,
+            "request_id": "",
+        })),
+    }
+}
+
 /// 用户主动删掉一个本地节点（「余额不足停机」留下的墓碑只能这样清，仅 UI）。
 ///
 /// **顺序是有意的**：先让控制面忽略墓碑，全部成功后才动本地（停运行时 → 删镜像行 →

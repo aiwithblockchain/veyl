@@ -40,6 +40,7 @@ import type {
   MyServerCreateInput,
   MyServerCredentialNode,
   NodeRotateCredentialsResult,
+  NodeUpgradeSingboxResult,
   MyServerDeviceIdentity,
   MyServerEvent,
   MyServerEventCode,
@@ -1767,6 +1768,29 @@ export class TauriAgentBridge implements AgentBridge {
     return call<NodeRotateCredentialsResult>("node_rotate_credentials", {
       serverId,
     });
+  }
+
+  /** 检查并升级 sing-box：回包只认三个字段，形状不对按上游错误处理。 */
+  async nodeUpgradeSingbox(
+    serverId: string,
+  ): Promise<NodeUpgradeSingboxResult> {
+    const raw = await call<{
+      installed?: unknown;
+      target?: unknown;
+      upgraded?: unknown;
+    }>("node_upgrade_singbox", { serverId });
+    if (
+      typeof raw?.installed !== "string" ||
+      typeof raw?.target !== "string" ||
+      typeof raw?.upgraded !== "boolean"
+    ) {
+      serverDataError();
+    }
+    return {
+      installed: raw.installed,
+      target: raw.target,
+      upgraded: raw.upgraded,
+    };
   }
 
   async myServerRegisterDevice(): Promise<MyServerDeviceIdentity> {

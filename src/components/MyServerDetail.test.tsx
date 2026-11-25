@@ -1556,3 +1556,341 @@ describe("更换连接密码", () => {
     });
   });
 });
+
+describe("sing-box 升级", () => {
+  function renderUpgrade(
+    over: Partial<MyServer> = {},
+    options: {
+      upgrade?: (serverId: string) => Promise<{
+        installed: string;
+        target: string;
+        upgraded: boolean;
+      }>;
+      onChanged?: () => void;
+      onRenamed?: (server: MyServer) => void;
+      fresh?: MyServer;
+      readOnly?: boolean;
+      bridged?: boolean;
+    } = {},
+  ) {
+    const upgrade = vi.fn(
+      options.upgrade ??
+        (async () => ({
+          installed: "1.14.4",
+          target: "1.15.0",
+          upgraded: true,
+        })),
+    );
+    const onChanged = options.onChanged ?? vi.fn();
+    const bridge = {
+      myServerDestroy: vi.fn(async () => server()),
+      myServerGet: vi.fn(
+        async (serverId: string) => options.fresh ?? server({ server_id: serverId }),
+      ),
+      ...(options.bridged === false ? {} : { nodeUpgradeSingbox: upgrade }),
+    } as unknown as AgentBridge;
+    const element = (next: Partial<MyServer>) => (
+      <MyServerDetail
+        bridge={bridge}
+        server={server(next)}
+        regionLabel="新加坡 1"
+        readOnly={options.readOnly}
+        onCreateAnother={vi.fn()}
+        onChanged={onChanged}
+        onRebuilt={() => {}}
+        onGone={vi.fn()}
+        onForget={async () => {}}
+        onRenamed={options.onRenamed}
+      />
+    );
+    const view = render(element(over));
+    return {
+      upgrade,
+      onChanged,
+      rerender: (next: Partial<MyServer>) => view.rerender(element(next)),
+    };
+  }
+
+  it("事实区显示 sing-box 版本与检查升级入口", () => {
+    renderUpgrade({ singbox_version: "1.14.4" });
+
+    const facts = document.querySelector(".myservers__facts")?.textContent ?? "";
+    expect(facts).toContain("sing-box");
+    expect(facts).toContain("1.14.4");
+    const entry = screen.getByRole("button", { name: "检查升级" });
+    // 事实区里的小按钮，不是主按钮。
+    expect(entry.classList.contains("copy-btn")).toBe(true);
+    expect(entry.classList.contains("btn--primary")).toBe(false);
+  });
+
+  it("没有版本时显示「未知」，按钮仍可点", () => {
+    renderUpgrade({ singbox_version: null });
+
+    const facts = document.querySelector(".myservers__facts")?.textContent ?? "";
+    expect(facts).toContain("未知");
+    const entry = screen.getByRole("button", { name: "检查升级" });
+    expect((entry as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("只在 healthy / active 且有节点 id、Host 接了命令时出现", () => {
+    for (const state of [
+      "creating",
+      "booting",
+      "installing",
+      "verifying",
+      "error",
+      "destroying",
+      "destroyed",
+      "gone",
+    ] as MyServerState[]) {
+      renderUpgrade({ state });
+      expect(screen.queryByRole("button", { name: "检查升级" })).toBeNull();
+      cleanup();
+    }
+
+    renderUpgrade({ node_id: null });
+    expect(screen.queryByRole("button", { name: "检查升级" })).toBeNull();
+    cleanup();
+
+    renderUpgrade({}, { bridged: false });
+    expect(screen.queryByRole("button", { name: "检查升级" })).toBeNull();
+    cleanup();
+
+    renderUpgrade({}, { readOnly: true });
+    expect(screen.queryByRole("button", { name: "检查升级" })).toBeNull();
+  });
+
+  it("点一次用一次，显示升级结果并刷新详情", async () => {
+    const { upgrade, onChanged } = renderUpgrade({ singbox_version: "1.14.4" });
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(upgrade).toHaveBeenCalledTimes(1);
+    expect(upgrade).toHaveBeenCalledWith("srv_1");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain("已升级到 1.15.0");
+    // 控制面还没刷新：这一行先用返回的 target 就地更新。
+    expect(document.querySelector(".myservers__facts")?.textContent).toContain(
+      "1.15.0",
+    );
+    // 焦点回到入口。
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "检查升级" }),
+    );
+  });
+
+  it("成功后回源一次，用 Host 返回的完整对象更新详情", async () => {
+    const fresh = server({ singbox_version: "1.15.0" });
+    const onRenamed = vi.fn();
+    const onChanged = vi.fn();
+    const { upgrade } = renderUpgrade(
+      { singbox_version: "1.14.4" },
+      { fresh, onRenamed, onChanged },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(upgrade).toHaveBeenCalledTimes(1);
+    expect(onRenamed).toHaveBeenCalledTimes(1);
+    expect(onRenamed).toHaveBeenCalledWith(fresh);
+    // 已经有完整对象，不再整表重拉。
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("已是最新时说已是最新，带上当前版本", async () => {
+    renderUpgrade(
+      { singbox_version: "1.14.4" },
+      {
+        upgrade: async () => ({
+          installed: "1.14.4",
+          target: "1.14.4",
+          upgraded: false,
+        }),
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain("已是最新（1.14.4）");
+    expect(document.body.textContent).not.toContain("已升级到");
+  });
+
+  it("已安装版本读不到时用 unknown 占位，不当成版本显示", async () => {
+    renderUpgrade(
+      {},
+      {
+        upgrade: async () => ({
+          installed: "unknown",
+          target: "",
+          upgraded: false,
+        }),
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain("已是最新（未知）");
+    expect(document.querySelector(".myservers__facts")?.textContent).not.toContain(
+      "unknown",
+    );
+  });
+
+  it("失败按 reason 给文案，事实区不变", async () => {
+    renderUpgrade(
+      { singbox_version: "1.14.4" },
+      {
+        upgrade: async () => {
+          throw {
+            code: "TIMEOUT",
+            message: "",
+            retryable: true,
+            details: { reason: "agent_timeout" },
+          };
+        },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "节点 180 秒内没完成升级，稍后再检查一次。",
+    );
+    const facts = document.querySelector(".myservers__facts")?.textContent ?? "";
+    expect(facts).toContain("1.14.4");
+  });
+
+  it("控制面拿不到门票时单独提示，不把用户引去查节点", async () => {
+    renderUpgrade(
+      {},
+      {
+        upgrade: async () => {
+          throw {
+            code: "UPSTREAM_ERROR",
+            message: "",
+            retryable: true,
+            details: { reason: "agent_token_unavailable" },
+          };
+        },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "暂时连不上控制面，没能开始升级。稍后再试。",
+    );
+    expect(document.body.textContent).not.toContain("节点还没准备好");
+  });
+
+  it("认不出的失败码走兜底文案，不把后端原文抛给用户", async () => {
+    renderUpgrade(
+      {},
+      {
+        upgrade: async () => {
+          throw { code: "INTERNAL", message: "boom", retryable: false };
+        },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "没能升级。节点可能暂时连不上，稍后再试。",
+    );
+    expect(document.body.textContent).not.toContain("boom");
+  });
+
+  it("节点忙时给「正在执行其他操作」，不说成一般失败", async () => {
+    renderUpgrade(
+      {},
+      {
+        upgrade: async () => {
+          throw {
+            code: "INTERNAL",
+            message: "",
+            retryable: true,
+            details: { reason: "agent_busy" },
+          };
+        },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    await act(async () => {});
+
+    expect(document.body.textContent).toContain(
+      "节点正在执行其他操作，稍后再试。",
+    );
+    expect(document.body.textContent).not.toContain("没能升级");
+  });
+
+  it("进行中按钮禁用并显示进行中文案", async () => {
+    let finish: () => void = () => {};
+    const pending = new Promise<{
+      installed: string;
+      target: string;
+      upgraded: boolean;
+    }>((resolve) => {
+      finish = () =>
+        resolve({ installed: "1.14.4", target: "1.15.0", upgraded: true });
+    });
+    renderUpgrade({ singbox_version: "1.14.4" }, { upgrade: () => pending });
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+
+    const busy = screen.getByRole("button", { name: "正在升级…" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(busy.getAttribute("aria-busy")).toBe("true");
+    // 升级会重启节点：进行中必须说清楚当前连接会中断。
+    expect(document.body.textContent).toContain(
+      "升级会重启节点，当前连接会短暂中断。",
+    );
+    // 升级在途时不能顺手销毁这台机器。
+    expect(
+      (screen.getByRole("button", { name: "销毁" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      finish();
+    });
+    expect(document.body.textContent).toContain("已升级到 1.15.0");
+    expect(
+      (screen.getByRole("button", { name: "销毁" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("在途时切服务器：结果不落到新面板", async () => {
+    let finish: () => void = () => {};
+    const pending = new Promise<{
+      installed: string;
+      target: string;
+      upgraded: boolean;
+    }>((resolve) => {
+      finish = () =>
+        resolve({ installed: "1.14.4", target: "1.15.0", upgraded: true });
+    });
+    const { rerender } = renderUpgrade(
+      { singbox_version: "1.14.4" },
+      { upgrade: () => pending },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "检查升级" }));
+    rerender({ server_id: "srv_2", singbox_version: "1.12.0" });
+
+    await act(async () => {
+      finish();
+    });
+    expect(document.body.textContent).not.toContain("已升级到");
+    expect(document.body.textContent).not.toContain("没能升级");
+    expect(
+      (screen.getByRole("button", { name: "检查升级" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+});

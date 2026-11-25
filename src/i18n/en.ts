@@ -1146,6 +1146,27 @@ export const en: Record<MessageKey, string> = {
     "Changed, but this device still has the old details. Reconnect, or refresh the server data.",
   "detail.rotateFailed":
     "Couldn't change it. The node may be temporarily unreachable; try again later.",
+  "detail.singboxUnknown": "Unknown",
+  "detail.upgradeCheck": "Check for update",
+  "detail.upgradeChecking": "Upgrading…",
+  "detail.upgradeRunningHint":
+    "Upgrading restarts the node, so the current connection drops briefly.",
+  "detail.upgradeLatest": "Up to date ({version})",
+  "detail.upgradeDone": "Updated to {version}",
+  "detail.upgradeFailed.unreachable":
+    "Can't reach the node. Confirm the server is still running, then try again.",
+  "detail.upgradeFailed.timeout":
+    "The node didn't finish upgrading within 180 seconds. Check again later.",
+  "detail.upgradeFailed.controlPlane":
+    "Can't reach the control plane, so the upgrade didn't start. Try again later.",
+  "detail.upgradeFailed.unavailable":
+    "The node isn't ready to take this update yet. Try again later.",
+  "detail.upgradeFailed.busy":
+    "The node is busy with another operation. Try again later.",
+  "detail.upgradeFailed.node":
+    "The node couldn't finish the upgrade. You can check again later.",
+  "detail.upgradeFailed.generic":
+    "Couldn't upgrade. The node may be temporarily unreachable; try again later.",
   "detail.repair": "Smart repair",
 
   // New node wizard

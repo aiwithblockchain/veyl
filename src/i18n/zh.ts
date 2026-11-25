@@ -1086,6 +1086,19 @@ export const zh = {
   "detail.rotateRefreshFailed":
     "已更换，但本机数据没刷新。请重新连接，或刷新服务器数据。",
   "detail.rotateFailed": "没能更换。节点可能暂时连不上，稍后再试。",
+  "detail.singboxUnknown": "未知",
+  "detail.upgradeCheck": "检查升级",
+  "detail.upgradeChecking": "正在升级…",
+  "detail.upgradeRunningHint": "升级会重启节点，当前连接会短暂中断。",
+  "detail.upgradeLatest": "已是最新（{version}）",
+  "detail.upgradeDone": "已升级到 {version}",
+  "detail.upgradeFailed.unreachable": "连不上节点，确认服务器还在运行后再试。",
+  "detail.upgradeFailed.timeout": "节点 180 秒内没完成升级，稍后再检查一次。",
+  "detail.upgradeFailed.controlPlane": "暂时连不上控制面，没能开始升级。稍后再试。",
+  "detail.upgradeFailed.unavailable": "节点还没准备好接收这次升级，稍后再试。",
+  "detail.upgradeFailed.busy": "节点正在执行其他操作，稍后再试。",
+  "detail.upgradeFailed.node": "节点没能完成升级，稍后可以再检查一次。",
+  "detail.upgradeFailed.generic": "没能升级。节点可能暂时连不上，稍后再试。",
   "detail.repair": "智能修复",
 
   // 新建节点向导

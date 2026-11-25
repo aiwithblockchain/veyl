@@ -6,6 +6,7 @@ pub mod permission_handler;
 pub mod questions;
 pub mod server_watch;
 pub mod ui_context;
+pub mod upgrade;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
