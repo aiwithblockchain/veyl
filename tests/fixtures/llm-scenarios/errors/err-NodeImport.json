@@ -1,16 +1,17 @@
 {
-  "name": "err-NodeImportUrl",
-  "tool": "NodeImportUrl",
+  "name": "err-NodeImport",
+  "tool": "NodeImport",
   "expect_error_code": "UPSTREAM_ERROR",
   "expect_ok": false,
   "contract_backed": true,
-  "description": "订阅地址当前拉不到",
+  "description": "订阅地址当前拉不到（source = url）",
   "turns": [
     {
       "tool_calls": [
         {
-          "name": "NodeImportUrl",
+          "name": "NodeImport",
           "arguments": {
+            "source": "url",
             "url": "https://example.invalid/sub"
           }
         }

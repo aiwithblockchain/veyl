@@ -2264,8 +2264,8 @@ check("StageSelect 在工具总表、§3.1、§4.52 三处一致（契约）", (
   if (!/Box::new\(StageSelectTool::new\(server_catalog\.clone\(\)\)\)/.test(regBlock)) {
     problems.push("tools.md §3.1 注册清单缺少 Box::new(StageSelectTool::new(server_catalog.clone()))");
   }
-  if (!/Box::new\(CatalogOptionsTool::new\(server_catalog\.clone\(\)\)\)/.test(regBlock)) {
-    problems.push("tools.md §3.1 注册清单缺少 Box::new(CatalogOptionsTool::new(server_catalog.clone()))");
+  if (!/Box::new\(ServerOptionsTool::new\(server_catalog\.clone\(\)\)\)/.test(regBlock)) {
+    problems.push("tools.md §3.1 注册清单缺少 Box::new(ServerOptionsTool::new(server_catalog.clone()))");
   }
   // 两个目录两个变量：`catalog` 是共享节点目录客户端，建机目录必须走 `server_catalog`。
   if (!/let server_catalog = services\.server_catalog\(\);/.test(regBlock)) {
@@ -2326,15 +2326,15 @@ check("StageSelect 在工具总表、§3.1、§4.52 三处一致（契约）", (
   return problems;
 });
 
-check("CatalogOptions 在 §4.53 完整登记且不泄露内部成本口径（契约）", () => {
+check("ServerOptions 在 §4.53 完整登记且不泄露内部成本口径（契约）", () => {
   const md = read("docs/contracts/tools.md");
   const problems = [];
 
   const s = mdSection(md, "### 4.53", "\n### ");
-  if (!s) return ["tools.md 找不到 §4.53 CatalogOptions"];
+  if (!s) return ["tools.md 找不到 §4.53 ServerOptions"];
 
   for (const phrase of [
-    "CatalogOptionsData",
+    "ServerOptionsData",
     "regions",
     "plans",
     "daily_price_cents",
@@ -2348,15 +2348,15 @@ check("CatalogOptions 在 §4.53 完整登记且不泄露内部成本口径（�
     problems.push("§4.53 没有写明 hourly_usd / monthly_usd 是内部成本口径、不返回");
   }
 
-  const block = tsTypeBlock("docs/contracts/tools.md", "CatalogOptionsData") ?? "";
-  if (!block) problems.push("tools.md 找不到 CatalogOptionsData");
+  const block = tsTypeBlock("docs/contracts/tools.md", "ServerOptionsData") ?? "";
+  if (!block) problems.push("tools.md 找不到 ServerOptionsData");
   else {
     for (const f of ["regions", "plans"]) {
-      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(block)) problems.push(`CatalogOptionsData 缺少 ${f}`);
+      if (!new RegExp(`^\\s*${f}\\s*:`, "m").test(block)) problems.push(`ServerOptionsData 缺少 ${f}`);
     }
     for (const bad of ["hourly_usd", "monthly_usd"]) {
       if (new RegExp(`\\b${bad}\\b`).test(block)) {
-        problems.push(`CatalogOptionsData 不得包含 ${bad}（内部成本口径不出现在返回结构里）`);
+        problems.push(`ServerOptionsData 不得包含 ${bad}（内部成本口径不出现在返回结构里）`);
       }
     }
   }

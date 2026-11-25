@@ -33,7 +33,7 @@ curl -s -X POST http://127.0.0.1:18091/v1/chat/completions \
 | 5 | `RuntimeLogs` | `INTERNAL` | **无** | 日志文件缺失 |
 | 6 | `CoreListVersions` | `INTERNAL` | **无** | 内置清单损坏 |
 | 7 | `CatalogSearch` | `CATALOG_UNAVAILABLE` | §4.8 | 目录服务不可达 |
-| 8 | `NodeImportUrl` | `UPSTREAM_ERROR` | §4.10 | 订阅地址当前拉不到 |
+| 8 | `NodeImport`（`source = "url"`） | `UPSTREAM_ERROR` | §4.10 | 订阅地址当前拉不到 |
 | 9 | `VpnConnect` | `PRECONDITION_FAILED` | §4.11 | 未导入配置就连接 |
 | 10 | `VpnDisconnect` | `PRECONDITION_FAILED` | **无** | 未连接时断开 |
 | 11 | `DiagRun` | `INTERNAL` | **无** | 诊断内部失败 |
