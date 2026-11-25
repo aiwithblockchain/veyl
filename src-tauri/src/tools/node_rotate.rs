@@ -1,4 +1,4 @@
-//! `NodeRotateCredentials`：AI 经确认卡触发节点端口 / 密码轮换（`node-agent-mcp.md` §8 / §10）。
+//! `NodeRotateCredentials`：AI 经确认卡触发更换节点连接密码（`node-agent-mcp.md` §8 / §10）。
 //!
 //! 节点上的 agent 是一个只暴露 `rotate_credentials` 的 MCP server，证书自签。
 //! 这里直连 rmcp 的 streamable HTTP client，并注入自建的 reqwest 0.13 客户端承担信任：
@@ -33,7 +33,7 @@ use crate::tools::policy;
 const TOOL_NAME: &str = "NodeRotateCredentials";
 const AGENT_TOOL: &str = "rotate_credentials";
 const CONFIRM_KIND: &str = "node_rotate_confirm";
-const CONFIRM_OPTION: &str = "重置";
+const CONFIRM_OPTION: &str = "更换";
 const CANCEL_OPTION: &str = "取消";
 /// 控制面令牌本身只有 60 秒寿命，取令牌再慢就没有意义了。
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -100,7 +100,7 @@ impl AgentFailure {
                 mapped.with_details(json!({ "reason": reason }))
             }
             Self::BadResponse(detail) => {
-                AivpnError::new("INTERNAL", "节点代理返回的数据不完整，这次没有重置")
+                AivpnError::new("INTERNAL", "节点代理返回的数据不完整，这次没有更换")
                     .with_details(json!({ "reason": "agent_bad_response", "detail": detail }))
             }
             Self::TlsUntrusted(detail) => AivpnError::new(
@@ -113,7 +113,7 @@ impl AgentFailure {
                     .with_details(json!({ "reason": "agent_token_rejected" }))
             }
             Self::Timeout => {
-                let mut error = AivpnError::new("TIMEOUT", "节点在 90 秒内没有完成重置");
+                let mut error = AivpnError::new("TIMEOUT", "节点在 90 秒内没有完成更换");
                 error.retryable = true;
                 error.with_details(json!({ "reason": "agent_timeout" }))
             }
@@ -126,7 +126,7 @@ impl AgentFailure {
                 error.with_details(json!({ "reason": "agent_unreachable", "detail": detail }))
             }
             Self::ToolFailed { message, retryable } => {
-                let mut error = AivpnError::new("INTERNAL", format!("节点没能完成重置：{message}"));
+                let mut error = AivpnError::new("INTERNAL", format!("节点没能完成更换：{message}"));
                 error.retryable = retryable;
                 error.with_details(json!({
                     "reason": "agent_tool_failed",
@@ -626,11 +626,11 @@ impl Tool for NodeRotateCredentialsTool {
     }
 
     fn description(&self) -> &str {
-        "只在用户明确要求重置这台服务器的节点端口或密码（例如「端口被封了，换一个」「重置节点凭据」）时调用。\
-         会先弹确认卡；用户逐字选「重置」后才会让节点换端口与密码并重启。\
+        "只在用户明确要求更换这台服务器的连接密码（例如「端口被封了，换一个」「更换连接密码」）时调用。\
+         会先弹确认卡；用户逐字选「更换」后才会让节点换端口与密码并重启。\
          成功后必须告诉用户：新端口和密码要断开并重新连接之后才会生效，当前连接仍在用旧端口。\
          不得为了排障、提速或推测性的原因自行调用，也不要在用户没提这件事时主动建议后自己执行。\n\
-         说「节点端口」「节点密码」「重新连接」，不出现 server_id、MCP、agent、令牌这些词。"
+         说「连接密码」「端口」「重新连接」，不出现 server_id、MCP、agent、令牌这些词。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -643,7 +643,7 @@ impl Tool for NodeRotateCredentialsTool {
             "properties": {
                 "server_id": {
                     "type": "string",
-                    "description": "要重置的服务器 id，取自 MyServers 的 server_id"
+                    "description": "要更换连接密码的服务器 id，取自 MyServers 的 server_id"
                 }
             },
             "required": ["server_id"],
@@ -704,9 +704,9 @@ impl NodeRotateCredentialsTool {
 
     fn success_outcome(&self, report: RotateReport, refreshed: bool) -> ToolOutcome {
         // 端口一变，正在跑的隧道就作废了：必须让模型把「断开重连」说出来，
-        // 否则用户会以为重置失败（实测踩过）。
+        // 否则用户会以为更换失败（实测踩过）。
         let base = format!(
-            "节点端口与密码已重置（新端口 {}）。当前连接仍在用旧端口，断开后重新连接才会生效。",
+            "连接密码已更换（新端口 {}）。当前连接仍在用旧端口，断开后重新连接才会生效。",
             report.port
         );
         let summary = if refreshed {
@@ -731,13 +731,13 @@ impl NodeRotateCredentialsTool {
     /// 确认卡：默认焦点是「取消」，Esc / 关闭 / 超时都按取消处理。
     async fn confirm(&self, ctx: &ToolContext) -> Result<(), AivpnError> {
         let request_id = policy::current_request_id(&ctx.session_id)
-            .ok_or_else(|| AivpnError::new("INTERNAL", "无法确定当前请求，节点没有重置"))?;
+            .ok_or_else(|| AivpnError::new("INTERNAL", "无法确定当前请求，节点没有更换"))?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         questions::register_with(
             &ctx.session_id,
             &request_id,
             UserQuestionEvent {
-                question: "重置这台服务器的节点端口与密码？重置会重启节点，本机与手机会在下次同步后使用新值。\n是否重置？"
+                question: "更换这台服务器的连接密码？更换会重启节点，本机与手机会在下次同步后使用新值。\n是否更换？"
                     .to_string(),
                 options: Some(vec![CONFIRM_OPTION.to_string(), CANCEL_OPTION.to_string()]),
                 reply_tx: tx,
@@ -756,7 +756,7 @@ impl NodeRotateCredentialsTool {
             Ok(())
         } else {
             log::warn!("[node_rotate] reason=cancelled");
-            Err(AivpnError::new("CANCELLED", "用户取消了节点重置"))
+            Err(AivpnError::new("CANCELLED", "用户取消了更换连接密码"))
         }
     }
 }
@@ -787,7 +787,7 @@ fn parse_server_id(input: &Value) -> Result<String, AivpnError> {
     } else {
         log::warn!("[node_rotate] code=INVALID_ARGUMENT reason=invalid_server_id");
         Err(
-            AivpnError::new("INVALID_ARGUMENT", "server_id 不合法，这次没有重置")
+            AivpnError::new("INVALID_ARGUMENT", "server_id 不合法，这次没有更换")
                 .with_details(json!({ "reason": "invalid_server_id" })),
         )
     }

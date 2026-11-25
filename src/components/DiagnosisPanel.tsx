@@ -23,6 +23,7 @@ interface Props {
 
 const STEP_TITLE: Record<DiagnosisStepId, MessageKey> = {
   connectivity: "diagnosis.step.connectivity",
+  probe: "diagnosis.step.probe",
   config: "diagnosis.step.config",
   rotate: "diagnosis.step.rotate",
   retest: "diagnosis.step.retest",
@@ -64,6 +65,9 @@ const UNTESTED_REASON_KEY: Record<string, MessageKey> = {
   runtime_missing: "diagnosis.untested.runtimeMissing",
   runtime_failed: "diagnosis.untested.runtimeFailed",
   runtime_timeout: "diagnosis.untested.runtimeTimeout",
+  timeout: "diagnosis.untested.probeTimeout",
+  no_local_node: "diagnosis.untested.noLocalNode",
+  probe_error: "diagnosis.untested.probeError",
 };
 
 /** 破坏性动作才用 danger-ghost；其余只有一个主按钮。 */
@@ -153,6 +157,30 @@ export function DiagnosisPanel({
       }
       case "unreachable":
         return t("diagnosis.connectivity.unreachable");
+      case "proxy-pending":
+        return t("diagnosis.probe.pending");
+      case "proxy-ok":
+        return (
+          <>
+            {t("diagnosis.probe.ok")}
+            {conclusion.latencyMs !== null ? (
+              <>
+                {" · "}
+                <span className="num">{conclusion.latencyMs}</span> ms
+              </>
+            ) : null}
+          </>
+        );
+      case "proxy-failed":
+        return t("diagnosis.probe.failed");
+      case "proxy-untested": {
+        const key = conclusion.reason
+          ? UNTESTED_REASON_KEY[conclusion.reason]
+          : undefined;
+        return key
+          ? t("diagnosis.probe.untestedReason", { reason: t(key) })
+          : t("diagnosis.probe.untested");
+      }
       case "service-down":
         return t(
           isConnection

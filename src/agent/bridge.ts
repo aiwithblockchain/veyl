@@ -1143,7 +1143,7 @@ export interface AgentBridge {
   myServerDestroy(serverId: string, confirm: boolean): Promise<MyServer>;
   /** 取凭据；客户端验签后落库，界面不展示。 */
   myServerCredentials(serverId: string): Promise<MyServerCredentialNode>;
-  /** 智能修复：重置节点端口与密码（会重启节点）；Host 没接时省略。 */
+  /** 智能修复：更换节点连接密码（会重启节点）；Host 没接时省略。 */
   nodeRotateCredentials?(
     serverId: string,
   ): Promise<NodeRotateCredentialsResult>;

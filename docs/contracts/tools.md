@@ -364,7 +364,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 32 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
 | 33 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
 | 34 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
-| 35 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 重置某台服务器的节点端口与密码（**有确认点**，会重启节点） | `Execute` | 高 |
+| 35 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 更换某台服务器的连接密码（**有确认点**，会重启节点） | `Execute` | 高 |
 | 36 | `submit_issue_to_public_wall` | `SubmitIssueToPublicWallTool` | 把问题发到公开问题墙（**有确认点**，提交即公开） | `Write` | 中（公开可见） |
 | 37 | `read_public_issue_wall` | `ReadPublicIssueWallTool` | 搜索 / 读取问题墙与运营答复（**无需登录**） | `ReadOnly` | 只读 |
 | 38 | `AskUserQuestion` | （Claurst 内置；`AskUserQuestionGuard` 包装） | 向用户提问 | `None` | 低 |
@@ -422,7 +422,7 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 我的服务器（只读）
     Box::new(MyServersTool::new(services.clone())),
     Box::new(MyServerFailureTool::new(services.clone())),
-    // 节点端口与密码轮换（有确认点）
+    // 更换连接密码（有确认点）
     Box::new(NodeRotateCredentialsTool::new()),
     // 在线切换接管方式（有确认点）
     Box::new(ConfigSetModeTool::new(store.clone(), rt.clone())),
@@ -2149,13 +2149,13 @@ type HttpCheckData = {
 
 ---
 
-### 4.55 `NodeRotateCredentials`（节点端口与密码轮换，3.23.0 新增）
+### 4.55 `NodeRotateCredentials`（更换连接密码，3.23.0 新增）
 
 ```json
 {
   "type": "object",
   "properties": {
-    "server_id": { "type": "string", "description": "要重置的服务器 id，取自 MyServers 的 server_id" }
+    "server_id": { "type": "string", "description": "要更换连接密码的服务器 id，取自 MyServers 的 server_id" }
   },
   "required": ["server_id"],
   "additionalProperties": false
@@ -2170,8 +2170,8 @@ type NodeRotateCredentialsData = {
 };
 ```
 
-- `PermissionLevel::Execute`；**有确认卡**（kind `node_rotate_confirm`，选项「重置 / 取消」，默认焦点「取消」；Esc / 关闭 / 超时都按取消）。
-- 描述边界写死在工具描述里：只在用户明确要求重置节点端口或密码时调用，不得为了排障、提速或推测性原因自行调用，也不得在用户没提时主动建议后自己执行。
+- `PermissionLevel::Execute`；**有确认卡**（kind `node_rotate_confirm`，选项「更换 / 取消」，默认焦点「取消」；Esc / 关闭 / 超时都按取消）。
+- 描述边界写死在工具描述里：只在用户明确要求更换连接密码时调用，不得为了排障、提速或推测性原因自行调用，也不得在用户没提时主动建议后自己执行。
 - 执行链路：Host 先向控制面取这台节点的 agent 端点与一次性令牌（`POST /v1/servers/{id}/agent-token`，60 秒、一次性），再连节点的 MCP 服务调用 `rotate_credentials`。**`endpoint` 是控制面下发的完整 MCP URL（带 `/mcp`），Host 不拼路径**——端点语义只在控制面定义一次。
 - **轮换成功后 Host 主动刷新本机凭据**：节点池只为「本地还没有这台服务器的节点行」取凭据，行还在就不会自动同步；因此工具在 agent 返回成功后立即调用 `POST /v1/servers/{id}/credentials`（按 `server_id` upsert 本地节点行，更新端口与密码并回填 `my_servers.node_id`），再发一次 `my-server-changed` 让界面重读。刷新失败**不影响成功结论**：`refreshed = false`，summary 追加「本机凭据刷新失败，请手动刷新服务器数据」。
 - TLS 信任：控制面给了 `ca_pem` 就 `add_root_certificate` 走正常链校验；**CA 路径失败（`agent_tls_untrusted`）时用同一张票的 `cert_fingerprint` pin 再试一次**（令牌一次性，不能重新开票），仍失败才报错。没有 CA 时直接用指纹 pin；明文 HTTP 的端点直接拒绝。
@@ -2186,7 +2186,7 @@ type NodeRotateCredentialsData = {
   - `agent_unreachable` — 连不上或连接中断，`retryable = true`；
   - `agent_bad_response` — 控制面或 agent 回包结构不对。
   - 用户取消 → `CANCELLED`；参数不合法 → `INVALID_ARGUMENT / invalid_server_id`。
-- 成功返回 `{ ok: true, port, refreshed }`，`display.changed = unknown`（远端已改，本地无回滚）；summary「节点端口与密码已重置（新端口 N）。当前连接仍在用旧端口，断开后重新连接才会生效」（刷新失败时追加「本机凭据刷新失败，请手动刷新服务器数据后再重连」）；**模型必须把「断开重连」这句话转述给用户**——只刷新本机凭据不会重建正在运行的隧道。`display`「节点端口与密码已重置」+ `facts` 带新端口。失败文案不承诺「没有变化」——agent 可能在半途失败。
+- 成功返回 `{ ok: true, port, refreshed }`，`display.changed = unknown`（远端已改，本地无回滚）；summary「连接密码已更换（新端口 N）。当前连接仍在用旧端口，断开后重新连接才会生效」（刷新失败时追加「本机凭据刷新失败，请手动刷新服务器数据后再重连」）；**模型必须把「断开重连」这句话转述给用户**——只刷新本机凭据不会重建正在运行的隧道。`display`「连接密码已更换」+ `facts` 带新端口。失败文案不承诺「没有变化」——agent 可能在半途失败。
 - 审计：沿用工具调用审计（记 `server_id` 与结果），不含令牌与密码。
 
 ### 4.56 `submit_issue_to_public_wall`（上报到公开问题墙，3.25.0 新增）

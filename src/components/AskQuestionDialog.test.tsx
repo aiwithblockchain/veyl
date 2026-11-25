@@ -188,21 +188,21 @@ function rotateQuestion(overrides: Partial<PendingQuestion> = {}): PendingQuesti
     ...confirmQuestion(),
     kind: "node_rotate_confirm",
     upgradeConfirm: null,
-    question: "重置这台服务器的节点端口与密码？",
-    options: ["重置", "取消"],
+    question: "更换这台服务器的连接密码？",
+    options: ["更换", "取消"],
     defaultIndex: 1,
     ...overrides,
   };
 }
 
-describe("AskQuestionDialog：节点端口重置确认卡", () => {
-  it("走阻塞对话框，写标题与影响，按钮是重置 / 取消", async () => {
+describe("AskQuestionDialog：节点连接密码更换确认卡", () => {
+  it("走阻塞对话框，写标题与影响，按钮是更换 / 取消", async () => {
     renderQuestion(rotateQuestion());
 
-    expect(await screen.findByText("重置节点端口与密码")).toBeTruthy();
+    expect(await screen.findByText("更换连接密码")).toBeTruthy();
     const dialog = screen.getByRole("dialog");
-    expect(dialog.textContent).toContain("重置会重启节点");
-    expect(screen.getByRole("button", { name: "重置" })).toBeTruthy();
+    expect(dialog.textContent).toContain("更换会重启节点");
+    expect(screen.getByRole("button", { name: "更换" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
   });
 
@@ -218,9 +218,9 @@ describe("AskQuestionDialog：节点端口重置确认卡", () => {
     await waitFor(() => expect(document.activeElement).toBe(cancel));
   });
 
-  it("default_index=0 时焦点落在重置", async () => {
+  it("default_index=0 时焦点落在更换", async () => {
     renderQuestion(rotateQuestion({ defaultIndex: 0 }));
-    const reset = await screen.findByRole("button", { name: "重置" });
+    const reset = await screen.findByRole("button", { name: "更换" });
     await waitFor(() => expect(document.activeElement).toBe(reset));
   });
 
@@ -228,18 +228,18 @@ describe("AskQuestionDialog：节点端口重置确认卡", () => {
     const { onAnswer } = renderQuestion(
       rotateQuestion({ options: ["确认重置", "暂不重置"] }),
     );
-    await screen.findByText("重置节点端口与密码");
+    await screen.findByText("更换连接密码");
 
     fireEvent.keyDown(window, { key: "Escape" });
 
     await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("暂不重置"));
   });
 
-  it("点重置回传重置选项原文", async () => {
+  it("点更换回传重置选项原文", async () => {
     const { onAnswer } = renderQuestion(
       rotateQuestion({ options: ["确认重置", "暂不重置"] }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "重置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "更换" }));
 
     await waitFor(() => expect(onAnswer).toHaveBeenCalledWith("确认重置"));
   });
@@ -288,7 +288,7 @@ describe("AskQuestionDialog：问题墙上报确认卡", () => {
     expect(dialog.textContent).toContain("停在正在重置");
     expect(dialog.textContent).toContain("连续两次触发");
     expect(dialog.textContent).toContain("macOS · 1.0.0");
-    expect(dialog.textContent).toContain("重置端口 · 未通过 · 90.0 秒");
+    expect(dialog.textContent).toContain("更换连接密码 · 未通过 · 90.0 秒");
     expect(dialog.textContent).not.toContain("agent_timeout");
     expect(dialog.textContent).toContain("会上报版本、平台、诊断步骤");
     expect(dialog.textContent).not.toContain('"steps"');

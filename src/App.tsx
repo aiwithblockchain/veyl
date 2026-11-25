@@ -2152,7 +2152,7 @@ export default function App() {
     let runCode: string | null = null;
     /** 最近一次 untested 的 Host 原因，供面板显示人话。 */
     let probeUntestedReason: string | null = null;
-    const probeNode = async (): Promise<ProbeOutcome> => {
+    const probeNodeDetail = async (): Promise<ConnectionRetest> => {
       probeUntestedReason = null;
       if (!localNodeId) {
         probeUntestedReason = "no_local_node";
@@ -2161,7 +2161,7 @@ export default function App() {
           `diagnosis run=${runCode ?? "none"} probe status=none reason=no_local_node`,
           "node-diagnosis",
         );
-        return null;
+        return { reachable: null, reason: "no_local_node", latencyMs: null };
       }
       try {
         const result = await bridge.nodeProbe(localNodeId);
@@ -2175,7 +2175,11 @@ export default function App() {
             `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=untested reason=${probeUntestedReason ?? "none"}`,
             "node-diagnosis",
           );
-          return null;
+          return {
+            reachable: null,
+            reason: probeUntestedReason,
+            latencyMs: null,
+          };
         }
         if (result.reachable !== true) {
           uiLog(
@@ -2183,19 +2187,26 @@ export default function App() {
             `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=${result.status} reason=${result.error?.reason ?? result.error?.code ?? "none"}`,
             "node-diagnosis",
           );
-          return false;
+          return {
+            reachable: false,
+            reason: result.error?.reason ?? result.error?.code ?? null,
+            latencyMs: result.latency_ms,
+          };
         }
-        return true;
+        return { reachable: true, reason: null, latencyMs: result.latency_ms };
       } catch (error) {
         // 命令本身没跑成：不知道通不通，按「没测成」处理。
+        const reason = toBridgeError(error).code || "throw";
         uiLog(
           "warn",
-          `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=none reason=${toBridgeError(error).code || "throw"}`,
+          `diagnosis run=${runCode ?? "none"} probe node=${localNodeId} status=none reason=${reason}`,
           "node-diagnosis",
         );
-        return null;
+        return { reachable: null, reason, latencyMs: null };
       }
     };
+    const probeNode = async (): Promise<ProbeOutcome> =>
+      (await probeNodeDetail()).reachable;
     const isRuntimeUp = () => {
       const state = runtimeRef.current.state;
       return state === "running" || state === "degraded";
@@ -2283,6 +2294,7 @@ export default function App() {
         };
       },
       reprobe: probeNode,
+      probeProxy: probeNodeDetail,
       probeUntestedReason: () => probeUntestedReason,
       reconnectAndProbe: async (): Promise<ReconnectOutcome> => {
         const connected = await handleReconnectAndTest();

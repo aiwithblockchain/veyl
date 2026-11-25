@@ -358,7 +358,7 @@ describe("AskQuestionCard", () => {
     expect(screen.getByText("停在正在重置")).toBeTruthy();
     expect(screen.getByText("连续两次触发")).toBeTruthy();
     expect(screen.getByText(/macOS · 1\.0\.0/)).toBeTruthy();
-    expect(screen.getByText(/重置端口 · 未通过 · 90\.0 秒/)).toBeTruthy();
+    expect(screen.getByText(/更换连接密码 · 未通过 · 90\.0 秒/)).toBeTruthy();
     expect(screen.getByText(/会上报版本、平台、诊断步骤/)).toBeTruthy();
     expect(screen.queryByText(/"steps"/)).toBeNull();
     // 内部错误码不上界面：只显示「未通过」，不把 agent_timeout 这类码念给用户。

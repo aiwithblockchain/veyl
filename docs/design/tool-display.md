@@ -408,7 +408,7 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 32 | `StageSelect` | 正在选地区和规格 | 已选好地区和规格 | 没能选好地区和规格 | `none` |
 | 33 | `CatalogOptions` | 正在读可选地区与规格 | 读到了可选地区与规格 | 可选地区读不到 | `none` |
 | 34 | `HttpCheck` | 正在检查这个网页 | 网页返回 200 | 没访问成功 | `none` |
-| 35 | `NodeRotateCredentials` | 正在重置节点端口与密码 | 节点端口与密码已重置 | 没能重置，节点仍用旧端口 | `none` / `unknown` |
+| 35 | `NodeRotateCredentials` | 正在更换连接密码 | 连接密码已更换 | 没能更换，节点仍用旧密码 | `none` / `unknown` |
 | 36 | `submit_issue_to_public_wall` | 正在准备发到问题墙 | 已发到问题墙 | 没能发到问题墙 | `none` |
 | 37 | `read_public_issue_wall` | 正在查问题墙 | 已查看问题墙 | 问题墙读不到 | `none` |
 | 38 | `AskUserQuestion` | 不显示工具行 | — | — | `none` |

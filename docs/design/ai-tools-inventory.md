@@ -85,7 +85,7 @@
 | 36 | `SetUserRegion` | 地区 | Write | 记录用户所在地区 | 契约 §4.47；系统环境段 mod.rs:205/225 |
 | 37 | `MyServers` | 服务器 | ReadOnly | 列我的服务器与状态 | 契约 §4.48；product §3.3 |
 | 38 | `MyServerFailure` | 服务器 | ReadOnly | 读某台服务器创建失败详情 | 契约 §4.51；product #7、ai-docs #7 |
-| 39 | `NodeRotateCredentials` | 服务器 | Execute | 重置某台服务器的节点端口 / 密码（有确认卡） | 契约 §4.55；product #10（未点名） |
+| 39 | `NodeRotateCredentials` | 服务器 | Execute | 更换某台服务器的连接密码（有确认卡） | 契约 §4.55；product #10（未点名） |
 | 40 | `OpenSettings` | 设置 | ReadOnly | 打开设置并指向某段 / 某行 | 契约 §4.50；product §3.6（咨询 AI） |
 | 41 | `StageSelect` | 建机 | Write | 把地区 / 规格选进新建节点舞台 | 契约 §4.52；product #6、ai-docs #6 |
 | 42 | `CatalogOptions` | 建机 | ReadOnly | 读建机可选地区与规格 | 契约 §4.53；product #6 |
@@ -255,7 +255,7 @@
 |---|---|---|---|---|---|
 | `MyServers` | ReadOnly | `{}` | 逐台 `id \| 名称 \| 地区 \| 状态 \| 地址 \| 每天 X 美元 [\| 可建配置]` | `servers.empty` 或 `server.row`（最多 8 行） | none / none |
 | `MyServerFailure` | ReadOnly | `serverId`* | `{name}（状态）这次失败在「阶段」：{message}，是否可重试。…` / 记录不完整 / 无记录 | `server.failure_code`、`server.stage`、`server.retryable` / `server.record_incomplete` + `server.advice_rebuild` / `server.no_record` | none / none |
-| `NodeRotateCredentials` | Execute | `server_id`* | `节点端口与密码已重置（新端口 N）。当前连接仍在用旧端口，断开后重新连接才会生效。` | `node.new_port`、`node.credential_refresh_failed` | unknown / none |
+| `NodeRotateCredentials` | Execute | `server_id`* | `连接密码已更换（新端口 N）。当前连接仍在用旧端口，断开后重新连接才会生效。` | `node.new_port`、`node.credential_refresh_failed` | unknown / none |
 
 实现位置：`my_servers.rs:141-575`、`node_rotate.rs:620-729`。
 

@@ -315,11 +315,12 @@ export const en: Record<MessageKey, string> = {
   "tool.MyServerFailure.running": "Checking where the creation failed",
   "tool.MyServerFailure.done": "Checked the failure details",
   "tool.MyServerFailure.failed": "Couldn't read the failure details",
-  "tool.NodeRotateCredentials.running": "Resetting the node port…",
+  "tool.NodeRotateCredentials.running":
+    "Changing the node's connection password…",
   "tool.NodeRotateCredentials.done":
-    "Node port and password reset. Disconnect and reconnect for it to take effect.",
+    "Connection password changed. Disconnect and reconnect for it to take effect.",
   "tool.NodeRotateCredentials.failed":
-    "Couldn't reset the node. Rebuild this server, or try again later.",
+    "Couldn't change the connection password. Rebuild this server, or try again later.",
   "tool.CatalogOptions.running": "Loading regions and plans",
   "tool.CatalogOptions.done": "Loaded regions and plans",
   "tool.CatalogOptions.failed": "Couldn't load regions and plans",
@@ -466,10 +467,10 @@ export const en: Record<MessageKey, string> = {
   "dialog.mode.allApps": "Tun mode",
   "dialog.mode.proxy": "Proxy mode",
   "dialog.mode.unknown": "Selected mode",
-  "dialog.nodeRotate.title": "Reset node port and password",
+  "dialog.nodeRotate.title": "Change connection password",
   "dialog.nodeRotate.body":
-    "Resetting restarts the node and changes its port. Disconnect and reconnect afterwards for it to take effect; other devices need to import the config again.",
-  "dialog.nodeRotate.confirm": "Reset",
+    "Changing it restarts the node and changes its port. Disconnect and reconnect afterwards for it to take effect; other devices need to import the config again.",
+  "dialog.nodeRotate.confirm": "Change",
   "dialog.issueSubmit.title": "Post to the issue wall",
   "dialog.issueSubmit.titleField": "Title",
   "dialog.issueSubmit.summary": "What happened",
@@ -479,8 +480,8 @@ export const en: Record<MessageKey, string> = {
   "dialog.issueSubmit.environment": "Platform and version",
   "dialog.issueSubmit.steps": "Diagnosis steps",
   "dialog.issueSubmit.step.connectivity": "Connectivity",
-  "dialog.issueSubmit.step.config_update": "Config update",
-  "dialog.issueSubmit.step.rotate": "Port reset",
+  "dialog.issueSubmit.step.config_update": "Sync config",
+  "dialog.issueSubmit.step.rotate": "Change connection password",
   "dialog.issueSubmit.stepOk": "Passed",
   "dialog.issueSubmit.stepFailed": "Failed",
   "dialog.issueSubmit.disclosure":
@@ -803,7 +804,7 @@ export const en: Record<MessageKey, string> = {
   "assistant.prompt.connectDiagnosis":
     "The connection failed. Here is what the local diagnosis collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; don't guess and don't ask me to upload logs.\n{context}",
   "assistant.prompt.nodeUnreachable":
-    "Node \"{name}\" failed its test this time. First use a tool to check whether it can recover intelligently (reset port and password); recover it if you can, and only suggest destroying and rebuilding if it can't be recovered. Don't make up tool results; if tools aren't available, say so honestly.",
+    "Node \"{name}\" failed its test this time. First use a tool to check whether it can recover intelligently (change the connection password); recover it if you can, and only suggest destroying and rebuilding if it can't be recovered. Don't make up tool results; if tools aren't available, say so honestly.",
   "assistant.prompt.pickRegion": "Help me pick a region and plan.",
 
   // Settings › Advanced › Language
@@ -1746,8 +1747,8 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.entryAria": "Diagnose {name}",
   "diagnosis.intro": "Work through the likely causes step by step; each step waits for your click.",
   "diagnosis.action.start": "Start analysis",
-  "diagnosis.action.updateConfig": "Update config",
-  "diagnosis.action.resetPort": "Reset port and password",
+  "diagnosis.action.updateConfig": "Sync config",
+  "diagnosis.action.resetPort": "Change connection password",
   "diagnosis.action.retest": "Re-test",
   "diagnosis.action.askAi": "Ask AI",
   "diagnosis.action.goServers": "Destroy and rebuild",
@@ -1755,9 +1756,10 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.action.changeNode": "Change node",
   "diagnosis.action.reconnect": "Reconnect",
   "diagnosis.step.connectivity": "Connectivity",
-  "diagnosis.step.config": "Update config",
+  "diagnosis.step.probe": "Proxy availability",
+  "diagnosis.step.config": "Sync config",
   "diagnosis.step.runtimeConfig": "Runtime and config",
-  "diagnosis.step.rotate": "Reset port and password",
+  "diagnosis.step.rotate": "Change connection password",
   "diagnosis.step.retest": "Re-test",
   "diagnosis.step.ai": "Hand to AI",
   "diagnosis.status.running": "In progress",
@@ -1776,6 +1778,10 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.untested.runtimeMissing": "the local runtime isn't installed",
   "diagnosis.untested.runtimeFailed": "the local runtime has stopped",
   "diagnosis.untested.runtimeTimeout": "the local runtime isn't responding",
+  "diagnosis.untested.probeTimeout": "the probe timed out",
+  "diagnosis.untested.noLocalNode":
+    "this node hasn't synced to this device yet, try again later",
+  "diagnosis.untested.probeError": "the probe couldn't run",
   "diagnosis.connectivity.pending": "Checking connectivity…",
   "diagnosis.connectivity.icmpOk": "ICMP reachable",
   "diagnosis.connectivity.tcpOk": "ICMP blocked, TCP reachable",
@@ -1783,6 +1789,12 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.connectivity.serviceDown": "Machine is online, but the control service is unavailable",
   "diagnosis.connectivity.localNetwork": "Your local network may be down",
   "diagnosis.connectivity.skipped": "This check doesn't apply to this node",
+  "diagnosis.probe.pending": "Checking proxy availability…",
+  "diagnosis.probe.ok": "Proxy available",
+  "diagnosis.probe.failed": "Proxy unreachable",
+  "diagnosis.probe.untested":
+    "Couldn't test this time: the probe service didn't run.",
+  "diagnosis.probe.untestedReason": "Couldn't test this time: {reason}.",
   "diagnosis.connection.localNetwork": "There's no network right now",
   "diagnosis.connection.helperBlocked":
     "The background helper isn't running or isn't authorized",
@@ -1800,57 +1812,58 @@ export const en: Record<MessageKey, string> = {
     "The runtime reported an error, and there's no local fix to apply",
   "diagnosis.connection.undetermined":
     "Local checks all passed, but the connection still fails",
-  "diagnosis.config.pending": "Updating config…",
+  "diagnosis.config.pending": "Syncing config…",
   "diagnosis.config.controlPlane": "Control plane is temporarily unreachable",
   "diagnosis.config.timeout":
-    "Updating the config hasn't returned yet; it may still be running. Check the connection again later.",
+    "Syncing the config hasn't returned yet; it may still be running. Check the connection again later.",
   "diagnosis.config.untested":
     "Couldn't re-test this time: the probe didn't run, so this isn't a failure.",
   "diagnosis.config.untestedReason": "Couldn't re-test this time: {reason}.",
-  "diagnosis.config.reconnectFailed": "Config updated, but reconnecting failed.",
-  "diagnosis.config.recovered": "Config updated; connection restored",
+  "diagnosis.config.reconnectFailed": "Config synced, but reconnecting failed.",
+  "diagnosis.config.recovered": "Config synced; connection restored",
   "diagnosis.config.recoveredNoChange": "Config unchanged; connection restored",
-  "diagnosis.config.stillDown": "Config updated, but still unreachable",
+  "diagnosis.config.stillDown": "Config synced, but still unreachable",
   "diagnosis.config.stillDownNoChange": "Config unchanged and still unreachable",
-  "diagnosis.config.appliedIdle": "Config updated; reconnect to apply",
+  "diagnosis.config.appliedIdle": "Config synced; reconnect to apply",
   "diagnosis.config.unchanged": "Config unchanged",
-  "diagnosis.rotate.pending": "Resetting port and password…",
-  "diagnosis.rotate.recovered": "Port and password reset; connection restored",
+  "diagnosis.rotate.pending": "Changing the connection password…",
+  "diagnosis.rotate.recovered":
+    "Connection password changed; connection restored",
   "diagnosis.rotate.reconnectFailed":
-    "Port and password reset, but reconnecting failed",
+    "Connection password changed, but reconnecting failed",
   "diagnosis.rotate.stillFailed":
-    "Port and password reset, but still unreachable",
+    "Connection password changed, but still unreachable",
   "diagnosis.rotate.timeout":
-    "Resetting hasn't returned yet; it may still be running. Check the port again later.",
+    "Changing hasn't returned yet; it may still be running. Check the connection again later.",
   "diagnosis.rotate.untested":
-    "Port and password reset, but couldn't re-test this time.",
+    "Connection password changed, but couldn't re-test this time.",
   "diagnosis.rotate.untestedReason":
-    "Port and password reset, but couldn't test this time: {reason}.",
-  "diagnosis.rotate.appliedIdle": "Reset done; reconnect to apply",
-  "diagnosis.rotate.failed": "Reset failed: {reason}",
-  "diagnosis.rotate.failedNoReason": "Reset failed",
+    "Connection password changed, but couldn't test this time: {reason}.",
+  "diagnosis.rotate.appliedIdle": "Changed; reconnect to apply",
+  "diagnosis.rotate.failed": "Change failed: {reason}",
+  "diagnosis.rotate.failedNoReason": "Change failed",
   "diagnosis.rotate.confirm":
-    "This disconnects the current connection and changes the port and password; other devices must update their config before they can connect again.",
+    "This disconnects the current connection and changes the port and password; other devices must sync their config before they can connect again.",
   "diagnosis.rotate.confirmIdle":
-    "This restarts the server and changes the port and password; other devices must update their config before they can connect again.",
-  "diagnosis.rotate.confirmAction": "Reset anyway",
+    "This restarts the server and changes the port and password; other devices must sync their config before they can connect again.",
+  "diagnosis.rotate.confirmAction": "Change anyway",
   "diagnosis.ai.handed": "Diagnosis details handed to AI",
   "diagnosis.reason.agentTokenUnavailable":
-    "The control plane is unreachable, so the reset didn't start.",
+    "The control plane is unreachable, so the change didn't start.",
   "diagnosis.reason.agentTlsUntrusted":
     "Couldn't establish a trusted connection to this server.",
   "diagnosis.reason.agentTokenRejected":
     "The server rejected the connection credentials.",
   "diagnosis.reason.agentToolFailed":
-    "The node agent on the server didn't finish the reset.",
+    "The node agent on the server didn't finish the change.",
   "diagnosis.reason.agentTimeout":
-    "The server didn't respond while resetting.",
+    "The server didn't respond while changing the password.",
   "diagnosis.reason.agentUnreachable": "Couldn't reach this server.",
   "diagnosis.reason.agentBadResponse":
     "The server returned an unrecognized result.",
   "diagnosis.reason.unknown": "Unknown reason.",
   "diagnosis.reason.unsupported":
-    "This version doesn't support resetting the port.",
+    "This version doesn't support changing the connection password.",
   "diagnosis.probeError.invalidIp":
     "The machine address isn't usable, so the probe couldn't start.",
   "diagnosis.probeError.invalidPort":

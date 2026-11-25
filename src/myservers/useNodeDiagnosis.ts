@@ -98,6 +98,12 @@ export interface DiagnosisContext {
     /** 探测命令本身没跑起来时的短码；正常为 null。 */
     probe_error: string | null;
   };
+  /** ping 通后自动跑的 sing-box 可用性（Clash 延迟）；没走这一步为 null。 */
+  proxy: {
+    reachable: boolean | null;
+    latency_ms: number | null;
+    reason: string | null;
+  } | null;
   config_update: {
     changed: boolean | null;
     port_changed: boolean | null;
@@ -112,7 +118,7 @@ export interface DiagnosisContext {
   rotate: {
     ok: boolean | null;
     reason: string | null;
-    /** 重置命令超时：可能仍在跑或已经成功。 */
+    /** 更换命令超时：可能仍在跑或已经成功。 */
     timed_out: boolean;
   };
   client: {
@@ -206,7 +212,7 @@ export interface ConnectionDiagnosisContext {
   };
 }
 
-/** connection 档的依赖；node 档字段（同步 / 重置）在这一档不参与。 */
+/** connection 档的依赖；node 档字段（同步 / 更换）在这一档不参与。 */
 export interface ConnectionDiagnosisDeps {
   facts: ConnectionFacts;
   /** 本地检查：runtime_status + config_detail。 */
@@ -215,7 +221,7 @@ export interface ConnectionDiagnosisDeps {
   retest: () => Promise<ConnectionRetest>;
   /** helper 未运行 / 未授权：打开设置。 */
   openSettings?: () => void;
-  /** 配置里没有这个节点 / 配置失效：更新配置。 */
+  /** 配置里没有这个节点 / 配置失效：同步配置。 */
   updateConfig?: () => void;
   /** 节点地址不通：回到节点列表换一个。 */
   changeNode?: () => void;
@@ -239,6 +245,8 @@ export interface DiagnosisDeps {
   /** ICMP + TCP 32100；Host 侧命令一次返回两项。connection 档拿不到 IP 时不注入（记 skipped）。 */
   probeReachability?: () => Promise<ProbeReport>;
   /* 以下为 node 档专用；connection 档不传、也不会被调用。 */
+  /** ping 通后自动确认代理是否可用（`node_probe`，Clash 延迟）；只读，不重启隧道。 */
+  probeProxy?: () => Promise<ConnectionRetest>;
   /** 全量同步（`myServerSync`），判断这台是否有变化。 */
   syncConfig?: () => Promise<SyncOutcome>;
   /** 只重测一次，不重启隧道；null = 没测成（untested）。 */
@@ -247,7 +255,7 @@ export interface DiagnosisDeps {
   probeUntestedReason?: () => string | null;
   /** stop → start → 重测；重连失败与重连后测不通要分开。 */
   reconnectAndProbe?: () => Promise<ReconnectOutcome>;
-  /** 重置这台节点的端口与密码（`node_rotate_credentials`）。 */
+  /** 更换这台节点的端口与密码（`node_rotate_credentials`）。 */
   rotateCredentials?: () => Promise<RotateOutcome>;
   /** 打开右栏，把诊断清单作为一条系统消息交给 AI。返回 false = 被拦下（AI 未配置）。 */
   openAi?: (context: DiagnosisContext) => boolean;
@@ -257,7 +265,13 @@ export interface DiagnosisDeps {
   onRunStart?: (run: string) => void;
 }
 
-export type DiagnosisStepId = "connectivity" | "config" | "rotate" | "retest" | "ai";
+export type DiagnosisStepId =
+  | "connectivity"
+  | "probe"
+  | "config"
+  | "rotate"
+  | "retest"
+  | "ai";
 
 export type DiagnosisConclusion =
   | { kind: "connectivity-pending" }
@@ -268,6 +282,11 @@ export type DiagnosisConclusion =
       icmpMs: number | null;
       tcpMs: number | null;
     }
+  /** ping 通后自动跑的 sing-box 可用性（Clash 延迟）。 */
+  | { kind: "proxy-pending" }
+  | { kind: "proxy-ok"; latencyMs: number | null }
+  | { kind: "proxy-failed" }
+  | { kind: "proxy-untested"; reason: string | null }
   | { kind: "unreachable" }
   | { kind: "service-down" }
   | { kind: "probe-error"; code: string | null }
@@ -284,18 +303,18 @@ export type DiagnosisConclusion =
   | { kind: "config-failed"; changed: boolean }
   /** 配置有变化，但隧道没在跑：不自动连接，提示重新连接后生效。 */
   | { kind: "config-applied-idle" }
-  /** 配置没有变化，且隧道没在跑：结论中性，下一步给重置。 */
+  /** 配置没有变化，且隧道没在跑：结论中性，下一步给更换连接密码。 */
   | { kind: "config-unchanged" }
   | { kind: "rotate-pending" }
   | { kind: "rotate-recovered" }
   | { kind: "rotate-reconnect-failed" }
-  /** 重置命令超时：可能仍在跑或已经成功，不按失败处理。 */
+  /** 更换命令超时：可能仍在跑或已经成功，不按失败处理。 */
   | { kind: "rotate-timeout" }
-  /** 重置成功，但重测没跑成（untested）：reason 是 Host 给的原因。 */
+  /** 更换成功，但重测没跑成（untested）：reason 是 Host 给的原因。 */
   | { kind: "rotate-untested"; reason: string | null }
-  /** 重置成功，但跑的是别的节点、只重测仍不通。 */
+  /** 更换成功，但跑的是别的节点、只重测仍不通。 */
   | { kind: "rotate-still-failed" }
-  /** 重置成功，但隧道没在跑：不探测、不自动连接。 */
+  /** 更换成功，但隧道没在跑：不探测、不自动连接。 */
   | { kind: "rotate-applied-idle" }
   | { kind: "rotate-failed"; reason: string | null }
   | { kind: "ai-handed" }
@@ -350,9 +369,9 @@ export interface NodeDiagnosis {
   action: DiagnosisAction | null;
   /** 已经收集到的诊断清单；「去问 AI」时原样交给调用方。 */
   context: DiagnosisContext;
-  /** 执行当前主按钮（开始分析 / 更新配置 / 重置端口 / 去问 AI / 去销毁）。 */
+  /** 执行当前主按钮（开始分析 / 同步配置 / 更换连接密码 / 去问 AI / 去销毁）。 */
   run: () => void;
-  /** 重置的二次确认：确认后才真正调 rotateCredentials。 */
+  /** 更换的二次确认：确认后才真正调 rotateCredentials。 */
   confirmReset: () => void;
   cancelReset: () => void;
   /** connection 档：结论后可以再测一次（node_probe）；其它情况为 null。 */
@@ -363,6 +382,7 @@ interface Collected {
   icmp: IcmpProbe | null;
   tcp: TcpProbe | null;
   probeError: string | null;
+  proxy: ConnectionRetest | null;
   syncChanged: boolean | null;
   syncPortAfter: number | null;
   syncTimedOut: boolean;
@@ -380,6 +400,7 @@ function emptyCollected(): Collected {
     icmp: null,
     tcp: null,
     probeError: null,
+    proxy: null,
     syncChanged: null,
     syncPortAfter: null,
     syncTimedOut: false,
@@ -409,6 +430,13 @@ function deriveAction(
   switch (last.conclusion.kind) {
     case "connectivity-ok":
       return "updateConfig";
+    case "proxy-ok":
+    case "proxy-untested":
+      // 代理确认可用或这次没测成：只留关闭，不再推同步配置。
+      return null;
+    case "proxy-failed":
+      // ping 通但代理不通：先同步配置，再走原来的重连/重测链路。
+      return "updateConfig";
     case "unreachable":
       return "goServers";
     case "service-down":
@@ -424,15 +452,15 @@ function deriveAction(
     case "config-reconnect-failed":
       return "askAi";
     case "config-untested":
-      // 没测成不是不通：同一轮最多试 3 次更新配置，之后交 AI。
+      // 没测成不是不通：同一轮最多试 3 次同步配置，之后交 AI。
       return configAttempts < 3 ? "updateConfig" : "askAi";
     case "config-unchanged":
       return "resetPort";
     case "config-failed":
-      // 配置可能是别的设备改的：ICMP 通说明 IP 没被封，重置通常还能救回来。
+      // 配置可能是别的设备改的：ICMP 通说明 IP 没被封，更换通常还能救回来。
       return "resetPort";
     case "rotate-untested":
-      // 重置后最多再测 2 次，仍没测成才交 AI；重置本身不再给第二次。
+      // 更换后最多再测 2 次，仍没测成才交 AI；更换本身不再给第二次。
       return postRotateRetests < 2 ? "retest" : "askAi";
     case "rotate-failed":
     case "rotate-reconnect-failed":
@@ -661,6 +689,13 @@ function buildContext(
       tcp: collected.tcp,
       probe_error: collected.probeError,
     },
+    proxy: collected.proxy
+      ? {
+          reachable: collected.proxy.reachable,
+          latency_ms: collected.proxy.latencyMs,
+          reason: collected.proxy.reason,
+        }
+      : null,
     config_update: {
       changed: collected.syncChanged,
       port_changed: portChanged,
@@ -752,7 +787,7 @@ function logClosed(
         : `fail:${collected.rotateReason ?? "unknown"}`;
   uiLog(
     "info",
-    `diagnosis run=${run ?? "none"} steps=${codes} runtime=${runtime} icmp=${boolCode(collected.icmp?.ok ?? null)} tcp=${boolCode(collected.tcp?.ok ?? null)} probe_error=${collected.probeError ?? "none"} changed=${triCode(collected.syncChanged)} reprobe=${triCode(collected.reprobe)} reconnect=${triCode(collected.reconnect)} control_plane_error=${collected.controlPlaneError ?? "none"} rotate=${rotate}`,
+    `diagnosis run=${run ?? "none"} steps=${codes} runtime=${runtime} icmp=${boolCode(collected.icmp?.ok ?? null)} tcp=${boolCode(collected.tcp?.ok ?? null)} probe_error=${collected.probeError ?? "none"} proxy=${collected.proxy ? (collected.proxy.reachable === null ? `untested:${collected.proxy.reason ?? "none"}` : collected.proxy.reachable ? "ok" : "fail") : "none"} changed=${triCode(collected.syncChanged)} reprobe=${triCode(collected.reprobe)} reconnect=${triCode(collected.reconnect)} control_plane_error=${collected.controlPlaneError ?? "none"} rotate=${rotate}`,
     "node-diagnosis",
   );
 }
@@ -768,6 +803,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
   const nodeDeps = () =>
     depsRef.current as DiagnosisDeps & {
       probeReachability: () => Promise<ProbeReport>;
+      probeProxy: () => Promise<ConnectionRetest>;
       syncConfig: () => Promise<SyncOutcome>;
       reprobe: () => Promise<ProbeOutcome>;
       reconnectAndProbe: () => Promise<ReconnectOutcome>;
@@ -830,6 +866,62 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
 
   const untestedReason = (): string | null =>
     depsRef.current.probeUntestedReason?.() ?? null;
+
+  /**
+   * ping 通后自动确认代理是否已经可用：只读 `node_probe`（Clash 延迟），
+   * 不重启隧道。通或没测成都不再推修复动作，只有确定不通才回到同步配置。
+   */
+  const runProxyProbe = async () => {
+    busyRef.current = true;
+    updatePhase("running");
+    setSteps((prev) => [
+      ...prev,
+      { id: "probe", status: "running", conclusion: { kind: "proxy-pending" } },
+    ]);
+    log("info", "action=probe-proxy");
+
+    let outcome: ConnectionRetest;
+    try {
+      outcome = await withTimeout(nodeDeps().probeProxy(), 20_000, "timeout");
+    } catch (error) {
+      outcome = {
+        reachable: null,
+        reason: probeErrorCode(error) ?? "probe_error",
+        latencyMs: null,
+      };
+    }
+    collectedRef.current.proxy = outcome;
+    busyRef.current = false;
+    if (!mountedRef.current) return;
+
+    log(
+      "info",
+      `proxy result=${outcome.reachable === null ? "untested" : outcome.reachable ? "ok" : "fail"} latency=${outcome.latencyMs ?? "none"} reason=${outcome.reason ?? "none"}`,
+    );
+
+    if (outcome.reachable === null) {
+      replaceLast({
+        id: "probe",
+        status: "unknown",
+        conclusion: { kind: "proxy-untested", reason: outcome.reason },
+      });
+      updatePhase("done");
+    } else if (outcome.reachable) {
+      replaceLast({
+        id: "probe",
+        status: "passed",
+        conclusion: { kind: "proxy-ok", latencyMs: outcome.latencyMs },
+      });
+      updatePhase("done");
+    } else {
+      replaceLast({
+        id: "probe",
+        status: "failed",
+        conclusion: { kind: "proxy-failed" },
+      });
+      updatePhase("awaiting");
+    }
+  };
 
   const startConnectivity = async () => {
     busyRef.current = true;
@@ -894,8 +986,11 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
           },
         },
       ]);
+      // ping 通不等于代理能用：先自动跑一次 Clash 延迟，确认是不是已经恢复。
+      await runProxyProbe();
+      return;
     } else if (report.tcp.error === "refused") {
-      // 端口回了 RST：机器活着，只是控制服务没在听；重置也要 agent 在线，先交 AI。
+      // 端口回了 RST：机器活着，只是控制服务没在听；更换也要 agent 在线，先交 AI。
       setSteps([
         { id: "connectivity", status: "failed", conclusion: { kind: "service-down" } },
       ]);
@@ -951,7 +1046,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       }
     }
 
-    // 超时不是失败：命令可能仍在跑或已经成功，别让用户照着「失败」去重置。
+    // 超时不是失败：命令可能仍在跑或已经成功，别让用户照着「失败」去更换。
     if (timedOut) {
       collectedRef.current.syncTimedOut = true;
       log("warn", `config result=timeout elapsed_ms=${Date.now() - startedAt}`);
@@ -1016,7 +1111,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
       return;
     }
 
-    // 运行中的隧道可能拿着旧凭据（刚在别处重置过端口、另一台设备改了配置）：
+    // 运行中的隧道可能拿着旧凭据（刚在别处更换过端口、另一台设备改了配置）：
     // 桌面端看不到运行配置里的端口，所以只要跑的就是这台，就先 stop → start 再测。
     // 端口没变也重连——「没变」只说明本机记录已是最新，不代表隧道里是新的。
     const reconnect = runtimeLabel() === "this";
@@ -1086,7 +1181,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (!mountedRef.current) return;
 
     if (ok === null) {
-      // 没测成不是不通：给「更新配置」再测一次，不给重置。
+      // 没测成不是不通：给「同步配置」再测一次，不给更换密码。
       replaceLast({
         id: "config",
         status: "unknown",
@@ -1267,7 +1362,7 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     }
   };
 
-  /** 重置后的重测：只 reprobe，不再 rotate；同一轮最多 2 次。 */
+  /** 更换后的重测：只 reprobe，不再 rotate；同一轮最多 2 次。 */
   const runPostRotateRetest = async () => {
     const startedAt = Date.now();
     busyRef.current = true;

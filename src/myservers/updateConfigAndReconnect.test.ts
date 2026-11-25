@@ -12,7 +12,7 @@ function options(over: Partial<Parameters<typeof updateConfigAndReconnect>[0]> =
   };
 }
 
-describe("先更新配置的共用流程", () => {
+describe("先同步配置的共用流程", () => {
   it("隧道在跑且跑的就是这台：取凭据后 stop → start", async () => {
     const opts = options();
     const outcome = await updateConfigAndReconnect(opts);

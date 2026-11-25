@@ -1302,7 +1302,7 @@ describe("节点诊断入口", () => {
     ).toBeTruthy();
   });
 
-  it("面板打开后本地端口已被同步改过：更新配置判为无变化", async () => {
+  it("面板打开后本地端口已被同步改过：同步配置判为无变化", async () => {
     prepare([SERVER]);
     let localPort = 8388;
     vi.mocked(bridge.configDetail).mockImplementation(async () =>
@@ -1314,6 +1314,15 @@ describe("节点诊断入口", () => {
     vi.spyOn(bridge, "nodeProbeReachability").mockResolvedValue({
       icmp: { ok: true, rtt_ms: 20, loss: 0 },
       tcp: { ok: true, ms: 15, error: null },
+    });
+    vi.spyOn(bridge, "nodeProbe").mockResolvedValue({
+      node_id: "local_node_srv_1",
+      status: "unreachable",
+      reachable: false,
+      latency_ms: null,
+      probe_method: "clash_delay",
+      checked_at: Date.now(),
+      error: { code: "probe_failed", message: "" },
     });
     vi.spyOn(bridge, "myServerCredentials").mockImplementation(async () => ({
       server_id: SERVER.server_id,
@@ -1338,7 +1347,7 @@ describe("节点诊断入口", () => {
     localPort = 9999;
 
     fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
-    fireEvent.click(await screen.findByRole("button", { name: "更新配置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "同步配置" }));
 
     expect(await screen.findByText("配置没有变化")).toBeTruthy();
     expect(screen.queryByText("配置已更新，重新连接后生效")).toBeNull();

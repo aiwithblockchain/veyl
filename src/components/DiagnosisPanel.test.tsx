@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { uiLog } from "../log/uiLog";
 import type {
@@ -59,6 +59,11 @@ function makeDeps(over: Partial<DiagnosisDeps> = {}): DiagnosisDeps {
     probeReachability: vi.fn(async () => reachable),
     syncConfig: vi.fn(async () => ({ changed: false, port: 20343 })),
     reprobe: vi.fn(async () => false),
+    probeProxy: vi.fn(async () => ({
+      reachable: false,
+      reason: null,
+      latencyMs: null,
+    })),
     reconnectAndProbe: vi.fn(async () => "ok" as const),
     rotateCredentials: vi.fn(async () => ({ ok: true as const, port: 21345 })),
     openAi: vi.fn(),
@@ -80,7 +85,7 @@ async function start() {
 
 async function startAndUpdate() {
   await start();
-  fireEvent.click(await screen.findByRole("button", { name: "更新配置" }));
+  fireEvent.click(await screen.findByRole("button", { name: "同步配置" }));
 }
 
 describe("节点诊断面板", () => {
@@ -172,7 +177,7 @@ describe("节点诊断面板", () => {
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   });
 
-  it("ICMP 被屏蔽但 TCP 通：继续更新配置，并标出走的是 TCP", async () => {
+  it("ICMP 被屏蔽但 TCP 通：继续同步配置，并标出走的是 TCP", async () => {
     const deps = makeDeps({
       probeReachability: vi.fn(async () => ({
         icmp: { ok: false, rtt_ms: null, loss: 100, error: null },
@@ -185,10 +190,107 @@ describe("节点诊断面板", () => {
 
     expect(await screen.findByText(/ICMP 未通，TCP 连通/)).toBeTruthy();
     expect(screen.getByText("18")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "同步配置" }),
+    ).toBeTruthy();
   });
 
-  it("同步有变化且重连成功：结束在「配置已更新，连接已恢复」", async () => {
+  it("ping 通后自动跑 sing-box 检测：通过时展示延迟，只留关闭", async () => {
+    const probeProxy = vi.fn(async () => ({
+      reachable: true,
+      reason: null,
+      latencyMs: 86,
+    }));
+    const syncConfig = vi.fn(async () => ({ changed: false, port: 20343 }));
+    open(makeDeps({ probeProxy, syncConfig }));
+
+    await start();
+
+    expect(
+      await screen.findByText(/^代理可用/, {
+        selector: ".diagnosis__conclusion",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByText("代理可用性")).toBeTruthy();
+    expect(screen.getByText("86")).toBeTruthy();
+    expect(probeProxy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "同步配置" })).toBeNull();
+    expect(syncConfig).not.toHaveBeenCalled();
+  });
+
+  it("sing-box 检测不通过：下一步给同步配置", async () => {
+    open(makeDeps());
+
+    await start();
+
+    expect(await screen.findByText("代理不通")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "同步配置" })).toBeTruthy();
+  });
+
+  it("sing-box 没测成：只留关闭，不推同步配置", async () => {
+    const probeProxy = vi.fn(async () => ({
+      reachable: null,
+      reason: "clash_unavailable",
+      latencyMs: null,
+    }));
+    open(makeDeps({ probeProxy }));
+
+    await start();
+
+    expect(
+      await screen.findByText(/这次没能测：本地测速组件不可用/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步配置" })).toBeNull();
+  });
+
+  it("连通性不通时不跑 sing-box 检测", async () => {
+    const probeProxy = vi.fn();
+    open(
+      makeDeps({
+        probeReachability: vi.fn(async () => silent),
+        probeProxy,
+      }),
+    );
+
+    await start();
+
+    expect(await screen.findByText("这台机器整机不可达")).toBeTruthy();
+    expect(probeProxy).not.toHaveBeenCalled();
+  });
+
+  it("sing-box 超时：按超时原因显示，只留关闭", async () => {
+    const probeProxy = vi.fn(async () => ({
+      reachable: null,
+      reason: "timeout",
+      latencyMs: null,
+    }));
+    open(makeDeps({ probeProxy }));
+
+    await start();
+
+    expect(
+      await screen.findByText("这次没能测：测速超时，没能完成。"),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步配置" })).toBeNull();
+  });
+
+  it("未知 untested 原因走通用文案", async () => {
+    const probeProxy = vi.fn(async () => ({
+      reachable: null,
+      reason: "something_new",
+      latencyMs: null,
+    }));
+    open(makeDeps({ probeProxy }));
+
+    await start();
+
+    expect(
+      await screen.findByText("这次没能测：测速组件没有跑起来。"),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "同步配置" })).toBeNull();
+  });
+
+  it("同步有变化且重连成功：结束在「配置已同步，连接已恢复」", async () => {
     const reconnectAndProbe = vi.fn(async () => "ok" as const);
     const deps = makeDeps({
       syncConfig: vi.fn(async () => ({ changed: true, port: 21345 })),
@@ -198,10 +300,10 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
 
-    expect(await screen.findByText("配置已更新，连接已恢复")).toBeTruthy();
+    expect(await screen.findByText("配置已同步，连接已恢复")).toBeTruthy();
     expect(reconnectAndProbe).toHaveBeenCalledTimes(1);
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
   });
 
@@ -232,11 +334,11 @@ describe("节点诊断面板", () => {
     expect(await screen.findByText("配置没有变化，仍然不通")).toBeTruthy();
     expect(reprobe).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole("button", { name: "重置端口与密码" }),
+      screen.getByRole("button", { name: "更换连接密码" }),
     ).toBeTruthy();
   });
 
-  it("重置失败：结论带 reason，下一步是去问 AI", async () => {
+  it("更换失败：结论带 reason，下一步是去问 AI", async () => {
     const openAi = vi.fn();
     const deps = makeDeps({
       reconnectAndProbe: vi.fn(async () => "probe-failed" as const),
@@ -250,17 +352,17 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
 
     expect(
       screen.getByText(
-        "会断开当前连接，端口和密码都会变；其它设备需要更新配置后才能继续用。",
+        "会断开当前连接，端口和密码都会变；其它设备需要同步配置后才能继续用。",
       ),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
-    expect(await screen.findByText("重置失败：没能连上这台服务器。")).toBeTruthy();
+    expect(await screen.findByText("更换失败：没能连上这台服务器。")).toBeTruthy();
     expect(document.body.textContent).not.toContain("agent_unreachable");
     fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
 
@@ -289,7 +391,7 @@ describe("节点诊断面板", () => {
     await startAndUpdate();
 
     expect(
-      await screen.findByText("配置已更新，重新连接后生效"),
+      await screen.findByText("配置已同步，重新连接后生效"),
     ).toBeTruthy();
     expect(reconnectAndProbe).not.toHaveBeenCalled();
     expect(reprobe).not.toHaveBeenCalled();
@@ -308,16 +410,16 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
     expect(
       screen.getByText(
-        "会重启这台节点，端口和密码都会变；其它设备需要更新配置后才能继续用。",
+        "会重启这台节点，端口和密码都会变；其它设备需要同步配置后才能继续用。",
       ),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
-    expect(await screen.findByText("已重置，重新连接后生效")).toBeTruthy();
+    expect(await screen.findByText("已更换，重新连接后生效")).toBeTruthy();
     expect(reconnectAndProbe).not.toHaveBeenCalled();
     expect(reprobe).not.toHaveBeenCalled();
   });
@@ -335,12 +437,12 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
     expect(
-      await screen.findByText("端口与密码已重置，但仍然不通"),
+      await screen.findByText("连接密码已更换，但仍然不通"),
     ).toBeTruthy();
     expect(reprobe).toHaveBeenCalled();
     expect(reconnectAndProbe).not.toHaveBeenCalled();
@@ -350,7 +452,7 @@ describe("节点诊断面板", () => {
     open(makeDeps());
 
     await start();
-    const update = await screen.findByRole("button", { name: "更新配置" });
+    const update = await screen.findByRole("button", { name: "同步配置" });
     await waitFor(() => expect(document.activeElement).toBe(update));
     expect(
       document.querySelector(".diagnosis__steps")?.getAttribute("aria-live"),
@@ -366,7 +468,7 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
 
     const cancel = screen.getByRole("button", { name: "取消" });
@@ -388,12 +490,12 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
     expect(
-      await screen.findByText("重置失败：这个版本还不支持重置端口。"),
+      await screen.findByText("更换失败：这个版本还不支持更换连接密码。"),
     ).toBeTruthy();
     expect(document.body.textContent).not.toContain("UNSUPPORTED");
   });
@@ -430,7 +532,7 @@ describe("节点诊断面板", () => {
     expect(vi.mocked(uiLog).mock.calls[0][2]).toBe("node-diagnosis");
   });
 
-  it("重置失败：日志带 reason 与同一个 run 码", async () => {
+  it("更换失败：日志带 reason 与同一个 run 码", async () => {
     const deps = makeDeps({
       reconnectAndProbe: vi.fn(async () => "probe-failed" as const),
       rotateCredentials: vi.fn(async () => ({
@@ -442,10 +544,10 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
-    await screen.findByText(/重置还没返回结果/);
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
+    await screen.findByText(/更换还没返回结果/);
 
     const line = logLines().find((item) => item.includes("rotate ok=false"));
     expect(line).toBeTruthy();
@@ -497,9 +599,9 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
 
-    expect(await screen.findByText("配置已更新，但仍然不通")).toBeTruthy();
+    expect(await screen.findByText("配置已同步，但仍然不通")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "重置端口与密码" }),
+      screen.getByRole("button", { name: "更换连接密码" }),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "去问 AI" })).toBeNull();
   });
@@ -514,9 +616,9 @@ describe("节点诊断面板", () => {
     expect(await screen.findByText(/这次没能重测/)).toBeTruthy();
     expect(reprobe).toHaveBeenCalledTimes(1);
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
-    expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "同步配置" })).toBeTruthy();
   });
 
   it("重测没跑成时带 Host 原因：显示人话，状态是未完成", async () => {
@@ -529,11 +631,18 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
 
+    const conclusion = await screen.findByText(
+      "这次没能重测：这个节点还没进节点池，稍后再试。",
+    );
+    expect(conclusion).toBeTruthy();
+    const step = conclusion.closest("li");
+    expect(step).toBeTruthy();
     expect(
-      await screen.findByText("这次没能重测：这个节点还没进节点池，稍后再试。"),
+      within(step as HTMLElement).getByRole("img", { name: "未完成" }),
     ).toBeTruthy();
-    expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
-    expect(screen.queryByRole("img", { name: "失败" })).toBeNull();
+    expect(
+      within(step as HTMLElement).queryByRole("img", { name: "失败" }),
+    ).toBeNull();
   });
 
   it("节点在池里但还没进运行中的配置：提示重新连接后再试", async () => {
@@ -567,15 +676,15 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
     expect(
-      await screen.findByText("端口与密码已重置，但这次没能重测。"),
+      await screen.findByText("连接密码已更换，但这次没能重测。"),
     ).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "重新测一次" })).toBeTruthy();
   });
@@ -589,10 +698,10 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
 
-    expect(await screen.findByText("配置已更新，但没能重连。")).toBeTruthy();
+    expect(await screen.findByText("配置已同步，但没能重连。")).toBeTruthy();
     expect(document.body.textContent).not.toContain("仍然不通");
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   });
@@ -612,18 +721,18 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
     expect(
-      await screen.findByText("端口与密码已重置，但没能重连"),
+      await screen.findByText("连接密码已更换，但没能重连"),
     ).toBeTruthy();
     expect(document.body.textContent).not.toContain(
-      "端口与密码已重置，但仍然不通",
+      "连接密码已更换，但仍然不通",
     );
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   });
@@ -645,11 +754,11 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
 
-    expect(await screen.findByText(/更新配置还没返回结果/)).toBeTruthy();
+    expect(await screen.findByText(/同步配置还没返回结果/)).toBeTruthy();
     expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
     expect(document.body.textContent).not.toContain("控制面暂时不可达");
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
@@ -678,15 +787,15 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
-    expect(await screen.findByText(/重置还没返回结果/)).toBeTruthy();
+    expect(await screen.findByText(/更换还没返回结果/)).toBeTruthy();
     expect(screen.getByRole("img", { name: "未完成" })).toBeTruthy();
-    expect(document.body.textContent).not.toContain("重置失败");
+    expect(document.body.textContent).not.toContain("更换失败");
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "去问 AI" }));
@@ -719,24 +828,24 @@ describe("节点诊断面板", () => {
     ).toBeTruthy();
   });
 
-  it("更新配置连续三次没测成：不再给更新配置，只给去问 AI", async () => {
+  it("同步配置连续三次没测成：不再给同步配置，只给去问 AI", async () => {
     const reprobe = vi.fn<() => Promise<boolean | null>>(async () => null);
     open(makeDeps({ isTunnelRunning: () => false, reprobe }));
 
     await startAndUpdate();
     await screen.findByText(/这次没能重测/);
 
-    fireEvent.click(screen.getByRole("button", { name: "更新配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "同步配置" }));
     await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(2));
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "更新配置" }),
+      await screen.findByRole("button", { name: "同步配置" }),
     );
     await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(3));
 
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "更新配置" }),
+        screen.queryByRole("button", { name: "同步配置" }),
       ).toBeNull(),
     );
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
@@ -757,11 +866,11 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     fireEvent.click(
-      await screen.findByRole("button", { name: "重置端口与密码" }),
+      await screen.findByRole("button", { name: "更换连接密码" }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认更换" }));
 
-    await screen.findByText("端口与密码已重置，但这次没能重测。");
+    await screen.findByText("连接密码已更换，但这次没能重测。");
     fireEvent.click(screen.getByRole("button", { name: "重新测一次" }));
     await waitFor(() => expect(reprobe).toHaveBeenCalledTimes(3));
 
@@ -776,12 +885,12 @@ describe("节点诊断面板", () => {
       ).toBeNull(),
     );
     expect(
-      screen.queryByRole("button", { name: "重置端口与密码" }),
+      screen.queryByRole("button", { name: "更换连接密码" }),
     ).toBeNull();
     expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
   });
 
-  it("关闭重开：次数计数清零，重新从第一次更新配置开始", async () => {
+  it("关闭重开：次数计数清零，重新从第一次同步配置开始", async () => {
     const firstProbe = vi.fn<() => Promise<boolean | null>>(async () => null);
     const first = open(
       makeDeps({ isTunnelRunning: () => false, reprobe: firstProbe }),
@@ -789,15 +898,15 @@ describe("节点诊断面板", () => {
 
     await startAndUpdate();
     await screen.findByText(/这次没能重测/);
-    fireEvent.click(screen.getByRole("button", { name: "更新配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "同步配置" }));
     await waitFor(() => expect(firstProbe).toHaveBeenCalledTimes(2));
     fireEvent.click(
-      await screen.findByRole("button", { name: "更新配置" }),
+      await screen.findByRole("button", { name: "同步配置" }),
     );
     await waitFor(() => expect(firstProbe).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "更新配置" }),
+        screen.queryByRole("button", { name: "同步配置" }),
       ).toBeNull(),
     );
     first.unmount();
@@ -811,7 +920,7 @@ describe("节点诊断面板", () => {
     await startAndUpdate();
 
     expect(await screen.findByText(/这次没能重测/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "更新配置" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "同步配置" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "去问 AI" })).toBeNull();
   });
 });
@@ -922,7 +1031,7 @@ describe("连接失败的智能诊断（profile: connection）", () => {
     expect(await screen.findByText("当前配置里没有这个节点")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "换一个节点" }));
     expect(changeNode).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("button", { name: "更新配置" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "同步配置" })).toBeNull();
     expect(screen.queryByRole("button", { name: "去问 AI" })).toBeNull();
   });
 
@@ -1112,7 +1221,7 @@ describe("连接失败的智能诊断（profile: connection）", () => {
 
   it("probe-untested 八个 reason 的动作按定稿表", async () => {
     const cases = [
-      ["node_not_in_config", "更新配置"],
+      ["node_not_in_config", "同步配置"],
       ["node_not_in_running_config", "重新测一次"],
       ["connection_busy", "重新测一次"],
       ["clash_unavailable", "重新测一次"],

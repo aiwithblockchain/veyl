@@ -99,7 +99,7 @@ export function AskQuestionDialog({ question, onAnswer, onExpire, connected = fa
     "切换";
   const cancelAnswer =
     options.find((option) => /取消|暂不|稍后|不升|不更新|不用|以后/.test(option)) ?? "取消";
-  /** 通用确认卡（如节点端口重置）：确认回传就是「不是取消」的那个选项原文。 */
+  /** 通用确认卡（如更换连接密码）：确认回传就是「不是取消」的那个选项原文。 */
   const confirmAnswer = options.find((option) => option !== cancelAnswer) ?? "确认";
 
   // 后端 15 分钟后静默回空串；倒计时只读后端给的 expires_at。

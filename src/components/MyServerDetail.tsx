@@ -51,7 +51,7 @@ interface Props {
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
 export const DESTROY_RETRY_MS = 60_000;
 
-/** 重置凭据的确认态：这么久没有块内交互就收回。 */
+/** 更换连接密码的确认态：这么久没有块内交互就收回。 */
 export const ROTATE_CONFIRM_MS = 8_000;
 
 function errorText(error: unknown): string {
@@ -93,7 +93,7 @@ export function MyServerDetail({
   const focusRenameAfterSave = useRef(false);
   const [ipCopy, setIpCopy] = useState<"idle" | "copied" | "failed">("idle");
   const ipCopyTimer = useRef(0);
-  /** 重置连接凭据：就地确认 → 结果文案，不走整块错误态。 */
+  /** 更换连接密码：就地确认 → 结果文案，不走整块错误态。 */
   const [rotatePhase, setRotatePhase] = useState<
     "idle" | "confirming" | "ok" | "stale" | "failed"
   >("idle");
@@ -595,7 +595,7 @@ export function MyServerDetail({
 
       <div className="myservers__footer">
         <div className="myservers__danger">
-          {/* 重置凭据：就地确认；危险块同时只开一个确认。 */}
+          {/* 更换连接密码：就地确认；危险块同时只开一个确认。 */}
           {rotatePhase === "confirming" && canRotate ? (
             <div
               className="myservers__confirm"
