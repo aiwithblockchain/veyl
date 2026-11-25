@@ -378,7 +378,7 @@ describe("充值", () => {
     expect(form.get("line_items[0][price_data][unit_amount]")).toBe("2400");
     expect(form.get("line_items[0][price_data][product_data][name]")).toBe("Veyl Service Credits");
     expect(form.get("line_items[0][price_data][product_data][description]")).toBe(
-      "Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.",
+      "Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.",
     );
     expect(form.get("locale")).toBe("en");
     expect(form.get("branding_settings[display_name]")).toBe("Veyl");
@@ -391,10 +391,10 @@ describe("充值", () => {
       "https://veyl-edge-dev.pages.dev/logo.png",
     );
     expect(form.get("custom_text[submit][message]")).toBe(
-      "Your service credits are added to your Veyl account after payment.",
+      "Credits are added to your Veyl account after payment.",
     );
     expect(form.get("custom_text[after_submit][message]")).toBe(
-      "Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.",
+      "Return to the Veyl app to see your credits. Cards post instantly; WeChat Pay and Alipay may take a few minutes.",
     );
     expect(form.get("consent_collection[terms_of_service]")).toBe("required");
     expect(form.get("payment_method_types")).toBeNull();

@@ -86,7 +86,7 @@ Stripe-Version: 2026-11-18.endive
 | `branding_settings[font_family]` | `inter` | 最接近 APP 系统 sans 的 Stripe 支持字体 |
 | `branding_settings[border_style]` | `rounded` | 圆角与 APP 一致 |
 | `branding_settings[logo][type]` | `url` | |
-| `branding_settings[logo][url]` | `${siteBase(env)}/logo.png` | 跟随 `PUBLIC_SITE_URL`：prod 为 `https://veyl.dessage.xyz/logo.png`，dev 为 `https://veyl-edge-dev.pages.dev/logo.png`；部署对应 Pages 并 `curl -I` 确认真实 200，否则收银台引用 404 图 |
+| `branding_settings[logo][url]` | `${siteBase(env)}/logo.png` | 资产是 322×137 透明 wordmark（`Veyl.` + 粉色点）；跟随 `PUBLIC_SITE_URL`：prod 为 `https://veyl.dessage.xyz/logo.png`，dev 为 `https://veyl-edge-dev.pages.dev/logo.png`；部署对应 Pages 并 `curl -I` 确认真实 200，否则收银台引用 404 图 |
 | `success_url` | `https://<控制面>/payment/return?session_id={CHECKOUT_SESSION_ID}` | `{CHECKOUT_SESSION_ID}` 是**字面占位符**，由 Stripe 替换；不要自己拼 |
 | `cancel_url` | `https://<控制面>/payment/return?canceled=1` | 取消回跳带 `canceled=1`；页面据此显示 "Payment not completed"，不再与成功页混用 |
 | `customer_email` | 账户邮箱 | 预填，用户仍可在收银台改 |
@@ -97,10 +97,10 @@ Stripe-Version: 2026-11-18.endive
 | `line_items[0][price_data][currency]` | `usd` | |
 | `line_items[0][price_data][unit_amount]` | `1200` / `2400` / `3600` / `4800` | 来自白名单，**不接受前端任意金额** |
 | `line_items[0][price_data][product_data][name]` | `Veyl Service Credits` | 收银台与收据上显示 |
-| `line_items[0][price_data][product_data][description]` | `Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.` | 可选，但建议保留 |
+| `line_items[0][price_data][product_data][description]` | `Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.` | 可选，但建议保留 |
 | `consent_collection[terms_of_service]` | `required` | 需要先在 Dashboard 配 ToS URL，见 §3.2 |
-| `custom_text[submit][message]` | `Your service credits are added to your Veyl account after payment.` | 提交按钮旁说明到账口径 |
-| `custom_text[after_submit][message]` | `Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.` | 提交后提示回应用查看；区分卡与异步方式 |
+| `custom_text[submit][message]` | `Credits are added to your Veyl account after payment.` | 提交按钮旁说明到账口径 |
+| `custom_text[after_submit][message]` | `Return to the Veyl app to see your credits. Cards post instantly; WeChat Pay and Alipay may take a few minutes.` | 提交后提示回应用查看；区分卡与异步方式 |
 
 表单编码后的完整形状（值由 `URLSearchParams` 编码）：
 
@@ -124,10 +124,10 @@ line_items[0][quantity]=1
 line_items[0][price_data][currency]=usd
 line_items[0][price_data][unit_amount]=1200
 line_items[0][price_data][product_data][name]=Veyl Service Credits
-line_items[0][price_data][product_data][description]=Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.
+line_items[0][price_data][product_data][description]=Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.
 consent_collection[terms_of_service]=required
-custom_text[submit][message]=Your service credits are added to your Veyl account after payment.
-custom_text[after_submit][message]=Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.
+custom_text[submit][message]=Credits are added to your Veyl account after payment.
+custom_text[after_submit][message]=Return to the Veyl app to see your credits. Cards post instantly; WeChat Pay and Alipay may take a few minutes.
 payment_method_options[wechat_pay][client]=web
 ```
 
@@ -372,7 +372,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 - **Webhook 端点**：`https://<prod>/v1/webhooks/stripe`，只订阅 `checkout.session.completed` / `async_payment_succeeded` / `async_payment_failed` / `expired` 四个事件；每个端点用自己的 `whsec_`。
 - **Live secret**：`STRIPE_SECRET_KEY` 必须是 `sk_live_`，`STRIPE_WEBHOOK_SECRET` 必须是 live 端点的 `whsec_`；`ENVIRONMENT=production` 时两者缺一不可（代码 fail closed，不建单）。
 - **回跳 URL**：`APP_PAYMENT_RETURN_URL` 指向控制面 `/payment/return`，不是站点根。
-- **Branding（一次性）**：Dashboard → Branding 配置同一 logo（生产站 `https://veyl.dessage.xyz/logo.png`）、背景 `#FAFAF8`、按钮 `#14161C`、Inter、rounded；用于收据 / 邮件等非 Checkout 场景。Session 级 `branding_settings` 只影响收银台，且 logo 跟随 `PUBLIC_SITE_URL`（dev 用 dev Pages）。
+- **Branding（一次性）**：Dashboard → Branding 配置同一 wordmark（322×137 透明 PNG，生产站 `https://veyl.dessage.xyz/logo.png`）、背景 `#FAFAF8`、按钮 `#14161C`、Inter、rounded；用于收据 / 邮件等非 Checkout 场景。Session 级 `branding_settings` 只影响收银台，且 logo 跟随 `PUBLIC_SITE_URL`（dev 用 dev Pages）。
 - **商品与账单描述**：`product_data.name = Veyl Service Credits`；statement descriptor 建议 `VEYL`（Dashboard 账户级设置，最多 22 字符）。
 
 ### 9.2 回滚与 Dodo 吊销
@@ -449,7 +449,7 @@ stripe listen --forward-to localhost:8787/v1/webhooks/stripe
 | 客户端 i18n（英文） | `src/i18n/en.ts` 的**同名 key**；中英文必须同一批改，不能只改中文 |
 | Host 固定串 | `src-tauri/src/tools/my_servers.rs`（`因余额不足停机删除`、`余额不足，已停机删除`，含工具描述）；`src-tauri/src/control_plane/error.rs`（`余额不足，服务器没有开通`）。这些会出现在界面与 AI 工具说明里，不能漏 |
 | 控制面展示文案 | `cloudflare/control-plane/src/index.ts` 的 `/payment/return` 页：`余额变化` → `服务额度变化`；`orders.ts` 的 `余额不足，先充值`；`servers.ts` 的墓碑原因 `余额不足，已停机删除` |
-| 支付页 / 收据 / 邮件 | Checkout 的 `product_data.name` 为 `Veyl Service Credits`，description 用英文 `Prepaid service credits ...` 措辞；收银台强制 `locale=en`，回跳页也统一英文。Stripe 收据沿用产品名。邮件目前只有登录验证码，不含额度文案；将来加支付邮件时沿用本口径 |
+| 支付页 / 收据 / 邮件 | Checkout 的 `product_data.name` 为 `Veyl Service Credits`，description 用英文 `Prepaid credits ...` 措辞；收银台强制 `locale=en`，回跳页也统一英文。Stripe 收据沿用产品名。邮件目前只有登录验证码，不含额度文案；将来加支付邮件时沿用本口径 |
 | 法务页 / 定价页 | 已完成：中文「服务额度」、英文 Service Credits |
 
 ### 11.3 验收

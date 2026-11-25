@@ -17,7 +17,7 @@ const STRIPE_API = "https://api.stripe.com/v1/checkout/sessions";
 const STRIPE_VERSION = "2026-11-18.endive";
 const PRODUCT_NAME = "Veyl Service Credits";
 const PRODUCT_DESCRIPTION =
-  "Prepaid service credits for Veyl cloud server management. For use within Veyl only; non-refundable and non-transferable.";
+  "Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.";
 
 export type CheckoutResult =
   | { ok: true; sessionId: string; checkoutUrl: string }
@@ -107,11 +107,11 @@ export async function createCheckoutSession(
   // 收银台文案：提交按钮旁说明到账口径，提交后再次提示回应用查看。
   form.set(
     "custom_text[submit][message]",
-    "Your service credits are added to your Veyl account after payment.",
+    "Credits are added to your Veyl account after payment.",
   );
   form.set(
     "custom_text[after_submit][message]",
-    "Return to the Veyl app to see your service credits. Card payments appear right away; WeChat Pay and Alipay can take a few minutes.",
+    "Return to the Veyl app to see your credits. Cards post instantly; WeChat Pay and Alipay may take a few minutes.",
   );
   // 微信支付走 Checkout 时必须显式声明客户端类型；缺这个字段会失败（stripe-migration.md §3.1）。
   form.set("payment_method_options[wechat_pay][client]", "web");
