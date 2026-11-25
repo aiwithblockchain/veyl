@@ -3025,10 +3025,10 @@ export default function App() {
               email={myServers.account?.email ?? null}
               wallet={myServers.wallet}
               walletLoading={myServers.walletLoading}
+              walletRefreshing={myServers.walletRefreshing}
               walletError={myServers.walletError}
               walletStale={myServers.walletStale}
               identityProblem={myServers.identityProblem}
-              walletRefreshing={myServers.walletRefreshing}
               onTopUp={() => myServers.openTopUp()}
               onRefreshWallet={(trigger) =>
                 void myServers.refreshWallet({ trigger })
