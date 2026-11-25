@@ -58,7 +58,7 @@ describe("TunHelperRow：英文界面", () => {
     setLanguage("en");
     harness(helperInfo("running"));
     expect(await screen.findByText("Update background helper")).toBeTruthy();
-    expect(screen.getByText("Up to date (2026.11.1)")).toBeTruthy();
+    expect(await screen.findByText("Up to date (2026.11.1)")).toBeTruthy();
   });
 });
 
