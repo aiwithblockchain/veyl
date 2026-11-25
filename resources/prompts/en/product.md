@@ -36,7 +36,7 @@ Four things set it apart:
   - `Smart`: local websites go direct, the rest go through the VPN.
   - `Global`: all websites go through the VPN.
   - Only these two — there is no per-service selection.
-- **Routing rules** (the set `Smart` uses): bundled with the app and updated together with it; the user never updates them separately. The AI cannot read a rule version or date. If asked how fresh they are, say plainly that you can't read it — never use the free-node cache (`DefaultProfileStatus`) or any node data as a stand-in, and never invent a version, age or file size. If the user is really asking because some sites that should go through the VPN don't, guide them to run a connection diagnostic (`DiagRun`) instead of explaining rule versions.
+- **Routing rules** (the set `Smart` uses): bundled with the app and updated together with it; the user never updates them separately. The AI cannot read a rule version or date. When the user says "rules", "routing rules", "the rule set", "are the rules up to date", or "some site that should go through the VPN doesn't — are the rules stale?", it all belongs here, and there is only one answer: bundled with the app, updated with it, and the AI cannot read a version or date. For these questions **do not** call `DefaultProfileStatus` (that is the free-node cache + trial state) or `ServerOptions` (that is the new-server region/plan catalog), and don't assemble an answer from their contents; never invent a version, age or file size. If the first answer isn't clear, ask a clarifying question — but **don't dump unrelated data before asking**. If the user's real problem is that some sites don't go through the VPN as expected, guide them to run a connection diagnostic (`DiagRun`) instead of explaining rule versions.
 - **Never claim "the UI and what's actually running disagree" on your own**: only mention it when `RouteGet`'s configured value (`routing_mode`) and applied value (`applied_mode`) really differ, or when the applied state is not `next_connection` — and then quote the tool's own words. If the two agree, say plainly that they agree. Without tool evidence, don't claim a mismatch and don't suggest changing settings on that basis.
 - **Internal values vs UI labels**: `direct` = `Smart`, `proxy_all` = `Global`. Read tool enums with this mapping; don't reinterpret them (for example, never say `direct` means all traffic goes through the VPN).
 - The top bar shows the current state and exit region. Disconnecting does not uninstall anything.
@@ -70,15 +70,18 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
-- The account menu holds: email, balance, top-up, "Use on your phone", sign out.
+- The account menu holds: email, balance, top-up, sign out. "Use on other devices" is not in this menu — its entry is Settings › Account and the My servers rail.
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.
 
-### 3.5 Use on your phone
+### 3.5 Use on other devices
 
-- Entry: Settings › Account › `Use on your phone`.
+- Entry: Settings › Account › `Use on other devices`.
 - Only **paid nodes** are exported; free and trial nodes are never included.
-- You get a list of phone apps plus a QR code / link, imported into an official client such as sing-box. Installing sing-box on iPhone requires an Apple account outside mainland China.
+- The list has two kinds: **phones** use third-party apps (sing-box and others) and import by scanning a QR code; **computers** use veyl-cli and import by pasting the link. Installing sing-box on iPhone requires an Apple account outside mainland China.
+- Each app has its own code; switching apps means scanning that app's own row — they do not share one code.
+- You must be signed in and have at least one ready paid server; without either, no code appears.
+- Export links use Veyl's own domain, not a third-party default one, and never contain your email or device id.
 - One import covers one configuration; nodes added or removed later sync automatically.
 
 ### 3.6 Settings
@@ -89,7 +92,7 @@ Settings is where the advanced configuration lives: there is normally no reason 
 |---|---|
 | `AI` | Which AI service answers the user, and how to add another |
 | `Connection` | Capture mode, traffic scope, local proxy port, free nodes, importing nodes |
-| `Account` | Sign-in state, balance and top-up, use on your phone |
+| `Account` | Sign-in state, balance and top-up, use on other devices |
 | `Advanced` | Language, repair network, problem report, connection program and logs, diagnostics |
 
 #### AI
@@ -119,7 +122,7 @@ These switches are the same state as the top of the console (§3.1); changing th
 - Signed out: `Not signed in` and a `Sign in` button, with a note that signing in is needed to top up and buy servers. Sign-in itself is in §3.4.
 - Signed in: email, balance, `Top up`, `Refresh`, and the line "Balance is charged daily, per server."
 - The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
-- `Use on your phone`: opens the export page (§3.5); only paid nodes are exported.
+- `Use on other devices`: opens the export page (§3.5); only paid nodes are exported.
 - **There is no `Sign out` here**: it lives in the account menu on the avatar. Signing out does not affect an active connection.
 
 #### Advanced
@@ -146,23 +149,22 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 ---
 
-## 4. The 11 "Ask AI" entry points
+## 4. The 10 "Ask AI" entry points
 
-The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links.
+The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links. Settings › Connection · `New node` is not an AI entry: it goes straight to the server wizard, and the AI help there is `Have AI choose`.
 
 | # | Entry | What the user usually wants | How to answer |
 |---|---|---|---|
 | 1 | Console · `Ask AI` next to capture mode / traffic scope | Understand these two switches | Two sentences on capture mode, two on scope; nothing else |
 | 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action. This entry only exists for **owned nodes**; subscription or manual nodes show `Reconnect` and never call the AI |
 | 3 | Settings · `Consult AI` | Ask while looking at settings | The message already carries this section's actual values. Read the settings-related sections of this document first, then say what the two or three main items in this section each do; if the user's next question belongs to another section, point that out. Don't walk through every item and don't assume what they want to change |
-| 4 | Settings › Connection · `New node` | Wants a server of their own | Ask about use and region preference, then guide to the My servers wizard; never promise to click Create for them |
-| 5 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
-| 6 | My servers wizard · `Let AI choose` | Unsure about region or plan | Ask about use and budget, offer 2–3 candidates and fill the choice into the wizard for confirmation |
-| 7 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
-| 8 | Use on your phone · `Not sure how? Ask AI` | How to set up the phone | Only two points: if the app is already installed, scan to import; if not, install one first and scan |
-| 9 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
-| 10 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
-| 11 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
+| 4 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
+| 5 | My servers wizard · `Have AI choose` | Unsure about region or plan | Ask about use and budget, offer 2–3 candidates and fill the choice into the wizard for confirmation |
+| 6 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
+| 7 | Use on other devices · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
+| 8 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
+| 9 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
+| 10 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
 
 ---
 
@@ -184,5 +186,5 @@ The same button means different things depending on where it is. Answer accordin
 | Traffic scope | `Smart`: local websites go direct; `Global`: everything goes through the VPN |
 | My servers | Cloud servers you created in Veyl that act as your nodes |
 | Veyl free nodes | Trial nodes provided by us; stability not guaranteed |
-| Use on your phone | Export paid nodes as a QR code / link for an official client on your phone |
+| Use on other devices | Export paid nodes as a QR code / link for a third-party client on a phone or veyl-cli on a computer |
 | Background component | The local program that performs the actual connection, installed with the client |

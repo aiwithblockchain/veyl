@@ -380,7 +380,8 @@ impl Tool for ServerOptionsTool {
     fn description(&self) -> &str {
         "读取新建节点可选的真实地区与规格，或用户问「有哪些地区 / 多少钱」时调用。\
          只返回 id、名称、大洲、日价与每月流量额度；不返回成本价，也没有「售罄」判断。\
-         调 StageSelect 之前先用它拿 id，不要凭印象拼。"
+         调 StageSelect 之前先用它拿 id，不要凭印象拼。\
+         只用于建机地区与规格；不要用它回答分流规则或规则数据。"
     }
 
     fn permission_level(&self) -> PermissionLevel {

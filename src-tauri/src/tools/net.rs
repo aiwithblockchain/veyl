@@ -328,7 +328,8 @@ impl Tool for DefaultProfileStatusTool {
     fn description(&self) -> &str {
         "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间，以及免费节点试用状态\
          （阶段、剩余天数、池内免费节点数）。回答「试用还剩几天 / 是不是到期了」用它；\
-         缓存里的节点数不等于池内节点数，也不是用户的节点总量——「我有几个节点」要用 ConfigDetail。"
+         缓存里的节点数不等于池内节点数，也不是用户的节点总量——「我有几个节点」要用 ConfigDetail。\
+         只回答免费节点缓存与试用状态；不要用它回答分流规则是否最新——规则随应用预置，读不到版本。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
