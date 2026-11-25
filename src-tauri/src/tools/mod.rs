@@ -198,7 +198,7 @@ pub fn vpn_tools(services: Arc<dyn VpnToolServices>) -> Vec<Box<dyn Tool>> {
         Box::new(node_rotate::NodeRotateCredentialsTool::new()),
         Box::new(settings::OpenSettingsTool::new()),
         Box::new(stage_select::StageSelectTool::new(server_catalog.clone())),
-        Box::new(stage_select::CatalogOptionsTool::new(server_catalog.clone())),
+        Box::new(stage_select::ServerOptionsTool::new(server_catalog.clone())),
         Box::new(AskUserQuestionGuard::new()),
     ]
 }

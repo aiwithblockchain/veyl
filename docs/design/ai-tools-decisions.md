@@ -138,9 +138,9 @@
 
 ### 3.3 连带改动
 
-- `tools.md`：§3 与 §4.31（原 `CatalogOptions` 小节）改名，§3.1 注册示例同步；`AskUserQuestion` 那条的说明改成本文 §3.2 第 3 点；变更表加 3.29.0。
+- `tools.md`：§3 与 §4.53（原 `CatalogOptions` 小节）改名，§3.1 注册示例同步；`AskUserQuestion` 那条的说明改成本文 §3.2 第 3 点；变更表加 3.29.0。
 - `tool-display.md`、`TOOL_COPY`、`toolDisplay.test.ts`：键名随之改名。
-- `commands.md`：命令 → 工具映射里 `catalog_options` 改指 `ServerOptions`，命令本身不动；升小版本并加变更记录。
+- `commands.md`：命令 → 工具映射里 `my_server_catalog` 一行的 AI 侧说明改指 `ServerOptions`（不存在 `catalog_options` 命令），命令本身不动；升小版本并加变更记录。
 - 提示词：`kickoff.md` 未点名 `CatalogOptions`，无需改；`StageSelect` 的描述里那句引用要改。
 - `description.rs` 的英文描述：`CatalogOptions` → `ServerOptions`，`StageSelect` 里那句引用同步。
 

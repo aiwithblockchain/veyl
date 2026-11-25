@@ -308,10 +308,10 @@ export const TOOL_COPY: Record<string, ToolCopyKeys> = {
     "tool.advice.rotateRetry",
     false,
   ),
-  CatalogOptions: entry(
-    "tool.CatalogOptions.running",
-    "tool.CatalogOptions.done",
-    "tool.CatalogOptions.failed",
+  ServerOptions: entry(
+    "tool.ServerOptions.running",
+    "tool.ServerOptions.done",
+    "tool.ServerOptions.failed",
     "tool.advice.chooseOnStage",
     true,
   ),

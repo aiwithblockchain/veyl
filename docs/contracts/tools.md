@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.28.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）与第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）；其余工具面变更在后续批次。
+> 契约版本：`3.29.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）与第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）；其余工具面变更在后续批次。
 >
-> ⚠️ 本文件 3.28.0 已落地的工具面是 **38 个**：3.26.0 的 43 个减去 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，再把 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`。§4.53 / §4.58–§4.60 记录的是**后续批次**（改名、新增只读工具）的提案，不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.29.0 已落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`。§4.58–§4.60 记录的是**后续批次**（新增只读工具）的提案，不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -21,7 +21,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.28.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.29.0`）；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -100,7 +100,7 @@ pub struct ToolResult {
 | `OpenSettings` | 打开的分段与是否定位到行 |
 | `MyServerFailure` | 阶段、原因、是否可重试、订单事件摘要 |
 | `StageSelect` | 本次选中的地区 / 规格 |
-| `CatalogOptions` | 全部地区与规格的可用清单（见 §4.53） |
+| `ServerOptions` | 全部地区与规格的可用清单（见 §4.53） |
 | `HttpCheck` | `via`、状态码或失败分类、耗时、`server`、`cf_mitigated`、TLS 是否成功 |
 | `NodeRotateCredentials` | 新端口、本机凭据是否刷新、需要断开重连（见 §4.55） |
 | `submit_issue_to_public_wall` / `read_public_issue_wall` | 见 §4.56 / §4.57 |
@@ -110,7 +110,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.28.0";
+  contract_version: "3.29.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -171,7 +171,7 @@ type NextAction = {
 | `ConfigDelete` | ~~直接删除一套配置~~ | **3.18.0 已移出工具集**，见 §4.17 |
 | `RouteSetMode` | 跨家族切换会断开并重连（需显式确认） | 会短暂断网 |
 
-**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`、`HttpCheck`、`read_public_issue_wall`）在 `PermissionMode::Default` 下直接允许；其余工具（含 2.45.2 起的 `NodeProbe`：探不通时可能停隧道）由 Host 的 `PermissionHandler` 一律返回 `Allow`。
+**唯一的约束来自 `PermissionLevel`**：Claurst 用它区分「只读 / 非只读」，只读工具（`RuntimeStatus`、`CatalogSearch`、`ConfigDetail`、`JobGet`、`RuntimeLogs`、`CoreListVersions`、`DiagRun`、`DeepseekSetupKey`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`ServerOptions`、`HttpCheck`、`read_public_issue_wall`）在 `PermissionMode::Default` 下直接允许；其余工具（含 2.45.2 起的 `NodeProbe`：探不通时可能停隧道）由 Host 的 `PermissionHandler` 一律返回 `Allow`。
 
 不再存在的东西：
 
@@ -362,16 +362,16 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 | 30 | `OpenSettings` | `OpenSettingsTool` | 打开设置并指向某段/某行（**不改值**） | `ReadOnly` | 只读 |
 | 31 | `MyServerFailure` | `MyServerFailureTool` | 某台服务器创建失败的详情与订单事件 | `ReadOnly` | 只读 |
 | 32 | `StageSelect` | `StageSelectTool` | 把地区/规格选进新建节点舞台（**只改界面选择**） | `Write` | 低（不建机、不扣费） |
-| 33 | `CatalogOptions` | `CatalogOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
+| 33 | `ServerOptions` | `ServerOptionsTool` | 建机目录：地区与套餐的 id / 名称 / 日价（只读） | `ReadOnly` | 只读 |
 | 34 | `HttpCheck` | `HttpCheckTool` | 访问一个网页地址，只读状态码与 Cloudflare 挑战标记 | `ReadOnly` | 只读 |
 | 35 | `NodeRotateCredentials` | `NodeRotateCredentialsTool` | 更换某台服务器的连接密码（**有确认点**，会重启节点） | `Execute` | 高 |
 | 36 | `submit_issue_to_public_wall` | `SubmitIssueToPublicWallTool` | 把问题发到公开问题墙（**有确认点**，提交即公开） | `Write` | 中（公开可见） |
 | 37 | `read_public_issue_wall` | `ReadPublicIssueWallTool` | 搜索 / 读取问题墙与运营答复（**无需登录**） | `ReadOnly` | 只读 |
 | 38 | `AskUserQuestion` | （Claurst 内置；`AskUserQuestionGuard` 包装） | 向用户提问 | `None` | 低 |
 
-> 3.28.0 工具总数 40 → **38**：`NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`（`source` 枚举 `url` / `text` / `manual`）。3.27.0 已删除三个旧分流工具（43 → 40）；`CatalogOptions` 改名与新增 `AccountBalance` / `TrialStatus` / `AiProviders` 仍在**后续批次**，不属于本版。本节序号只是清单编号，§4 的章节号是稳定引用。
+> 3.29.0 工具总数仍是 **38**：`CatalogOptions` 改名 `ServerOptions`（schema 与行为不变），消除与 `CatalogSearch` 的命名混淆。3.27.0 删除三个旧分流工具（43 → 40）、3.28.0 合并节点写入三工具（40 → 38）。新增 `AccountBalance` / `TrialStatus` / `AiProviders` 仍在**后续批次**，不属于本版。本节序号只是清单编号，§4 的章节号是稳定引用。
 
-> `AskUserQuestion` 的 schema 与执行由 `claurst-tools` 提供；Veyl 用 `AskUserQuestionGuard` 包装（description 末尾加一行约束、校验 `options` 为非空字符串数组），其余委托内置实现（§4.22）。**3.27.0 更正**：旧文「Veyl 不重写这个工具」与实现不符。
+> `AskUserQuestion` 的 schema 与执行由 `claurst-tools` 提供；Veyl 用 `AskUserQuestionGuard` 包装（description 末尾加一行约束、校验 `options` 为字符串数组并过滤空白项），其余委托内置实现（§4.22）。它不是新工具：`name()` 仍是 `AskUserQuestion`，不占额外工具名额。**3.29.0 更正**：旧文「Veyl 不重写这个工具」与实现不符，实际是「不重写，但包装并补约束」。
 
 **破坏性工具（destructive）**：`CoreUpgrade`（下载并安装运行时，**有确认点**，见 §4.45）、`ConfigSetMode`（**有确认点**，会断开重连，见 §4.49）、`NodeRotateCredentials`（**有确认点**，会重启节点并改端口，见 §4.55）、`submit_issue_to_public_wall`（**有确认点**，内容会立即公开，见 §4.56）、`VpnConnect`（会改系统代理或路由）、`NetRepair`（会改系统网络设置）。除 `CoreUpgrade` / `ConfigSetMode` / `NodeRotateCredentials` / `submit_issue_to_public_wall` 外均无确认点，直接执行；风险评估见 §2.1.1。`CoreInstall` 已在 3.4.0、`ConfigDelete` 已在 3.18.0 从工具集移除，见 §4.7 / §4.17。
 
@@ -379,7 +379,7 @@ export const TOOL_COPY: Record<string, ToolCopy>;   // 键集合必须与 §3 �
 
 ### 3.1 注册清单（照抄）
 
-> 构造签名待回填：3.28.0 把三条写节点路径合并为 `NodeImport`，其余名字与 3.27.0 相同；本段沿用旧版构造签名作示意，**实际注册入口以实现为准**：`src-tauri/src/tools/mod.rs` 的 `vpn_tools(Arc<dyn VpnToolServices>)`。
+> 构造签名待回填：3.28.0 把三条写节点路径合并为 `NodeImport`、3.29.0 把 `CatalogOptions` 改名 `ServerOptions`；本段沿用旧版构造签名作示意，**实际注册入口以实现为准**：`src-tauri/src/tools/mod.rs` 的 `vpn_tools(Arc<dyn VpnToolServices>)`。
 
 ```rust
 // server_catalog 是「建机目录」（地区 + 套餐）；与上面的 catalog（共享节点目录客户端）不是一个东西。
@@ -429,17 +429,17 @@ let tools: Vec<Box<dyn Tool>> = vec![
     // 设置指路（只读）
     Box::new(OpenSettingsTool::new()),
     Box::new(StageSelectTool::new(server_catalog.clone())),
-    Box::new(CatalogOptionsTool::new(server_catalog.clone())),
+    Box::new(ServerOptionsTool::new(server_catalog.clone())),
     // 只读网页可达性（AI 自查）
     Box::new(HttpCheckTool::new()),
-    // claurst-tools 内置 AskUserQuestion 的包装（校验 options、加一行 description）
+    // claurst-tools 内置 AskUserQuestion 的包装（校验 options、加一行 description；name() 仍是 AskUserQuestion，不额外占名额）
     Box::new(AskUserQuestionGuard::new()),
 ];
 ```
 
 > **两个目录，两个变量，别复用。** `catalog`（`CatalogSearchTool` 用）是**共享节点目录客户端** `crate::catalog::CatalogClient`；`server_catalog` 才是建机目录（地区 + 套餐）。把后者写成 `catalog` 会把节点列表工具换成错的目录源。
 >
-> `server_catalog` 与 `my_server_catalog`（`commands.md` §7.14）是**同一个取数入口**：`VpnToolServices::server_catalog()` → `control_plane::catalog::fetch_catalog`，`StageSelect` 的校验与 `CatalogOptions` 的读取都走它，不各自拼 URL。**不做本地缓存**（§7.14 明确「不做本地缓存、不返回假数据」）——Worker 侧已有 5 分钟服务端缓存，Host 每次现取，代价只是几十条 JSON；陈旧目录会让用户看到已下架的地区或旧价格，比多打一次请求更糟。目录只在 `commands.rs:285` 现取的写法**作废**：命令层与工具层都调 `VpnToolServices` 这一个方法。
+> `server_catalog` 与 `my_server_catalog`（`commands.md` §7.14）是**同一个取数入口**：`VpnToolServices::server_catalog()` → `control_plane::catalog::fetch_catalog`，`StageSelect` 的校验与 `ServerOptions` 的读取都走它，不各自拼 URL。**不做本地缓存**（§7.14 明确「不做本地缓存、不返回假数据」）——Worker 侧已有 5 分钟服务端缓存，Host 每次现取，代价只是几十条 JSON；陈旧目录会让用户看到已下架的地区或旧价格，比多打一次请求更糟。目录只在 `commands.rs:285` 现取的写法**作废**：命令层与工具层都调 `VpnToolServices` 这一个方法。
 
 ### 3.2 `VpnConnect` 没有确认点
 
@@ -939,7 +939,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.28.0";
+  contract_version: "3.29.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1143,7 +1143,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.28.0";
+  contract_version: "3.29.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1348,9 +1348,11 @@ type DefaultProfileStatusData = {
 
 ---
 
-### 4.22 `AskUserQuestion`（Claurst 内置 + `AskUserQuestionGuard` 包装，3.27.0 更正）
+### 4.22 `AskUserQuestion`（Claurst 内置 + `AskUserQuestionGuard` 包装，3.29.0 登记）
 
-工具实现与 schema 由 `claurst-tools` 提供（`crates/tools/src/lib.rs:109-116`）。Veyl 用 `AskUserQuestionGuard` 包一层：在 description 末尾加一行约束、校验 `options` 为非空字符串数组，其余全部委托内置实现（`src-tauri/src/tools/mod.rs:51-98`）。**不改内置工具的 schema 与执行逻辑**。
+工具实现与 schema 由 `claurst-tools` 提供（`crates/tools/src/lib.rs:109-116`）。Veyl 用 `AskUserQuestionGuard` 包一层：在 description 末尾加一行约束、校验 `options` 为字符串数组并过滤空白项，其余全部委托内置实现（`src-tauri/src/tools/mod.rs:51-98`）。**不改内置工具的 schema 与执行逻辑**。
+
+**它不是新工具**：`name()` 仍是 `AskUserQuestion`，与内置工具同名；§3 的 38 个工具名里有且只有 `AskUserQuestion` 这一个名字，包装不占额外名额。
 
 行为：
 
@@ -1363,9 +1365,9 @@ type DefaultProfileStatusData = {
 | 多选 | **不支持**（Claurst 通道本身不支持） |
 | 解释行 | UI 在**带选项、且不是确认卡**的卡片底部加固定按钮，文案跟随界面语言：`解释这个设置的含义`（中）或 `Explain what this setting means`（英）；点击回传的就是这串字，工具层只当普通文本，语义由提示词约束（不当作答、不推进、不构成节点同意） |
 
-**`options` 必须非空，且每一项都是非空字符串**：`options` 缺失、为空数组、或含全空白项时，**不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束。
+**`options` 必须给出至少一个可点选项**：缺失、不是数组、空数组、含非字符串项、或过滤掉空白项后为空时，**不发事件**，直接把这次工具调用以 `INVALID_ARGUMENT` 结束；混在有效项里的空白项会被过滤掉，不算错误——过滤后的项就是卡片按钮。
 
-> 为什么：提问卡按 `options` 渲染按钮，空 `options` 等于没有可点的答案；全空白项更糟——点下去回传空串，与「跳过」的语义撞在一起。与其把坏卡显示给用户，不如当场告诉模型"请带上选项再问"。
+> 为什么：提问卡按 `options` 渲染按钮，空 `options` 等于没有可点的答案。空白项会被过滤掉——点下去回传空串，与「跳过」的语义撞在一起，不能放进卡片；过滤后一个都不剩时，同样等于没有可点的答案。非字符串项无法渲染成按钮，直接拒绝。与其把坏卡显示给用户，不如当场告诉模型"请带上选项再问"。
 
 这与 §3 表格里「`AskUserQuestionGuard` 包装」一致；本节补充的是**接通之后的可观测行为**。
 
@@ -2057,8 +2059,8 @@ type StageSelectData = {
 - **校验在 Host（唯一可信处）**：请求里出现的 `region` / `plan` 必须在目录里；不在目录即拒绝。
   - 未知值 → `INVALID_ARGUMENT / unknown_region` / `unknown_plan`，整次拒绝、不发事件；
   - **地区与规格同时出现时，还必须是目录里的真实组合**（`plan.regions` 含该地区，2.38.0）：不满足 → `INVALID_ARGUMENT / plan_unavailable_in_region`，`details` 带 `region`、`plan`，整次拒绝、不发事件。**不假设「每个地区都能开每一档」**——真实数据里 sgp1 就没有 `s-1vcpu-1gb`；
-  - 目录取不到 → **与 `CatalogOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
-- **调之前先拿 id**：必须先调 `CatalogOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
+  - 目录取不到 → **与 `ServerOptions` 用同一组码**（`commands.md` §7.14：`TIMEOUT`、`UPSTREAM_ERROR / network|upstream_status|invalid_response`、`RATE_LIMITED`），不新造 `catalog_unavailable`。
+- **调之前先拿 id**：必须先调 `ServerOptions`（§4.53）拿到真实 id，禁止凭印象拼。模型嘴上说「东京」不算数，`region` 必须是目录里的 id。
 - 成功后 Host 发 `stage-select`（`events.md` §4.26），`region` / `plan` 里未请求的字段为 `null`。**舞台可见且不在创建中时**，UI 按字段合并、缺省保持当前值，合并后高亮 1.5 秒——**成功不等于「一定高亮」**：Host 没有屏幕状态，事件完全可能在用户停在连接屏时到达并被 UI 丢掉，这是正常结果，不是失败。
 - **舞台没打开 / 正在创建**：UI 忽略事件，不排队重放，对话里仍留工具卡——与 `settings-point`（`events.md` §4.25）同一口径。此时 `display` 不承诺「屏幕上已经变了」。
 - **越权边界**：schema 里没有 `screen`、没有 config、没有命令字段——它只能改「新建节点」这一处选择。设置、接管方式、连接、服务器、布局都碰不到。要扩到别的舞台必须升版本并单独评审。
@@ -2067,11 +2069,9 @@ type StageSelectData = {
 
 ---
 
-### 4.53 `CatalogOptions`（可选地区与规格；3.29.0 起改名 `ServerOptions`，本版未改名）
+### 4.53 `ServerOptions`（可选地区与规格；3.29.0 由 `CatalogOptions` 改名）
 
-> **不属于 3.28.0**：改名计划在 3.29.0 落地；本版仍叫 `CatalogOptions`，行为与返回形状见下。
-
-原 `CatalogOptions` 与 `CatalogSearch` 都以「Catalog」命名，但一个查建机目录、一个查共享节点目录。改名只解决命名混淆，行为与返回形状不变；UI 命令名不变。
+原 `CatalogOptions` 与 `CatalogSearch` 都以「Catalog」命名，但一个查建机目录、一个查共享节点目录。3.29.0 改名为 `ServerOptions`，schema、行为与返回形状都不变；UI 命令名不变。
 
 只读的建机目录：给模型真实 id，让它能把 `StageSelect` 说对。
 
@@ -2080,7 +2080,7 @@ type StageSelectData = {
 ```
 
 ```ts
-type CatalogOptionsData = {
+type ServerOptionsData = {
   regions: Array<{ id: string; name: string; continent: string }>;   // 目录里的全部地区
   plans: Array<{ id: string; label: string; daily_price_cents: number; transfer_gib: number; regions: string[] }>;
 };
@@ -2411,7 +2411,7 @@ type AiProvidersData = {
 | 只读工具 | 3s |
 | `NodeProbe` | 20s（15s 探测含 8s 探针运行时启动 + 最多 5s 判定；判为已销毁后的 `runtime_stop` 在后台，不计入；探通了不检查） |
 | `NodeImport`（`source = "url"`） | 15s（抓取 10s + 解析）；`text` / `manual` 3s |
-| `CatalogOptions` | 8s（走缓存，必要时取一次目录） |
+| `ServerOptions` | 8s（走缓存，必要时取一次目录） |
 | `HttpCheck` | `timeout_ms`（默认 8s，最大 15s） |
 | `RuntimeStart` | 15s（含 10s 启动） |
 | `VpnConnect` | 30s |
@@ -2468,6 +2468,15 @@ type AiProvidersData = {
 
 ## 8. 变更记录
 
+### 3.29.0（未发布，2026-11-25：第 4 组落地，`CatalogOptions` 改名 `ServerOptions`）
+
+> 本版落地第 4 组：`CatalogOptions` 改名 `ServerOptions`，schema 与行为不变，工具总数仍是 **38**。`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 按实现如实登记。
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.29.0`；`CatalogOptions` 改名 `ServerOptions`（Rust 类型 `ServerOptionsTool`、模型可见名、§4.53 小节、§3.1 注册清单、英文描述与 `TOOL_COPY` 键名同步）。schema、权限、行为与返回形状不变；`StageSelect` 中文 / 英文描述里「先调 `CatalogOptions`」同步改为 `ServerOptions`。工具总数仍是 **38** | 改名 | 两个「catalog」语义不同却同前缀：`CatalogSearch` 查共享节点目录，本工具读建机目录；`docs/design/ai-tools-decisions.md` §3 |
+| 2 | `AskUserQuestionGuard` 按实现如实登记：它不是新工具，`name()` 仍是 `AskUserQuestion`，包装只做两件事——补表达约束、归一化 `options`；名字与内置工具相同，**不占额外工具名额**（§3 的 38 个里只有 `AskUserQuestion` 这一个名字）。旧说法「Veyl 不重写内置工具」改为「不重写，但包装并补约束」 | 说明更正 | `src-tauri/src/tools/mod.rs` 的 `AskUserQuestionGuard` |
+
 ### 3.28.0（未发布，2026-11-24：第 3 组落地，节点写入三工具合并）
 
 > 本版落地第 3 组：`NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`，工具总数 40 → **38**。三条 Host 命令（`node_import_url` / `node_import_text` / `node_create`）全部保留给界面。
@@ -2479,16 +2488,15 @@ type AiProvidersData = {
 
 ### 3.27.0（未发布，2026-11-24：第 2 组落地与 `content` 自足）
 
-> 本版只落地第 2 条：删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，工具总数 43 → **40**。其余条目是**后续批次**的提案（改名在后续批次、新增只读工具在 3.30.0），不属于本版；节点写入三工具合并已在 3.28.0 落地（见上一节）。
+> 本版只落地第 2 条：删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，工具总数 43 → **40**。其余条目是**后续批次**的提案（新增只读工具在 3.30.0），不属于本版；节点写入三工具合并在 3.28.0、`CatalogOptions` 改名在 3.29.0 落地。
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 版本升到 `3.27.0`；§1.2 重写：`content` 是模型唯一可见的通道，必须自足、可多行，`data` / `metadata` 只服务 UI；新增 §1.2.1 逐工具 `content` 验收清单；§4 中原本「事实只在 `data`」的工具补上 `content` 要求（`DiagRun` / `JobGet` / `NodeImportUrl` / `NodeImportText` / `NodeCreate` / `IssueReport` / `HttpCheck` / `NetConfigGet` / `CatalogRefresh` / `ConfigDetail` / `RuntimeLogs` / `CoreListVersions` / `CatalogSearch` / `DeepseekSetupKey` / `NodeProbe` / `RouteGet` / `RouteSetMode`） | 口径 | `ai-tools-inventory.md` P0；2026-11-24 PM 阶段 0 |
 | 2 | 删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；`ConfigUpdate.targets` 删除；保留 `RouteGet` / `RouteSetMode`。工具总数 43 → **40** | 删除工具 | 产品已无按服务分流；`category_list` / `route_targets_set` / `rules_status` 三条 Host 命令保留给界面 |
-| 3 | **后续批次（3.29.0）**：`CatalogOptions` 改名 `ServerOptions`（消除与 `CatalogSearch` 的命名冲突）；`StageSelect` / `OpenSettings` 保留；`AskUserQuestionGuard` 如实登记为内置 `AskUserQuestion` 的包装，更正「Veyl 不重写内置工具」的旧说法 | 改名 / 更正（未落地） | 2026-11-24 PM 阶段 0 |
-| 4 | **后续批次（3.30.0）**：新增只读工具 `AccountBalance`（§4.58）、`TrialStatus`（§4.59）、`AiProviders`（§4.60）；手机导出与批量测速仍不给工具。总数 38 → **41** | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
-| 5 | 待回填：`ConfigUpdate.connect_mode` 的错误、`NodeImport` 手动模式的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举（后三项随 3.30.0） | 待回填 | 以实现为准，不凭空写字段 |
-| 6 | 提示词残留已处理：`resources/prompts/zh/product.md` 的「先用分类列表取到合法分类名」改为「分流只有智能 / 全局两档，没有按服务挑选」；英文版原句「Only these two — there is no per-service selection」保持不变 | 已知残留（已修） | 提示词批次；4b819ef |
+| 3 | **后续批次（3.30.0）**：新增只读工具 `AccountBalance`（§4.58）、`TrialStatus`（§4.59）、`AiProviders`（§4.60）；手机导出与批量测速仍不给工具。总数 38 → **41** | 新增工具（未落地） | 缺口 G1 / G2 / G8 |
+| 4 | 待回填：`ConfigUpdate.connect_mode` 的错误、`NodeImport` 手动模式的 `data` 包装、`AccountBalance` 匿名读余额与 `topup_available` 判据、`TrialStatus` 未登录形状与 `free_node_count` 来源、`AiProviders` 的 `id` 枚举（后三项随 3.30.0） | 待回填 | 以实现为准，不凭空写字段 |
+| 5 | 提示词残留已处理：`resources/prompts/zh/product.md` 的「先用分类列表取到合法分类名」改为「分流只有智能 / 全局两档，没有按服务挑选」；英文版原句「Only these two — there is no per-service selection」保持不变 | 已知残留（已修） | 提示词批次；4b819ef |
 
 ### 3.26.0（未发布，2026-11-23：登录态与 MyServers 门禁）
 
@@ -2571,14 +2579,14 @@ type AiProvidersData = {
 | 2 | 新增「`skipped` 的语义」：不是错误、**不计入 `failed`**、`remediation` 与 `action` 必须为 `null`；界面不得用失败色；模型只能说「这项没检查」，不得说「坏了 / 不可用」 | 语义澄清 | 不适用 ≠ 坏 |
 | 3 | 新增各模式适用表：代理模式五项适用（`network.exit_ip` 未探测到算 `skipped`）；TUN 下 `app.process_alive` / `app.data_plane` 适用，`app.clash_api` 与 `network.exit_ip` 为 `skipped`（无探测通道 / 不采集出口 IP），`system.proxy_services` 为 `skipped` 但**残留指向未监听端口仍 `failed`**；未连接 / 连接中除 `system.proxy_services`（照常检查）外一律 `skipped` | 语义澄清 | 「不适用」必须有一个不撒谎的表示 |
 | 4 | 新增文案禁区：未连接与连接中不得出现「进程未运行」「控制面不可用」；TUN 下不得出现「sing-box 进程未运行」 | 文案约束 | 这些是 `skipped`，不是失败；说成失败会让用户以为坏了 |
-| 5 | §4.53 `CatalogOptions`：`content` 改为携带完整可选清单（地区 `名称（id）`、规格含日价与 `plans[].regions` 的可用地区），受 2000 字符上限截断并在末尾标注「已截断」；`display` 文案与 facts 不变 | 模型可见内容 | 模型此前只拿到数量，无法推荐或合法调用 `StageSelect`；§1.2 要求 `content` 自足 |
+| 5 | §4.53 `CatalogOptions`（3.29.0 改名 `ServerOptions`）：`content` 改为携带完整可选清单（地区 `名称（id）`、规格含日价与 `plans[].regions` 的可用地区），受 2000 字符上限截断并在末尾标注「已截断」；`display` 文案与 facts 不变 | 模型可见内容 | 模型此前只拿到数量，无法推荐或合法调用 `StageSelect`；§1.2 要求 `content` 自足 |
 
 ### 3.20.2（未发布：随 AI 自查第一批统一升版）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | §4.13 `DiagRun` 新增 `network.coverage` 检查，`DiagAction` 增 `{ kind: "switch_mode"; to: "tun" \| "system_proxy" }`：全部接管 + running → `ok`；本机代理 + running → 不通过并给 `switch_mode`；未连接 → `ok` +「先连接」。结论**只用于「UDP / QUIC 应用不通」**，不得用来解释反机器人挑战；`remediation` 用「切到全部接管」，内部值只出现在 `action.to` | 字段扩展 | AI 自查第一批 T2；四组对照实验证伪「切全部接管就能过挑战」；判定收敛为 `(connected, tun)` 两参数——**接管方式由实际连接类型决定**，不再有「读不到模式」态；**删除不可达的「读不到接管方式」分支**——该分支在唯一触发场景里实际覆盖是已知的（本机代理），回「读不到」是错误结论；留一个会说假话的分支比少一个更糟 |
-| 2 | §3 工具总表 39 → 40、§3.1 注册清单加 `HttpCheckTool`、新增 §4.54 `HttpCheck`（原计划 §4.53，因被 `CatalogOptions` 占用改为 §4.54）：返回 `url / via / status / elapsed_ms / redirects / server / cf_mitigated / tls_ok / error`；`via` 如实报告走隧道还是直连（全部接管下进程直连也算 `tunnel`；本机代理但拿不到混合端口则退回直连并报 `direct`）；直连的 200 不代表用户经 VPN 的体验；DNS 解析失败归 `HTTP_CHECK_FAILED`，只有解析成功落私网才是 `private_address`；只允许 `https` + 443，解析全部 A/AAAA 并拒私网，重定向逐跳复核，**只读响应头、正文不读**，直连时 pin 已校验 IP 并 `no_proxy`；**已知边界：经本机代理时不做 pin，rebinding 有 TOCTOU 窗口，重审触发条件见 §4.54**，`ReadOnly` | 新增工具 | AI 自查第一批 T4；在错误的路径上得到正确的数字会得出相反结论 |
+| 2 | §3 工具总表 39 → 40、§3.1 注册清单加 `HttpCheckTool`、新增 §4.54 `HttpCheck`（原计划 §4.53，因被 `CatalogOptions`（3.29.0 改名 `ServerOptions`）占用改为 §4.54）：返回 `url / via / status / elapsed_ms / redirects / server / cf_mitigated / tls_ok / error`；`via` 如实报告走隧道还是直连（全部接管下进程直连也算 `tunnel`；本机代理但拿不到混合端口则退回直连并报 `direct`）；直连的 200 不代表用户经 VPN 的体验；DNS 解析失败归 `HTTP_CHECK_FAILED`，只有解析成功落私网才是 `private_address`；只允许 `https` + 443，解析全部 A/AAAA 并拒私网，重定向逐跳复核，**只读响应头、正文不读**，直连时 pin 已校验 IP 并 `no_proxy`；**已知边界：经本机代理时不做 pin，rebinding 有 TOCTOU 窗口，重审触发条件见 §4.54**，`ReadOnly` | 新增工具 | AI 自查第一批 T4；在错误的路径上得到正确的数字会得出相反结论 |
 | 3 | §5.2 / §5.3 同步：`HttpCheck` 计入纯读取幂等；超时按 `timeout_ms`（默认 8s，最大 15s） | 元数据 | 同 2 |
 
 ### 3.20.1（2026-11-18，`RuntimeStart` 补被取代启动的收尾）
@@ -2599,7 +2607,7 @@ type AiProvidersData = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | `contract_version` 升到 `3.19.0`；`CatalogOptionsData.plans[]` 增 `regions: string[]`（该档位真实可用的地区 id，`commands.md` §7.14 同步）；删掉「目录没有可用性字段」的旧说法 | 数据结构 | 2026-11-18 建机 422：不能假设 DO 偏好处处一样 |
+| 1 | `contract_version` 升到 `3.19.0`；`CatalogOptionsData.plans[]`（3.29.0 改名 `ServerOptionsData`）增 `regions: string[]`（该档位真实可用的地区 id，`commands.md` §7.14 同步）；删掉「目录没有可用性字段」的旧说法 | 数据结构 | 2026-11-18 建机 422：不能假设 DO 偏好处处一样 |
 | 2 | §4.52 `StageSelect`：地区与规格同时出现时按 `plan.regions` 校验组合，不满足 → `INVALID_ARGUMENT / plan_unavailable_in_region`（`details` 带 `region`、`plan`），不占本轮名额 | 校验收紧 | 同上；与 Worker 的扣费前校验同一口径 |
 
 ### 3.18.0（2026-11-17，配置类工具退出 AI 工具集）
@@ -2648,9 +2656,9 @@ type AiProvidersData = {
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 新增 §4.53 `CatalogOptions`（`ReadOnly`）：只回地区与套餐的 id / 名称 / 日价，与 `my_server_catalog` 共用目录来源；总数 41 → **42** | 新增工具 | 评审 P1-2：模型不知道目录里有哪些 id |
+| 1 | 新增 §4.53 `CatalogOptions`（3.29.0 改名 `ServerOptions`，`ReadOnly`）：只回地区与套餐的 id / 名称 / 日价，与 `my_server_catalog` 共用目录来源；总数 41 → **42** | 新增工具 | 评审 P1-2：模型不知道目录里有哪些 id |
 | 2 | §4.52 `StageSelect` 修订：输入与返回改为部分字段（未请求的为 `null`），**删除 `changed`**——Host 没有舞台当前选择的镜像，算不出来 | 语义修正 | 评审 P1-1 |
-| 3 | 注册行写死依赖：`StageSelectTool::new(...)` / `CatalogOptionsTool::new(...)`，目录由 `VpnToolServices` 提供 | 约束 | 评审 P1-3 |
+| 3 | 注册行写死依赖：`StageSelectTool::new(...)` / `CatalogOptionsTool::new(...)`（3.29.0 改名 `ServerOptionsTool`），目录由 `VpnToolServices` 提供 | 约束 | 评审 P1-3 |
 | 4 | 「一轮最多一次」改为 Host 强制，第二次 → `PRECONDITION_FAILED`（码名与名额口径在 3.17.1 修正）；「用户没表达意图不得预选」明确为 advisory，Host 不校验 | 约束澄清 | 评审附带项 |
 | 5 | 目录没有「可用」字段：改写为「不在目录即拒绝」；「不落库」改写为「不写业务表」，参数会进 `tool_calls.args_json` | 措辞修正 | 同上 |
 

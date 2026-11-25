@@ -321,9 +321,9 @@ export const en: Record<MessageKey, string> = {
     "Connection password changed. Disconnect and reconnect for it to take effect.",
   "tool.NodeRotateCredentials.failed":
     "Couldn't change the connection password. Rebuild this server, or try again later.",
-  "tool.CatalogOptions.running": "Loading regions and plans",
-  "tool.CatalogOptions.done": "Loaded regions and plans",
-  "tool.CatalogOptions.failed": "Couldn't load regions and plans",
+  "tool.ServerOptions.running": "Loading regions and plans",
+  "tool.ServerOptions.done": "Loaded regions and plans",
+  "tool.ServerOptions.failed": "Couldn't load regions and plans",
   "tool.StageSelect.running": "Choosing region and plan",
   "tool.StageSelect.done": "Region and plan selected",
   "tool.StageSelect.failed": "Couldn't choose region and plan",

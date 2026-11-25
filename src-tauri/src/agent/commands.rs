@@ -388,7 +388,7 @@ pub async fn my_server_catalog(
     state: State<'_, Arc<AppState>>,
     fresh: Option<bool>,
 ) -> Result<Value, Value> {
-    // 与 StageSelect / CatalogOptions 共用 `VpnToolServices::server_catalog()`。
+    // 与 StageSelect / ServerOptions 共用 `VpnToolServices::server_catalog()`。
     // 只有打开新建向导时才要求回源（`fresh = true`）；页面加载等不带参数的路径
     // 走控制面的全局年龄判断，避免每次进页面都打 DO（commands.md §7.14）。
     let source = state.services.server_catalog();

@@ -260,7 +260,7 @@ pub fn is_readonly(tool: &str) -> bool {
             | "NetConfigGet"
             | "DefaultProfileStatus"
             | "OpenSettings"
-            | "CatalogOptions"
+            | "ServerOptions"
             | "MyServerFailure"
     )
 }

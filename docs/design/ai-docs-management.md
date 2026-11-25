@@ -34,7 +34,7 @@
 | 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts:7` |
 | 4 | 设置 › 连接 · 「新建节点」 | `新建节点` | 无文本，只展开右栏并把焦点给输入框 | 无 | `App.tsx:2080`（`handleAskAiFromConsole`） |
 | 5 | 设置 › 帮助 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
-| 6 | 我的服务器 › 建机向导底部 | `让 AI 帮我选` | 「帮我选一个地区和规格。」 | 无（AI 自己调 `StageSelect` / `CatalogOptions`） | `MyServerWizard.tsx:469`、`App.tsx:3096` |
+| 6 | 我的服务器 › 建机向导底部 | `让 AI 帮我选` | 「帮我选一个地区和规格。」 | 无（AI 自己调 `StageSelect` / `ServerOptions`） | `MyServerWizard.tsx:469`、`App.tsx:3096` |
 | 7 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
 | 8 | 「在手机上使用」弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
 | 9 | 右栏 AI 空态 · 预设问题 | 5 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
@@ -94,7 +94,7 @@
 - **销毁**：未用完的整天退回余额，销毁当天已用掉的不退；AI 无工具入口，只给路径。
 - **手机使用**：只付费节点、自有域名、在设置 › 账户里导出；给的是 App 列表与二维码，不是通用教程。
 
-工具：`MyServers`、`MyServerFailure`、`StageSelect`、`CatalogOptions`、`JobGet`。
+工具：`MyServers`、`MyServerFailure`、`StageSelect`、`ServerOptions`、`JobGet`。
 
 ### 2.4 账户与登录
 
@@ -333,7 +333,7 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
-目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `StageSelect` `CatalogOptions`
+目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `StageSelect` `ServerOptions`
 配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImport` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
 路由：`RouteGet` `RouteSetMode`
 连接：`VpnConnect` `VpnDisconnect`

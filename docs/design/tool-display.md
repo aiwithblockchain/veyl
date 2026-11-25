@@ -3,13 +3,13 @@
 > 日期：2026-11-06
 > 状态：设计定稿，未实现
 >
-> ⚠️ 工具面随批更新：当前批次（`tools.md` 3.28.0）为 **38 个**工具。已落地的两批是：删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`（同名 Host 命令保留给界面，3.27.0）、节点写入三工具合并为 `NodeImport`（3.28.0）。`CatalogOptions` 改名与新增只读工具仍在后续批次。数字以 `docs/contracts/tools.md` §3 为准，本文不再写死终态数量。
+> ⚠️ 工具面随批更新：当前批次（`tools.md` 3.29.0）为 **38 个**工具。已落地的三批是：删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`（同名 Host 命令保留给界面，3.27.0）、节点写入三工具合并为 `NodeImport`（3.28.0）、`CatalogOptions` 改名 `ServerOptions`（3.29.0）。新增只读工具仍在后续批次。数字以 `docs/contracts/tools.md` §3 为准，本文不再写死终态数量。
 >
 > 涉及：`src/components/ToolCallCard.tsx`、`src/state/chatStore.ts`、
 > `src-tauri/src/tools/envelope.rs`、`src-tauri/src/claurst_session/mod.rs`、
 > `docs/contracts/events.md` §3.3–3.4、`resources/prompts/zh/system.md`
 >
-> **2026-11-24 同步 `tools.md` 3.28.0（第 2、3 组）**：工具集合 43 → 40 → **38**。第 2 组删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`。`ServerOptions` 改名、`AccountBalance` / `TrialStatus` / `AiProviders` 新增均**未落地**，属于后续批次。
+> **2026-11-25 同步 `tools.md` 3.29.0（第 2–4 组）**：工具集合 43 → 40 → 38。第 2 组删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把 `NodeImportUrl` / `NodeImportText` / `NodeCreate` 合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`。`AccountBalance` / `TrialStatus` / `AiProviders` 新增**未落地**，属于后续批次。
 >
 > **这份文档解决什么**：真机截图里用户看到的是「RuntimeStatus 调用 RuntimeStatus 0ms 完成」
 > 「ConfigList 调用 ConfigList 0ms 完成」。这不是文案不好，是**数据层把不该给用户看的东西
@@ -218,7 +218,7 @@ type ToolCallEndPayload = {
 
 | 工具族 | 失败时典型值 | 说明 |
 |---|---|---|
-| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigDetail`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`CatalogOptions`、`HttpCheck`、`read_public_issue_wall`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
+| 只读 / `None` 级（`RuntimeStatus`、`RuntimeLogs`、`CoreListVersions`、`CatalogSearch`、`ConfigDetail`、`DiagRun`、`DeepseekSetupKey`、`JobGet`、`NetConfigGet`、`DefaultProfileStatus`、`RouteGet`、`OpenSettings`、`MyServers`、`MyServerFailure`、`ServerOptions`、`HttpCheck`、`read_public_issue_wall`、`AskUserQuestion`） | `none` | 可不填，Host 按 `none` 处理 |
 | `NodeProbe` | `none` 或 `unknown` | 探测本身只读；探不通时可能停隧道，停止失败 = `unknown` |
 | `VpnConnect` | `restored` 或 `none` | 启动前失败 = `none`；已改系统设置后失败 = `restored`（工具负责恢复再返回） |
 | `VpnDisconnect` | `restored` 或 `none` | 断开失败时网络可能仍被接管 → 不允许填 `none` 除非确认未改 |
@@ -406,7 +406,7 @@ UI 卡片是最后一层。模型正文、`ai-status` 文案、工具 descriptio
 | 30 | `OpenSettings` | 正在打开设置 | 已打开设置 | 没能打开设置 | `none` |
 | 31 | `MyServerFailure` | 正在看这次创建卡在哪 | 已查看创建失败详情 | 失败详情读不到 | `none` |
 | 32 | `StageSelect` | 正在选地区和规格 | 已选好地区和规格 | 没能选好地区和规格 | `none` |
-| 33 | `CatalogOptions` | 正在读可选地区与规格 | 读到了可选地区与规格 | 可选地区读不到 | `none` |
+| 33 | `ServerOptions` | 正在读可选地区与规格 | 读到了可选地区与规格 | 可选地区读不到 | `none` |
 | 34 | `HttpCheck` | 正在检查这个网页 | 网页返回 200 | 没访问成功 | `none` |
 | 35 | `NodeRotateCredentials` | 正在更换连接密码 | 连接密码已更换 | 没能更换，节点仍用旧密码 | `none` / `unknown` |
 | 36 | `submit_issue_to_public_wall` | 正在准备发到问题墙 | 已发到问题墙 | 没能发到问题墙 | `none` |

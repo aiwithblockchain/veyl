@@ -172,7 +172,7 @@ pub trait VpnToolServices: Send + Sync {
     async fn catalog_search(&self, query: CatalogQuery) -> anyhow::Result<Value>;
 
     /// 建机目录（地区 + 套餐）的取数入口。每次现取，不做本地缓存；
-    /// `CatalogOptions`、`StageSelect` 与 `my_server_catalog` 共用。
+    /// `ServerOptions`、`StageSelect` 与 `my_server_catalog` 共用。
     fn server_catalog(&self) -> Arc<dyn ServerCatalogSource> {
         Arc::new(LiveServerCatalog)
     }

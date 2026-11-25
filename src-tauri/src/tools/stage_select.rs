@@ -1,4 +1,4 @@
-//! `StageSelect`（`tools.md` §4.52）与 `CatalogOptions`（§4.53）。
+//! `StageSelect`（`tools.md` §4.52）与 `ServerOptions`（§4.53）。
 //!
 //! `StageSelect` 只把地区 / 规格选进「新建节点」舞台：不建机、不扣费、不写业务表。
 //! Host 没有舞台当前选择的镜像，所以只回本次请求的字段，未请求的为 `null`。
@@ -77,7 +77,7 @@ fn parse_input(input: &Value) -> Result<StageRequest, AivpnError> {
     if region.is_none() && plan.is_none() {
         return Err(invalid(
             "invalid_payload",
-            "region 与 plan 至少要给一个；先调 CatalogOptions 拿真实 id",
+            "region 与 plan 至少要给一个；先调 ServerOptions 拿真实 id",
         ));
     }
     Ok(StageRequest { region, plan })
@@ -154,8 +154,8 @@ impl Tool for StageSelectTool {
     fn description(&self) -> &str {
         "用户说「帮我选 / 换成东京 / 用标准档」，或点了新建节点卡片上的对应按钮时，\
          把地区 / 规格选进「新建节点」舞台。只改界面选择，不建机、不扣费、不调用任何命令。\
-         region / plan 至少要给一个，值必须是 CatalogOptions 返回的真实 id；\
-         不知道 id 就先调 CatalogOptions，不要凭印象拼。同一轮最多成功一次。"
+         region / plan 至少要给一个，值必须是 ServerOptions 返回的真实 id；\
+         不知道 id 就先调 ServerOptions，不要凭印象拼。同一轮最多成功一次。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -361,20 +361,20 @@ fn catalog_summary(catalog: &Catalog) -> String {
     truncate_with_marker(&plans)
 }
 
-pub struct CatalogOptionsTool {
+pub struct ServerOptionsTool {
     catalog: Arc<dyn ServerCatalogSource>,
 }
 
-impl CatalogOptionsTool {
+impl ServerOptionsTool {
     pub fn new(catalog: Arc<dyn ServerCatalogSource>) -> Self {
         Self { catalog }
     }
 }
 
 #[async_trait]
-impl Tool for CatalogOptionsTool {
+impl Tool for ServerOptionsTool {
     fn name(&self) -> &str {
-        "CatalogOptions"
+        "ServerOptions"
     }
 
     fn description(&self) -> &str {
@@ -449,7 +449,7 @@ impl Tool for CatalogOptionsTool {
                 }
             },
         };
-        envelope::finish(ctx, "CatalogOptions", outcome)
+        envelope::finish(ctx, "ServerOptions", outcome)
     }
 }
 
@@ -703,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_options_returns_only_display_fields() {
-        let tool = CatalogOptionsTool::new(source(Ok(catalog())));
+        let tool = ServerOptionsTool::new(source(Ok(catalog())));
         let result = tool
             .execute(json!({}), &context(&session("options"), 1))
             .await;
@@ -723,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_options_content_lists_real_ids_and_daily_price() {
-        let tool = CatalogOptionsTool::new(source(Ok(catalog())));
+        let tool = ServerOptionsTool::new(source(Ok(catalog())));
         let result = tool
             .execute(json!({}), &context(&session("options-content"), 1))
             .await;
@@ -759,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_options_truncates_oversized_catalog_but_keeps_availability() {
-        let tool = CatalogOptionsTool::new(source(Ok(big_catalog())));
+        let tool = ServerOptionsTool::new(source(Ok(big_catalog())));
         let result = tool
             .execute(json!({}), &context(&session("options-big"), 1))
             .await;
@@ -787,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_options_rejects_unknown_arguments() {
-        let tool = CatalogOptionsTool::new(source(Ok(catalog())));
+        let tool = ServerOptionsTool::new(source(Ok(catalog())));
         let result = tool
             .execute(json!({ "region": "tyo" }), &context(&session("options-bad"), 1))
             .await;
