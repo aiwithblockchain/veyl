@@ -276,7 +276,7 @@ describe("节点卡 → 添加节点", () => {
     });
 
     render(<App />);
-    await screen.findByText("东京 01");
+    await screen.findAllByText("东京 01");
 
     fireEvent.click(await screen.findByRole("button", { name: "添加节点" }));
 

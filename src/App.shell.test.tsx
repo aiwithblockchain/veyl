@@ -462,7 +462,7 @@ describe("三区外壳与连接舞台", () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
-    expect(await screen.findByText("42 毫秒")).toBeTruthy();
+    expect((await screen.findAllByText("42 毫秒")).length).toBeGreaterThan(0);
     expect(screen.queryByText(/已加入/)).toBeNull();
   }, 15_000);
 
@@ -1077,7 +1077,7 @@ describe("三区外壳与连接舞台", () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("先做这一步")).toBeTruthy());
-    expect(screen.getByText("美国 01")).toBeTruthy();
+    expect(screen.getAllByText("美国 01").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));

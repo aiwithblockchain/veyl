@@ -698,8 +698,17 @@ export const en: Record<MessageKey, string> = {
   "console.selfOwnedUnreachable":
     "Not being able to connect doesn't necessarily mean the machine is at fault; your current network often can't reach that region. You can destroy and rebuild, but the day's charge isn't refunded.",
   "console.group.owned": "My servers",
-  "console.group.custom": "Your own nodes",
+  "console.group.custom": "Custom nodes",
   "console.group.free": "Free nodes",
+  "console.group.empty.owned": "No server nodes yet",
+  "console.group.empty.custom": "No custom nodes added yet",
+  "console.group.empty.free": "No free nodes",
+  "console.sources.aria": "Node sources",
+  "console.current.locateAria":
+    "Current node “{name}”; select to show its group",
+  "console.search.placeholder": "Search this group",
+  "console.search.empty": "No matching nodes",
+  "console.search.clear": "Clear search",
   "console.empty": "This configuration has no nodes left",
   "console.primary.disconnectAria": "Disconnect",
   "console.primary.connectAria": "Connect to node",
