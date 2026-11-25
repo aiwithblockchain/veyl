@@ -1417,6 +1417,61 @@ async fn llm_providers_tests_one_provider_and_reports_not_found() {
     );
 }
 
+/// 只读工具失败不能报 `unknown`：用户会以为「可能改动了什么」。
+#[tokio::test]
+async fn readonly_failures_never_report_an_unknown_change() {
+    let (svc, _rec) = FakeServices::new();
+    let all = tools(svc);
+
+    // HttpCheck：只接受 https，直接拒绝。
+    const HTTP_SESSION: &str = "boundary-readonly-http";
+    let (is_error, env) = run_in_session(
+        tool(&all, "HttpCheck"),
+        json!({ "url": "http://example.com" }),
+        HTTP_SESSION,
+    )
+    .await;
+    assert!(is_error, "{env}");
+    let outcome = crate::tools::envelope::take_outcome(HTTP_SESSION, "HttpCheck")
+        .expect("工具结果应当已登记");
+    assert_eq!(
+        outcome.display.changed,
+        crate::tools::Changed::None,
+        "HttpCheck 失败不能报 unknown"
+    );
+
+    // MyServers：登录后服务层报错（FakeServices 未接入）也不能报 unknown。
+    use crate::control_plane::auth;
+    let _guard = crate::test_support::AUTH_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    crate::test_support::install_test_secrets();
+    auth::clear_tokens_for_test();
+    auth::store_device_for_test("dev_readonly");
+    auth::store_tokens_for_test(&auth::TokenSet {
+        account_id: "acct_readonly".into(),
+        device_id: "dev_readonly".into(),
+        access_token: "access".into(),
+        access_expires_at: "2099-01-01T00:00:00Z".into(),
+        refresh_token: "refresh".into(),
+        refresh_expires_at: "2099-01-01T00:00:00Z".into(),
+        account_kind: "email".into(),
+        email: Some("a@example.com".into()),
+    });
+    const SERVER_SESSION: &str = "boundary-readonly-servers";
+    let (is_error, env) =
+        run_in_session(tool(&all, "MyServers"), json!({}), SERVER_SESSION).await;
+    assert!(is_error, "{env}");
+    let outcome = crate::tools::envelope::take_outcome(SERVER_SESSION, "MyServers")
+        .expect("工具结果应当已登记");
+    assert_eq!(
+        outcome.display.changed,
+        crate::tools::Changed::None,
+        "MyServers 失败不能报 unknown"
+    );
+    auth::clear_tokens_for_test();
+}
+
 #[tokio::test]
 async fn node_import_text_reports_imported_and_skipped() {
     let (svc, rec) = FakeServices::with_data(json!({

@@ -264,6 +264,9 @@ pub fn is_readonly(tool: &str) -> bool {
             | "MyServerFailure"
             | "MyServerWallet"
             | "LlmProviders"
+            | "MyServers"
+            // 会发一次请求，但不改任何状态。
+            | "HttpCheck"
     )
 }
 
@@ -284,7 +287,13 @@ mod tests {
     /// 只读工具失败也不能声称改动过。
     #[test]
     fn read_only_tools_never_report_a_change() {
-        for tool in ["DiagRun", "RuntimeStatus", "RouteGet"] {
+        for tool in [
+            "DiagRun",
+            "RuntimeStatus",
+            "RouteGet",
+            "MyServers",
+            "HttpCheck",
+        ] {
             for ok in [true, false] {
                 assert_eq!(fallback(tool, ok).changed, Changed::None, "{tool}");
             }
