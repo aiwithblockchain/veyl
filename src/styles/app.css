@@ -6980,7 +6980,7 @@ details[open] > .settings-fold__summary::before {
   padding: 0 4px;
 }
 
-/* 列表底部的「在手机上使用」：整行可点，次级（不加实心底）。
+/* 列表底部的「在其它设备上使用」：整行可点，次级（不加实心底）。
    与上面的行对齐（左右 8px），顶部一条细线把它和滚动内容分开。 */
 .rail__action-row {
   flex: none;
@@ -7204,7 +7204,7 @@ details[open] > .settings-fold__summary::before {
   word-break: break-all;
 }
 
-/* ---------- 在手机上使用（弹层） ---------- */
+/* ---------- 在其它设备上使用（弹层） ---------- */
 
 /* 三段：标题 / 滚动区 / 常驻页脚；只有中间滚动。只覆盖本弹层的尺寸。 */
 .modal.mobile-export {
@@ -7448,6 +7448,11 @@ details[open] > .settings-fold__summary::before {
   display: flex;
   align-items: flex-start;
   gap: 24px;
+}
+
+/* veyl-cli 行：没有二维码，链接区占满整行。 */
+.mobile-export__import--link {
+  display: block;
 }
 
 .mobile-export__fallback {

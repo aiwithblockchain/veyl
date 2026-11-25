@@ -21,7 +21,7 @@ function expectDecls(selector: string, ...decls: string[]) {
   for (const decl of decls) expect(body).toContain(decl);
 }
 
-describe("在手机上使用的 v6 尺寸", () => {
+describe("在其它设备上使用的 v6 尺寸", () => {
   it("只覆盖本弹层：640 宽、88vh/880 高、28 内边距", () => {
     expectDecls(
       ".modal.mobile-export",

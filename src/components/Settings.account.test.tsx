@@ -133,7 +133,7 @@ describe("设置 › 账户", () => {
     expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
   });
 
-  it("在手机上使用：行常驻，点查看把触发行交给 App", () => {
+  it("在其它设备上使用：行常驻，点查看把触发行交给 App", () => {
     const open = vi.fn();
     renderAccount({ onOpenMobileExport: open });
 
@@ -144,14 +144,14 @@ describe("设置 › 账户", () => {
     expect(open.mock.calls[0][0]).toBe(button);
   });
 
-  it("未登录也有在手机上使用：下载入口对所有用户开放", () => {
+  it("未登录也有在其它设备上使用：入口对所有用户开放", () => {
     renderAccount({
       account: { ...ACCOUNT, logged_in: false, email: null },
       onOpenMobileExport: () => {},
     });
-    expect(screen.getByText("在手机上使用")).toBeTruthy();
+    expect(screen.getByText("在其它设备上使用")).toBeTruthy();
     expect(
-      screen.getByText("下载 sing-box 官方客户端，扫码导入你的节点。"),
+      screen.getByText("在手机或电脑上导入你的节点。"),
     ).toBeTruthy();
   });
 });

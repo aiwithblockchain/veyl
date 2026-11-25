@@ -368,7 +368,7 @@ export default function App() {
   // 只存一份，和改动前单实例 Composer 的行为一致（切会话也保留）。
   const [composerDraft, setComposerDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  /** 「在手机上使用」弹层：设置行与左栏行共用这一份开关。 */
+  /** 「在其它设备上使用」弹层：设置行与左栏行共用这一份开关。 */
   const [mobileExportOpen, setMobileExportOpen] = useState(false);
   /** 节点导入 / 手动填写弹层：入口在控制台节点卡。 */
   const [nodeImportOpen, setNodeImportOpen] = useState(false);
@@ -470,7 +470,7 @@ export default function App() {
   });
   /**
    * 左栏快捷行：已登录（邮箱账户且会话未过期）、列表可读、且至少一台服务器节点已就绪。
-   * 设备身份按未登录处理，不给「在手机上使用」（login-and-payment.md §11.3）。
+   * 设备身份按未登录处理，不给「在其它设备上使用」（login-and-payment.md §11.3）。
    */
   const showRailMobileExport =
     myServers.loggedIn &&

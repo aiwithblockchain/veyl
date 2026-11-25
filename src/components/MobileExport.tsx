@@ -23,9 +23,10 @@ const PLATFORM_LABELS: Record<MobilePlatform, string> = {
   android: "Android",
 };
 
-type RowId = MobileClientId | "other";
-
+const VEYLCLI_ID = "veylcli" as const;
 const OTHER_ID = "other" as const;
+
+type RowId = MobileClientId | typeof VEYLCLI_ID | typeof OTHER_ID;
 
 interface FormatEntry {
   url: string;
@@ -57,12 +58,15 @@ export function hasReadyServer(servers: MyServer[]): boolean {
   return servers.some(isServerNodeReady);
 }
 
-interface AppDef {
-  id: MobileClientId;
+interface ImportTarget {
   name: string;
-  meta: MessageKey;
-  /** 该 App 内部吃哪一份数据；用户看不到这层映射。 */
+  /** 该目标内部吃哪一份数据；用户看不到这层映射。 */
   format: FormatId;
+}
+
+interface AppDef extends ImportTarget {
+  id: MobileClientId;
+  meta: MessageKey;
 }
 
 /** 顺序即界面顺序：按「最可能被用」排，不按平台分组。 */
@@ -153,7 +157,7 @@ interface Props {
 
 type CopyState = "idle" | "ok" | "fail";
 
-/** 「在手机上使用」弹层：按 App 分类，展开一行才出现该行的导入码与下载入口。 */
+/** 「在其它设备上使用」弹层：按设备或 App 分类，展开一行才出现该行的导入码与下载入口。 */
 export function MobileExport({
   bridge,
   nested = false,
@@ -318,7 +322,7 @@ export function MobileExport({
       return;
     }
     setOpenId(id);
-    if (id !== OTHER_ID) loadClientQr(id);
+    if (id !== OTHER_ID && id !== VEYLCLI_ID) loadClientQr(id);
   };
 
   const copy = async (url: string) => {
@@ -383,7 +387,7 @@ export function MobileExport({
     </a>
   );
 
-  const stepTitle = (app: AppDef) => (
+  const stepTitle = (app: ImportTarget) => (
     <h3 className="mobile-export__step-title">
       <span className="mobile-export__step-num" aria-hidden="true">
         2
@@ -392,12 +396,17 @@ export function MobileExport({
     </h3>
   );
 
-  const importStep = (app: AppDef) => {
+  const importStep = (
+    app: ImportTarget,
+    opts: { withQr?: boolean; title?: ReactNode; note?: string } = {},
+  ) => {
+    const withQr = opts.withQr !== false;
+    const title = opts.title ?? stepTitle(app);
     // 没有可用付费服务器：这一步不出现码位，说明与动作代替导入块。
     if (phase.kind === "no_ready_server") {
       return (
         <section className="mobile-export__step">
-          {stepTitle(app)}
+          {title}
           <p className="mobile-export__step-note">
             {tr("mobile.paidOnly")}
           </p>
@@ -468,6 +477,9 @@ export function MobileExport({
       );
       side = (
         <>
+          {opts.note ? (
+            <p className="mobile-export__step-note">{opts.note}</p>
+          ) : null}
           <div className="mobile-export__actions">
             <button
               type="button"
@@ -533,18 +545,22 @@ export function MobileExport({
       );
     }
 
-    const empty = qr === null;
+    const empty = withQr && qr === null;
     return (
       <section className="mobile-export__step">
-        <div className="mobile-export__import">
-          <div
-            className={`mobile-export__qr ${empty ? "is-empty" : ""}`.trim()}
-            aria-busy={phase.kind === "loading" ? true : undefined}
-          >
-            {qr}
-          </div>
+        <div
+          className={`mobile-export__import${withQr ? "" : " mobile-export__import--link"}`}
+        >
+          {withQr ? (
+            <div
+              className={`mobile-export__qr ${empty ? "is-empty" : ""}`.trim()}
+              aria-busy={phase.kind === "loading" ? true : undefined}
+            >
+              {qr}
+            </div>
+          ) : null}
           <div className="mobile-export__side">
-            {stepTitle(app)}
+            {title}
             <div className="mobile-export__side-body">{side}</div>
           </div>
         </div>
@@ -597,6 +613,20 @@ export function MobileExport({
       </section>
     );
   };
+
+  // veyl-cli：与手机端共用同一条链接，只是把二维码换成复制按钮，不需要下载步骤。
+  const veylCliPanel = importStep(
+    { name: "veyl-cli", format: "singbox" },
+    {
+      withQr: false,
+      title: (
+        <h3 className="mobile-export__step-title">
+          {tr("mobile.veylcli.step")}
+        </h3>
+      ),
+      note: tr("mobile.veylcli.hint"),
+    },
+  );
 
   const renderRow = (
     id: RowId,
@@ -705,6 +735,12 @@ export function MobileExport({
                     {importStep(app)}
                   </>,
                 ),
+              )}
+              {renderRow(
+                VEYLCLI_ID,
+                "veyl-cli",
+                tr("mobile.veylcli.meta"),
+                veylCliPanel,
               )}
               {renderRow(
                 OTHER_ID,

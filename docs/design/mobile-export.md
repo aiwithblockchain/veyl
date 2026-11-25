@@ -1,6 +1,7 @@
 # 手机端使用：把付费节点交给 sing-box 官方客户端
 
 > 日期：2026-11-19
+> **2026-11-25 变更：** 入口与弹层改名为「在其它设备上使用」，并新增 veyl-cli（Windows / macOS）一行，只提供复制链接。其余结论不变。
 > 状态：**需求草案，待产品负责人确认**。只出文档，不改代码、不定契约、不做界面版式。
 > 上游：产品负责人 2026-11-19 口述需求；`my-servers.md` §16 / §17；`login-and-payment.md` §2；`global-config-merge.md`。
 > 外部事实：2026-11-19 取自 sing-box 官方文档（`sing-box.sagernet.org/clients/`）与 GitHub 发布记录，逐条标注核实状态。

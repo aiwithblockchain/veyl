@@ -21,13 +21,13 @@ interface Props {
   trialHint?: string | null;
   /** 旁注里的「去控制台」：切到连接页。 */
   onGoConnect?: () => void;
-  /** 登录态：未登录只留标题与一行提示，不渲染服务器行与「在手机上使用」。 */
+  /** 登录态：未登录只留标题与一行提示，不渲染服务器行与「在其它设备上使用」。 */
   signedIn?: boolean;
   /** 账户读失败（DNS / 网络 / 5xx）：左栏给「连不上」，不要写成登录提示。 */
   accountError?: boolean;
   /** 目录探针失败：未登录时同样按「控制面不可达」显示。 */
   catalogError?: boolean;
-  /** 已登录 + 至少一台节点就绪时，底部多一行「在手机上使用」。 */
+  /** 已登录 + 至少一台节点就绪时，底部多一行「在其它设备上使用」。 */
   showMobile?: boolean;
   onMobile?: (trigger: HTMLElement) => void;
   /** 标题行的同步按钮；不给就不渲染。 */
@@ -175,7 +175,7 @@ export function MyServersRail({
       </button>
     ) : null;
 
-  // 未登录：不渲染服务器行、同步与「在手机上使用」；错误态只留标题与「连不上」，
+  // 未登录：不渲染服务器行、同步与「在其它设备上使用」；错误态只留标题与「连不上」，
   // 非错误态保留底部建机入口（点击由 App 门禁到登录弹窗）。
   if (!signedIn) {
     const unreachable = Boolean(error) || accountError || catalogError;

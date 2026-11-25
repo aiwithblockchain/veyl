@@ -894,7 +894,7 @@ export const en: Record<MessageKey, string> = {
   "advanced.modeScope":
     "I'm looking at capture mode and traffic scope on Veyl's connection screen. They're currently \"{mode}\" + \"{scope}\".\n\nAnswer in two parts, using everyday situations and no jargon:\n\n1. Capture mode: in one sentence, explain the difference between Proxy mode and Tun mode; then say which to pick in these three cases —\n1) Only the browser needs to reach websites: Proxy mode.\n2) You want apps to go through it too, but you don't want the whole computer's traffic taken over, and you know how to set an app's proxy: Proxy mode works.\n3) You want every app to go through it without configuring proxies one by one: Tun mode.\n\n2. Traffic scope: Smart sends only the traffic that needs the VPN through it; everything else goes direct. Global sends all traffic through it.\n\nFinish with one sentence on what my current combination means. Only talk about these two switches; no generic tutorial. Never mention HTTP/3, QUIC, routing rules, DNS or similar terms.",
   "advanced.mobileExport":
-    "I'm in Veyl's \"Use on phone\" and want to set up the node on my phone.\nCover only two points: if the phone already has one of the apps in the list, use it to scan Veyl's QR code; if not, install one from the list first (sing-box on iPhone needs an Apple account outside mainland China), then scan the same code with it.\nDon't give a generic tutorial; only cover these two points.",
+    "I'm in Veyl's \"Use on other devices\" and want to set up the node on another device.\nCover only two kinds of devices: on a phone, if one of the listed apps is already installed, use it to scan the QR code shown for that app in Veyl; if not, install one from the list first (sing-box on iPhone needs an Apple account outside mainland China), then scan that app's own code. On a computer, use veyl-cli and paste the link to import.\nDon't give a generic tutorial; only cover these two kinds of devices.",
 
   // Default control labels sent to the AI
   "controls.connect": "Connect",
@@ -1090,7 +1090,7 @@ export const en: Record<MessageKey, string> = {
   "rail.myServers": "My servers",
   "rail.loginHint": "Sign in to see your servers here.",
   "rail.newNode": "New node",
-  "rail.useOnPhone": "Use on phone",
+  "rail.useOnPhone": "Use on other devices",
   "rail.loading": "Loading servers",
   "rail.error": "Can't reach the server. Try again later.",
   "rail.closeList": "Close server list",
@@ -1188,35 +1188,38 @@ export const en: Record<MessageKey, string> = {
   "wizard.tier.standard": "Standard",
   "wizard.tier.advanced": "Advanced",
 
-  // Use on phone
-  "mobile.title": "Use on phone",
-  "mobile.intro": "Choose the app you use on your phone; install one first if you don't have it.",
+  // Use on other devices
+  "mobile.title": "Use on other devices",
+  "mobile.intro": "Choose the device or app you use; install one first if you don't have it.",
   "mobile.recommended": "Recommended",
   "mobile.otherName": "My app isn't listed",
   "mobile.otherNote":
-    "Open any row above for a download link; the node is the same, so switching apps loses nothing.",
-  "mobile.attribution": "These apps aren't ours; Veyl only provides the node.",
+    "It's the same node across apps and devices, so switching loses nothing.",
+  "mobile.attribution": "Third-party apps in the list aren't ours; Veyl only provides the node.",
   "mobile.askAi": "Need help? Ask AI",
   "mobile.meta.singbox": "iPhone (needs an Apple account outside mainland China) / Android",
   "mobile.meta.ios": "iOS",
   "mobile.meta.androidOnly": "Android only",
   "mobile.meta.both": "iPhone / Android",
+  "mobile.veylcli.meta": "Windows / macOS",
+  "mobile.veylcli.step": "Paste the link into veyl-cli",
+  "mobile.veylcli.hint": "Paste the link into veyl-cli to import.",
   "mobile.scanWith": "Scan the code with {app} to import",
   "mobile.paidOnly":
-    "Only paid nodes you created yourself can be exported to phones. Free and trial nodes aren't included.",
+    "Only paid nodes you created yourself can be exported. Free and trial nodes aren't included.",
   "mobile.goCreate": "Create a server",
   "mobile.loadingNode": "Loading node…",
   "mobile.loginFirst": "Sign in first.",
-  "mobile.loginNote": "After signing in you can import your own node to your phone.",
+  "mobile.loginNote": "After signing in you can import your own node to other devices.",
   "mobile.login": "Sign in",
   "mobile.genFailed": "Can't create it right now.",
   "mobile.retry": "Retry",
   "mobile.qrAlt": "Import QR code",
   "mobile.regenerate": "Regenerate",
   "mobile.regenerateConfirm":
-    "After regenerating, old configs in every app on your phone stop working at the next refresh.",
+    "After regenerating, old configs on every device stop working at the next refresh.",
   "mobile.regenerated":
-    "Regenerated. Old configs in every app on your phone stop working at the next refresh.",
+    "Regenerated. Old configs on every device stop working at the next refresh.",
   "mobile.regenerateFailed": "Couldn't regenerate. The old link still works; try again later.",
   "mobile.downloadFirst": "No app yet? Download it first",
   "mobile.linkIsSecret": "The link works like a password; don't forward it.",
@@ -1238,7 +1241,7 @@ export const en: Record<MessageKey, string> = {
   "settings.account.balance": "Balance",
   "settings.account.email": "Email",
   "settings.account.loading": "Loading",
-  "settings.account.mobile": "Use on phone",
+  "settings.account.mobile": "Use on other devices",
   "settings.account.refresh": "Refresh",
   "settings.account.refreshing": "Refreshing",
   "settings.account.signedIn": "Signed in",
@@ -1594,7 +1597,7 @@ export const en: Record<MessageKey, string> = {
   "settings.advanced.rerun": "Run again",
   "settings.about.aiNote": "AI conversations go to the service you chose; configurations, nodes and logs stay on this device.",
   "settings.account.billingNote": "Balance is charged per day, separately for each server.",
-  "settings.account.mobileNote": "Download the official sing-box client and scan the code to import your node.",
+  "settings.account.mobileNote": "Import your node on a phone or computer.",
   "settings.account.view": "View",
   "settings.reset.confirmBody": "This immediately drops the current connection and undoes Veyl's network changes. Configurations and nodes aren't deleted.",
   "settings.reset.runningShort": "Resetting…",

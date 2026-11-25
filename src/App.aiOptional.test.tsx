@@ -423,7 +423,7 @@ describe("未配置 AI 的动作入口", () => {
     fireEvent.click(await within(settings).findByRole("button", { name: "查看" }));
 
     const exportDialog = await screen.findByRole("dialog", {
-      name: "在手机上使用",
+      name: "在其它设备上使用",
     });
     fireEvent.click(
       within(exportDialog).getByRole("button", { name: "不会操作？问 AI" }),
@@ -433,7 +433,7 @@ describe("未配置 AI 的动作入口", () => {
       await screen.findByRole("dialog", { name: "还没有配置 AI 服务" }),
     ).toBeTruthy();
     // 被拦下：既不关导出层，也不关设置。
-    expect(screen.getByRole("dialog", { name: "在手机上使用" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "在其它设备上使用" })).toBeTruthy();
     expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
@@ -442,7 +442,7 @@ describe("未配置 AI 的动作入口", () => {
         screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
       ).toBeNull(),
     );
-    expect(screen.getByRole("dialog", { name: "在手机上使用" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "在其它设备上使用" })).toBeTruthy();
     expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
   }, 15_000);
 
@@ -456,7 +456,7 @@ describe("未配置 AI 的动作入口", () => {
     fireEvent.click(within(settings).getByRole("tab", { name: "账户" }));
     fireEvent.click(await within(settings).findByRole("button", { name: "查看" }));
     const exportDialog = await screen.findByRole("dialog", {
-      name: "在手机上使用",
+      name: "在其它设备上使用",
     });
     fireEvent.click(
       within(exportDialog).getByRole("button", { name: "不会操作？问 AI" }),
@@ -469,7 +469,7 @@ describe("未配置 AI 的动作入口", () => {
         screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
       ).toBeNull(),
     );
-    expect(screen.getByRole("dialog", { name: "在手机上使用" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "在其它设备上使用" })).toBeTruthy();
     expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   }, 15_000);
 

@@ -68,6 +68,7 @@ const APP_NAMES = [
   "Shadowrocket",
   "Clash Meta for Android",
   "Hiddify",
+  "veyl-cli",
   "我的 App 不在列表里",
 ];
 
@@ -127,7 +128,7 @@ function setup(bridge: AgentBridge) {
       onAskAi={onAskAi}
     />,
   );
-  const dialog = screen.getByRole("dialog", { name: "在手机上使用" });
+  const dialog = screen.getByRole("dialog", { name: "在其它设备上使用" });
   return { dialog, onClose, onLogin, onGoServers, onAskAi };
 }
 
@@ -195,19 +196,19 @@ describe("MobileExport：英文界面", () => {
       />,
     );
     expect(
-      await screen.findByRole("dialog", { name: "Use on phone" }),
+      await screen.findByRole("dialog", { name: "Use on other devices" }),
     ).toBeTruthy();
-    expect(screen.getByText("Use on phone")).toBeTruthy();
+    expect(screen.getByText("Use on other devices")).toBeTruthy();
   });
 });
 
-describe("在手机上使用：按 App 分类", () => {
-  it("默认一行都不展开：五行顺序、引导句与归属句", async () => {
+describe("在其它设备上使用：按设备或 App 分类", () => {
+  it("默认一行都不展开：六行顺序、引导句与归属句", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
     expect(
-      within(dialog).getByText("选你手机上用的 App，还没有就先装一个。"),
+      within(dialog).getByText("选你要用的设备或 App，还没有就先装一个。"),
     ).toBeTruthy();
     const names = Array.from(
       dialog.querySelectorAll(".mobile-export__app-name"),
@@ -215,7 +216,9 @@ describe("在手机上使用：按 App 分类", () => {
     expect(names).toEqual(APP_NAMES);
     expect(dialog.querySelectorAll(".mobile-export__panel")).toHaveLength(0);
     expect(
-      within(dialog).getByText("这些 App 不是我们开发的，Veyl 只提供节点。"),
+      within(dialog).getByText(
+        "列表里的第三方 App 不是我们开发的，Veyl 只提供节点。",
+      ),
     ).toBeTruthy();
 
     await waitFor(() => expect(bridge.mobileExportGet).toHaveBeenCalled());
@@ -293,6 +296,28 @@ describe("在手机上使用：按 App 分类", () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
       SHADOWROCKET_URL,
     );
+  });
+
+  it("veyl-cli：只有复制链接，没有二维码与下载步骤", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => {}) },
+    });
+    const bridge = makeBridge(async () => OK);
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    expect(within(dialog).getByText("在 veyl-cli 里粘贴链接")).toBeTruthy();
+    expect(
+      within(dialog).queryByRole("img", { name: "导入二维码" }),
+    ).toBeNull();
+    expect(dialog.querySelector(".mobile-export__platform")).toBeNull();
+
+    const copy = await within(dialog).findByRole("button", {
+      name: "复制链接",
+    });
+    fireEvent.click(copy);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(SINGBOX_URL);
   });
 
   it("展开后是两个编号步骤：① 先下载、② 再导入，标题带 App 名", async () => {
@@ -483,7 +508,7 @@ describe("在手机上使用：按 App 分类", () => {
     expect(body.contains(footer)).toBe(false);
     expect(footer.contains(importImg)).toBe(false);
     expect(footer.textContent).toContain(
-      "这些 App 不是我们开发的，Veyl 只提供节点。",
+      "列表里的第三方 App 不是我们开发的，Veyl 只提供节点。",
     );
     expect(
       within(footer).getByRole("button", { name: "不会操作？问 AI" }),
@@ -516,7 +541,7 @@ describe("在手机上使用：按 App 分类", () => {
       ".mobile-export__panel",
     ) as HTMLElement;
     expect(panel.textContent).toContain(
-      "上面每一行点开都有下载入口；节点是同一份，换 App 不会丢。",
+      "节点是同一份，换 App 或设备不会丢。",
     );
     expect(within(panel).queryAllByRole("button")).toHaveLength(0);
     expect(within(panel).queryByRole("link")).toBeNull();
@@ -565,7 +590,7 @@ describe("在手机上使用：按 App 分类", () => {
     fireEvent.click(row(dialog, "sing-box"));
     expect(await within(dialog).findByText("先登录。")).toBeTruthy();
     expect(
-      within(dialog).getByText("登录后可以把自己的节点导入手机。"),
+      within(dialog).getByText("登录后可以把自己的节点导入其它设备。"),
     ).toBeTruthy();
     expect(within(dialog).queryByRole("img", { name: "导入二维码" })).toBeNull();
     expect(
@@ -585,7 +610,7 @@ describe("在手机上使用：按 App 分类", () => {
     fireEvent.click(row(dialog, "Hiddify"));
     expect(
       await within(dialog).findByText(
-        "手机端只能导出你自己创建的付费节点。免费和试用节点不包含。",
+        "客户端只导出你自己创建的付费节点。免费和试用节点不包含。",
       ),
     ).toBeTruthy();
     // ① 装 App 与服务器状态无关：下载码与链接照常。
@@ -766,7 +791,7 @@ describe("在手机上使用：按 App 分类", () => {
     );
     expect(
       within(dialog).getByText(
-        "重新生成后，手机上所有 App 的旧配置下次更新时失效。",
+        "重新生成后，所有设备上的旧配置下次更新时失效。",
       ),
     ).toBeTruthy();
     const cancel = within(dialog).getByRole("button", { name: "取消" });
@@ -781,7 +806,7 @@ describe("在手机上使用：按 App 分类", () => {
     expect(bridge.mobileExportRotate).not.toHaveBeenCalled();
   });
 
-  it("确认重新生成：调用命令并说明作用域是「所有 App」", async () => {
+  it("确认重新生成：调用命令并说明作用域是「所有设备」", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
 
@@ -796,7 +821,7 @@ describe("在手机上使用：按 App 分类", () => {
     );
     expect(
       await within(dialog).findByText(
-        "已重新生成；手机上所有 App 的旧配置下次更新时失效。",
+        "已重新生成；所有设备上的旧配置下次更新时失效。",
       ),
     ).toBeTruthy();
   });

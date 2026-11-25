@@ -100,7 +100,7 @@ interface Props {
   onLogin?: () => void;
   onTopUp?: () => void;
   onViewBills?: () => void;
-  /** 「在手机上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
+  /** 「在其它设备上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
   mobileExportOpen?: boolean;
   /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
   trapPaused?: boolean;
@@ -1229,7 +1229,7 @@ export function Settings({
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
-      // 「在手机上使用」弹层在上层：Esc 归它，不关设置。
+      // 「在其它设备上使用」弹层在上层：Esc 归它，不关设置。
       if (mobileExportOpen) return;
       // 重置弹层在上层：先关它，运行中则完全忽略。
       if (resetPhase !== "idle") {

@@ -321,7 +321,7 @@ describe("进行中行的计时", () => {
   });
 });
 
-describe("左栏底部的在手机上使用", () => {
+describe("左栏底部的在其它设备上使用", () => {
   function renderWithMobile(over: {
     showMobile?: boolean;
     compact?: boolean;
@@ -353,7 +353,7 @@ describe("左栏底部的在手机上使用", () => {
     const row = container.querySelector<HTMLButtonElement>(".rail__action-row");
     expect(row).toBeTruthy();
     expect(row?.getAttribute("aria-haspopup")).toBe("dialog");
-    expect(row?.textContent).toBe("在手机上使用");
+    expect(row?.textContent).toBe("在其它设备上使用");
     row?.click();
     expect(onMobile).toHaveBeenCalledTimes(1);
     expect(onMobile.mock.calls[0][0]).toBe(row);

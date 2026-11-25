@@ -1371,7 +1371,7 @@ describe("左栏门禁", () => {
     return screen.findByRole("complementary", { name: "服务器列表" });
   }
 
-  it("已登录且有就绪服务器：左栏有服务器行与「在手机上使用」", async () => {
+  it("已登录且有就绪服务器：左栏有服务器行与「在其它设备上使用」", async () => {
     prepare([SERVER]);
 
     const rail = await openServers();
