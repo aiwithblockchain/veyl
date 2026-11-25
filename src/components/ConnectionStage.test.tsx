@@ -1587,6 +1587,16 @@ describe("混池节点卡：试用 + 自建", () => {
     source: "seed",
     created_at: 0,
   };
+  const CUSTOM: ConfigDetail["nodes"][number] = {
+    node_id: "c3",
+    name: "自建 03",
+    server: "192.0.2.30",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "manual",
+    created_at: 0,
+  };
 
   function configWith(nodes: ConfigDetail["nodes"]): ConfigDetail {
     return {
@@ -1612,7 +1622,7 @@ describe("混池节点卡：试用 + 自建", () => {
 
     const groups = screen.getAllByRole("group");
     expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
-      "你的服务器",
+      "我的服务器",
       "免费节点",
     ]);
     expect(within(groups[0]).getByText("东京 1 号")).toBeTruthy();
@@ -1624,23 +1634,79 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.queryByText(/7 天试用/)).toBeNull();
   });
 
-  it("只有一类时不出现任何组标题", async () => {
+  it("只有一类时只出现那一组的标题，组头不再重复试用 hint", () => {
     const { rerender } = renderStage();
-    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(
+      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
+    ).toEqual(["免费节点"]);
     expect(screen.getByText("2 个节点 · 7 天试用")).toBeTruthy();
+    expect(screen.queryByText("试用中")).toBeNull();
 
     rerender(stageElement({ config: configWith([OWNED]) }));
-    expect(screen.queryAllByRole("group")).toHaveLength(0);
-    expect(screen.queryByText("你的服务器")).toBeNull();
+    expect(
+      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
+    ).toEqual(["我的服务器"]);
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("免费组节点被清理后只剩自建：整组与组标题一起消失", () => {
+  it("只有自定义节点时只出现「你自己的节点」一组，行内保留「自定义」小标", () => {
+    renderStage({ config: configWith([CUSTOM]) });
+
+    const groups = screen.getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
+      "你自己的节点",
+    ]);
+    expect(within(groups[0]).getByText("自建 03")).toBeTruthy();
+    expect(within(groups[0]).getByText("自定义")).toBeTruthy();
+  });
+
+  it("三类同池：服务器 → 自己的节点 → 免费，自定义小标只在第二组", () => {
+    renderStage({ config: configWith([FREE, CUSTOM, OWNED]) });
+
+    const groups = screen.getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
+      "我的服务器",
+      "你自己的节点",
+      "免费节点",
+    ]);
+    expect(within(groups[0]).getByText("东京 1 号")).toBeTruthy();
+    expect(within(groups[0]).queryByText("自定义")).toBeNull();
+    expect(within(groups[1]).getByText("自建 03")).toBeTruthy();
+    expect(within(groups[1]).getByText("自定义")).toBeTruthy();
+    expect(within(groups[2]).getByText("洛杉矶 02")).toBeTruthy();
+    expect(within(groups[2]).queryByText("自定义")).toBeNull();
+  });
+
+  it("三类 + 待接入行：待接入行排在「我的服务器」组末尾，另外两组不受影响", () => {
+    renderStage({
+      config: configWith([FREE, CUSTOM, OWNED]),
+      pendingServerNodes: [{ nodeId: "local_pending", name: "待接入机器" }],
+    });
+
+    const groups = screen.getAllByRole("group");
+    expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual([
+      "我的服务器",
+      "你自己的节点",
+      "免费节点",
+    ]);
+    const ownedOptions = groups[0].querySelectorAll('[role="option"]');
+    expect(ownedOptions).toHaveLength(2);
+    expect(ownedOptions[0].textContent).toContain("东京 1 号");
+    expect(ownedOptions[ownedOptions.length - 1].textContent).toContain("待接入机器");
+    expect(groups[1].querySelectorAll('[role="option"]')).toHaveLength(1);
+    expect(within(groups[1]).getByText("自建 03")).toBeTruthy();
+    expect(groups[2].querySelectorAll('[role="option"]')).toHaveLength(1);
+    expect(within(groups[2]).getByText("洛杉矶 02")).toBeTruthy();
+  });
+
+  it("免费组节点被清理后只剩自建：免费组整组消失", () => {
     const { rerender } = renderStage({ config: configWith([OWNED, FREE]) });
     expect(screen.getAllByRole("group")).toHaveLength(2);
 
     rerender(stageElement({ config: configWith([OWNED]) }));
-    expect(screen.queryAllByRole("group")).toHaveLength(0);
+    expect(
+      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
+    ).toEqual(["我的服务器"]);
     expect(screen.queryByText("免费节点")).toBeNull();
     expect(screen.queryByText("试用中")).toBeNull();
     expect(screen.getByText("东京 1 号")).toBeTruthy();
@@ -1988,18 +2054,18 @@ describe("待接入的服务器节点", () => {
     };
   }
 
-  it("渲染成禁用行，位于「你的服务器」组末尾且带「重新连接后可用」", () => {
+  it("渲染成禁用行，位于「我的服务器」组末尾且带「重新连接后可用」", () => {
     const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
     renderStage({
       // node_count 故意写 3：顶部计数只能来自可用节点数，不能读这个字段。
       config: configWith([FREE, OWNED], { node_count: 3 }),
-      pendingServerNodes: [{ nodeId: "local_pending", name: "我的服务器4gUQ" }],
+      pendingServerNodes: [{ nodeId: "local_pending", name: "你的服务器4gUQ" }],
       onSwitchNode,
     });
 
-    const ownedGroup = screen.getByRole("group", { name: "你的服务器" });
+    const ownedGroup = screen.getByRole("group", { name: "我的服务器" });
     const pendingRow = within(ownedGroup)
-      .getByText("我的服务器4gUQ")
+      .getByText("你的服务器4gUQ")
       .closest(".stage-node") as HTMLElement;
     expect(pendingRow).toBeTruthy();
     // 灰显、不可点、不是按钮：选中态只看配置里的节点。
@@ -2174,7 +2240,7 @@ describe("隧道在跑但没有可用节点", () => {
   it("0 个节点但有待接入行：不写「这条配置没有节点了」", () => {
     renderStage({
       config: EMPTY,
-      pendingServerNodes: [{ nodeId: "local_pending", name: "我的服务器4gUQ" }],
+      pendingServerNodes: [{ nodeId: "local_pending", name: "你的服务器4gUQ" }],
     });
 
     expect(screen.queryByText("这条配置没有节点了")).toBeNull();

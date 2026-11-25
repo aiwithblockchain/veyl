@@ -1,8 +1,8 @@
 # 连接页节点列表：按来源分三组
 
 > 日期：2026-11-24
-> 状态：**已定，待实现**。
-> 前置：等「节点添加」批次（`NodeImportDialog` 等）提交后再动 `ConnectionStage.tsx`，避免同文件两份实现冲突。
+> 状态：**已实现**（2026-11-25）。
+> 前置：等「节点添加」批次（`NodeImportDialog` 等）提交后再动 `ConnectionStage.tsx`，避免同文件两份实现冲突。已解除（33653a1）。
 > 上游：`docs/design/node-import-ui.md` §7（两类节点的能力边界）。
 
 ---

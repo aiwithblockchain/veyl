@@ -562,10 +562,13 @@ export function ConnectionStage({
 
   const nodeEntries = nodes.map((node, index) => ({ node, index }));
   const freeEntries = nodeEntries.filter(({ node }) => node.source === "seed");
-  const ownedEntries = nodeEntries.filter(({ node }) => node.source !== "seed");
+  const customEntries = nodeEntries.filter(
+    ({ node }) => node.source === "url" || node.source === "manual",
+  );
+  const ownedEntries = nodeEntries.filter(({ node }) => node.source === "owned");
   /**
    * 待接入行：与配置里的节点按 id 去重——attach 完成后同一节点只留正常行，
-   * 不能既在「你的服务器」里可点、又灰显一份。
+   * 不能既在「我的服务器」里可点、又灰显一份。
    */
   const pendingEntries = useMemo(() => {
     const configured = new Set((config?.nodes ?? []).map((node) => node.node_id));
@@ -578,16 +581,17 @@ export function ConnectionStage({
     }
     return result;
   }, [config?.nodes, pendingServerNodes]);
-  /** 两类同池才分组；只有一类时与单来源的卡片完全一致。 */
-  const mixedSources =
-    freeEntries.length > 0 &&
-    (ownedEntries.length > 0 || pendingEntries.length > 0);
   const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
 
   const trialEnded = trialPhase(null, trialExpiresAt, now).kind === "ended";
 
   /** 免费组标题右侧：与「我的服务器」空态共用同一条取整规则；已过期与无时间分开说。 */
   const trialHint = trialGroupHint(null, trialExpiresAt, now);
+  /** 只渲染一组时，组头的试用口径与卡头重复，不再显示 hint。 */
+  const groupCount =
+    (ownedEntries.length > 0 || pendingEntries.length > 0 ? 1 : 0) +
+    (customEntries.length > 0 ? 1 : 0) +
+    (freeEntries.length > 0 ? 1 : 0);
 
   /** 试用到期但 Host 还没清池（最多约 5 分钟）：免费行就地拒绝，避免先连上再被断开。 */
   const isExpiredSeed = (node: { source: string }) =>
@@ -988,32 +992,7 @@ export function ConnectionStage({
             ) : null}
           </header>
           <div className="stage-card__nodes" role="listbox" aria-label={t("console.aria.nodes")}>
-            {mixedSources ? (
-              <>
-                <div
-                  className="stage-node-group"
-                  role="group"
-                  aria-label={t("console.group.owned")}
-                >
-                  <div className="stage-node-group__head">
-                    <span>{t("console.group.owned")}</span>
-                  </div>
-                  {ownedEntries.map(renderNode)}
-                  {pendingEntries.map(renderPendingNode)}
-                </div>
-                <div
-                  className="stage-node-group"
-                  role="group"
-                  aria-label={t("console.group.free")}
-                >
-                  <div className="stage-node-group__head">
-                    <span>{t("console.group.free")}</span>
-                    <span className="stage-node-group__hint">{trialHint}</span>
-                  </div>
-                  {freeEntries.map(renderNode)}
-                </div>
-              </>
-            ) : ownedEntries.length === 0 && pendingEntries.length > 0 ? (
+            {ownedEntries.length > 0 || pendingEntries.length > 0 ? (
               <div
                 className="stage-node-group"
                 role="group"
@@ -1022,14 +1001,37 @@ export function ConnectionStage({
                 <div className="stage-node-group__head">
                   <span>{t("console.group.owned")}</span>
                 </div>
+                {ownedEntries.map(renderNode)}
                 {pendingEntries.map(renderPendingNode)}
               </div>
-            ) : (
-              <>
-                {nodeEntries.map(renderNode)}
-                {pendingEntries.map(renderPendingNode)}
-              </>
-            )}
+            ) : null}
+            {customEntries.length > 0 ? (
+              <div
+                className="stage-node-group"
+                role="group"
+                aria-label={t("console.group.custom")}
+              >
+                <div className="stage-node-group__head">
+                  <span>{t("console.group.custom")}</span>
+                </div>
+                {customEntries.map(renderNode)}
+              </div>
+            ) : null}
+            {freeEntries.length > 0 ? (
+              <div
+                className="stage-node-group"
+                role="group"
+                aria-label={t("console.group.free")}
+              >
+                <div className="stage-node-group__head">
+                  <span>{t("console.group.free")}</span>
+                  {groupCount > 1 ? (
+                    <span className="stage-node-group__hint">{trialHint}</span>
+                  ) : null}
+                </div>
+                {freeEntries.map(renderNode)}
+              </div>
+            ) : null}
           </div>
           {confirmFor ? (
             <div

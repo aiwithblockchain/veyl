@@ -6179,7 +6179,7 @@ details[open] > .settings-fold__summary::before {
 
 .stage-card__nodes { display: flex; flex-direction: column; }
 
-/* 混合来源时的分组标题；单来源不渲染，所以这里只服务两类同池的情形。 */
+/* 按来源分三组：我的服务器 / 你自己的节点 / 免费节点；空组不渲染。 */
 .stage-node-group {
   display: flex;
   flex-direction: column;

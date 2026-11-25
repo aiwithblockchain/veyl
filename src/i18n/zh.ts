@@ -666,7 +666,8 @@ export const zh = {
   "console.probe.mixed": "{count} 个没测成。",
   "console.selfOwnedUnreachable":
     "连不上不一定是机器的问题，你当前的网络到那个地区的线路不通很常见。可以销毁重建，当天已扣的费用不退。",
-  "console.group.owned": "你的服务器",
+  "console.group.owned": "我的服务器",
+  "console.group.custom": "你自己的节点",
   "console.group.free": "免费节点",
   "console.empty": "这条配置没有节点了",
   "console.primary.disconnectAria": "断开连接",

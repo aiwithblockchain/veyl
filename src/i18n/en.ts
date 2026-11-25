@@ -696,7 +696,8 @@ export const en: Record<MessageKey, string> = {
   "console.probe.mixed": "{count} couldn't be tested.",
   "console.selfOwnedUnreachable":
     "Not being able to connect doesn't necessarily mean the machine is at fault; your current network often can't reach that region. You can destroy and rebuild, but the day's charge isn't refunded.",
-  "console.group.owned": "Your servers",
+  "console.group.owned": "My servers",
+  "console.group.custom": "Your own nodes",
   "console.group.free": "Free nodes",
   "console.empty": "This configuration has no nodes left",
   "console.primary.disconnectAria": "Disconnect",
