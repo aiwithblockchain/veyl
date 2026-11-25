@@ -926,24 +926,28 @@ mod memory_tests {
     }
 
     /// 解释入口的回传不是选择：先记「等解释后选择」，真实回答再清掉。
+    ///
+    /// `request_id` 在生产里全局唯一（`req_<纳秒>_<序号>`），`clear_request_markers`
+    /// 也只按它过滤——各用例必须用互不相同的 `request_id`。跨会话共用同一个
+    /// 会让一个用例的 `cleanup_request` 清掉另一个用例刚记下的标记。
     #[tokio::test]
     async fn explaining_a_setting_marks_a_pending_explanation() {
         let (event, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
-        register("ses_explain", "req_explain", event);
+        register("ses_explain", "req_explain_once", event);
         let id = list_pending("ses_explain")["questions"][0]["question_id"]
             .as_str()
             .unwrap()
             .to_string();
 
-        assert!(!explain_pending("ses_explain", "req_explain"));
+        assert!(!explain_pending("ses_explain", "req_explain_once"));
         reply("ses_explain", &id, EXPLAIN_ANSWER).unwrap();
-        assert!(explain_pending("ses_explain", "req_explain"));
+        assert!(explain_pending("ses_explain", "req_explain_once"));
         assert!(
             !explain_pending("ses_explain", "req_other"),
             "只属于当前请求"
         );
 
-        cleanup_request("ses_explain", "req_explain");
+        cleanup_request("ses_explain", "req_explain_once");
     }
 
     /// 中英两种解释原文都触发解释语义，都不算真实选择、也不构成节点同意。
@@ -954,25 +958,27 @@ mod memory_tests {
             ("ses_explain_en", EXPLAIN_ANSWER_EN),
             ("ses_explain_en_spaced", "  Explain what this setting means  "),
         ] {
+            // 每轮自己的 request_id：与其它用例共用会在并发跑时被对方的 cleanup 清掉。
+            let request = format!("req_{session}");
             let (event, _rx) = event("怎么接管？", &["TUN 模式", "Proxy 模式"]);
-            register(session, "req_explain", event);
+            register(session, &request, event);
             let id = list_pending(session)["questions"][0]["question_id"]
                 .as_str()
                 .unwrap()
                 .to_string();
 
-            assert!(!explain_pending(session, "req_explain"));
+            assert!(!explain_pending(session, &request));
             reply(session, &id, answer).unwrap();
             assert!(
-                explain_pending(session, "req_explain"),
+                explain_pending(session, &request),
                 "{answer:?} 应触发解释语义"
             );
             assert!(
-                !seed_consent_granted(session, "req_explain"),
+                !seed_consent_granted(session, &request),
                 "解释不是节点来源同意"
             );
 
-            cleanup_request(session, "req_explain");
+            cleanup_request(session, &request);
         }
     }
 
