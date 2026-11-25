@@ -461,7 +461,10 @@ async fn tray_state_loop<R: Runtime>(
             Some(running) = probe_rx.recv(), if probing => {
                 probing = false;
                 probe_started = None;
-                log::debug!("托盘：TUN 探测返回 running={running}");
+                // 只有值变了才留痕：这条每拍都打会把 debug 日志淹掉。
+                if tun_running_known != Some(running) {
+                    log::debug!("托盘：TUN running {tun_running_known:?} → {running}");
+                }
                 tun_running_known = Some(running);
             }
             _ = tokio::time::sleep_until(
@@ -483,6 +486,8 @@ async fn tray_state_loop<R: Runtime>(
                         "托盘：读运行时状态超过 {TRAY_STATUS_TIMEOUT:?}，保持上一个图标"
                     ),
                 }
+                // 兜底这一拍也要探 TUN：helper 被外部杀掉、sing-box 自己崩溃都不经过
+                // services 层，没有状态事件，这一拍是「隧道自己死掉」唯一能被发现的路径。
                 probe_wanted = true;
             }
         }

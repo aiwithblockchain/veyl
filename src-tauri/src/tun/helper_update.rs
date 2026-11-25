@@ -22,6 +22,13 @@ pub const HELPER_BINARY_NAME: &str = "veyl-helper";
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// 等隧道断开再换 helper 时，多久问一次后端。
+///
+/// 必须独立于 `POLL_INTERVAL`：那个同时被 `poll_until_fresh` 用，10 秒期限内
+/// 要保持 1 秒粒度。这条等待是**无上限**的（pending-until-disconnect：TUN
+/// 一直连着就一直等），所以每分钟只该问几次后端——每次都走 XPC `status`，
+/// 1 秒一拍会在稳态持续几小时（2026-11-25 Tess 定位到这条噪音）。
+const DISCONNECT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// TUN 断开后再等这么久才换 helper，避开连接刚结束的清理窗口。
 const PENDING_AFTER_DISCONNECT: Duration = Duration::from_secs(5);
 const PERIODIC_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
@@ -551,8 +558,8 @@ impl HelperUpdater {
     /// TUN（或自己点「重启」）时再授权。
     pub fn check_and_upgrade(&self) {
         // 每轮都续租：helper 被外部重启/空闲退出过也能自动补上。
-        // 必须用 renew（先建后放）：refresh 先放旧的，续不上的那一瞬 helper 会看到
-        // 0 条租约，正在跑的隧道就可能被按「租约丢失」拆掉。
+        // 必须用 renew（先建后放）：先放后建的那一瞬 helper 会看到 0 条租约，
+        // 正在跑的隧道就可能被按「租约丢失」拆掉。
         let _ = self.renew_presence();
         let info = self.info();
         if info.state != HelperState::Stale {
@@ -561,12 +568,15 @@ impl HelperUpdater {
 
         if self.tun_running() {
             log::info!("helper 需要升级，TUN 正在运行；等断开 5 秒后执行");
+            // 没有上限：TUN 一直连着就一直等，用户断开满 5 秒后才换 helper
+            // （pending-until-disconnect，§3.4）。因此按 `DISCONNECT_POLL_INTERVAL`
+            // 慢拍，别用 1 秒的 `POLL_INTERVAL`——那是 start 升级判定的粒度。
             let mut gate = PendingGate::default();
             loop {
                 if gate.ready(self.tun_running(), Instant::now()) {
                     break;
                 }
-                std::thread::sleep(POLL_INTERVAL);
+                std::thread::sleep(DISCONNECT_POLL_INTERVAL);
             }
             // 等待期间可能已经换过：再判一次，避免无谓重启。
             if self.info().state == HelperState::Running {
