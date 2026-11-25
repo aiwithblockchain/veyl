@@ -719,6 +719,22 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
   });
 
+  it("设置 › 连接的新建节点直接进舞台，不打开右栏", async () => {
+    signInForWizard();
+    await renderApp();
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    const dialog = await screen.findByRole("dialog", { name: "设置" });
+    fireEvent.click(within(dialog).getByRole("tab", { name: "连接" }));
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "新建节点" }),
+    );
+
+    await screen.findByRole("heading", { name: "新建节点" });
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
+    expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
+  }, 15_000);
+
   it("未登录点新建节点：弹登录，不打开向导", async () => {
     await renderApp();
     // 等账户读完（默认设备身份 = 未登录），再点建机入口。

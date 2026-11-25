@@ -1557,7 +1557,7 @@ export const en: Record<MessageKey, string> = {
   "settings.provider.localHint": "Local Ollama needs no key; http:// only allows localhost / 127.0.0.1.",
   "settings.connection.modeNote": "Proxy mode only covers apps with a proxy configured; Tun mode captures all traffic. Switching briefly drops the current connection.",
   "settings.connection.scopeNote": "Smart only routes the traffic that needs it; Global routes everything.",
-  "settings.connection.noConfig": "No configuration yet. Add a node on the Connection screen first.",
+  "settings.connection.noConfig": "No node yet.",
   "settings.connection.switch": "Switch",
   "settings.sync.rowLabel": "Node config sync",
   "settings.sync.interval": "Sync interval",

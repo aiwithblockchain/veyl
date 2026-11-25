@@ -1486,7 +1486,7 @@ export const zh = {
   "settings.provider.localHint": "本机 Ollama 可免 Key；http 仅允许 localhost / 127.0.0.1。",
   "settings.connection.modeNote": "Proxy 模式只给设了代理的软件用；Tun 模式接管全部流量。切换会短暂断开当前连接。",
   "settings.connection.scopeNote": "智能只让需要的流量走节点，全局让所有流量都走。",
-  "settings.connection.noConfig": "还没有配置。先在连接屏加一个节点。",
+  "settings.connection.noConfig": "还没有节点。",
   "settings.connection.switch": "切换",
   "settings.sync.rowLabel": "节点配置同步",
   "settings.sync.interval": "同步间隔",

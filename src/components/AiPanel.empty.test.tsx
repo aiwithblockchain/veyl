@@ -55,7 +55,6 @@ function renderPanel(over: {
       aiProviderName="DeepSeek"
       hasEverConnected
       hasConfigs
-      focusSignal={0}
       question={over.question ?? null}
       onSelectSession={noop}
       onNewSession={over.onNewSession ?? noop}
@@ -181,7 +180,6 @@ describe("对话空态的预制问题", () => {
         aiProviderName="DeepSeek"
         hasEverConnected
         hasConfigs
-        focusSignal={0}
         onSelectSession={noop}
         onNewSession={noop}
         onRenameSession={asyncOk}
@@ -207,7 +205,6 @@ describe("对话空态的预制问题", () => {
         aiProviderName="DeepSeek"
         hasEverConnected
         hasConfigs
-        focusSignal={0}
         onSelectSession={noop}
         onNewSession={noop}
         onRenameSession={asyncOk}

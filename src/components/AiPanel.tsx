@@ -40,8 +40,6 @@ interface Props {
   hasConfigs: boolean;
   /** 只有 client / no_nodes 屏展示预制问题；其它屏不显示。 */
   presetsVisible?: boolean;
-  /** 递增这个值会把焦点移到输入框，并切回对话页。 */
-  focusSignal: number;
   /** 当前会话待回答的提问；普通提问渲染在消息流末尾。 */
   question?: PendingQuestion | null;
   /** 非空 = 提问不属于当前屏幕：卡片折叠成这一行只读提示。 */
@@ -111,7 +109,6 @@ export function AiPanel({
   hasEverConnected,
   hasConfigs,
   presetsVisible = true,
-  focusSignal,
   question = null,
   questionAwayText = null,
   questionExpired = false,
@@ -147,10 +144,6 @@ export function AiPanel({
   const editRef = useRef<HTMLInputElement>(null);
   const confirmRef = useRef<HTMLDivElement>(null);
   useFocusTrap(Boolean(confirming), confirmRef);
-
-  useEffect(() => {
-    if (focusSignal > 0) setView("chat");
-  }, [focusSignal]);
 
   useEffect(() => {
     if (!editingId) return;
@@ -403,7 +396,6 @@ export function AiPanel({
             onDisplayAction={onDisplayAction}
             hasKey={aiReady}
             onConfigureKey={onConfigureKey}
-            focusSignal={focusSignal}
             focusMessagesSignal={messagesFocusSignal}
             composerDraft={composerDraft}
             onComposerDraftChange={onComposerDraftChange}
@@ -471,7 +463,6 @@ export function AiPanel({
               onStop={onStop}
               disabled={!aiReady}
               onConfigure={onConfigureKey}
-              focusSignal={focusSignal}
               value={composerDraft}
               onValueChange={onComposerDraftChange}
             />

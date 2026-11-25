@@ -186,10 +186,10 @@ describe("连接 tab", () => {
     await waitFor(() => expect(onSetRoutingMode).toHaveBeenCalledWith("proxy_all"));
   });
 
-  it("没有配置时只留指路和新建链接，不显示端口", async () => {
+  it("没有节点时只说一句，并给新建入口，不显示端口", async () => {
     const onNewConfig = vi.fn();
     renderSettings(makeBridge(), { connectMode: null, configId: null, onNewConfig });
-    expect(await screen.findByText(/还没有配置/)).toBeTruthy();
+    expect(await screen.findByText(/^还没有节点。/)).toBeTruthy();
     expect(screen.queryByText("本地代理端口")).toBeNull();
     expect(document.querySelector(".seed-refresh")).toBeNull();
 

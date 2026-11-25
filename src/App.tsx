@@ -691,7 +691,6 @@ export default function App() {
     configId: string;
     mode: ConfigRouteMode;
   } | null>(null);
-  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   // 运行时状态的唯一权威：App 与 useVpnSession 共用同一份，避免两个实例的时钟分叉。
   const runtimeAuthorityRef = useRef(createRuntimeAuthority());
   const vpn = useVpnSession(
@@ -2097,12 +2096,6 @@ export default function App() {
     setAiUnread(false);
   };
 
-  // 「新建节点」暂由 AI 接手：打开右栏并给输入框焦点，后续流程下一阶段接。
-  const handleAskAiFromConsole = () => {
-    openAssistant();
-    setComposerFocusSignal((value) => value + 1);
-  };
-
   // 三个「问 AI」入口共用：连接页两个 chip、设置页「咨询 AI」、新建节点向导的「让 AI 帮我选」。
   // 未配置时先弹告警；面板保持收起，取消后不留痕迹。返回 false = 被拦下。
   const askAiInPanel = (prompt: string): boolean => {
@@ -2933,7 +2926,6 @@ export default function App() {
       hasEverConnected={hasEverConnected}
       hasConfigs={vpn.configs.length > 0}
       presetsVisible={uiScreen === "client" || uiScreen === "no_nodes"}
-      focusSignal={composerFocusSignal}
       onSelectSession={handleSelectSession}
       onNewSession={() => dispatch({ type: "new_session" })}
       onRenameSession={handleRenameSession}
@@ -3410,7 +3402,7 @@ export default function App() {
         onSetConnectMode={handleSetConnectMode}
         onNewConfig={() => {
           setSettingsOpen(false);
-          handleAskAiFromConsole();
+          openNewNode(destination === "servers" ? "servers" : "client");
         }}
         onClose={closeSettings}
         onRestartOnboarding={() => {

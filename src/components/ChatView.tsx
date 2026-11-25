@@ -29,8 +29,6 @@ interface Props {
   onDisplayAction?: (action: ToolDisplayAction) => Promise<DisplayActionOutcome>;
   hasKey: boolean;
   onConfigureKey: () => void;
-  /** 递增这个值会把焦点移到输入框。 */
-  focusSignal?: number;
   /** 递增这个值会把焦点移到消息流（空态点预制问题后）。 */
   focusMessagesSignal?: number;
   /** 输入框草稿由上层持有，重挂载不丢。 */
@@ -53,7 +51,6 @@ export function ChatView({
   onDisplayAction,
   hasKey,
   onConfigureKey,
-  focusSignal = 0,
   focusMessagesSignal = 0,
   composerDraft,
   onComposerDraftChange,
@@ -126,7 +123,6 @@ export function ChatView({
         onStop={onStop}
         disabled={!hasKey}
         onConfigure={onConfigureKey}
-        focusSignal={focusSignal}
         value={composerDraft}
         onValueChange={onComposerDraftChange}
       />

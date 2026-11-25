@@ -12,8 +12,6 @@ interface Props {
   /** 没有可用 AI 时禁用输入，并给出配置入口。 */
   disabled?: boolean;
   onConfigure?: () => void;
-  /** 递增这个值会把焦点移到输入框。 */
-  focusSignal?: number;
   /** 受控草稿：传入时由上层持有，组件重挂载也不丢；不传则自己保存。 */
   value?: string;
   onValueChange?: (text: string) => void;
@@ -27,7 +25,6 @@ export function Composer({
   questionPending = false,
   disabled = false,
   onConfigure,
-  focusSignal = 0,
   value: controlledValue,
   onValueChange,
 }: Props) {
@@ -48,11 +45,6 @@ export function Composer({
   const blockedTimerRef = useRef<number | null>(null);
   // 提问待回答时请求仍挂着，但输入框是用来回答的，不能按「等待回复」挡住。
   const blocked = streaming && !questionPending;
-
-  useEffect(() => {
-    if (!focusSignal) return;
-    textareaRef.current?.focus();
-  }, [focusSignal]);
 
   const clearBlockedHint = () => {
     if (blockedTimerRef.current !== null) {

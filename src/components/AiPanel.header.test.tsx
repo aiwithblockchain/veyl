@@ -18,7 +18,6 @@ function renderPanel(props: { aiReady: boolean; aiProviderName: string | null })
       aiProviderName={props.aiProviderName}
       hasEverConnected
       hasConfigs
-      focusSignal={0}
       onSelectSession={noop}
       onNewSession={noop}
       onRenameSession={asyncOk}
@@ -75,7 +74,6 @@ describe("会话重命名输入法", () => {
         aiProviderName={null}
         hasEverConnected
         hasConfigs
-        focusSignal={0}
         onSelectSession={noop}
         onNewSession={noop}
         onRenameSession={onRenameSession}
