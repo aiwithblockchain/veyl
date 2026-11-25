@@ -56,6 +56,7 @@ Four things set it apart:
 Running a node on your own server gives you a dedicated, stable exit.
 
 - **Create**: pick a region and plan → see the daily price (monthly = daily × 30) → create. Sign-in and top-up happen in place if needed.
+- **Region availability per plan**: each plan carries its own list of supported regions — **that list is the full set**. A region not listed cannot be used with that plan; never infer availability from the overall region list. If the user's region is missing from a plan, say which plans it doesn't support first, then offer alternatives; don't pick for them and only correct yourself after a failure. If unsure, call `ServerOptions` again and read that entry instead of going from memory.
 - **Balance threshold**: before creating, the balance must cover **7 days** (daily × 7). Otherwise show "Not enough balance, $X short." and do not create or charge anything.
 - **Billing**: the first day is charged once the server is ready and verified running; after that **one day is charged at the same time every day**. If the balance cannot cover it, the server is **stopped and destroyed** — there is no grace period.
 - **Destroying**: unused whole days are refunded to the balance; **the day of destruction is not refunded**. Balance that was never spent cannot be withdrawn.

@@ -313,7 +313,7 @@ export const zh = {
   "tool.ServerOptions.failed": "读不到可选地区和规格",
   "tool.StageSelect.running": "正在选地区和规格",
   "tool.StageSelect.done": "已选好地区和规格",
-  "tool.StageSelect.failed": "没能选好地区和规格",
+  "tool.StageSelect.failed": "地区和规格没有改动",
   "tool.OpenSettings.running": "正在打开设置",
   "tool.OpenSettings.done": "已打开设置",
   "tool.OpenSettings.failed": "没能打开设置",

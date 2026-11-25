@@ -326,7 +326,7 @@ export const en: Record<MessageKey, string> = {
   "tool.ServerOptions.failed": "Couldn't load regions and plans",
   "tool.StageSelect.running": "Choosing region and plan",
   "tool.StageSelect.done": "Region and plan selected",
-  "tool.StageSelect.failed": "Couldn't choose region and plan",
+  "tool.StageSelect.failed": "Region and plan left unchanged",
   "tool.OpenSettings.running": "Opening Settings",
   "tool.OpenSettings.done": "Settings opened",
   "tool.OpenSettings.failed": "Couldn't open Settings",
