@@ -21,6 +21,7 @@ use crate::logging::{self, redact_sensitive, FileLogConfig};
 use crate::rotation::{RotationEngine, Rotator};
 use crate::singbox::SingBox;
 use crate::state::{AgentState, StateStore, StoredDesired};
+use crate::traffic::TrafficMeter;
 use crate::{start_agent_with_certs, AgentHandle};
 
 /// Production builds compile the control plane's Ed25519 public key in.
@@ -195,7 +196,15 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     );
 
     let host: Arc<dyn Host> = Arc::new(RealHost::new()?);
-    let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host));
+    let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
+    // Outbound metering is independent of everything below: it logs its own
+    // errors and never delays sing-box, credentials or the MCP endpoint.
+    let meter = Arc::new(TrafficMeter::new(
+        host.clone(),
+        control.clone(),
+        cfg.state_dir.join("traffic.json"),
+        cfg.traffic.clone(),
+    ));
     let engine = Arc::new(RotationEngine::new(
         Arc::new(cfg.clone()),
         singbox,
@@ -233,6 +242,11 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         "agent ready"
     );
 
+    // Create the nft counter before the first apply so traffic that flows
+    // during a slow install is already counted. The first window only records
+    // the baseline; any error here is a log line, never a startup failure.
+    meter.tick_now().await;
+
     if let Some(desired) = &desired {
         tracing::info!(
             port = desired.port,
@@ -256,12 +270,17 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     // Say it again; the endpoint is idempotent for an already-active machine.
     engine.reannounce_active().await;
 
-    // The desired state is never polled again. The only timer left repairs a
-    // public IP the metadata service did not answer for at startup.
+    // The desired state is never polled again. The remaining timers repair a
+    // public IP the metadata service did not answer for at startup and meter
+    // outbound traffic.
     let mut ip_retries_left = IP_RETRY_ATTEMPTS;
     let mut ip_retry = tokio::time::interval(IP_RETRY_INTERVAL);
     ip_retry.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ip_retry.tick().await;
+
+    let mut traffic_tick = tokio::time::interval(Duration::from_secs(cfg.traffic.read_secs));
+    traffic_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    traffic_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -314,6 +333,11 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                     ),
                     None => {}
                 }
+            }
+            // Metering: read the counter, accumulate, report when due. Every
+            // error inside `tick` is a log line, never a process event.
+            _ = traffic_tick.tick() => {
+                meter.tick_now().await;
             }
         }
     }

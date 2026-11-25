@@ -126,6 +126,44 @@ fn default_metadata_url() -> String {
     "http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address".into()
 }
 
+fn default_traffic_read_secs() -> u64 {
+    30
+}
+
+fn default_traffic_save_secs() -> u64 {
+    300
+}
+
+fn default_traffic_report_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+/// Metering cadence (see `docs/design/traffic-billing.md` §6.3). Every key has
+/// a default so the cloud-init config keeps starting unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrafficConfig {
+    /// How often the nft counter is read.
+    #[serde(default = "default_traffic_read_secs")]
+    pub read_secs: u64,
+    /// How often the accumulator is persisted; a restart loses at most this
+    /// much traffic.
+    #[serde(default = "default_traffic_save_secs")]
+    pub save_secs: u64,
+    /// Report once this many bytes are pending (or after 30 idle minutes).
+    #[serde(default = "default_traffic_report_bytes")]
+    pub report_bytes: u64,
+}
+
+impl Default for TrafficConfig {
+    fn default() -> Self {
+        Self {
+            read_secs: default_traffic_read_secs(),
+            save_secs: default_traffic_save_secs(),
+            report_bytes: default_traffic_report_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingBoxConfig {
     #[serde(default = "default_sb_binary")]
@@ -212,6 +250,8 @@ pub struct AgentConfig {
     pub recent_ports_keep: usize,
     #[serde(default = "default_egress_probe")]
     pub egress_probe: String,
+    #[serde(default)]
+    pub traffic: TrafficConfig,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default)]
@@ -242,6 +282,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("allowed_hosts", &self.allowed_hosts)
             .field("cert_dir", &self.cert_dir)
             .field("state_dir", &self.state_dir)
+            .field("traffic", &self.traffic)
             .field("log_level", &self.log_level)
             .field("log", &self.log)
             .field("allow_insecure_control_plane", &self.allow_insecure_control_plane)
@@ -311,6 +352,15 @@ impl AgentConfig {
                 bail!("log.keep_files must be 1..=50");
             }
         }
+        if self.traffic.read_secs == 0 {
+            bail!("traffic.read_secs must be at least 1");
+        }
+        if self.traffic.save_secs < self.traffic.read_secs {
+            bail!("traffic.save_secs must be at least traffic.read_secs");
+        }
+        if self.traffic.report_bytes == 0 {
+            bail!("traffic.report_bytes must be at least 1");
+        }
         Ok(())
     }
 
@@ -369,6 +419,7 @@ mod tests {
             port_band: default_band(),
             recent_ports_keep: default_recent_ports_keep(),
             egress_probe: default_egress_probe(),
+            traffic: TrafficConfig::default(),
             log_level: default_log_level(),
             log: LogConfig::default(),
             allow_insecure_control_plane: false,
@@ -429,6 +480,9 @@ mod tests {
         );
         assert_eq!(cfg.log.max_bytes, 5 * 1024 * 1024);
         assert_eq!(cfg.log.keep_files, 3);
+        assert_eq!(cfg.traffic.read_secs, 30);
+        assert_eq!(cfg.traffic.save_secs, 300);
+        assert_eq!(cfg.traffic.report_bytes, 256 * 1024 * 1024);
         cfg.validate().unwrap();
     }
 

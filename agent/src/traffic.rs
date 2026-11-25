@@ -1,0 +1,817 @@
+//! Outbound traffic metering: an nft chain that counts bytes on the default
+//! route's interface, a persisted accumulator, and event-triggered reports to
+//! `POST /v1/agent/traffic`.
+//!
+//! Contract: `docs/design/traffic-billing.md` §6.2–§6.6 and §7.2. Three rules
+//! shape this file:
+//! - the agent never sends a billing cycle; the control plane derives it from
+//!   its own clock when the report arrives;
+//! - every error is logged and swallowed: sing-box, credentials and the MCP
+//!   endpoint must keep working when metering does not;
+//! - when the persisted state is gone, the current counter becomes the new
+//!   baseline. Some traffic is then under-counted; nothing is counted twice.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::auth::now_unix;
+use crate::config::TrafficConfig;
+use crate::control::{ControlApi, ControlError};
+use crate::host::Host;
+
+/// Dedicated table: the host's own firewall is never touched, and `nft` only
+/// ever lists this one.
+pub const TABLE: &str = "veyl_meter";
+pub const CHAIN: &str = "out";
+/// Report at least this often even on an idle machine. Only the byte threshold
+/// is configurable; this is the design doc's fixed window.
+pub const REPORT_IDLE_SECS: u64 = 30 * 60;
+
+/// One report that has been handed to the network but not acknowledged. It is
+/// persisted before the request goes out: if the response is lost, the retry
+/// must carry the exact same `(seq, bytes)` or the control plane cannot dedupe
+/// it, and bytes that arrived in the meantime would be dropped forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttempt {
+    pub seq: u64,
+    pub bytes: u64,
+}
+
+/// Persisted accumulator. `seq` is per server, monotonic and never reset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficState {
+    #[serde(default)]
+    pub counter_last: u64,
+    #[serde(default)]
+    pub pending_bytes: u64,
+    #[serde(default)]
+    pub last_saved_at: u64,
+    #[serde(default)]
+    pub last_ok_at: u64,
+    #[serde(default)]
+    pub seq: u64,
+    /// In-flight report; `pending_bytes` may grow past it while it is sent.
+    #[serde(default)]
+    pub pending_attempt: Option<PendingAttempt>,
+}
+
+/// Atomic state file (temp file + rename, 0600).
+#[derive(Debug, Clone)]
+pub struct TrafficStore {
+    path: PathBuf,
+}
+
+impl TrafficStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `None` means "never written"; a corrupt file is an error. Both take the
+    /// conservative branch in [`TrafficMeter`].
+    pub fn load(&self) -> Result<Option<TrafficState>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map(Some)
+                .with_context(|| format!("parse {}", self.path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("read {}", self.path.display())),
+        }
+    }
+
+    pub fn save(&self, state: &TrafficState) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create traffic state dir {}", parent.display()))?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(state)?;
+        {
+            use std::io::Write;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&tmp)
+                .with_context(|| format!("create {}", tmp.display()))?;
+            file.write_all(text.as_bytes())
+                .with_context(|| format!("write {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
+        Ok(())
+    }
+}
+
+pub struct TrafficMeter {
+    host: Arc<dyn Host>,
+    control: Arc<dyn ControlApi>,
+    store: TrafficStore,
+    params: TrafficConfig,
+    state: Mutex<Option<TrafficState>>,
+    /// 409 from the control plane: the server is gone, stop reporting.
+    stopped: AtomicBool,
+}
+
+impl TrafficMeter {
+    pub fn new(
+        host: Arc<dyn Host>,
+        control: Arc<dyn ControlApi>,
+        state_path: impl Into<PathBuf>,
+        params: TrafficConfig,
+    ) -> Self {
+        Self {
+            host,
+            control,
+            store: TrafficStore::new(state_path),
+            params,
+            state: Mutex::new(None),
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    pub async fn tick_now(&self) {
+        self.tick(now_unix()).await;
+    }
+
+    /// One 30-second window: read the counter, accumulate, then save and/or
+    /// report if due. Never returns an error; every failure is a log line.
+    pub async fn tick(&self, now: u64) {
+        if self.stopped() {
+            return;
+        }
+        let counter = match self.read_counter().await {
+            Ok(counter) => counter,
+            Err(e) => {
+                tracing::warn!(error = %e, "traffic: counter read failed; skipping this window");
+                return;
+            }
+        };
+
+        let (save_due, new_attempt, report) = {
+            let mut guard = self.state.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(self.seed(now, counter));
+            }
+            let state = guard.as_mut().expect("seeded above");
+            // A smaller reading means the table was recreated: everything the
+            // new counter holds is new traffic.
+            let delta = if counter < state.counter_last {
+                counter
+            } else {
+                counter - state.counter_last
+            };
+            state.counter_last = counter;
+            state.pending_bytes = state.pending_bytes.saturating_add(delta);
+
+            let save_due = now.saturating_sub(state.last_saved_at) >= self.params.save_secs;
+            let idle_due = now.saturating_sub(state.last_ok_at) >= REPORT_IDLE_SECS;
+            // A zero-byte report is deliberate: the control plane pools the
+            // allowance of machines that have a report in the cycle, so an idle
+            // node must still say "nothing new" every 30 minutes.
+            let due = state.pending_bytes >= self.params.report_bytes || idle_due;
+            let mut new_attempt = false;
+            if due && state.pending_attempt.is_none() {
+                // Freeze the batch *before* the request leaves.
+                state.pending_attempt = Some(PendingAttempt {
+                    seq: state.seq,
+                    bytes: state.pending_bytes,
+                });
+                new_attempt = true;
+            }
+            let report = state
+                .pending_attempt
+                .as_ref()
+                .map(|attempt| (attempt.seq, attempt.bytes));
+            (save_due, new_attempt, report)
+        };
+
+        // The attempt is on disk before the network can see it; a retry after a
+        // crash resends the same batch instead of a larger, unacknowledged one.
+        if save_due || new_attempt {
+            self.save(now);
+        }
+        let Some((seq, delta_bytes)) = report else {
+            return;
+        };
+
+        match self.control.traffic(seq, delta_bytes).await {
+            Ok(()) => {
+                {
+                    let mut guard = self.state.lock().unwrap();
+                    if let Some(state) = guard.as_mut() {
+                        let acknowledged = state.pending_attempt.take();
+                        let bytes = acknowledged.map(|a| a.bytes).unwrap_or(delta_bytes);
+                        state.pending_bytes = state.pending_bytes.saturating_sub(bytes);
+                        state.seq = state.seq.saturating_add(1);
+                        state.last_ok_at = now;
+                    }
+                }
+                self.save(now);
+                tracing::debug!(seq, delta_bytes, "traffic: reported");
+            }
+            Err(ControlError::Status { status: 409, .. }) => {
+                self.stopped.store(true, Ordering::Relaxed);
+                tracing::error!(
+                    event = "traffic_report_stopped",
+                    "the control plane says this server is gone (409); traffic reporting stops"
+                );
+            }
+            Err(e) => {
+                // Keep the attempt and the seq untouched: the next window
+                // resends exactly this batch, so a report the control plane did
+                // record (but whose response was lost) is deduped instead of
+                // blocking the bytes that arrived after it.
+                tracing::warn!(
+                    seq,
+                    delta_bytes,
+                    error = %e,
+                    "traffic: report failed; retrying the same batch next window"
+                );
+            }
+        }
+    }
+
+    /// Load the persisted state, or establish a fresh baseline from the current
+    /// counter. Only the missing/unreadable branch knows that the current
+    /// reading must *not* be treated as delta (that would bill traffic twice).
+    fn seed(&self, now: u64, counter: u64) -> TrafficState {
+        match self.store.load() {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                tracing::warn!(
+                    event = "metering_state_lost",
+                    counter,
+                    "traffic: no state file; using the current counter as the new baseline"
+                );
+                self.new_baseline(now, counter)
+            }
+            Err(e) => {
+                tracing::error!(
+                    event = "metering_state_lost",
+                    counter,
+                    error = %e,
+                    "traffic: state file is unreadable; using the current counter as the new baseline"
+                );
+                self.new_baseline(now, counter)
+            }
+        }
+    }
+
+    fn new_baseline(&self, now: u64, counter: u64) -> TrafficState {
+        // `seq` starts from the clock instead of 0: the control plane discards
+        // `seq <= last_seq`, so a reset to 0 after a lost state file would look
+        // like a duplicate and silently drop every report until the counter
+        // caught up with the old sequence.
+        let state = TrafficState {
+            counter_last: counter,
+            pending_bytes: 0,
+            last_saved_at: now,
+            last_ok_at: now,
+            seq: now.max(1),
+            pending_attempt: None,
+        };
+        if let Err(e) = self.store.save(&state) {
+            tracing::warn!(error = %e, "traffic: could not write the initial state");
+        }
+        state
+    }
+
+    fn save(&self, now: u64) {
+        let mut guard = self.state.lock().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
+        state.last_saved_at = now;
+        if let Err(e) = self.store.save(state) {
+            tracing::warn!(error = %e, "traffic: state save failed");
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Option<TrafficState> {
+        self.state.lock().unwrap().clone()
+    }
+
+    /// Resolve the interface on every read: a default-route change would
+    /// otherwise freeze the counter without any error.
+    async fn read_counter(&self) -> Result<u64> {
+        let iface = self.default_iface().await?;
+        match self.list_table().await? {
+            Some((rule_iface, bytes)) if rule_iface == iface => Ok(bytes),
+            other => {
+                if let Some((rule_iface, _)) = other {
+                    tracing::info!(
+                        rule_iface,
+                        iface = %iface,
+                        "traffic: counter follows a stale interface; rebuilding"
+                    );
+                }
+                self.rebuild(&iface).await?;
+                // A fresh table starts at zero; the negative-delta branch takes
+                // over on the next window.
+                Ok(0)
+            }
+        }
+    }
+
+    async fn default_iface(&self) -> Result<String> {
+        let out = self
+            .host
+            .run(
+                "ip",
+                &["route".into(), "show".into(), "default".into()],
+            )
+            .await?;
+        if !out.success() {
+            bail!(
+                "ip route show default exited with {}: {}",
+                out.status.unwrap_or(-1),
+                out.summary()
+            );
+        }
+        parse_default_iface(&out.stdout)
+            .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
+    }
+
+    async fn list_table(&self) -> Result<Option<(String, u64)>> {
+        let out = self
+            .host
+            .run(
+                "nft",
+                &[
+                    "-j".into(),
+                    "list".into(),
+                    "table".into(),
+                    "inet".into(),
+                    TABLE.into(),
+                ],
+            )
+            .await?;
+        if !out.success() {
+            return Ok(None);
+        }
+        Ok(parse_counter(&out.stdout))
+    }
+
+    async fn rebuild(&self, iface: &str) -> Result<()> {
+        // Deleting a missing table fails; that is the expected first-run path.
+        let _ = self
+            .host
+            .run(
+                "nft",
+                &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
+            )
+            .await;
+        let steps: [&[&str]; 3] = [
+            &["add", "table", "inet", TABLE],
+            &[
+                "add", "chain", "inet", TABLE, CHAIN, "{", "type", "filter", "hook", "output",
+                "priority", "0", ";", "policy", "accept", ";", "}",
+            ],
+            &["add", "rule", "inet", TABLE, CHAIN, "oifname", iface, "counter"],
+        ];
+        for step in steps {
+            let args: Vec<String> = step.iter().map(|s| s.to_string()).collect();
+            let out = self.host.run("nft", &args).await?;
+            if !out.success() {
+                bail!("nft {} failed: {}", args.join(" "), out.summary());
+            }
+        }
+        tracing::info!(iface, "traffic: created the outbound counter table");
+        Ok(())
+    }
+}
+
+/// `ip route show default` → the `dev` of the first default route. Names like
+/// `eth0@if3` (veth peers) are cut at the `@`.
+pub fn parse_default_iface(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.first() != Some(&"default") {
+            continue;
+        }
+        let Some(pos) = tokens.iter().position(|t| *t == "dev") else {
+            continue;
+        };
+        let raw = tokens.get(pos + 1)?;
+        let name = raw.split('@').next().unwrap_or(raw);
+        if valid_iface(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn valid_iface(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 15
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b':'))
+}
+
+/// `nft -j list table inet veyl_meter` → the interface our rule matches and
+/// its byte counter.
+pub fn parse_counter(json: &str) -> Option<(String, u64)> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    for entry in value.get("nftables")?.as_array()? {
+        let Some(rule) = entry.get("rule") else {
+            continue;
+        };
+        let Some(expr) = rule.get("expr").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut iface = None;
+        let mut bytes = None;
+        for item in expr {
+            if let Some(counter) = item.get("counter") {
+                bytes = counter.get("bytes").and_then(Value::as_u64);
+            }
+            if let Some(m) = item.get("match") {
+                if m.pointer("/left/meta/key").and_then(Value::as_str) == Some("oifname") {
+                    iface = m.get("right").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+        }
+        if let (Some(iface), Some(bytes)) = (iface, bytes) {
+            return Some((iface, bytes));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::{DesiredState, ReportRequest};
+    use crate::test_support::FakeHost;
+    use async_trait::async_trait;
+
+    #[derive(Default)]
+    struct RecordingControl {
+        reports: Mutex<Vec<(u64, u64)>>,
+        fail: Mutex<bool>,
+        /// Record the report, then fail the request: the control plane counted
+        /// it but the agent never sees the 2xx.
+        lose_response: Mutex<bool>,
+    }
+
+    #[async_trait]
+    impl ControlApi for RecordingControl {
+        async fn report(&self, _body: &ReportRequest) -> Result<(), ControlError> {
+            Ok(())
+        }
+
+        async fn desired_state(&self) -> Result<DesiredState, ControlError> {
+            Err(ControlError::Transport("not used in this test".into()))
+        }
+
+        async fn traffic(&self, seq: u64, delta_bytes: u64) -> Result<(), ControlError> {
+            if *self.lose_response.lock().unwrap() {
+                self.reports.lock().unwrap().push((seq, delta_bytes));
+                return Err(ControlError::Transport("response lost".into()));
+            }
+            if *self.fail.lock().unwrap() {
+                return Err(ControlError::Transport("offline".into()));
+            }
+            self.reports.lock().unwrap().push((seq, delta_bytes));
+            Ok(())
+        }
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-agent-traffic-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn params(report_bytes: u64) -> TrafficConfig {
+        TrafficConfig {
+            read_secs: 30,
+            save_secs: 300,
+            report_bytes,
+        }
+    }
+
+    fn nft_json(iface: &str, bytes: u64) -> String {
+        format!(
+            r#"{{"nftables":[{{"metainfo":{{"version":"1.0.9","release_name":"x"}}}},{{"table":{{"family":"inet","name":"veyl_meter"}}}},{{"chain":{{"family":"inet","table":"veyl_meter","name":"out","type":"filter","hook":"output","prio":0,"policy":"accept"}}}},{{"rule":{{"family":"inet","table":"veyl_meter","chain":"out","expr":[{{"match":{{"op":"==","left":{{"meta":{{"key":"oifname"}}}},"right":"{iface}"}}}},{{"counter":{{"packets":7,"bytes":{bytes}}}}}]}}}}]}}"#
+        )
+    }
+
+    fn setup(name: &str) -> (PathBuf, Arc<FakeHost>, Arc<RecordingControl>) {
+        let dir = tmpdir(name);
+        let host = Arc::new(FakeHost::new());
+        host.set_command_output(
+            "ip",
+            0,
+            "default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.5 metric 100\n",
+            "",
+        );
+        let control = Arc::new(RecordingControl::default());
+        (dir, host, control)
+    }
+
+    #[tokio::test]
+    async fn accumulates_deltas_and_reports_at_the_threshold() {
+        let (dir, host, control) = setup("accumulate");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_060), ""),
+                (0, &nft_json("ens3", 1_160), ""),
+            ],
+        );
+        let store = TrafficStore::new(dir.join("traffic.json"));
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            store.path().to_path_buf(),
+            params(100),
+        );
+
+        // First tick seeds the baseline: the counter is not a delta.
+        meter.tick(1_000).await;
+        assert!(control.reports.lock().unwrap().is_empty());
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 0);
+
+        meter.tick(1_030).await;
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 60);
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        meter.tick(1_060).await;
+        assert_eq!(
+            *control.reports.lock().unwrap(),
+            vec![(1_000, 160)],
+            "one report with the whole pending batch"
+        );
+        let state = store.load().unwrap().unwrap();
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(state.seq, 1_001);
+        assert_eq!(state.last_ok_at, 1_060);
+        assert_eq!(state.counter_last, 1_160);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_counter_that_went_backwards_counts_the_new_value() {
+        let (dir, host, control) = setup("reset");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 5_000), ""),
+                (0, &nft_json("ens3", 6_000), ""),
+                // Table was recreated: the counter starts over.
+                (0, &nft_json("ens3", 200), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // baseline 5000
+        meter.tick(1_030).await; // +1000
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 1_000);
+        meter.tick(1_060).await; // reset to 200 → +200
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 1_200);
+        assert_eq!(state.counter_last, 200);
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_missing_state_file_uses_the_counter_as_the_new_baseline() {
+        let (dir, host, control) = setup("missing");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 5_000), ""),
+                // Idle for longer than the report window: a zero-byte report
+                // still goes out (the control plane pools allowances per row).
+                (0, &nft_json("ens3", 5_000), ""),
+                (0, &nft_json("ens3", 5_300), ""),
+            ],
+        );
+        let store = TrafficStore::new(dir.join("traffic.json"));
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            store.path().to_path_buf(),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        let seeded = store.load().unwrap().unwrap();
+        assert_eq!(
+            seeded.counter_last, 5_000,
+            "the current counter is the baseline, not a delta"
+        );
+        assert_eq!(seeded.pending_bytes, 0);
+        assert_eq!(seeded.seq, 1_000, "seq is seeded from the clock");
+
+        meter.tick(1_000 + REPORT_IDLE_SECS).await;
+        // The doc's algorithm reports on the idle window even with nothing
+        // pending: the control plane needs the row, not the bytes.
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 0)]);
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 0);
+        assert_eq!(meter.snapshot().unwrap().seq, 1_001);
+        assert_eq!(meter.snapshot().unwrap().last_ok_at, 1_000 + REPORT_IDLE_SECS);
+
+        meter.tick(1_000 + REPORT_IDLE_SECS + 30).await;
+        // Below the byte threshold and inside a fresh idle window: wait.
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 300);
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 0)]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_report_resends_the_frozen_batch() {
+        let (dir, host, control) = setup("retry");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_200), ""),
+                (0, &nft_json("ens3", 1_250), ""),
+            ],
+        );
+        let store = TrafficStore::new(dir.join("traffic.json"));
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            store.path().to_path_buf(),
+            params(100),
+        );
+        *control.fail.lock().unwrap() = true;
+
+        meter.tick(1_000).await; // baseline
+        meter.tick(1_030).await; // +200 → the batch is frozen, the request fails
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 200, "nothing is lost on failure");
+        assert_eq!(state.seq, 1_000, "seq is only advanced by a 2xx");
+        assert_eq!(state.last_ok_at, 1_000);
+        assert_eq!(
+            state.pending_attempt,
+            Some(PendingAttempt {
+                seq: 1_000,
+                bytes: 200
+            }),
+            "the attempted batch is written before the request goes out"
+        );
+        assert_eq!(
+            store.load().unwrap().unwrap().pending_attempt,
+            state.pending_attempt,
+            "the attempt survives a crash mid-send"
+        );
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        *control.fail.lock().unwrap() = false;
+        meter.tick(1_060).await; // +50 → resend the frozen 200, not 250
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 200)]);
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 50, "the new 50 bytes are kept");
+        assert_eq!(state.seq, 1_001);
+        assert_eq!(state.pending_attempt, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_lost_response_does_not_block_the_bytes_that_follow_it() {
+        let (dir, host, control) = setup("lost-response");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_100), ""),
+                (0, &nft_json("ens3", 1_150), ""),
+                (0, &nft_json("ens3", 1_250), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(100),
+        );
+
+        meter.tick(1_000).await; // baseline
+        *control.lose_response.lock().unwrap() = true;
+        meter.tick(1_030).await; // +100 → counted by the control plane, 2xx lost
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 100)]);
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 100);
+
+        *control.lose_response.lock().unwrap() = false;
+        meter.tick(1_060).await; // +50 → same seq, same 100 bytes
+        assert_eq!(
+            *control.reports.lock().unwrap(),
+            vec![(1_000, 100), (1_000, 100)],
+            "the retry is the duplicate the control plane dedupes"
+        );
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 50, "the 50 new bytes are not lost");
+        assert_eq!(state.seq, 1_001);
+
+        meter.tick(1_090).await; // +100 → only the bytes after the ack
+        assert_eq!(
+            *control.reports.lock().unwrap(),
+            vec![(1_000, 100), (1_000, 100), (1_001, 150)]
+        );
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn seq_increases_by_one_per_accepted_report() {
+        let (dir, host, control) = setup("seq");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 0), ""),
+                (0, &nft_json("ens3", 500), ""),
+                (0, &nft_json("ens3", 1_000), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(100),
+        );
+
+        meter.tick(1_000).await;
+        meter.tick(1_030).await;
+        meter.tick(1_060).await;
+        assert_eq!(
+            *control.reports.lock().unwrap(),
+            vec![(1_000, 500), (1_001, 500)]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn default_route_interface_is_parsed_not_assumed() {
+        assert_eq!(
+            parse_default_iface("default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.5\n")
+                .as_deref(),
+            Some("ens3")
+        );
+        assert_eq!(
+            parse_default_iface(
+                "10.0.0.0/24 dev ens3 proto kernel scope link src 10.0.0.5\ndefault via 10.0.0.1 dev eth0 metric 100\n"
+            )
+            .as_deref(),
+            Some("eth0")
+        );
+        assert_eq!(
+            parse_default_iface("default via 10.0.0.1 dev veth1a@if2 proto dhcp\n").as_deref(),
+            Some("veth1a")
+        );
+        assert_eq!(parse_default_iface(""), None);
+        assert_eq!(parse_default_iface("default via 10.0.0.1 proto dhcp\n"), None);
+    }
+
+    #[test]
+    fn counter_is_read_from_the_json_rule() {
+        assert_eq!(
+            parse_counter(&nft_json("ens3", 4_294_967_296)),
+            Some(("ens3".to_string(), 4_294_967_296))
+        );
+        assert_eq!(parse_counter("not json"), None);
+        assert_eq!(parse_counter(r#"{"nftables":[]}"#), None);
+    }
+}

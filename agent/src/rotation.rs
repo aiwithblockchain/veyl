@@ -1035,6 +1035,10 @@ mod tests {
         async fn desired_state(&self) -> Result<DesiredState, ControlError> {
             Ok(self.desired.lock().unwrap().clone())
         }
+
+        async fn traffic(&self, _seq: u64, _delta_bytes: u64) -> Result<(), ControlError> {
+            Ok(())
+        }
     }
 
     fn config(dir: &Path) -> Arc<AgentConfig> {
@@ -1061,6 +1065,7 @@ mod tests {
             port_band: [30000, 30999],
             recent_ports_keep: 20,
             egress_probe: "1.1.1.1:443".into(),
+            traffic: Default::default(),
             log_level: "debug".into(),
             log: Default::default(),
             allow_insecure_control_plane: false,
@@ -1373,6 +1378,10 @@ mod tests {
                     status: 409,
                     body: r#"{"reason":"server_destroyed"}"#.into(),
                 })
+            }
+
+            async fn traffic(&self, _seq: u64, _delta_bytes: u64) -> Result<(), ControlError> {
+                Ok(())
             }
         }
 
@@ -1735,6 +1744,10 @@ mod tests {
             async fn desired_state(&self) -> Result<DesiredState, ControlError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(self.desired.clone())
+            }
+
+            async fn traffic(&self, _seq: u64, _delta_bytes: u64) -> Result<(), ControlError> {
+                Ok(())
             }
         }
 

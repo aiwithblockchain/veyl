@@ -345,6 +345,25 @@ impl ControlPlane {
             .await?;
         desired_from_value(value)
     }
+
+    /// `POST /v1/agent/traffic { seq, delta_bytes }`. The agent never sends a
+    /// billing cycle; the control plane assigns the report to its own month.
+    pub async fn traffic(
+        &self,
+        server_token: &str,
+        seq: u64,
+        delta_bytes: u64,
+    ) -> Result<(), ControlError> {
+        let body = json!({ "seq": seq, "delta_bytes": delta_bytes });
+        self.call(
+            reqwest::Method::POST,
+            "/v1/agent/traffic",
+            server_token,
+            Some(&body),
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 /// Accept either the bare desired object or `{ "desired": { ... } }`.
@@ -361,6 +380,7 @@ pub fn desired_from_value(value: Value) -> Result<DesiredState, ControlError> {
 pub trait ControlApi: Send + Sync {
     async fn report(&self, body: &ReportRequest) -> Result<(), ControlError>;
     async fn desired_state(&self) -> Result<DesiredState, ControlError>;
+    async fn traffic(&self, seq: u64, delta_bytes: u64) -> Result<(), ControlError>;
 }
 
 /// A control plane bound to one server token.
@@ -386,6 +406,12 @@ impl ControlApi for ControlSession {
 
     async fn desired_state(&self) -> Result<DesiredState, ControlError> {
         self.plane.desired_state(&self.server_token).await
+    }
+
+    async fn traffic(&self, seq: u64, delta_bytes: u64) -> Result<(), ControlError> {
+        self.plane
+            .traffic(&self.server_token, seq, delta_bytes)
+            .await
     }
 }
 

@@ -20,6 +20,7 @@ pub mod rotation;
 pub mod server;
 pub mod singbox;
 pub mod state;
+pub mod traffic;
 
 #[cfg(test)]
 mod test_support;

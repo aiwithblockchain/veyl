@@ -6,7 +6,8 @@
 - 一次性 Ed25519 Bearer 令牌，agent 内置公钥离线验签；
 - enroll → 安装/校验 sing-box → 写配置 → systemd → 验活 → 上报的三阶段流程；
 - agent 自己生成新端口与密码的真实轮换；
-- 定期拉取期望状态并按差异应用；
+- 启动时拉一次期望状态并按差异应用（没有周期轮询）；
+- 出站流量计量：nft 计数器 + 5 分钟落盘 + 事件触发上报；
 - 自签证书持久化，按节点公网地址重签 leaf SAN。
 
 设计依据：`docs/design/node-agent-mcp.md` §4–§8、`shared-firewall.md` §3。
@@ -14,7 +15,7 @@
 ## 结论
 
 - **MCP 链路**：`cargo run --example demo` 本机 10/10 通过（TLS + 令牌 + tools/call）。
-- **agent 主体**：`cargo test` 全部通过，覆盖令牌、证书持久化、端口选择、配置生成、安装校验、轮换失败路径、启动时的期望状态应用与按需升级。
+- **agent 主体**：`cargo test` 全部通过，覆盖令牌、证书持久化、端口选择、配置生成、安装校验、轮换失败路径、启动时的期望状态应用、按需升级与流量计量。
 - **未验收**：真实 Ubuntu 机器上的 systemd 行为、真实 GitHub 下载、与控制面会话的联调。这三项必须在真机上跑。
 
 ## 快速开始
@@ -104,6 +105,9 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 | `port_band` | 默认 `[30000, 30999]`，与共享防火墙规则一致 |
 | `recent_ports_keep` | 记录最近用过的端口数，轮换时排除，避免立刻复用 |
 | `egress_probe` | 轮换验活时的出站 TCP 目标，默认 `1.1.1.1:443` |
+| `traffic.read_secs` | 默认 30；读 nft 计数器的间隔 |
+| `traffic.save_secs` | 默认 300；累加器落盘间隔（重启最多丢这么久） |
+| `traffic.report_bytes` | 默认 268435456（256 MiB）；`pending` 达到该值即上报，另有 30 分钟空闲上报 |
 | `singbox.*` | 二进制、配置、unit、systemctl/tar/install/journalctl 路径 |
 | `log_level` | `info`；`RUST_LOG` 优先 |
 | `log.file` | 日志文件，默认 `/var/log/veyl-agent/agent.log`；设 `null` 关闭文件日志 |
@@ -182,6 +186,16 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 - 与轮换共用 busy 锁：同时发起时后到的那个返回 `kind=retryable` + `reason=agent_busy`。
 - 每次工具调用前先 best-effort 补报一次 `active`（控制面对已 active 机器幂等），自愈「apply 成功但 active 上报丢了」这条路径，不需要持久化的脏标志。
 
+## 流量计量（`traffic.rs`）
+
+按 `docs/design/traffic-billing.md` §6 实现，**只数出站**，与 DO 的计费口径一致。
+
+- 启动时用默认路由解析公网网卡（`ip route show default` 的 `dev`，不写死 `eth0`），建独立表 `table inet veyl_meter`（规则 `oifname "<if>" counter`），不碰系统防火墙；每个读窗口重新解析网卡，表被清掉或网卡变了就重建。
+- 每 30 秒读 `nft -j list table inet veyl_meter` 的 `counter.bytes`：`delta = cur < last ? cur : cur - last`（负增量 = 计数器归零，按新值计），累加到 `pending`；每 5 分钟原子落盘，冻结的上报批次在发出前也会先落盘（`state_dir/traffic.json`，0600，临时文件 + rename）。
+- 上报：`pending >= 256 MB` 或距上次成功上报 ≥ 30 分钟时 `POST /v1/agent/traffic {seq, delta_bytes}`；发之前先把这一批 `{seq, bytes}` 冻结进 `pending_attempt` 并落盘，2xx 才 `pending -= bytes`、`seq+1`、清 `pending_attempt`；失败保留冻结值，下个窗口**原样重发**（不随 `pending` 增长），控制面按 `(server_id, seq)` 去重——这样「已经记账但响应丢了」不会吞掉之后新增的字节。**空闲也照发**：30 分钟到点发一条 `delta_bytes: 0`——控制面按「本周期有上报行的机器」汇总已释放额度，闲置机器不产生行会把额度挡在账号池外（空闲机器每天最多 48 次）。**报文里没有周期**——agent 不知道计费周期，归属由控制面按收到时间判定。
+- **状态文件缺失或读不出来**：记一条 `metering_state_lost`，以当前计数器为新基准重新开始——那一段宁可少算，绝不重复计费。`seq` 以当前时间做种子（不是 0）：控制面丢弃 `seq <= last_seq`，从 0 重开会被当成重复，后续上报会被静默丢掉。
+- 网络错误与 5xx 只记 warn、下个窗口重试；**409（服务器已销毁）停止上报**。任何计量错误都不影响 sing-box、凭据与 MCP 通道。
+
 ## 启动时的期望状态
 
 - **先监听，再 apply**：MCP 端点（32100）在首次安装/应用之前就 bind，下载慢或 systemd 卡住时桌面端仍能连上。
@@ -210,7 +224,7 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 cargo test
 ```
 
-当前 **80 个单元测试**，覆盖：
+当前 **97 个单元测试**，覆盖：
 
 - 令牌：JWT 往返、过期、错误签名、错误 `server_id`、jti 一次性、JWK 解析、篡改 payload/alg=none、批量 `tools/call` 计数、**jti 跨重启重放**、过期 jti 清理、重放表上限；
 - 证书：CA/leaf 持久化、leaf 缺失时只重签 leaf、公网地址变化时只重签 leaf、动态 Host 白名单、公网 IP 重签只发生一次、**重签后新连接实际拿到新证书（TLS 握手校验）**；
@@ -221,6 +235,7 @@ cargo test
 - 轮换：成功上报 `installing/verifying/rotated` 且 rotated 带新密码；`rotated` 被 409 拒绝时回滚旧配置、不落状态、不上报 `failed`；busy 返回 retryable；`Debug` 脱敏；
 - 期望状态：一致时不重启；变化时应用；apply 失败内部重试一次；两次 restart 失败后才上报 `failed`；active 未确认时每轮补报、失败保留标记；轮换后控制面未追平时不覆盖新端口；**config 一致但服务死了：重启一次成功继续报 active，仍失败上报 failed**；
 - 状态持久化：缺失文件、roundtrip、0600、端口去重、`last_desired`（含密码）落盘且 Debug 脱敏、**损坏文件备份后重置**；
+- 流量：正常累加与阈值上报、计数器归零、状态文件缺失取新基准（空闲窗口也报 0 字节）、上报失败重发冻结批次、响应丢失后新字节不被吞、成功一次 `seq+1`、默认路由网卡与 `nft -j` 解析；
 - 脱敏：密码/令牌字段、未知键的 token 串、嵌套转义、`Authorization`/`Bearer`、`password=`/`token=` 赋值、截断；
 - 日志文件：跨 write 分片仍按行脱敏（密码/`server_token`/`Authorization`/`Bearer` 不落盘）、0600 文件 + 0700 目录、按大小轮转并只保留配置份数、轮转后写新文件；`log.file: null` 可关闭，缺省配置可启动；
 - host：**命令超时返回可标记错误**、tar/install 用 300 秒超时、下载拒绝 http；
@@ -235,7 +250,8 @@ cargo test
 5. **enroll 崩溃窗口**：控制面先消费一次性 token 再返回；若 agent 在返回后、写 state 前崩溃，重启会收到 409。控制面已支持 TTL 内幂等换发新 `server_token`；agent 现在也会把 409 当终态、退避 10 分钟重试并明确提示重建，不再 10 秒重启一次。真机上仍需验证这条恢复路径。
 6. DO metadata 公网 IP 查询是新增行为，只在 DO 上有效；其他环境要显式配 `public_host`。
 7. 不做自更新；版本由重建决定（设计 §12）。
-8. 只改 `agent/`；未提交、未部署。
+8. **流量计量真机验收**（`traffic-billing.md` §6.10）：下载 1 GB 比对 nft 读数与上报值（误差 ≤ 1%）、断网一段时间后 `pending` 补发且不重复记账、空闲机器每天最多 48 次上报。agent 改动要发新版二进制并**重建节点**才生效。
+9. 只改 `agent/`；未提交、未部署。
 
 ## 目录结构
 
@@ -255,6 +271,7 @@ agent/
   src/host.rs           命令、文件、网络、下载的 Host 抽象（可测试）
   src/singbox.rs        下载校验、配置、systemd、验活
   src/rotation.rs       端口/密码、轮换、期望状态应用、按需升级
+  src/traffic.rs        出站计量：nft 计数器、累加器、落盘、上报
   src/agent.rs          run 主循环
   src/logging.rs        日志初始化与脱敏
   src/main.rs           CLI：run / serve / gen-certs / mint-token
