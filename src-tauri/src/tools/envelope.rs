@@ -212,36 +212,13 @@ fn normalize_display(tool: &str, outcome: &mut ToolOutcome) {
 
 /// `tools.md` §2.5：输入参数预览，敏感字段打码；全被打码时返回 None。
 pub fn args_preview(schema: &Value, input: &Value) -> Option<Value> {
-    const BLACKLIST: [&str; 10] = [
-        "key",
-        "token",
-        "secret",
-        "password",
-        "uuid",
-        "private_key",
-        "short_id",
-        "auth",
-        "apikey",
-        "api_key",
-    ];
-
     let object = input.as_object()?;
-    let properties = schema.get("properties").and_then(Value::as_object);
 
     let mut out = serde_json::Map::new();
     let mut masked_only = true;
 
     for (name, value) in object.iter().take(8) {
-        let sensitive = properties
-            .and_then(|props| props.get(name))
-            .and_then(|prop| prop.get("sensitive"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || BLACKLIST
-                .iter()
-                .any(|needle| name.to_lowercase().contains(needle));
-
-        if sensitive {
+        if is_sensitive_field(Some(schema), name) {
             out.insert(name.clone(), Value::String("***".to_string()));
             continue;
         }
@@ -254,6 +231,67 @@ pub fn args_preview(schema: &Value, input: &Value) -> Option<Value> {
         return None;
     }
     Some(Value::Object(out))
+}
+
+const SENSITIVE_KEY_NEEDLES: [&str; 10] = [
+    "key",
+    "token",
+    "secret",
+    "password",
+    "uuid",
+    "private_key",
+    "short_id",
+    "auth",
+    "apikey",
+    "api_key",
+];
+
+/// schema 标了 `sensitive: true`，或键名命中黑名单。展示与审计共用这一份规则。
+fn is_sensitive_field(schema: Option<&Value>, name: &str) -> bool {
+    let flagged = schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+        .and_then(|props| props.get(name))
+        .and_then(|prop| prop.get("sensitive"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    flagged
+        || SENSITIVE_KEY_NEEDLES
+            .iter()
+            .any(|needle| name.to_lowercase().contains(needle))
+}
+
+/// 审计落库用：只把敏感字段的值换成 `***`，其余字段原样保留（不截断、不丢键）。
+/// 递归进嵌套对象与数组，避免 `target.password` 这类写法漏网。
+pub fn redact_args(schema: Option<&Value>, input: &Value) -> Value {
+    match input {
+        Value::Object(object) => {
+            let properties = schema
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object);
+            let mut out = serde_json::Map::new();
+            for (name, value) in object {
+                if is_sensitive_field(schema, name) {
+                    out.insert(name.clone(), Value::String("***".to_string()));
+                    continue;
+                }
+                let child_schema = properties.and_then(|props| props.get(name));
+                out.insert(name.clone(), redact_args(child_schema, value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            let item_schema = schema.and_then(|schema| schema.get("items"));
+            Value::Array(
+                items
+                    .iter()
+                    .map(|item| redact_args(item_schema, item))
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
 }
 
 fn truncate(value: &Value) -> Value {
@@ -343,5 +381,43 @@ mod display_projection_tests {
         // 事件投影仍能从同一份 outcome 读到 display。
         assert_eq!(outcome.display.facts.len(), 1);
         assert_eq!(outcome.display.changed, Changed::None);
+    }
+
+    /// schema 的 `sensitive: true` 与键名黑名单都要生效，嵌套对象同样不能漏。
+    #[test]
+    fn redact_args_masks_schema_and_nested_blacklist_fields() {
+        let schema = json!({
+            "properties": {
+                "password": { "type": "string", "sensitive": true },
+                "target": {
+                    "type": "object",
+                    "properties": { "node_id": { "type": "string" } }
+                }
+            }
+        });
+        let redacted = redact_args(
+            Some(&schema),
+            &json!({
+                "password": "pw",
+                "target": { "node_id": "nd_1", "api_key": "sk-1" },
+                "port": 8388,
+            }),
+        );
+
+        assert_eq!(redacted["password"], "***");
+        assert_eq!(redacted["target"]["node_id"], "nd_1");
+        assert_eq!(redacted["target"]["api_key"], "***");
+        assert_eq!(redacted["port"], 8388);
+        assert!(!redacted.to_string().contains("pw\""));
+        assert!(!redacted.to_string().contains("sk-1"));
+    }
+
+    /// 没有 schema 时黑名单仍然生效；普通字段保持原样。
+    #[test]
+    fn redact_args_without_schema_only_touches_known_keys() {
+        let input = json!({ "server": "203.0.113.9", "token": "tkn" });
+        let redacted = redact_args(None, &input);
+        assert_eq!(redacted["server"], "203.0.113.9");
+        assert_eq!(redacted["token"], "***");
     }
 }

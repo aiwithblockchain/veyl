@@ -608,11 +608,17 @@ impl AivpnSession {
                                 .and_then(Value::as_str)
                                 .map(str::to_string);
                         }
-                        record_tool_call_start(&session_id, &tool_id, &tool_name, parsed.as_ref());
                         let schema = tools_snapshot
                             .iter()
                             .find(|(name, _, _)| name == tool_name)
                             .and_then(|(_, _, schema)| schema.clone());
+                        record_tool_call_start(
+                            &session_id,
+                            &tool_id,
+                            &tool_name,
+                            parsed.as_ref(),
+                            schema.as_ref(),
+                        );
                         let preview = match (&schema, &parsed) {
                             (Some(schema), Some(input)) => envelope::args_preview(schema, input),
                             _ => None,
@@ -961,16 +967,21 @@ fn describe_tool_call(tool: &str, input: Option<&Value>) -> String {
 /// assistant 消息，下一轮请求会被上游以 400 拒绝。发新消息前先清掉。
 
 /// 工具审计：请求开始写一行；审批已移除，`approved` 恒为 NULL。
+///
+/// 参数按工具 schema 与敏感键名打码后再落库：审计要能看出调了什么工具、什么
+/// 地址端口，但不该多留一份密码/密钥的明文副本。
 fn record_tool_call_start(
     session_id: &str,
     tool_id: &str,
     tool_name: &str,
     args: Option<&Value>,
+    schema: Option<&Value>,
 ) {
     let Some(store) = crate::store::global() else {
         return;
     };
     let request_id = policy::current_request_id(session_id);
+    let redacted = args.map(|value| envelope::redact_args(schema, value));
     let conn = store.conn();
     let _ = crate::store::tool_calls::begin(
         &conn,
@@ -979,7 +990,7 @@ fn record_tool_call_start(
             session_id: Some(session_id),
             request_id: request_id.as_deref(),
             tool_name,
-            args: args.unwrap_or(&Value::Null),
+            args: redacted.as_ref().unwrap_or(&Value::Null),
         },
     );
 }
@@ -1223,7 +1234,13 @@ mod audit_tests {
         install_store();
         let store = crate::store::global().expect("全局库已安装");
 
-        record_tool_call_start("ses_audit", "call_audit", "RuntimeStatus", Some(&json!({ "x": 1 })));
+        record_tool_call_start(
+            "ses_audit",
+            "call_audit",
+            "RuntimeStatus",
+            Some(&json!({ "x": 1 })),
+            None,
+        );
         {
             let conn = store.conn();
             let row = crate::store::tool_calls::get(&conn, "call_audit")
@@ -1242,6 +1259,68 @@ mod audit_tests {
             .unwrap();
         assert!(row.finished_at.is_some());
         assert!(!row.is_error);
+    }
+
+    /// 审计行落库前按 schema 打码：密码不能有明文副本，地址端口仍要能看出来。
+    #[test]
+    fn audit_masks_node_import_password_and_keeps_address() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+        let schema = tool_schema("NodeImport");
+        assert!(schema.is_some(), "工具清单里缺少 NodeImport");
+
+        record_tool_call_start(
+            "ses_audit_mask",
+            "call_audit_mask",
+            "NodeImport",
+            Some(&json!({
+                "source": "manual",
+                "name": "东京 01",
+                "server": "203.0.113.9",
+                "port": 8388,
+                "method": "aes-256-gcm",
+                "password": "s3cret-pw",
+            })),
+            schema.as_ref(),
+        );
+
+        let conn = store.conn();
+        let row = crate::store::tool_calls::get(&conn, "call_audit_mask")
+            .unwrap()
+            .expect("请求开始即应有行");
+        assert_eq!(row.args["password"], "***", "密码不能有明文副本");
+        assert_eq!(row.args["server"], "203.0.113.9", "地址仍要能看出来");
+        assert_eq!(row.args["port"], 8388);
+        assert!(!row.args.to_string().contains("s3cret-pw"));
+    }
+
+    /// 普通工具的参数原样落库：打码不能把 node_id 之类也一起改掉。
+    #[test]
+    fn audit_keeps_ordinary_tool_arguments() {
+        install_store();
+        let store = crate::store::global().expect("全局库已安装");
+        let schema = tool_schema("VpnConnect");
+        let args = json!({ "target": { "node_id": "nd_tokyo" }, "dry_run": false });
+
+        record_tool_call_start(
+            "ses_audit_plain",
+            "call_audit_plain",
+            "VpnConnect",
+            Some(&args),
+            schema.as_ref(),
+        );
+
+        let conn = store.conn();
+        let row = crate::store::tool_calls::get(&conn, "call_audit_plain")
+            .unwrap()
+            .expect("请求开始即应有行");
+        assert_eq!(row.args, args);
+    }
+
+    fn tool_schema(name: &str) -> Option<Value> {
+        use crate::tools::services::NotWiredServices;
+        let tools = crate::tools::vpn_tools(Arc::new(NotWiredServices));
+        crate::tools::schema_of(&tools, name)
     }
 
     #[test]

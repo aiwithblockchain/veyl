@@ -154,6 +154,19 @@ pub fn run() {
     let menu_parts = lifecycle_parts.clone();
 
     let services: Arc<dyn VpnToolServices> = wired;
+    // 审计表：旧版把工具参数原样落库，NodeImport 的 password 因此留了明文副本。
+    // 启动时按工具 schema 幂等打码一次；只动敏感字段的值，地址端口等保持原样。
+    {
+        let audit_tools = crate::tools::vpn_tools(Arc::clone(&services));
+        let conn = store.conn();
+        match crate::store::tool_calls::redact_history(&conn, |name| {
+            crate::tools::schema_of(&audit_tools, name)
+        }) {
+            Ok(0) => {}
+            Ok(count) => log::info!("审计参数打码：清理历史行 {count} 条"),
+            Err(error) => log::warn!("审计参数打码失败：{error}"),
+        }
+    }
     let state = Arc::new(agent::AppState::new(services));
     let setup_state = Arc::clone(&state);
     // 工具路径没有 AppState 句柄，热更新凭据靠这个弱引用。

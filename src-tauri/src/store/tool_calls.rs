@@ -56,6 +56,47 @@ pub fn finish(conn: &Connection, id: &str, result: &Value, is_error: bool) -> St
     Ok(())
 }
 
+/// 历史审计行的参数按工具 schema 幂等打码，返回改动的行数。
+///
+/// 旧版把 `NodeImport.password` 原样写进了 `args_json`；这里在启动时清掉存量明文。
+/// 规则本身只用 `envelope::redact_args`，`schema_for` 由工具注册表提供。
+pub fn redact_history(
+    conn: &Connection,
+    schema_for: impl Fn(&str) -> Option<Value>,
+) -> StoreResult<usize> {
+    let mut updates: Vec<(String, String)> = Vec::new();
+    {
+        let mut statement = conn.prepare("SELECT id, tool_name, args_json FROM tool_calls")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, tool_name, args_json) = row?;
+            let Ok(args) = serde_json::from_str::<Value>(&args_json) else {
+                continue;
+            };
+            let redacted =
+                crate::tools::envelope::redact_args(schema_for(&tool_name).as_ref(), &args);
+            if redacted != args {
+                updates.push((id, redacted.to_string()));
+            }
+        }
+    }
+
+    let mut changed = 0;
+    for (id, redacted) in updates {
+        changed += conn.execute(
+            "UPDATE tool_calls SET args_json = ?1 WHERE id = ?2",
+            params![redacted, id],
+        )?;
+    }
+    Ok(changed)
+}
+
 pub fn get(conn: &Connection, id: &str) -> StoreResult<Option<ToolCallRecord>> {
     conn.query_row(
         "SELECT id, session_id, request_id, tool_name, args_json, approved, result_json,
@@ -156,5 +197,46 @@ mod tests {
 
         assert_eq!(recent(&conn, Some("ses_1"), 10).unwrap().len(), 1);
         assert_eq!(recent(&conn, None, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn history_cleanup_masks_only_sensitive_fields_and_is_idempotent() {
+        let store = super::super::db::Store::open_in_memory().unwrap();
+        let conn = store.conn();
+
+        // 模拟旧版写进去的明文行；普通工具的参数不能被动。
+        begin(
+            &conn,
+            &NewCall {
+                id: "call_old",
+                session_id: Some("ses_1"),
+                request_id: None,
+                tool_name: "NodeImport",
+                args: &json!({
+                    "server": "203.0.113.9",
+                    "port": 8388,
+                    "password": "old-pw",
+                }),
+            },
+        )
+        .unwrap();
+        begin_sample(&conn, "call_plain");
+
+        let schema = json!({
+            "properties": { "password": { "type": "string", "sensitive": true } }
+        });
+        let schema_for = |name: &str| (name == "NodeImport").then(|| schema.clone());
+
+        assert_eq!(redact_history(&conn, schema_for).unwrap(), 1);
+        let masked = get(&conn, "call_old").unwrap().unwrap();
+        assert_eq!(masked.args["password"], "***");
+        assert_eq!(masked.args["server"], "203.0.113.9");
+        assert_eq!(masked.args["port"], 8388);
+        assert_eq!(
+            get(&conn, "call_plain").unwrap().unwrap().args,
+            json!({ "target": { "node_id": "seed-jp-01" } })
+        );
+
+        assert_eq!(redact_history(&conn, schema_for).unwrap(), 0, "第二次不应再改");
     }
 }
