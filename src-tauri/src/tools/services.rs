@@ -1147,6 +1147,16 @@ fn is_cancelled_error(error: &anyhow::Error) -> bool {
         == Some("cancelled")
 }
 
+/// 会话状态 → 事件流里的运行时状态。TUN 的 `Stopped` 在事件里是 `idle`。
+fn tun_runtime_state(
+    state: crate::tun::session::TunState,
+) -> crate::runtime::RuntimeState {
+    match state {
+        crate::tun::session::TunState::Running { .. } => crate::runtime::RuntimeState::Running,
+        crate::tun::session::TunState::Stopped => crate::runtime::RuntimeState::Idle,
+    }
+}
+
 /// 给失败打上「旧连接已经被停掉 / 停旧失败」的标记，供 `connect_changed_state` 用。
 fn mark_old_connection_stopped(error: anyhow::Error, stopped: bool) -> anyhow::Error {
     let Some(service) = error.downcast_ref::<ServiceError>() else {
@@ -3448,6 +3458,11 @@ pub struct WiredServices {
     /// 最近一次 TUN 状态事件的目标状态：事件链的 `from` 用它，
     /// 不能硬编码 idle（失败后再连应当是 failed → starting）。
     tun_event_state: std::sync::Mutex<crate::runtime::RuntimeState>,
+    /// 最近一次 TUN 事件快照里的运行时版本。
+    ///
+    /// 会话线程自己发现后端退出时要在同步回调里拼一份 Idle 快照，那里不能
+    /// `await` 去取版本；用事件里带过的值兜住，避免 `upstream_version = null`。
+    tun_runtime_version: std::sync::Mutex<Option<String>>,
     /// 运行期操作锁：重建运行配置与启动/断开互斥；后到的断开排队，重建结束后执行。
     runtime_ops: tokio::sync::Mutex<()>,
     /// 运行期代数：每次真正改变运行时（停掉在跑的东西、重启）都 +1。
@@ -3565,6 +3580,7 @@ impl WiredServices {
             probe_start: tokio::sync::Mutex::new(()),
             mode_switches: ModeSwitches::default(),
             tun_event_state: std::sync::Mutex::new(crate::runtime::RuntimeState::Idle),
+            tun_runtime_version: std::sync::Mutex::new(None),
             runtime_ops: tokio::sync::Mutex::new(()),
             runtime_epoch: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -3946,10 +3962,45 @@ impl WiredServices {
         reason: Option<String>,
         snapshot: crate::runtime::RuntimeStatus,
     ) {
+        if let Some(version) = snapshot.upstream_version.clone() {
+            *self.tun_runtime_version.lock().unwrap() = Some(version);
+        }
         log::debug!("TUN 状态变化 {from:?} → {to:?} event={event:?}");
         self.manager
             .publish_state(from, to, event, reason, snapshot);
         *self.tun_event_state.lock().unwrap() = to;
+    }
+
+    /// 把 TUN 会话**自己发现**的断开发进同一条事件流。
+    ///
+    /// 用户主动断开在 `disconnect` 里已经发过 `stop_req → stopped`，会话侧只会
+    /// 在「我们自己发现后端没了」（helper 被杀、sing-box 崩溃、helper 报租约
+    /// 断开即将停止）时回调，不会再重复。用 `crash` 不用 `give_up`：后者是
+    /// 重连放弃的语义，不是进程意外退出。
+    ///
+    /// 回调在会话线程上同步执行，不能 `await`：快照用事件里带过的运行时版本。
+    pub fn install_tun_observer(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        self.tun
+            .set_state_observer(Arc::new(move |from, to, reason| {
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                let version = this.tun_runtime_version.lock().unwrap().clone();
+                // 空闲快照：pid / clash / uptime 全为空，界面不会再拿它当已连接。
+                let snapshot = crate::runtime::RuntimeStatus::tun_pending(
+                    crate::runtime::RuntimeState::Idle,
+                    None,
+                    version,
+                );
+                this.publish_tun_state(
+                    tun_runtime_state(from),
+                    tun_runtime_state(to),
+                    crate::runtime::RuntimeEventKind::Crash,
+                    Some(reason.to_string()),
+                    snapshot,
+                );
+            }));
     }
 
     /// 连接状态：TUN 的进程不归 manager 管，必须先看 `TunSession`，

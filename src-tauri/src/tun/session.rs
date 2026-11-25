@@ -38,6 +38,13 @@ pub enum TunState {
     Running { pid: u32 },
 }
 
+/// 状态观察者：`(旧状态, 新状态, 原因)`。
+///
+/// 只在我们**自己发现**后端消失时回调（helper 被杀、sing-box 崩溃、helper 报
+/// 租约断开即将停止）。用户主动断开有自己的 `stop_req → stopped` 事件路径，
+/// 不从这里发，避免重复。
+pub type TunStateObserver = Arc<dyn Fn(TunState, TunState, &'static str) + Send + Sync>;
+
 /// helper 在 presence 租约断开、宽限期计时中会拒绝 `status`，wire 码是
 /// `precondition_failed`。这是**明确的「即将停止」**，不是连接失败：
 /// 两个探测路径都不能据它 adopt，也不能继续报已连接。
@@ -144,6 +151,12 @@ pub struct TunSession {
     /// 数据面探测结果。只由健康循环写，`runtime_status` 读；
     /// 去抖口径与代理模式共用 `DataPlaneGate`（契约 §2.3.1）。
     data_plane: Mutex<DataPlaneSnapshot>,
+    /// 自己发现的断开要并进 manager 的事件流：界面与托盘只订阅那一条，
+    /// 会话内部清掉状态却没发事件，就是「界面还显示已连接、托盘已断开」。
+    observer: Mutex<Option<TunStateObserver>>,
+    /// 主动停止进行中。这期间的复核即使看到后端没了也不外发 `crash`：
+    /// 用户断开的 `stop_req → stopped` 由调用方发，不能重复。
+    stopping: AtomicBool,
 }
 
 /// 一次连接内的数据面结论 + 探测时刻。
@@ -161,6 +174,15 @@ impl DataPlaneSnapshot {
             gate: DataPlaneGate::default(),
             checked_at,
         }
+    }
+}
+
+/// 主动停止的作用域标记：`TunSession::stopping` 置位的 RAII 版本。
+struct StopIntent<'a>(&'a AtomicBool);
+
+impl Drop for StopIntent<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -220,7 +242,41 @@ impl TunSession {
             stop_done: std::sync::Condvar::new(),
             launch_seq: AtomicU64::new(0),
             data_plane: Mutex::new(DataPlaneSnapshot::fresh(now_iso())),
+            observer: Mutex::new(None),
+            stopping: AtomicBool::new(false),
         }
+    }
+
+    /// 装一次状态观察者（`WiredServices::install_tun_observer`）。
+    pub fn set_state_observer(&self, observer: TunStateObserver) {
+        *self.observer.lock().unwrap() = Some(observer);
+    }
+
+    /// 通知观察者。锁只用来取一份 `Arc` 拷贝，**不持锁回调**。
+    fn notify_state_observer(&self, from: TunState, to: TunState, reason: &'static str) {
+        let observer = self.observer.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer(from, to, reason);
+        }
+    }
+
+    /// 标记「这次停止是我们自己发起的」。guard 离开作用域就复位，
+    /// 不依赖每个返回分支手动清理。
+    fn begin_stop(&self) -> StopIntent<'_> {
+        self.stopping.store(true, Ordering::SeqCst);
+        StopIntent(&self.stopping)
+    }
+
+    /// 认领一次「缓存里的 pid 已经没了」的迁移。并发的 `status()` 只有一个能拿到
+    /// `true`：事件与清状态都只做一次，不会因为两个线程同时复核而发两条 crash。
+    /// pid 已经变成别的值（新连接已 commit）时不认领，避免误清新连接的状态。
+    fn claim_cached_pid(&self, expected: u32) -> bool {
+        let mut pid = self.pid.lock().unwrap();
+        if *pid != Some(expected) {
+            return false;
+        }
+        *pid = None;
+        true
     }
 
     /// 底层通道。helper 构建检查与升级需要它，但状态仍由本会话统一持有。
@@ -388,6 +444,7 @@ impl TunSession {
     /// 补停用：只停后端，**不动在途启动的登记**。
     /// 迟到的旧启动收尾时，登记可能已经属于更新的那次启动。
     fn stop_backend_only(&self) {
+        let _stopping = self.begin_stop();
         match self.backend.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL) {
             Ok(()) => {
                 // 与 `stop_with_deadline` 的成功分支对齐：真的停掉了，之后那次
@@ -468,6 +525,7 @@ impl TunSession {
     /// 反过来把活着的 sing-box 从缓存里抹掉，`probe_once` 的 `probed` 闩会让它
     /// 直到重启都不可见。
     fn stop_backend_full(&self) -> Result<(), TunError> {
+        let _stopping = self.begin_stop();
         match self.backend.stop_with_deadline(TUN_REPLY_DEADLINE_CONTROL) {
             Ok(()) => {
                 self.start_attempted.store(false, Ordering::SeqCst);
@@ -671,6 +729,7 @@ impl TunSession {
 
     /// 强制重置用：start 可能还在准备（真机首跑约 30 秒），stop 要能排到它后面。
     pub fn stop_with_deadline(&self, deadline: Duration) -> Result<(), TunError> {
+        let _stopping = self.begin_stop();
         // 启动窗口里 stop 也必须算数：先作废在途启动，迟到的 start 回来时
         // 不会再写成「已连接」，也不会改连接上下文。
         self.cancel_launch();
@@ -830,16 +889,41 @@ impl TunSession {
                 }
                 None => {
                     // sing-box 自己退出（例如 Wintun 建适配器失败）时，界面必须跟着变。
-                    log::warn!("TUN 后端报告运行时已退出，连接状态回到未连接");
-                    self.clear_state();
+                    // 并发的 status() 会同时走到这里，只有认领到这次迁移的那个才
+                    // 清状态、发事件——同一次 running → stopped 只发一次。
+                    if self.claim_cached_pid(cached_pid) {
+                        log::warn!("TUN 后端报告运行时已退出，连接状态回到未连接");
+                        self.clear_state();
+                        // 这是「我们自己发现后端没了」，必须并进事件流：界面与托盘
+                        // 只订阅 `runtime-state-changed`，没有事件就永远停在已连接。
+                        // 主动停止由调用方发 `stop_req → stopped`，这里不重复。
+                        if !self.stopping.load(Ordering::SeqCst) {
+                            self.notify_state_observer(
+                                TunState::Running { pid: cached_pid },
+                                TunState::Stopped,
+                                "runtime_exited",
+                            );
+                        }
+                    }
                     TunState::Stopped
                 }
             },
             Err(error) if helper_is_shutting_down(&error) => {
                 // 明确了「隧道即将被拆」的答复不是「问不到」：它就是断开。
                 // 保留缓存会让界面继续显示已连接，直到 helper 真正停掉。
-                log::warn!("TUN 后端报告租约已断开、隧道即将停止，连接状态回到未连接：{error}");
-                self.clear_state();
+                if self.claim_cached_pid(cached_pid) {
+                    log::warn!(
+                        "TUN 后端报告租约已断开、隧道即将停止，连接状态回到未连接：{error}"
+                    );
+                    self.clear_state();
+                    if !self.stopping.load(Ordering::SeqCst) {
+                        self.notify_state_observer(
+                            TunState::Running { pid: cached_pid },
+                            TunState::Stopped,
+                            "helper_shutting_down",
+                        );
+                    }
+                }
                 TunState::Stopped
             }
             // 后端暂时问不到：保留缓存，不把「问不到」当成「已断开」。
@@ -1431,6 +1515,56 @@ mod tests {
             session.status(),
             TunState::Stopped,
             "helper 停了就不能再报 Running"
+        );
+    }
+
+    /// 后端自己退出：清状态的同时必须通知观察者一次——界面与托盘只订阅
+    /// `runtime-state-changed`，不发事件就会永远停在已连接。
+    #[test]
+    fn a_backend_exit_notifies_the_state_observer_exactly_once() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        session.launch("{}", &meta()).unwrap();
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        session.set_state_observer(Arc::new(move |from, to, reason| {
+            sink.lock().unwrap().push((from, to, reason));
+        }));
+
+        *backend.running.lock().unwrap() = None;
+        *session.last_check.lock().unwrap() = Some(Instant::now() - Duration::from_secs(10));
+        assert_eq!(session.status(), TunState::Stopped);
+        // 再来一次：状态已经是空的，不能重复通知。
+        assert_eq!(session.status(), TunState::Stopped);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "running → stopped 只通知一次");
+        assert_eq!(seen[0].0, TunState::Running { pid: 4242 });
+        assert_eq!(seen[0].1, TunState::Stopped);
+        assert_eq!(seen[0].2, "runtime_exited");
+    }
+
+    /// 用户主动断开已经由调用方发 `stop_req → stopped`，会话侧不能再发一次。
+    #[test]
+    fn a_user_stop_does_not_duplicate_the_observer_event() {
+        let backend = Arc::new(FakeBackend::new());
+        let session = TunSession::with_backend(backend.clone(), "fake");
+        session.launch("{}", &meta()).unwrap();
+        assert_eq!(session.status(), TunState::Running { pid: 4242 });
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let sink = Arc::clone(&seen);
+        session.set_state_observer(Arc::new(move |_, _, _| {
+            sink.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        session.stop().unwrap();
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            0,
+            "主动断开的 stopped 事件由调用方发"
         );
     }
 

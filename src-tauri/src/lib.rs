@@ -132,6 +132,7 @@ pub fn run() {
         catalog,
         &data_dir,
     ));
+    wired.install_tun_observer();
     // 后台检查 helper 是否还是包里的那份；不阻塞启动、不弹窗。
     wired.spawn_helper_updater();
     // 启动清理只跑事务；断连放到后台任务，不能拖住启动。

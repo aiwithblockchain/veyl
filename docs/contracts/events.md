@@ -504,6 +504,8 @@ type RuntimeStateChangedPayload = {
 
 **TUN 也在同一条流里（2.20.0 起）**：TUN 的 sing-box 是特权助手的子进程、不归 `RuntimeManager` 管，但它的状态变化（启动中 / 已连接 / 停止中 / 空闲 / 失败）也以同一形状推进同一条 `runtime-state-changed` 流，`snapshot` 用 TUN 合成的快照（`starting` / `stopping` 下 `mode = "tun"`；`idle` / `failed` 下 `mode = null`，见 `runtime.md` §2.5；`mixed_port = null`、`health.clash_api = false`）。界面与托盘只订阅这一条流——各读一份状态就是「主界面已断开、托盘仍连着」的来源。典型序列：启动 `idle → starting`（`start_req`）→ 成功 `starting → running`（`process_ready`）或失败 `starting → failed`（`give_up`）；断开 `running → stopping`（`stop_req`）→ `stopping → idle`（`stopped`），停不掉时是 `stopping → failed`（`give_up`，带 `last_error`）。换配置连新连接时是完整的 `stopping → idle → starting → running`，中间不会闪错状态。
 
+**TUN 进程自行退出也走这条流（2026-11-25 补记）**：helper 被杀、sing-box 崩溃，或 helper 报告 presence 租约断开、隧道即将停止时，Host 在**自己发现**的那一刻发 `running → idle`，`event = "crash"`：`reason` 为 `"runtime_exited"`（后端报告没有 pid）或 `"helper_shutting_down"`（helper 明确说宽限期后停隧道）；`snapshot` 是空闲快照（`mode = null`、`pid = null`）。用 `crash` 不用 `give_up`：后者是重连放弃。用户主动断开已经发过 `stop_req → stopped`，这条**不重复发**；同一次 `running → stopped` 只发一次，不会因为 5 秒复核反复发。
+
 **为什么带 `snapshot`**：UI 需要的不只是「变成 running 了」，还需要「实际监听在哪个端口、连的是哪套配置、哪个节点」。不带快照的话，每个消费者都要在收到事件后再 `runtime_status()` 一次，而这两次调用之间状态可能又变了——代理卡片会短暂显示上一个端口。把快照挂在迁移事件上，顺序天然一致。
 
 不变量：
@@ -1464,6 +1466,7 @@ PM 已决议：`src/agent/protocol.ts` 的 `AGENT_EVENTS` 是事件名的**唯�
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | `contract_version` 升到 `2.25.0`；`NodeListChangedReason` 新增 `"node_updated"`（`node_update` 改了名称或连接参数）；payload 字面量 34 处同步，`routing.md` 的三处副本（含 §8 正文）随本文件 | 元数据 / 枚举新增 | `docs/design/node-edit.md`；2026-11-25 |
+| 2 | §4.1：补记 TUN 进程自行退出（helper 被杀 / sing-box 崩溃 / helper 报租约断开）→ `running → idle`、`event = "crash"`、`reason = "runtime_exited"` 或 `"helper_shutting_down"`；与用户断开的 `stopped` 互斥、同一次迁移只发一次。**事件形状不变，版本不升**（与 2.12.0 同一口径） | 行为补记 | 真机 kill helper 后界面仍显示【断开】、托盘已 Idle：TUN 自己发现的断开没有进事件流 |
 
 ### 2.24.0（未发布，2026-11-22：工具卡事实结构化、删除降级 text）
 
