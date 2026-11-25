@@ -128,6 +128,31 @@ impl std::fmt::Debug for NodeCreateInput {
     }
 }
 
+/// 仅 UI：编辑自定义节点。订阅节点只允许改名，`server` / `port` / `method` / `password`
+/// 只在 `source = manual` 时可传；`password` 省略或空串表示保持原密码。
+#[derive(Clone, Default)]
+pub struct NodeUpdateInput {
+    pub node_id: String,
+    pub name: String,
+    pub server: Option<String>,
+    pub port: Option<u16>,
+    pub method: Option<String>,
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for NodeUpdateInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeUpdateInput")
+            .field("node_id", &self.node_id)
+            .field("name", &self.name)
+            .field("server", &self.server)
+            .field("port", &self.port)
+            .field("method", &self.method)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// 宿主能力。每个方法返回契约里对应的 `data` 对象。
 #[async_trait]
 pub trait VpnToolServices: Send + Sync {
@@ -209,6 +234,8 @@ pub trait VpnToolServices: Send + Sync {
         text: &str,
     ) -> anyhow::Result<Value>;
     async fn node_create(&self, input: NodeCreateInput) -> anyhow::Result<Value>;
+    /// 仅 UI：编辑自定义节点的名称与（manual 的）连接参数。
+    async fn node_update(&self, input: NodeUpdateInput) -> anyhow::Result<Value>;
     /// UI 专用：把已存在的节点绑进全局配置（`commands.md` §4.x `node_attach`）。
     /// 不联网、不改 `current_node_id`；`configs` 为空时先懒创建默认配置。
     async fn node_attach(
@@ -549,6 +576,10 @@ impl VpnToolServices for NotWiredServices {
 
     async fn node_create(&self, _input: NodeCreateInput) -> anyhow::Result<Value> {
         not_wired("创建节点")
+    }
+
+    async fn node_update(&self, _input: NodeUpdateInput) -> anyhow::Result<Value> {
+        not_wired("编辑节点")
     }
 
     async fn node_switch(&self, _config_id: &str, _node_id: &str) -> anyhow::Result<Value> {
@@ -1144,39 +1175,41 @@ struct StartContext {
 const SUPERSEDED_START_MESSAGE: &str = "本次连接已被更新的操作取代，已取消。";
 const STOP_UNKNOWN_MESSAGE: &str = "连接结果无法确认，请查看诊断日志后重试。";
 /// 重建被用户断开取代时的固定文案（契约 §4.0.1）。
-const USER_DISCONNECTED_REBUILD_MESSAGE: &str = "已按你的操作断开；新增节点会在下次连接时生效。";
 
-/// 重建被用户断开取代：不回滚、不重连；节点已进池，下次连接生效。
-fn user_disconnected_rebuild() -> Value {
-    json!({
+/// 重建被用户断开取代：不回滚、不重连；改动已落库，下次连接生效。
+fn user_disconnected_rebuild(cause: &RebuildCause<'_>) -> Value {
+    let mut value = json!({
         "status": "failed",
         "reason": "user_disconnected",
         "restored": false,
-        "new_nodes_available_next_connect": true,
-        "message": USER_DISCONNECTED_REBUILD_MESSAGE,
-    })
+        "message": cause.user_disconnected_message(),
+    });
+    value[cause.available_key()] = json!(true);
+    value
 }
 
 /// 重建后的连接状态无法确认（拿不到运行期锁）：**不能冒充用户断开**，
-/// 也不能声称已恢复。节点已进池，下次连接生效。
-fn rebuild_unknown() -> Value {
-    json!({
+/// 也不能声称已恢复。改动已落库，下次连接生效。
+fn rebuild_unknown(cause: &RebuildCause<'_>) -> Value {
+    let mut value = json!({
         "status": "failed",
         "restored": false,
-        "new_nodes_available_next_connect": true,
-        "message": "没能确认当前连接状态；新节点已进池，下次连接生效。",
-    })
+        "message": cause.unknown_message(),
+    });
+    value[cause.available_key()] = json!(true);
+    value
 }
 
 /// 重建期间运行时被**另一次启动或重启**接手（连接还在）：不是用户断开，
 /// 不能说「已按你的操作断开」。
-fn rebuild_replaced_by_new_connection() -> Value {
-    json!({
+fn rebuild_replaced_by_new_connection(cause: &RebuildCause<'_>) -> Value {
+    let mut value = json!({
         "status": "failed",
         "restored": false,
-        "new_nodes_available_next_connect": true,
-        "message": "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。",
-    })
+        "message": cause.replaced_message(),
+    });
+    value[cause.available_key()] = json!(true);
+    value
 }
 
 /// 拉起返回后复查到的连接状态。
@@ -6399,6 +6432,189 @@ impl VpnToolServices for WiredServices {
         Ok(result)
     }
 
+    /// UI：编辑自定义节点（`docs/design/node-edit.md`）。
+    ///
+    /// `url` 只允许改名；`owned` / `seed` 不受理。改的是正在跑的节点就先断开；
+    /// 改的是连接中配置里的其它节点就重建运行配置。`source_key` 与 `id` 始终不变。
+    async fn node_update(&self, input: NodeUpdateInput) -> anyhow::Result<Value> {
+        let current = {
+            let conn = self.store.conn();
+            configs::get_node(&conn, &input.node_id)
+                .map_err(|error| svc_error(error.code(), error))?
+                .ok_or_else(|| {
+                    svc_error_with_details(
+                        "NOT_FOUND",
+                        "节点不存在",
+                        json!({ "reason": "node_not_found" }),
+                    )
+                })?
+        };
+        if current.source != configs::SOURCE_URL && current.source != configs::SOURCE_MANUAL {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "这个节点不能编辑",
+                json!({ "reason": "node_not_editable", "source": current.source }),
+            ));
+        }
+        let password_in = input.password.clone().unwrap_or_default();
+        let password_change = !password_in.trim().is_empty();
+        let params_given = input.server.is_some()
+            || input.port.is_some()
+            || input.method.is_some()
+            || password_change;
+        if current.source == configs::SOURCE_URL && params_given {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                "订阅节点的连接参数不能改",
+                json!({ "reason": "subscription_params_readonly" }),
+            ));
+        }
+
+        let server = input.server.clone().unwrap_or_else(|| current.server.clone());
+        let port = input.port.unwrap_or(current.port);
+        let method = input.method.clone().unwrap_or_else(|| current.method.clone());
+        // 密码留空表示不改；校验仍走新建同一套（占位口令不落库）。
+        let parsed = crate::nodes::validate_manual(
+            &input.name,
+            &server,
+            port,
+            if password_change { &password_in } else { "unchanged" },
+            &method,
+        )
+        .map_err(|error| {
+            let message = error.to_string();
+            let reason = match error {
+                crate::nodes::ImportError::Unsupported(_) => "unsupported_method",
+                _ => "invalid_argument",
+            };
+            svc_error_with_details("INVALID_ARGUMENT", message, json!({ "reason": reason }))
+        })?;
+        let params_changed = parsed.server != current.server
+            || parsed.port != current.port
+            || parsed.method != current.method
+            || password_change;
+
+        // 正在跑的正是这个节点且参数变了：先断开（与移除一致，运行时先行）。
+        // 只改名字不停：运行配置的 outbound tag 用节点 id，改名对运行配置零影响。
+        let connection = self.connection_state_cached().await;
+        let running_node = self
+            .runtime_status()
+            .await
+            .ok()
+            .and_then(|status| status["node_id"].as_str().map(str::to_string));
+        let was_running = running_node.as_deref() == Some(input.node_id.as_str());
+        let stopped = was_running && params_changed;
+        if stopped {
+            self.runtime_stop(false).await?;
+        }
+
+        // 先写凭据再写行：凭据写失败就一行都不动。
+        if password_change {
+            crate::secrets::set_secret(&current.password_ref, &password_in)
+                .map_err(|error| svc_error("SECRET_STORE", error))?;
+        }
+        {
+            let conn = self.store.conn();
+            let store_failed = |error: crate::store::StoreError| {
+                if password_change {
+                    // 凭据已经是新的、节点行还是旧的：让用户重填密码，别以为保存成功。
+                    svc_error_with_details(
+                        "INTERNAL",
+                        "密码已更新，但节点没保存成功；请重新填写密码后再保存",
+                        json!({ "reason": "store_error" }),
+                    )
+                } else {
+                    svc_error(error.code(), error)
+                }
+            };
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| svc_error("INTERNAL", error))?;
+            configs::upsert_node(
+                &tx,
+                &crate::store::NewNode {
+                    id: &current.id,
+                    name: &parsed.name,
+                    server: &parsed.server,
+                    port: parsed.port,
+                    method: &parsed.method,
+                    password_ref: &current.password_ref,
+                    source: &current.source,
+                    source_key: &current.source_key,
+                },
+            )
+            .map_err(store_failed)?;
+            tx.commit()
+                .map_err(|error| svc_error("INTERNAL", error))?;
+        }
+
+        // 参数变了：旧延迟属于旧地址。
+        if params_changed {
+            self.probes.forget_node(&input.node_id);
+        }
+
+        // 连接中的配置里绑着它：按「编辑」重建，不排除任何节点。
+        let mut rebuilt = false;
+        let mut rebuild_status: Option<String> = None;
+        let mut rebuild_message: Option<String> = None;
+        if params_changed && !stopped {
+            if let Some(config_id) = connection.config_id.clone() {
+                let bound = {
+                    let conn = self.store.conn();
+                    configs::list_nodes(&conn, &config_id)
+                        .map(|nodes| nodes.iter().any(|node| node.id == input.node_id))
+                        .unwrap_or(false)
+                };
+                if bound {
+                    match self.mode_switches.try_begin(&config_id) {
+                        Some(_guard) => {
+                            let config = self.require_config(&config_id)?;
+                            let outcome = self
+                                .rebuild_running_config(&config, RebuildCause::NodeEdited)
+                                .await;
+                            rebuild_status =
+                                outcome["status"].as_str().map(str::to_string);
+                            rebuild_message =
+                                outcome["message"].as_str().map(str::to_string);
+                            rebuilt = rebuild_status.as_deref() == Some("applied");
+                        }
+                        None => {
+                            crate::seed::emit_node_list_changed(
+                                &self.store,
+                                "node_updated",
+                                None,
+                                &[input.node_id.clone()],
+                            );
+                            return Err(svc_error_with_details(
+                                "CONFLICT",
+                                "已保存；这套配置正在切换连接，稍后重新连接即可用新设置",
+                                json!({ "reason": "switch_in_progress" }),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        crate::seed::emit_node_list_changed(
+            &self.store,
+            "node_updated",
+            None,
+            &[input.node_id.clone()],
+        );
+        Ok(json!({
+            "updated": true,
+            // 与 node_remove 对齐：这个字段只回答「运行时是不是正在跑它」。
+            "was_current": was_running,
+            // 确实停了运行时（参数变了才会停；改名不停）。
+            "disconnected": stopped,
+            "params_changed": params_changed,
+            "rebuilt": rebuilt,
+            "rebuild_status": rebuild_status,
+            "message": rebuild_message,
+        }))
+    }
+
     /// UI：把节点绑进全局配置（`global-config-merge.md` §3.3）。
     ///
     /// `source` 与 `nodeIds` 二选一；幂等；**永远不改 `current_node_id`**。
@@ -8367,6 +8583,64 @@ impl<'a> RebuildCause<'a> {
             Self::NodeEdited => &[],
         }
     }
+
+    fn is_added_nodes(&self) -> bool {
+        matches!(self, Self::AddedNodes(_))
+    }
+
+    /// 返回里「下次连接可用」那个字段名：新增说节点，编辑说设置。
+    fn available_key(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "new_nodes_available_next_connect",
+            Self::NodeEdited => "new_settings_available_next_connect",
+        }
+    }
+
+    fn stop_failed_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "新节点这次没能应用，当前连接也没停掉；重新连接后就能用它。",
+            Self::NodeEdited => "新设置这次没能应用，当前连接也没停掉；重新连接后就会用它。",
+        }
+    }
+
+    fn user_disconnected_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "已按你的操作断开；新增节点会在下次连接时生效。",
+            Self::NodeEdited => "已按你的操作断开；新设置会在下次连接时生效。",
+        }
+    }
+
+    fn unknown_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "没能确认当前连接状态；新节点已进池，下次连接生效。",
+            Self::NodeEdited => "没能确认当前连接状态；新设置已保存，下次连接生效。",
+        }
+    }
+
+    fn replaced_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => {
+                "新节点这次没能应用；当前连接已由新的操作接管，重新连接后就能用它。"
+            }
+            Self::NodeEdited => {
+                "新设置这次没能应用；当前连接已由新的操作接管，重新连接后就会用它。"
+            }
+        }
+    }
+
+    fn failed_restored_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "新节点这次没能应用，已回到原来的连接；重新连接后就能用它。",
+            Self::NodeEdited => "新设置这次没能应用，已回到原来的连接；重新连接后就会用它。",
+        }
+    }
+
+    fn failed_not_restored_message(&self) -> &'static str {
+        match self {
+            Self::AddedNodes(_) => "新节点这次没能应用，连接也没能恢复；重新连接会带上它。",
+            Self::NodeEdited => "新设置这次没能应用，连接也没能恢复；重新连接会带上它。",
+        }
+    }
 }
 
 impl WiredServices {
@@ -8807,18 +9081,23 @@ impl WiredServices {
             };
 
             log::info!(
-                "连接中新增 {} 个节点，重建运行配置 config={}",
-                excluded.len(),
+                "{}，重建运行配置 config={}",
+                if cause.is_added_nodes() {
+                    format!("连接中新增 {} 个节点", excluded.len())
+                } else {
+                    "节点设置已更新".to_string()
+                },
                 config.id
             );
             if let Err(error) = self.stop_for_rebuild(connection.tun).await {
                 log::warn!("重建运行配置：停旧连接失败：{error}");
-                return json!({
+                let mut failed = json!({
                     "status": "failed",
                     "restored": false,
-                    "new_nodes_available_next_connect": true,
-                    "message": "新节点这次没能应用，当前连接也没停掉；重新连接后就能用它。",
+                    "message": cause.stop_failed_message(),
                 });
+                failed[cause.available_key()] = json!(true);
+                return failed;
             }
             // 重建自己也是一次意图变更：锁内记代，锁外拉起后据此判断是否被取代。
             (latest, self.bump_runtime_epoch())
@@ -8877,15 +9156,17 @@ impl WiredServices {
             match still_connected {
                 AfterStart::Connected => {
                     log::info!("重建运行配置完成 config={}", config.id);
-                    return json!({
-                        "status": "applied",
-                        "new_nodes": self.nodes_in_running_config(config, excluded),
-                    });
+                    let mut value = json!({ "status": "applied" });
+                    if cause.is_added_nodes() {
+                        value["new_nodes"] =
+                            json!(self.nodes_in_running_config(config, excluded));
+                    }
+                    return value;
                 }
                 // 起来了但已被断开取代：节点已进池，不再接回连接。
-                AfterStart::Disconnected => return user_disconnected_rebuild(),
-                AfterStart::Replaced => return rebuild_replaced_by_new_connection(),
-                AfterStart::Unknown => return rebuild_unknown(),
+                AfterStart::Disconnected => return user_disconnected_rebuild(&cause),
+                AfterStart::Replaced => return rebuild_replaced_by_new_connection(&cause),
+                AfterStart::Unknown => return rebuild_unknown(&cause),
             }
         }
 
@@ -8905,13 +9186,13 @@ impl WiredServices {
                     // 代数变了不等于「用户断开」：也可能是重启或另一次启动。
                     // **在锁内重新读实际状态**，不能拿检查前的快照下结论。
                     return if self.connection_state_cached().await.connected {
-                        rebuild_replaced_by_new_connection()
+                        rebuild_replaced_by_new_connection(&cause)
                     } else {
-                        user_disconnected_rebuild()
+                        user_disconnected_rebuild(&cause)
                     };
                 }
             }
-            Err(_) => return rebuild_unknown(),
+            Err(_) => return rebuild_unknown(&cause),
         };
 
         #[cfg(test)]
@@ -8964,8 +9245,8 @@ impl WiredServices {
                     match self.still_connected_after_start(&latest.id, &rolled).await {
                         AfterStart::Connected => (true, false),
                         AfterStart::Disconnected => (false, true),
-                        AfterStart::Replaced => return rebuild_replaced_by_new_connection(),
-                        AfterStart::Unknown => return rebuild_unknown(),
+                        AfterStart::Replaced => return rebuild_replaced_by_new_connection(&cause),
+                        AfterStart::Unknown => return rebuild_unknown(&cause),
                     }
                 } else if rolled
                     .as_ref()
@@ -8976,10 +9257,10 @@ impl WiredServices {
                     // 与回滚守卫同型——重读实际状态再下结论。
                     match self.actual_connection_state(&latest.id).await {
                         AfterStart::Connected | AfterStart::Replaced => {
-                            return rebuild_replaced_by_new_connection();
+                            return rebuild_replaced_by_new_connection(&cause);
                         }
                         AfterStart::Disconnected => (false, true),
-                        AfterStart::Unknown => return rebuild_unknown(),
+                        AfterStart::Unknown => return rebuild_unknown(&cause),
                     }
                 } else {
                     (false, false)
@@ -8990,18 +9271,19 @@ impl WiredServices {
             log::info!("重建运行配置已回滚到原节点集合 config={}", config.id);
         }
         if disconnected {
-            return user_disconnected_rebuild();
+            return user_disconnected_rebuild(&cause);
         }
-        json!({
+        let mut failed = json!({
             "status": "failed",
             "restored": restored,
-            "new_nodes_available_next_connect": true,
             "message": if restored {
-                "新节点这次没能应用，已回到原来的连接；重新连接后就能用它。"
+                cause.failed_restored_message()
             } else {
-                "新节点这次没能应用，连接也没能恢复；重新连接会带上它。"
+                cause.failed_not_restored_message()
             },
-        })
+        });
+        failed[cause.available_key()] = json!(true);
+        failed
     }
 
     /// 锁外拉起返回后持锁复查「现在实际连没连」；**只在确认没人接手时才收本次实例**
@@ -10955,6 +11237,183 @@ mod config_service_tests {
         );
     }
 
+    /// 编辑手动节点：名称与连接参数写进库，密码留空保留原值，身份（id / source_key）不变。
+    #[tokio::test]
+    async fn node_update_rewrites_a_manual_node_and_keeps_its_identity() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("编辑")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "旧名".into(),
+                server: "203.0.113.21".into(),
+                port: 8388,
+                password: "pw-old".into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let id = node["node_id"].as_str().unwrap().to_string();
+        let before = {
+            let conn = services.store.conn();
+            configs::get_node(&conn, &id).unwrap().unwrap()
+        };
+
+        let result = services
+            .node_update(NodeUpdateInput {
+                node_id: id.clone(),
+                name: "新名".into(),
+                server: Some("198.51.100.7".into()),
+                port: Some(9000),
+                method: Some("chacha20-ietf-poly1305".into()),
+                password: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result["updated"], true);
+        assert_eq!(result["params_changed"], true);
+        assert_eq!(result["was_current"], false);
+        assert_eq!(result["rebuilt"], false);
+
+        let after = {
+            let conn = services.store.conn();
+            configs::get_node(&conn, &id).unwrap().unwrap()
+        };
+        assert_eq!(after.name, "新名");
+        assert_eq!(after.server, "198.51.100.7");
+        assert_eq!(after.port, 9000);
+        assert_eq!(after.method, "chacha20-ietf-poly1305");
+        assert_eq!(after.source_key, before.source_key, "去重键必须保持原值");
+        assert_eq!(after.password_ref, before.password_ref);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(
+            crate::secrets::get_secret(&after.password_ref)
+                .unwrap()
+                .as_deref(),
+            Some("pw-old"),
+            "密码留空不能覆盖原密码"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 订阅节点只允许改名：带连接参数直接拒绝，参数一个都不动。
+    #[tokio::test]
+    async fn node_update_rejects_subscription_params_but_allows_rename() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &crate::store::NewNode {
+                    id: "nod_url",
+                    name: "订阅 01",
+                    server: "203.0.113.30",
+                    port: 8388,
+                    method: "aes-256-gcm",
+                    password_ref: "node:nod_url",
+                    source: configs::SOURCE_URL,
+                    source_key: "key-url",
+                },
+            )
+            .unwrap();
+        }
+
+        let error = services
+            .node_update(NodeUpdateInput {
+                node_id: "nod_url".into(),
+                name: "订阅 01".into(),
+                server: Some("198.51.100.8".into()),
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "subscription_params_readonly"
+        );
+
+        // 只改名可以通过，连接参数保持订阅里的值。
+        let renamed = services
+            .node_update(NodeUpdateInput {
+                node_id: "nod_url".into(),
+                name: "我的订阅".into(),
+                server: None,
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(renamed["params_changed"], false);
+        let after = {
+            let conn = services.store.conn();
+            configs::get_node(&conn, "nod_url").unwrap().unwrap()
+        };
+        assert_eq!(after.name, "我的订阅");
+        assert_eq!(after.server, "203.0.113.30");
+        assert_eq!(after.source_key, "key-url");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 托管与免费节点不受理。
+    #[tokio::test]
+    async fn node_update_rejects_owned_and_seed_nodes() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        for (id, source) in [("nod_owned", configs::SOURCE_OWNED), ("nod_seed", configs::SOURCE_SEED)] {
+            {
+                let conn = services.store.conn();
+                configs::upsert_node(
+                    &conn,
+                    &crate::store::NewNode {
+                        id,
+                        name: "别人的节点",
+                        server: "203.0.113.31",
+                        port: 8388,
+                        method: "aes-256-gcm",
+                        password_ref: "node:placeholder",
+                        source,
+                        source_key: "key-x",
+                    },
+                )
+                .unwrap();
+            }
+            let error = services
+                .node_update(NodeUpdateInput {
+                    node_id: id.into(),
+                    name: "改名试试".into(),
+                    server: None,
+                    port: None,
+                    method: None,
+                    password: None,
+                })
+                .await
+                .unwrap_err();
+            let service = error.downcast_ref::<ServiceError>().unwrap();
+            assert_eq!(service.code, "PRECONDITION_FAILED", "{id}");
+            assert_eq!(
+                service.details.as_ref().unwrap()["reason"],
+                "node_not_editable",
+                "{id}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 不传 `config_id` 就读当前激活配置：AI 手上没有配置 id，这必须是可用的入口。
     #[tokio::test]
     async fn config_detail_without_an_id_reads_the_active_config() {
@@ -12247,7 +12706,8 @@ mod config_service_tests {
         };
         assert_eq!(state, AfterStart::Unknown, "拿不到锁只能报「不知道」");
 
-        let value = rebuild_unknown();
+        let cause = RebuildCause::AddedNodes(&[]);
+        let value = rebuild_unknown(&cause);
         assert!(
             value.get("reason").is_none(),
             "不能带 user_disconnected：{value}"
@@ -12264,7 +12724,8 @@ mod config_service_tests {
     /// 「被新的操作接管」不能被写成「已按你的操作断开」。
     #[test]
     fn the_replaced_rebuild_message_does_not_claim_a_user_disconnect() {
-        let replaced = rebuild_replaced_by_new_connection();
+        let cause = RebuildCause::AddedNodes(&[]);
+        let replaced = rebuild_replaced_by_new_connection(&cause);
         assert!(replaced.get("reason").is_none(), "{replaced}");
         assert_eq!(replaced["status"], "failed");
         assert_eq!(replaced["restored"], false);
@@ -12274,7 +12735,7 @@ mod config_service_tests {
             "接管不是断开：{replaced}"
         );
 
-        let disconnected = user_disconnected_rebuild();
+        let disconnected = user_disconnected_rebuild(&cause);
         assert_eq!(disconnected["reason"], "user_disconnected");
         assert!(disconnected["message"].as_str().unwrap().contains("断开"));
     }
@@ -15311,6 +15772,247 @@ mod main_flow_tests {
             "回滚后的运行配置不该含新节点：{profile}"
         );
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 只改名字：运行配置的 outbound tag 用节点 id，改名零影响，不能断连接。
+    #[tokio::test]
+    async fn renaming_the_current_node_does_not_drop_the_connection() {
+        let _serial = REBUILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let h = harness();
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let created = h
+            .services
+            .config_create(auto_port_input("改名不断开"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "甲".into(),
+                server: "198.51.100.61".into(),
+                port: 8388,
+                password: "pw-a".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let id = node["node_id"].as_str().unwrap().to_string();
+        h.services.node_switch(&config_id, &id).await.unwrap();
+        h.services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+
+        let result = h
+            .services
+            .node_update(NodeUpdateInput {
+                node_id: id.clone(),
+                name: "甲-改名".into(),
+                server: None,
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result["params_changed"], false);
+        assert_eq!(result["was_current"], true, "运行时确实在跑这个节点：{result}");
+        assert_eq!(result["disconnected"], false, "改名不能断开：{result}");
+        let status = h.services.runtime_status().await.unwrap();
+        assert_eq!(status["state"], "running", "改名不能断开：{status}");
+        assert_eq!(status["node_id"], id);
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 改当前节点的连接参数：先断开，不重建、不自动重连。
+    #[tokio::test]
+    async fn editing_the_current_node_params_stops_the_connection() {
+        let _serial = REBUILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let h = harness();
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let created = h
+            .services
+            .config_create(auto_port_input("改参数断开"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "甲".into(),
+                server: "198.51.100.63".into(),
+                port: 8388,
+                password: "pw-a".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let id = node["node_id"].as_str().unwrap().to_string();
+        h.services.node_switch(&config_id, &id).await.unwrap();
+        h.services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+
+        let result = h
+            .services
+            .node_update(NodeUpdateInput {
+                node_id: id.clone(),
+                name: "甲".into(),
+                server: Some("198.51.100.64".into()),
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result["params_changed"], true);
+        assert_eq!(result["was_current"], true);
+        assert_eq!(result["disconnected"], true);
+        assert_eq!(result["rebuilt"], false);
+        let status = h.services.runtime_status().await.unwrap();
+        assert_ne!(status["state"], "running", "改当前节点参数必须先断开：{status}");
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 改连接中配置里的非当前节点：按「编辑」重建，连接不断、当前节点不变。
+    #[tokio::test]
+    async fn editing_a_bound_non_current_node_rebuilds_the_running_config() {
+        let _serial = REBUILD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let h = harness();
+        let configured = crate::config::any_free_port().unwrap();
+        {
+            let conn = h.services.store.conn();
+            crate::store::settings::set_proxy_port(&conn, configured).unwrap();
+        }
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let created = h
+            .services
+            .config_create(auto_port_input("改非当前节点"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node_a = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "甲".into(),
+                server: "198.51.100.65".into(),
+                port: 8388,
+                password: "pw-a".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let a_id = node_a["node_id"].as_str().unwrap().to_string();
+        let node_b = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "乙".into(),
+                server: "198.51.100.66".into(),
+                port: 8388,
+                password: "pw-b".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let b_id = node_b["node_id"].as_str().unwrap().to_string();
+        h.services.node_switch(&config_id, &a_id).await.unwrap();
+        h.services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+
+        let result = h
+            .services
+            .node_update(NodeUpdateInput {
+                node_id: b_id.clone(),
+                name: "乙".into(),
+                server: Some("198.51.100.67".into()),
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result["was_current"], false);
+        assert_eq!(result["rebuilt"], true, "非当前节点必须走重建：{result}");
+        assert_eq!(result["rebuild_status"], "applied");
+        let status = h.services.runtime_status().await.unwrap();
+        assert_eq!(status["state"], "running");
+        assert_eq!(status["node_id"], a_id, "重建不能改当前节点");
+        let profile = rendered_profiles(&h.dir);
+        assert!(profile.contains(&format!("node-{b_id}")));
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 参数变了：Host 侧的测速缓存立即作废。
+    #[tokio::test]
+    async fn changing_params_forgets_the_probe_cache() {
+        let h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("测速作废"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "东京".into(),
+                server: "203.0.113.70".into(),
+                port: 8388,
+                password: "pw-a".into(), // secret-scan:allow
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let id = node["node_id"].as_str().unwrap().to_string();
+        h.services.probes.seed_cache_for_test(
+            &id,
+            json!({ "node_id": id, "reachable": true }),
+        );
+        let (before, _) = h.services.probes.snapshot(&config_id, &[id.clone()]);
+        assert_eq!(before.len(), 1);
+
+        h.services
+            .node_update(NodeUpdateInput {
+                node_id: id.clone(),
+                name: "东京".into(),
+                server: Some("203.0.113.71".into()),
+                port: None,
+                method: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+
+        let (after, _) = h.services.probes.snapshot(&config_id, &[id]);
+        assert!(after.is_empty(), "改完参数旧测速必须作废");
     }
 
     /// 起一套「已连接 + 一个池外节点」的环境，给下面几条中断/并发用例复用。

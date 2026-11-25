@@ -50,6 +50,8 @@ export interface NodeProbesController {
   loadSnapshot: (configId: string, nodeIds: string[]) => Promise<void>;
   /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
   recordResults: (entries: NodeProbeData[]) => void;
+  /** 节点参数改了：删掉它的旧结果，界面不能继续显示旧地址的延迟。 */
+  forget: (nodeId: string) => void;
   /** 外部逐节点探测（试用步骤流）期间点亮这些行的「测速中」；传空数组清除。 */
   markProbing: (nodeIds: string[]) => void;
   /** nodeIds 省略 = 全部；提供时只测过滤后的子集。 */
@@ -236,6 +238,14 @@ export function useNodeProbes({
   );
 
   /** 单节点测速不会写批次缓存；调用方把结果并进来，行内才能显示延迟。 */
+  const forget = useCallback((nodeId: string) => {
+    if (!(nodeId in resultsRef.current)) return;
+    const next = { ...resultsRef.current };
+    delete next[nodeId];
+    resultsRef.current = next;
+    setResults(next);
+  }, []);
+
   const recordResults = useCallback((entries: NodeProbeData[]) => {
     if (entries.length === 0) return;
     const merged = { ...resultsRef.current };
@@ -457,6 +467,7 @@ export function useNodeProbes({
       available,
       loadSnapshot,
       recordResults,
+      forget,
       markProbing,
       start,
       cancel,
@@ -472,6 +483,7 @@ export function useNodeProbes({
       available,
       loadSnapshot,
       recordResults,
+      forget,
       markProbing,
       start,
       cancel,

@@ -6,6 +6,7 @@ import type {
   ConfigConnectMode,
   ConfigRouteMode,
   NextAction,
+  NodeSummary,
   RuntimeSnapshot,
   RuntimeView,
   TrialStatusData,
@@ -371,6 +372,8 @@ export default function App() {
   const [mobileExportOpen, setMobileExportOpen] = useState(false);
   /** 节点导入 / 手动填写弹层：入口在控制台节点卡。 */
   const [nodeImportOpen, setNodeImportOpen] = useState(false);
+  /** 编辑态的节点；为空时弹层是「添加节点」。 */
+  const [editingNode, setEditingNode] = useState<NodeSummary | null>(null);
   const mobileExportTriggerRef = useRef<HTMLElement | null>(null);
   /** 设置在咨询 AI：右栏助手搬进弹层并排显示，原来的右栏不再渲染。 */
   const [settingsConsulting, setSettingsConsulting] = useState(false);
@@ -2132,6 +2135,18 @@ export default function App() {
     }
   };
 
+  /** 打开「添加节点」：先清掉编辑态，避免复用上一次的节点。 */
+  const openAddNode = () => {
+    setEditingNode(null);
+    setNodeImportOpen(true);
+  };
+
+  /** 编辑自定义节点：订阅节点只改名，手动节点可改连接参数。 */
+  const handleEditNode = (node: NodeSummary) => {
+    setEditingNode(node);
+    setNodeImportOpen(true);
+  };
+
   // 连接页行内「问 AI」（非自有节点）：只发固定提示，不做修复。
   const handleAskAiAboutNode = (_nodeId: string, prompt: string) => {
     askAiInPanel(prompt);
@@ -3224,7 +3239,7 @@ export default function App() {
             lastActionRef.current = { id: "trial_expired.new_node" };
             openNewNode("trial_expired");
           }}
-          onAddNode={() => setNodeImportOpen(true)}
+          onAddNode={openAddNode}
         />
       ) : showsStage && !(trialFlow && trialFlow.phase !== "done") ? (
         <ConnectionStage
@@ -3236,6 +3251,7 @@ export default function App() {
           onReconnect={handleVpnReconnect}
           onSwitchNode={handleSwitchNode}
           onRemoveNode={handleRemoveNode}
+          onEditNode={handleEditNode}
           nodeProbes={nodeProbes}
           failedAfterConnected={failedAfterConnected}
           helperPreparing={vpn.preparingHelper}
@@ -3256,7 +3272,7 @@ export default function App() {
             )
           }
           onProbe={handleProbe}
-          onAddNode={() => setNodeImportOpen(true)}
+          onAddNode={openAddNode}
           manualProbed={
             vpn.activeConfig
               ? manualProbedConfigs.has(vpn.activeConfig.config_id)
@@ -3290,7 +3306,7 @@ export default function App() {
             lastActionRef.current = { id: "no_nodes.new_node" };
             openNewNode("client");
           }}
-          onAddNode={() => setNodeImportOpen(true)}
+          onAddNode={openAddNode}
           trial={trialFlow}
           onRetryTrial={handleRetryTrial}
           onSkipProbe={handleSkipTrialProbe}
@@ -3508,7 +3524,17 @@ export default function App() {
       <NodeImportDialog
         open={nodeImportOpen}
         bridge={bridge}
-        onClose={() => setNodeImportOpen(false)}
+        editing={editingNode}
+        onSaved={(result) => {
+          if (result.paramsChanged && editingNode) {
+            nodeProbes.forget(editingNode.node_id);
+          }
+          void vpn.reload();
+        }}
+        onClose={() => {
+          setNodeImportOpen(false);
+          setEditingNode(null);
+        }}
         onNotice={setAppNotice}
       />
 

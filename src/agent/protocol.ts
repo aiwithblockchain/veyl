@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.24.0" as const;
+export const CONTRACT_VERSION = "2.25.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",
@@ -619,6 +619,32 @@ export interface NodeRemoveResult {
   wasCurrent: boolean;
 }
 
+export interface NodeUpdateInput {
+  nodeId: string;
+  name: string;
+  /** 连接参数只有 `source = manual` 的节点可传；订阅节点只允许改名。 */
+  server?: string;
+  port?: number;
+  method?: string;
+  /** 省略或空串表示保持原密码；Host 不回传密码。 */
+  password?: string;
+}
+
+export interface NodeUpdateResult {
+  updated: boolean;
+  /** 运行时正在跑这个节点（与 `node_remove` 同义，不看参数是否变化）。 */
+  wasCurrent: boolean;
+  /** 确实停了运行时：只有参数变了才会停，只改名不停。 */
+  disconnected: boolean;
+  paramsChanged: boolean;
+  /** 改的是连接中配置里绑着的节点：Host 已按新设置重建运行时。 */
+  rebuilt: boolean;
+  /** 重建结果：`applied` / `failed` / `skipped`；没重建时为 null。 */
+  rebuildStatus?: string | null;
+  /** 重建失败时能直接给用户看的一句话；其余情况为 null。 */
+  message?: string | null;
+}
+
 /** 服务分类（commands.md §10.7）。`proxy_selected` 的 targets 只能取这里的 id。 */
 export interface Category {
   id: string;
@@ -664,7 +690,9 @@ export type NodeListChangedReason =
   /** 智能修复成功后本机刷新。 */
   | "node_rotated"
   /** my_server_sync 拉到新端口 / 新密码。 */
-  | "node_synced";
+  | "node_synced"
+  /** node_update 改了名称或连接参数。 */
+  | "node_updated";
 
 export interface NodeListChangedPayload {
   contract_version: typeof CONTRACT_VERSION;

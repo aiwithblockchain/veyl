@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge } from "../agent/bridge";
+import type { NodeSummary } from "../agent/protocol";
 import nodesSource from "../../src-tauri/src/nodes.rs?raw";
 import { NodeImportDialog } from "./NodeImportDialog";
 
@@ -24,17 +25,29 @@ function makeBridge() {
     nodeImportUrl: vi.fn(async () => ({ imported: 2, skipped: [], nodes: [] })),
     nodeImportFile: vi.fn(async () => ({ imported: 1, skipped: [], nodes: [] })),
     pickNodeFile: vi.fn(async () => null),
+    nodeUpdate: vi.fn(async () => ({
+      updated: true,
+      wasCurrent: false,
+      disconnected: false,
+      paramsChanged: true,
+      rebuilt: false,
+    })),
   } as unknown as AgentBridge;
 }
 
-function renderDialog(over: { bridge?: AgentBridge } = {}) {
+function renderDialog(
+  over: { bridge?: AgentBridge; editing?: NodeSummary | null } = {},
+) {
   const bridge = over.bridge ?? makeBridge();
   const onClose = vi.fn();
   const onNotice = vi.fn();
+  const onSaved = vi.fn();
   const ui = (open: boolean) => (
     <NodeImportDialog
       open={open}
       bridge={bridge}
+      editing={over.editing ?? null}
+      onSaved={onSaved}
       onClose={onClose}
       onNotice={onNotice}
     />
@@ -44,6 +57,7 @@ function renderDialog(over: { bridge?: AgentBridge } = {}) {
     bridge,
     onClose,
     onNotice,
+    onSaved,
     container: view.container,
     rerenderOpen: (open: boolean) => view.rerender(ui(open)),
   };
@@ -572,5 +586,202 @@ describe("切段与改输入：旧结果不残留", () => {
 
     expect(host.length).toBeGreaterThan(0);
     expect(Array.from(select.options).map((option) => option.value)).toEqual(host);
+  });
+});
+
+describe("编辑态", () => {
+  const MANUAL: NodeSummary = {
+    node_id: "nd_1",
+    name: "东京 01",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "manual",
+    created_at: 0,
+  };
+  const SUBSCRIBED: NodeSummary = {
+    ...MANUAL,
+    node_id: "nd_2",
+    name: "订阅 01",
+    source: "url",
+  };
+
+  it("标题改为编辑节点，隐藏导入分段，预填字段且密码留空", () => {
+    renderDialog({ editing: MANUAL });
+
+    expect(screen.getByRole("dialog", { name: "编辑节点" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "链接 / 订阅" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "从文件导入" })).toBeNull();
+    expect(
+      (screen.getByPlaceholderText("东京 01") as HTMLInputElement).value,
+    ).toBe("东京 01");
+    expect(
+      (screen.getByPlaceholderText("example.com 或 1.2.3.4") as HTMLInputElement)
+        .value,
+    ).toBe("203.0.113.9");
+    expect((screen.getByPlaceholderText("8388") as HTMLInputElement).value).toBe(
+      "8388",
+    );
+    const password = screen.getByPlaceholderText(
+      "不修改就留空",
+    ) as HTMLInputElement;
+    expect(password.value).toBe("");
+  });
+
+  it("手动节点保存：调 node_update，密码留空不传", async () => {
+    const bridge = makeBridge();
+    const { onNotice, onClose, onSaved } = renderDialog({ bridge, editing: MANUAL });
+
+    fireEvent.change(screen.getByPlaceholderText("东京 01"), {
+      target: { value: "东京 02" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeUpdate).toHaveBeenCalledWith({
+        nodeId: "nd_1",
+        name: "东京 02",
+        server: "203.0.113.9",
+        port: 8388,
+        method: "aes-256-gcm",
+      }),
+    );
+    expect(onNotice).toHaveBeenCalledWith({ level: "info", text: "已保存" });
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("订阅节点：连接参数四栏禁用，只改名能保存", async () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge, editing: SUBSCRIBED });
+
+    expect(
+      (screen.getByPlaceholderText("example.com 或 1.2.3.4") as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByPlaceholderText("8388") as HTMLInputElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("combobox", { name: "加密方式" }) as HTMLSelectElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByPlaceholderText("不修改就留空") as HTMLInputElement).disabled,
+    ).toBe(true);
+
+    fireEvent.change(screen.getByPlaceholderText("东京 01"), {
+      target: { value: "我的订阅" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeUpdate).toHaveBeenCalledWith({
+        nodeId: "nd_2",
+        name: "我的订阅",
+      }),
+    );
+  });
+
+  it("改的是正在用的节点：提示已断开", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeUpdate: ReturnType<typeof vi.fn> }).nodeUpdate =
+      vi.fn(async () => ({
+        updated: true,
+        wasCurrent: true,
+        disconnected: true,
+        paramsChanged: true,
+        rebuilt: false,
+      }));
+    const { onNotice } = renderDialog({ bridge, editing: MANUAL });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已保存；已断开，重新连接后使用新设置",
+      }),
+    );
+  });
+
+  it("保存失败留在弹层并就地报错", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeUpdate: ReturnType<typeof vi.fn> }).nodeUpdate =
+      vi.fn(async () => {
+        throw {
+          code: "CONFLICT",
+          message: "已保存；这套配置正在切换连接，稍后重新连接即可用新设置",
+          details: { reason: "switch_in_progress" },
+        };
+      });
+    const { onClose } = renderDialog({ bridge, editing: MANUAL });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("编辑保存后的连接结果", () => {
+  const NODE: NodeSummary = {
+    node_id: "nd_1",
+    name: "东京 01",
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "manual",
+    created_at: 0,
+  };
+
+  it("重建失败：用错误样式给 Host 的文案，不报「已保存」", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeUpdate: ReturnType<typeof vi.fn> }).nodeUpdate =
+      vi.fn(async () => ({
+        updated: true,
+        wasCurrent: false,
+        disconnected: false,
+        paramsChanged: true,
+        rebuilt: false,
+        rebuildStatus: "failed",
+        message: "新设置这次没能应用，已回到原来的连接；重新连接后就会用它。",
+      }));
+    const { onNotice } = renderDialog({ bridge, editing: NODE });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "error",
+        text: "新设置这次没能应用，已回到原来的连接；重新连接后就会用它。",
+      }),
+    );
+  });
+
+  it("重建成功：提示已用新设置重新连接", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeUpdate: ReturnType<typeof vi.fn> }).nodeUpdate =
+      vi.fn(async () => ({
+        updated: true,
+        wasCurrent: false,
+        disconnected: false,
+        paramsChanged: true,
+        rebuilt: true,
+        rebuildStatus: "applied",
+        message: null,
+      }));
+    const { onNotice } = renderDialog({ bridge, editing: NODE });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已保存；已用新设置重新连接",
+      }),
+    );
   });
 });

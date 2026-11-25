@@ -34,6 +34,8 @@ interface Props {
     message?: string;
     wasCurrent?: boolean;
   }>;
+  /** 编辑自定义节点：打开编辑弹层（订阅只改名，手动可改连接参数）。 */
+  onEditNode?: (node: NodeSummary) => void;
   nodeProbes: NodeProbesController;
   /** 最近一次失败是否来自已连接态：决定失败标题。 */
   failedAfterConnected: boolean;
@@ -113,6 +115,7 @@ export function ConnectionStage({
   onReconnect,
   onSwitchNode,
   onRemoveNode,
+  onEditNode,
   nodeProbes,
   failedAfterConnected,
   helperPreparing,
@@ -426,9 +429,9 @@ export function ConnectionStage({
     );
   };
 
-  /** 自定义节点的「⋯ → 移除节点」。托管 / 免费节点不给入口。 */
+  /** 自定义节点的「⋯ → 编辑 / 移除」。托管 / 免费节点不给入口。 */
   const renderMore = (node: NodeSummary, name: string) => {
-    if (onRemoveNode === undefined) return null;
+    if (onEditNode === undefined && onRemoveNode === undefined) return null;
     if (node.source !== "url" && node.source !== "manual") return null;
     const open = menuFor === node.node_id;
     return (
@@ -469,18 +472,38 @@ export function ConnectionStage({
               moreButtonRef.current?.focus();
             }}
           >
-            <button
-              type="button"
-              role="menuitem"
-              className="stage-node__menu-item"
-              autoFocus
-              onClick={(event) => {
-                event.stopPropagation();
-                openRemoveConfirm(node, name);
-              }}
-            >
-              {t("console.node.remove")}
-            </button>
+            {onEditNode ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="stage-node__menu-item"
+                autoFocus
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMenuFor(null);
+                  onEditNode(node);
+                }}
+              >
+                {t("console.node.edit")}
+              </button>
+            ) : null}
+            {onEditNode && onRemoveNode ? (
+              <span className="stage-node__menu-sep" role="separator" />
+            ) : null}
+            {onRemoveNode ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="stage-node__menu-item"
+                autoFocus={onEditNode === undefined}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openRemoveConfirm(node, name);
+                }}
+              >
+                {t("console.node.remove")}
+              </button>
+            ) : null}
           </span>
         ) : null}
       </span>

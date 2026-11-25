@@ -3,7 +3,7 @@
 //! 批次只在内存里：不进 Job、不落库、不发 `*-changed`；应用退出直接丢掉。
 //! 同一时刻全局只允许一个批次，跨配置也一样。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -107,6 +107,9 @@ impl BatchMeta {
 pub struct ProbeBatchState {
     current: Mutex<Option<Arc<BatchMeta>>>,
     cache: Mutex<HashMap<String, Value>>,
+    /// 参数改过、缓存已作废的节点：在途批次回写时也要丢掉它们的结果。
+    /// 下一次批次开始（重新测）时整体清空。
+    stale: Mutex<HashSet<String>>,
     /// 单节点测速留下的空闲探针（仅同一配置可复用）。
     idle: Mutex<Option<IdleProbe>>,
     /// 正在启动的空闲探针：用户开始连接时要能取消它。
@@ -210,6 +213,20 @@ impl ProbeBatchState {
         }
     }
 
+    /// 节点参数变了：旧结果作废，正在跑的批次回写这个节点时也丢弃。
+    /// 空闲探针的运行时是用旧渲染配置起的，一并停掉，免得 60 秒内复用。
+    pub fn forget_node(&self, node_id: &str) {
+        self.cache.lock().remove(node_id);
+        self.stale.lock().insert(node_id.to_string());
+        self.cancel_idle();
+    }
+
+    /// 测试用：直接放一条缓存结果，模拟「这个节点之前测过」。
+    #[cfg(test)]
+    pub(crate) fn seed_cache_for_test(&self, node_id: &str, result: Value) {
+        self.cache.lock().insert(node_id.to_string(), result);
+    }
+
     /// 启动一批。已有批次在跑时返回它的 `run_id`（调用方映射成 BUSY）。
     /// `method` 是整批唯一使用的方式：`clash` 或 `none`。
     pub fn start(
@@ -221,9 +238,13 @@ impl ProbeBatchState {
         let mut current = self.current.lock();
         if let Some(existing) = current.as_ref() {
             if !existing.cancel.is_cancelled() {
+                // 已有批次在跑：不能顺手清失效集合——那会让在跑的旧批次
+                // 把改过参数的节点结果写回缓存。只有真正开新批次时才清。
                 return Err(existing.run_id.clone());
             }
         }
+        // 新批次会按当前参数重测：上次作废的节点这次可以重新写缓存。
+        self.stale.lock().clear();
         let run_id = new_run_id();
         let meta = Arc::new(BatchMeta {
             run_id: run_id.clone(),
@@ -305,6 +326,14 @@ impl ProbeBatchState {
 
     fn record(&self, result: &Value) {
         if let Some(node_id) = result.get("node_id").and_then(Value::as_str) {
+            let stale = {
+                let stale = self.stale.lock();
+                stale.contains(node_id)
+            };
+            // 参数改过之后，在途批次回来的旧结果不能写进缓存。
+            if stale {
+                return;
+            }
             self.cache.lock().insert(node_id.to_string(), result.clone());
         }
     }
@@ -918,6 +947,49 @@ mod tests {
         assert!(run_other.is_none(), "别的配置在跑时本配置拿到 null");
         state.cancel(&started.run_id);
         state.finish(&started.run_id);
+    }
+
+    /// 节点参数改过：旧结果作废，在途回写也丢弃；下一次批次可以重新写入。
+    #[tokio::test]
+    async fn forget_node_drops_old_results_and_ignores_late_writes() {
+        let state = ProbeBatchState::default();
+        let ids = vec!["nod_1".to_string()];
+        state.cache.lock().insert(
+            "nod_1".to_string(),
+            json!({"node_id": "nod_1", "reachable": true}),
+        );
+
+        state.forget_node("nod_1");
+        let (results, _) = state.snapshot("cfg_1", &ids);
+        assert!(results.is_empty(), "作废后不能再返回旧结果");
+
+        state.record(&json!({"node_id": "nod_1", "reachable": false}));
+        let (results, _) = state.snapshot("cfg_1", &ids);
+        assert!(results.is_empty(), "在途批次回来的旧结果必须丢弃");
+
+        let _started = state.start("cfg_1", 1, "clash").unwrap();
+        state.record(&json!({"node_id": "nod_1", "reachable": true}));
+        let (results, _) = state.snapshot("cfg_1", &ids);
+        assert_eq!(results.len(), 1, "新批次的结果要能写进缓存");
+    }
+
+    /// 批次在跑时再点测速：返回 BUSY，且不能顺手清掉失效集合——否则在跑的旧批次
+    /// 会把改过参数的节点结果写回缓存。
+    #[tokio::test]
+    async fn start_while_a_batch_is_running_keeps_the_stale_set() {
+        let state = ProbeBatchState::default();
+        let first = state.start("cfg_1", 2, "clash").unwrap();
+        state.forget_node("nod_1");
+
+        let busy = match state.start("cfg_1", 2, "clash") {
+            Ok(_) => panic!("已有批次在跑时必须返回 BUSY"),
+            Err(run_id) => run_id,
+        };
+        assert_eq!(busy, first.run_id);
+
+        state.record(&json!({"node_id": "nod_1", "reachable": true}));
+        let (results, _) = state.snapshot("cfg_1", &["nod_1".to_string()]);
+        assert!(results.is_empty(), "旧批次回写仍必须被丢弃");
     }
 
     #[tokio::test]

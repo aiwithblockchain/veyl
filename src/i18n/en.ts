@@ -670,6 +670,7 @@ export const en: Record<MessageKey, string> = {
   "console.node.fastest": "Fastest",
   "console.node.custom": "Custom",
   "console.node.more": "More actions for {name}",
+  "console.node.edit": "Edit node",
   "console.node.remove": "Remove node",
   "console.node.removeTitle": "Remove \"{name}\"?",
   "console.node.removeBody": "This only removes it from this computer's node pool; your provider or subscription isn't affected. Subscription nodes will come back the next time the subscription refreshes.",
@@ -1287,6 +1288,19 @@ export const en: Record<MessageKey, string> = {
   "settings.import.manual.note": "Find the address, port, encryption method and password in your provider's panel; the password stays on this device.",
   "settings.import.manual.password": "Password",
   "settings.import.manual.passwordPlaceholder": "Connection password",
+  "settings.import.manual.editPasswordPlaceholder": "Leave blank to keep it",
+  "settings.import.manual.save": "Save",
+  "settings.import.manual.saving": "Saving…",
+  "settings.import.manual.saved": "Saved",
+  "settings.import.manual.savedDisconnected":
+    "Saved; disconnected — reconnect to use the new settings",
+  "settings.import.manual.savedReconnected": "Saved; reconnected with the new settings",
+  "settings.import.manual.saveFailed": "Couldn't save. Check and try again.",
+  "settings.import.manual.rebuildFailed":
+    "Saved, but the connection couldn't be rebuilt; reconnect to use the new settings.",
+  "settings.import.editTitle": "Edit node",
+  "settings.import.editSubscribedNote":
+    "These come from the subscription: local changes don't sync back and won't be corrected by it. Edit them with your provider and import again.",
   "settings.import.manual.passwordRequired": "Enter the connection password.",
   "settings.import.manual.passwordTooLong": "The password can be at most 256 characters.",
   "settings.import.manual.port": "Port",

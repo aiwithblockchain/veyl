@@ -60,6 +60,7 @@ function probes(over: Partial<NodeProbesController> = {}): NodeProbesController 
     run: null,
     starting: false,
     probing: new Set(),
+    forget: () => {},
     finished: null,
     notice: null,
     available: true,
@@ -150,6 +151,7 @@ interface StageOverrides {
   onReconnect?: () => void;
   failedAfterConnected?: boolean;
   onSwitchNode?: (nodeId: string) => Promise<{ ok: boolean; message?: string }>;
+  onEditNode?: (node: import("../agent/protocol").NodeSummary) => void;
   onRemoveNode?: (nodeId: string) => Promise<{
     ok: boolean;
     message?: string;
@@ -204,6 +206,7 @@ function stageElement(over: StageOverrides = {}) {
       onReconnect={over.onReconnect ?? vi.fn()}
       onSwitchNode={over.onSwitchNode ?? (async () => ({ ok: true }))}
       onRemoveNode={over.onRemoveNode}
+      onEditNode={over.onEditNode}
       nodeProbes={over.nodeProbes ?? probes()}
       failedAfterConnected={over.failedAfterConnected ?? false}
       helperPreparing={false}
@@ -2662,6 +2665,28 @@ describe("自定义节点移除", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "更多操作：托管 01" })).toBeNull();
     expect(screen.queryByRole("button", { name: "更多操作：东京 01" })).toBeNull();
+  });
+
+  it("传了编辑回调时菜单先给「编辑节点」，点了把节点交给调用方", () => {
+    const onEditNode = vi.fn();
+    const onRemoveNode = vi.fn(async () => ({ ok: true }));
+    renderStage({ config: CUSTOM_CONFIG, onEditNode, onRemoveNode });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多操作：美国 01" }));
+    expect(
+      screen.getAllByRole("menuitem").map((item) => item.textContent),
+    ).toEqual(["编辑节点", "移除节点"]);
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "编辑节点" }));
+
+    expect(onEditNode).toHaveBeenCalledTimes(1);
+    expect(onEditNode.mock.calls[0][0]).toMatchObject({
+      node_id: "n3",
+      name: "美国 01",
+      source: "url",
+    });
+    expect(onRemoveNode).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
   it("菜单 → 就地确认 → 移除成功", async () => {

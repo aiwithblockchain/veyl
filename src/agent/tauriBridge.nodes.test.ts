@@ -179,3 +179,58 @@ describe("移除自定义节点", () => {
     expect(result).toEqual({ removed: true, wasCurrent: true });
   });
 });
+
+describe("编辑节点", () => {
+  it("node_update 只传填了的字段，并把 snake_case 归一化", async () => {
+    invoke.mockResolvedValueOnce({
+      updated: true,
+      was_current: true,
+      disconnected: true,
+      params_changed: true,
+      rebuilt: false,
+    });
+    const bridge = new TauriAgentBridge();
+
+    const result = await bridge.nodeUpdate({
+      nodeId: "nod_1",
+      name: "东京 02",
+      server: "203.0.113.10",
+      port: 9000,
+      method: "aes-256-gcm",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("node_update", {
+      nodeId: "nod_1",
+      name: "东京 02",
+      server: "203.0.113.10",
+      port: 9000,
+      method: "aes-256-gcm",
+    });
+    expect(result).toEqual({
+      updated: true,
+      wasCurrent: true,
+      disconnected: true,
+      paramsChanged: true,
+      rebuilt: false,
+      rebuildStatus: null,
+      message: null,
+    });
+  });
+
+  it("订阅节点只改名：不带连接参数，密码也不传", async () => {
+    invoke.mockResolvedValueOnce({
+      updated: true,
+      was_current: false,
+      params_changed: false,
+      rebuilt: false,
+    });
+    const bridge = new TauriAgentBridge();
+
+    await bridge.nodeUpdate({ nodeId: "nod_2", name: "我的订阅" });
+
+    expect(invoke).toHaveBeenCalledWith("node_update", {
+      nodeId: "nod_2",
+      name: "我的订阅",
+    });
+  });
+});

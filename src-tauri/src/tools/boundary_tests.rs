@@ -22,7 +22,8 @@ use crate::agent::permission_handler::AivpnPermissionHandler;
 use crate::control_plane::catalog::{Catalog, CatalogError, Plan, Region};
 use crate::tools::permission_level_of;
 use crate::tools::services::{
-    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, ServerCatalogSource,
+    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NodeUpdateInput,
+    ServerCatalogSource,
     VpnToolServices,
 };
 
@@ -289,6 +290,11 @@ impl VpnToolServices for FakeServices {
             "node_create({:?},name={},server={},port={})",
             input.config_id, input.name, input.server, input.port
         ));
+        Ok(self.data.clone())
+    }
+    async fn node_update(&self, input: NodeUpdateInput) -> anyhow::Result<Value> {
+        self.rec
+            .record(format!("node_update({},name={})", input.node_id, input.name));
         Ok(self.data.clone())
     }
     async fn node_switch(&self, config_id: &str, node_id: &str) -> anyhow::Result<Value> {
@@ -1601,6 +1607,9 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn node_create(&self, _: NodeCreateInput) -> anyhow::Result<Value> {
+            Err(anyhow::anyhow!("磁盘满了"))
+        }
+        async fn node_update(&self, _: NodeUpdateInput) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn node_switch(&self, _: &str, _: &str) -> anyhow::Result<Value> {

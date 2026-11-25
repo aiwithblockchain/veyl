@@ -1,7 +1,7 @@
 # 编辑自定义节点（手动可改全项，订阅只改名）
 
 > 日期：2026-11-25
-> 状态：**已定，待实现**（评审后第 2 版）。
+> 状态：**已实现**（2026-11-25）。
 > 触发：自定义节点只有「添加」和「移除」，加错一个参数只能删掉重加；改了服务器密码也没地方同步。
 > 相关：`docs/design/node-remove.md`（同一入口的移除）、`docs/design/node-list-grouping.md`（分组后的行结构）、`docs/design/node-import-ui.md`（手动填写表单与校验口径）。
 
@@ -50,9 +50,12 @@ node_update {
   password?: string      // 仅 manual 可传；省略或空串 = 不改
 } -> {
   updated: true
-  wasCurrent: boolean    // 改之前运行时正在跑这个节点
+  wasCurrent: boolean    // 运行时正在跑这个节点（与 node_remove 同义，不看参数是否变化）
+  disconnected: boolean  // 确实停了运行时：只有参数变了才会停，只改名不停
   paramsChanged: boolean // 地址/端口/加密/密码任意一项变了
-  rebuilt: boolean       // paramsChanged 且重建了连接中的运行时
+  rebuilt: boolean       // 重建成功（status = "applied"）
+  rebuildStatus: "applied" | "failed" | "skipped" | null
+  message: string | null // 重建失败时可直接给用户看的一句话
 }
 ```
 
@@ -63,7 +66,7 @@ node_update {
 3. `source = "url"` 且带了任一连接参数 → `PRECONDITION_FAILED / subscription_params_readonly`。名称照常可改。
 4. 校验与 `node_create` 同一套：名称 trim 后非空且 ≤64 字（`configs.rs:903`）；地址沿用 `validate_server`（`configs.rs:916`：≤253 字节，禁 `://`、空白、`/`、`\`、控制字符）；端口 1–65535；`method` 先 `to_ascii_lowercase` 再查 `nodes.rs:19` 的 `SUPPORTED_METHODS`；密码非空时 ≤256 字。失败按 `INVALID_ARGUMENT`，`details.reason` 与新建一致（`invalid_argument` / `unsupported_method`）。
 5. 读运行时快照（`node_id`、`config_id`），决定要不要动运行时：
-   - 正在跑的正是这个节点 → `was_current = true`，先停运行时；
+   - 正在跑的正是这个节点 → `was_current = true`；**且参数变了**才先停运行时并置 `disconnected = true`。只改名字不停：outbound tag 用节点 id，改名对运行配置零影响；
    - 否则若 `paramsChanged` 且这个节点绑在**正在连接的配置**里 → 记下「写库之后要重建」，此时不动运行时；
    - 不在连接中的配置里 → 不动运行时。
    - 判断依据是运行时快照的 `node_id`，不是活动配置的 `current_node_id`：真正在跑的是运行时。**已知不一致**：`node_remove` 判 `was_current` 用的是活动配置的 `current_node_id`，两者口径不同；本批不改 `node_remove`，后续统一，评审时不要当成新缺陷。
@@ -102,6 +105,9 @@ node_update {
 - 保存：主按钮「保存」；提交中禁用整张表单与「取消」。成功后关闭弹层，行内名称即时更新。
 - `wasCurrent = true`：关闭弹层后在节点卡顶部给一行「已断开，重新连接后使用新设置」，不自动重连（新参数可能连不上）。
 - `rebuilt = true`：一行「已用新设置重新连接」；连接态由运行时事件表达，不在提示里承诺。
+- `rebuildStatus = "failed"`：**不能报「已保存」**。用错误样式给 `message`（「新设置没能应用，连接已断开」这类），让用户知道值已存但连接断了。
+- `disconnected = true` 才提示「已断开，重新连接后使用新设置」；`wasCurrent` 只用于判断「正在跑」，不决定文案。
+- 保存成功时作废该节点的前端测速结果（`NodeProbesController.forget`）并重拉列表：换地址后旧延迟属于旧服务器。
 - 失败：错误贴着对应字段（与添加节点同一套映射）；`subscription_params_readonly` 落到参数区，`node_not_editable` 落到弹层顶部一行。
 
 ---

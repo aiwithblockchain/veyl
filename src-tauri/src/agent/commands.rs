@@ -1879,6 +1879,31 @@ pub async fn node_create(
         .map_err(error_value)
 }
 
+/// 仅 UI：编辑自定义节点（`url` 只改名称，`manual` 可改连接参数）。见 `docs/design/node-edit.md`。
+#[tauri::command]
+pub async fn node_update(
+    state: State<'_, Arc<AppState>>,
+    node_id: String,
+    name: String,
+    server: Option<String>,
+    port: Option<u16>,
+    method: Option<String>,
+    password: Option<String>,
+) -> Result<Value, Value> {
+    state
+        .services
+        .node_update(crate::tools::NodeUpdateInput {
+            node_id,
+            name,
+            server,
+            port,
+            method,
+            password,
+        })
+        .await
+        .map_err(error_value)
+}
+
 /// 仅 UI：把节点绑进全局配置。`source` 与 `nodeIds` 二选一；幂等，不改当前节点。
 #[tauri::command]
 pub async fn node_attach(

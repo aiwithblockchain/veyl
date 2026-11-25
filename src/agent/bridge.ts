@@ -13,6 +13,8 @@ import type {
   NodeForgetResult,
   NodeRemoveInput,
   NodeRemoveResult,
+  NodeUpdateInput,
+  NodeUpdateResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeProbeData,
@@ -27,7 +29,7 @@ import type {
   TrialStatusData,
 } from "./protocol";
 
-export type { NodeAttachInput, NodeAttachResult, NodeForgetInput, NodeForgetResult, NodeRemoveInput, NodeRemoveResult, TrialStatusData } from "./protocol";
+export type { NodeAttachInput, NodeAttachResult, NodeForgetInput, NodeForgetResult, NodeRemoveInput, NodeRemoveResult, NodeUpdateInput, NodeUpdateResult, TrialStatusData } from "./protocol";
 
 export type BridgeMode = "tauri" | "mock";
 
@@ -1088,6 +1090,8 @@ export interface AgentBridge {
   nodeForget(input: NodeForgetInput): Promise<NodeForgetResult>;
   /** 移除订阅 / 手动添加的节点；托管与免费节点由 Host 拒绝。 */
   nodeRemove(input: NodeRemoveInput): Promise<NodeRemoveResult>;
+  /** 编辑自定义节点：订阅节点只改名，手动节点可改连接参数（密码留空表示不改）。 */
+  nodeUpdate(input: NodeUpdateInput): Promise<NodeUpdateResult>;
   /** 从订阅地址导入节点；只接受 https，拉取失败整体失败。 */
   nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult>;
   /** 导入用户粘贴的 ss:// 文本；不发网络请求。 */

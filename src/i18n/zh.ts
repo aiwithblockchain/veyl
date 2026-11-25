@@ -640,6 +640,7 @@ export const zh = {
   "console.node.fastest": "最快",
   "console.node.custom": "自定义",
   "console.node.more": "更多操作：{name}",
+  "console.node.edit": "编辑节点",
   "console.node.remove": "移除节点",
   "console.node.removeTitle": "移除「{name}」？",
   "console.node.removeBody": "只从这台电脑的节点池移除，不会影响你的服务商或订阅。订阅导入的节点下次刷新订阅还会出现。",
@@ -1216,6 +1217,19 @@ export const zh = {
   "settings.import.manual.note": "在服务商后台找到地址、端口、加密方式和密码；密码只保存在本机。",
   "settings.import.manual.password": "密码",
   "settings.import.manual.passwordPlaceholder": "连接密码",
+  "settings.import.manual.editPasswordPlaceholder": "不修改就留空",
+  "settings.import.manual.save": "保存",
+  "settings.import.manual.saving": "正在保存…",
+  "settings.import.manual.saved": "已保存",
+  "settings.import.manual.savedDisconnected":
+    "已保存；已断开，重新连接后使用新设置",
+  "settings.import.manual.savedReconnected": "已保存；已用新设置重新连接",
+  "settings.import.manual.saveFailed": "没有保存成功，检查后再试。",
+  "settings.import.manual.rebuildFailed":
+    "已保存，但这次没能重新连接；重新连接后会使用新设置。",
+  "settings.import.editTitle": "编辑节点",
+  "settings.import.editSubscribedNote":
+    "这些来自订阅：本地改连接参数不会同步回服务商，也不会被订阅纠正。要改请在服务商那边改完重新导入。",
   "settings.import.manual.passwordRequired": "填连接密码。",
   "settings.import.manual.passwordTooLong": "密码最多 256 个字符。",
   "settings.import.manual.port": "端口",

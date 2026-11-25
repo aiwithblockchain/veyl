@@ -100,6 +100,8 @@ import type {
   NodeForgetResult,
   NodeRemoveInput,
   NodeRemoveResult,
+  NodeUpdateInput,
+  NodeUpdateResult,
   NodeImportResult,
   NodeImportSkipped,
   NodeSummary,
@@ -459,6 +461,20 @@ function normalizeNodeRemove(raw: unknown): NodeRemoveResult {
   return {
     removed: record.removed === true,
     wasCurrent: record.was_current === true,
+  };
+}
+
+function normalizeNodeUpdate(raw: unknown): NodeUpdateResult {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    updated: record.updated === true,
+    wasCurrent: record.was_current === true,
+    disconnected: record.disconnected === true,
+    paramsChanged: record.params_changed === true,
+    rebuilt: record.rebuilt === true,
+    rebuildStatus:
+      typeof record.rebuild_status === "string" ? record.rebuild_status : null,
+    message: typeof record.message === "string" ? record.message : null,
   };
 }
 
@@ -1415,6 +1431,18 @@ export class TauriAgentBridge implements AgentBridge {
     return normalizeNodeRemove(
       await call<unknown>("node_remove", { nodeId: input.nodeId }),
     );
+  }
+
+  async nodeUpdate(input: NodeUpdateInput): Promise<NodeUpdateResult> {
+    const args: Record<string, unknown> = {
+      nodeId: input.nodeId,
+      name: input.name,
+    };
+    if (input.server !== undefined) args.server = input.server;
+    if (input.port !== undefined) args.port = input.port;
+    if (input.method !== undefined) args.method = input.method;
+    if (input.password !== undefined) args.password = input.password;
+    return normalizeNodeUpdate(await call<unknown>("node_update", args));
   }
 
   async nodeImportUrl(url: string, configId?: string): Promise<NodeImportResult> {

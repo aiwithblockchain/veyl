@@ -44,8 +44,8 @@ use serde_json::Value;
 pub use display::{Changed, Display, DisplayAction, Fact, FactKey};
 pub use envelope::{AivpnError, NextAction, ToolOutcome};
 pub use services::{
-    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NotWiredServices,
-    VpnToolServices,
+    CatalogQuery, ConfigCreateInput, ConfigUpdateInput, NodeCreateInput, NodeUpdateInput,
+    NotWiredServices, VpnToolServices,
 };
 
 /// AskUserQuestion 的护栏：契约要求 options 非空，否则直接把这次工具调用

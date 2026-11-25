@@ -6434,6 +6434,13 @@ details[open] > .settings-fold__summary::before {
   outline-offset: -2px;
 }
 
+.stage-node__menu-sep {
+  display: block;
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--hair);
+}
+
 /* 行内移除确认：不弹系统框，紧贴节点卡。 */
 .stage-node-confirm {
   display: flex;

@@ -67,6 +67,8 @@ import type {
   NodeForgetResult,
   NodeRemoveInput,
   NodeRemoveResult,
+  NodeUpdateInput,
+  NodeUpdateResult,
   NodeImportResult,
   NodeProbeMethod,
   NodeProbePhase,
@@ -2317,6 +2319,117 @@ export class MockAgentBridge implements AgentBridge {
       },
     });
     return { removed: true, wasCurrent };
+  }
+
+  async nodeUpdate(input: NodeUpdateInput): Promise<NodeUpdateResult> {
+    await sleep(150);
+    const raw = localStorage.getItem(MOCK_CONFIG_STORAGE_KEY);
+    if (!raw) {
+      throw {
+        code: "NOT_FOUND",
+        message: "",
+        details: { reason: "node_not_found" },
+      };
+    }
+    const store = JSON.parse(raw) as {
+      configs?: ConfigDetail[];
+      activeId?: string | null;
+    };
+    let target: NodeSummary | null = null;
+    for (const config of store.configs ?? []) {
+      const found = (config.nodes ?? []).find(
+        (node) => node.node_id === input.nodeId,
+      );
+      if (found) {
+        target = found;
+        break;
+      }
+    }
+    if (!target) {
+      throw {
+        code: "NOT_FOUND",
+        message: "",
+        details: { reason: "node_not_found" },
+      };
+    }
+    if (target.source !== "url" && target.source !== "manual") {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "",
+        details: { reason: "node_not_editable", source: target.source },
+      };
+    }
+    const passwordChange = (input.password ?? "").trim().length > 0;
+    const paramsGiven =
+      input.server !== undefined ||
+      input.port !== undefined ||
+      input.method !== undefined ||
+      passwordChange;
+    if (target.source === "url" && paramsGiven) {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "",
+        details: { reason: "subscription_params_readonly" },
+      };
+    }
+    const name = input.name.trim();
+    if (!name) {
+      throw {
+        code: "INVALID_ARGUMENT",
+        message: "节点名称不能为空",
+        details: { reason: "invalid_argument" },
+      };
+    }
+    const server = (input.server ?? target.server).trim();
+    const port = input.port ?? target.port;
+    const method = (input.method ?? target.method).toLowerCase();
+    const paramsChanged =
+      server !== target.server ||
+      port !== target.port ||
+      method !== target.method ||
+      passwordChange;
+    const wasCurrent = this.runtime.node_id === input.nodeId;
+
+    let total = 0;
+    for (const config of store.configs ?? []) {
+      config.nodes = (config.nodes ?? []).map((node) =>
+        node.node_id === input.nodeId
+          ? {
+              ...node,
+              name,
+              server: paramsChanged ? server : node.server,
+              port: paramsChanged ? port : node.port,
+              method: paramsChanged ? method : node.method,
+            }
+          : node,
+      );
+      config.node_count = config.nodes.length;
+      total += config.nodes.length;
+    }
+    localStorage.setItem(MOCK_CONFIG_STORAGE_KEY, JSON.stringify(store));
+    // 真实 Host 改当前节点的参数会先停运行时；demo 里同样落回未连接。
+    if (wasCurrent && paramsChanged) await this.runtimeStop();
+    // 与 Host 对齐：只改名字不断开，wasCurrent 表示「已断开」而不是「曾是当前节点」。
+    this.emit({
+      name: AGENT_EVENTS.nodeListChanged,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        reason: "node_updated",
+        config_id: null,
+        node_count_total: total,
+        changed_node_ids: [input.nodeId],
+        emitted_at: now(),
+      },
+    });
+    return {
+      updated: true,
+      wasCurrent,
+      disconnected: wasCurrent && paramsChanged,
+      paramsChanged,
+      rebuilt: false,
+      rebuildStatus: null,
+      message: null,
+    };
   }
 
   async nodeImportUrl(url: string): Promise<NodeImportResult> {

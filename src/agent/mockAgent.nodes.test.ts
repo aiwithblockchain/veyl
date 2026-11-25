@@ -91,7 +91,90 @@ describe("浏览器演示用的节点命令", () => {
     expect((await bridge!.getRuntimeSnapshot())?.state).toBe("idle");
   });
 
-  it("服务目录可搜索", async () => {    const all = await bridge!.categoryList();
+  it("编辑手动节点：改名与参数写回，改的是正在用的节点会先断开", async () => {
+    const node = await bridge!.nodeCreate({
+      name: "旧名",
+      server: "203.0.113.9",
+      port: 8388,
+      method: "aes-256-gcm",
+      password: "secret",
+    });
+    const config = createMockConfig("本机", "system_proxy", {
+      nodeIds: [node.node_id],
+    });
+    config.current_node_id = node.node_id;
+    localStorage.setItem(
+      MOCK_CONFIG_STORAGE_KEY,
+      JSON.stringify({ configs: [config], activeId: config.config_id }),
+    );
+    await bridge!.runtimeStart(config.config_id);
+
+    const result = await bridge!.nodeUpdate({
+      nodeId: node.node_id,
+      name: "新名",
+      server: "198.51.100.7",
+      port: 9000,
+      method: "chacha20-ietf-poly1305",
+      password: "new-secret",
+    });
+
+    expect(result).toMatchObject({
+      updated: true,
+      wasCurrent: true,
+      disconnected: true,
+      paramsChanged: true,
+      rebuilt: false,
+      rebuildStatus: null,
+      message: null,
+    });
+    expect((await bridge!.getRuntimeSnapshot())?.state).toBe("idle");
+    const store = JSON.parse(
+      localStorage.getItem(MOCK_CONFIG_STORAGE_KEY) as string,
+    ) as { configs: { nodes: { node_id: string; name: string; server: string; port: number }[] }[] };
+    const stored = store.configs[0].nodes[0];
+    expect(stored).toMatchObject({
+      node_id: node.node_id,
+      name: "新名",
+      server: "198.51.100.7",
+      port: 9000,
+    });
+  });
+
+  it("订阅节点只允许改名：带连接参数直接拒绝", async () => {
+    const node = await bridge!.nodeCreate({
+      name: "订阅 01",
+      server: "203.0.113.9",
+      port: 8388,
+      method: "aes-256-gcm",
+      password: "secret",
+    });
+    const config = createMockConfig("本机", "system_proxy", {
+      nodeIds: [node.node_id],
+    });
+    config.nodes = config.nodes.map((item) => ({ ...item, source: "url" as const }));
+    localStorage.setItem(
+      MOCK_CONFIG_STORAGE_KEY,
+      JSON.stringify({ configs: [config], activeId: config.config_id }),
+    );
+
+    await expect(
+      bridge!.nodeUpdate({
+        nodeId: node.node_id,
+        name: "订阅 01",
+        server: "198.51.100.8",
+      }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: { reason: "subscription_params_readonly" },
+    });
+
+    await expect(
+      bridge!.nodeUpdate({ nodeId: node.node_id, name: "我的订阅" }),
+    ).resolves.toMatchObject({ updated: true, paramsChanged: false });
+  });
+
+  it("服务目录可搜索", async () => {
+    const all = await bridge!.categoryList();
     expect(all.categories.length).toBeGreaterThan(3);
     const filtered = await bridge!.categoryList("chat");
     expect(filtered.categories.map((category) => category.id)).toEqual(["chatgpt"]);

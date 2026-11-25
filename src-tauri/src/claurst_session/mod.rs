@@ -2197,8 +2197,8 @@ mod prompt_tests {
     /// 状态事件与命令信封共用同一个契约版本。
     #[test]
     fn the_status_contract_versions_match() {
-        assert_eq!(events::CONTRACT_VERSION, "2.24.0");
-        assert_eq!(crate::runtime::EVENT_CONTRACT_VERSION, "2.24.0");
+        assert_eq!(events::CONTRACT_VERSION, "2.25.0");
+        assert_eq!(crate::runtime::EVENT_CONTRACT_VERSION, "2.25.0");
     }
 
     /// 安全底线只留三条；多一条少一条都要在这里显形。

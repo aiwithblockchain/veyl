@@ -900,7 +900,7 @@ fn validate_name(value: &str) -> StoreResult<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_node_name(value: &str) -> StoreResult<String> {
+pub(crate) fn validate_node_name(value: &str) -> StoreResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(StoreError::Invalid("节点名不能为空".into()));
@@ -913,7 +913,7 @@ fn validate_node_name(value: &str) -> StoreResult<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_server(value: &str) -> StoreResult<String> {
+pub(crate) fn validate_server(value: &str) -> StoreResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.len() > 253 {
         return Err(StoreError::Invalid("服务器地址不合法".into()));

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentBridge } from "../agent/bridge";
-import type { NodeImportResult, NodeImportSkipped } from "../agent/protocol";
+import type {
+  NodeImportResult,
+  NodeImportSkipped,
+  NodeSummary,
+  NodeUpdateResult,
+} from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
 import { t as translate, useT } from "../i18n";
 import type { MessageKey } from "../i18n";
@@ -90,9 +95,20 @@ interface Props {
   bridge: AgentBridge;
   onClose: () => void;
   onNotice: (notice: { level: "info" | "error"; text: string }) => void;
+  /** 非空时进入编辑态：只渲染手动填写段，连接参数按来源决定是否可改。 */
+  editing?: NodeSummary | null;
+  /** 编辑保存成功：调用方作废该节点测速并重拉列表（mock 通道不订阅事件）。 */
+  onSaved?: (result: NodeUpdateResult) => void;
 }
 
-export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
+export function NodeImportDialog({
+  open,
+  bridge,
+  onClose,
+  onNotice,
+  editing,
+  onSaved,
+}: Props) {
   const t = useT();
   const [mode, setMode] = useState<Mode>("link");
 
@@ -119,25 +135,41 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
     password: useRef<HTMLInputElement>(null),
   };
 
+  const editingNodeId = editing?.node_id ?? null;
+  const paramsLocked = editing?.source === "url";
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+
   useFocusTrap(open, dialogRef);
 
   useEffect(() => {
     if (!open) return;
-    setMode("link");
+    const target = editingRef.current;
     setImportText("");
     setImportFile(null);
     setLinkBusy(false);
     setLinkResult(null);
     setLinkError(null);
+    setManualBusy(false);
+    setManualErrors({});
+    setManualError(null);
+    if (target) {
+      setMode("manual");
+      setName(target.name);
+      setServer(target.server);
+      setPort(String(target.port));
+      setMethod(target.method);
+      // 密码不回读：留空表示保持原密码。
+      setPassword("");
+      return;
+    }
+    setMode("link");
     setName("");
     setServer("");
     setPort("");
     setMethod(METHODS[2]);
     setPassword("");
-    setManualBusy(false);
-    setManualErrors({});
-    setManualError(null);
-  }, [open]);
+  }, [open, editingNodeId]);
 
   const busy = mode === "link" ? linkBusy : manualBusy;
 
@@ -257,7 +289,8 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
     }
 
     if (!password.trim()) {
-      errors.password = t("settings.import.manual.passwordRequired");
+      // 编辑态留空 = 保持原密码。
+      if (!editing) errors.password = t("settings.import.manual.passwordRequired");
     } else if (Array.from(password).length > 256) {
       errors.password = t("settings.import.manual.passwordTooLong");
     }
@@ -304,6 +337,39 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
 
     setManualBusy(true);
     try {
+      if (editing) {
+        const result = await bridge.nodeUpdate({
+          nodeId: editing.node_id,
+          name: name.trim(),
+          ...(paramsLocked
+            ? {}
+            : {
+                server: server.trim(),
+                port: Number(port.trim()),
+                method,
+                ...(password.trim() ? { password } : {}),
+              }),
+        });
+        onSaved?.(result);
+        if (result.rebuildStatus === "failed") {
+          // 保存成功但连接没回来：不能说「已保存」了事，要让用户知道连接断了。
+          onNotice({
+            level: "error",
+            text: result.message ?? t("settings.import.manual.rebuildFailed"),
+          });
+        } else {
+          onNotice({
+            level: "info",
+            text: result.disconnected
+              ? t("settings.import.manual.savedDisconnected")
+              : result.rebuilt
+                ? t("settings.import.manual.savedReconnected")
+                : t("settings.import.manual.saved"),
+          });
+        }
+        onClose();
+        return;
+      }
       await bridge.nodeCreate({
         name: name.trim(),
         server: server.trim(),
@@ -321,10 +387,19 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
           : null;
       if (reason === "unsupported_method") {
         setManualErrors({ method: t("settings.import.manual.methodUnsupported") });
-      } else if (bridgeError.code === "INVALID_ARGUMENT") {
+      } else if (bridgeError.code === "INVALID_ARGUMENT" && !editing) {
         setManualError(t("settings.import.addFailed"));
       } else {
-        setManualError(errorText(error, t("settings.import.addFailed")));
+        setManualError(
+          errorText(
+            error,
+            t(
+              editing
+                ? "settings.import.manual.saveFailed"
+                : "settings.import.addFailed",
+            ),
+          ),
+        );
       }
     } finally {
       setManualBusy(false);
@@ -350,7 +425,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
       >
         <header className="modal__head">
           <h2 id="node-import-title" className="modal__title">
-            {t("settings.import.title")}
+            {editing ? t("settings.import.editTitle") : t("settings.import.title")}
           </h2>
           <button
             type="button"
@@ -365,35 +440,41 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
 
         <div className="node-import__body">
           <p className="settings-note">
-            {mode === "link"
-              ? t("settings.import.note")
-              : t("settings.import.manual.note")}
+            {editing
+              ? paramsLocked
+                ? t("settings.import.editSubscribedNote")
+                : t("settings.import.manual.note")
+              : mode === "link"
+                ? t("settings.import.note")
+                : t("settings.import.manual.note")}
           </p>
 
-          <div
-            className="settings-seg node-import__seg"
-            role="group"
-            aria-label={t("settings.import.modeAria")}
-          >
-            <button
-              type="button"
-              className={mode === "link" ? "is-selected" : ""}
-              aria-pressed={mode === "link"}
-              disabled={busy}
-              onClick={() => switchMode("link")}
+          {editing ? null : (
+            <div
+              className="settings-seg node-import__seg"
+              role="group"
+              aria-label={t("settings.import.modeAria")}
             >
-              {t("settings.import.modeLink")}
-            </button>
-            <button
-              type="button"
-              className={mode === "manual" ? "is-selected" : ""}
-              aria-pressed={mode === "manual"}
-              disabled={busy}
-              onClick={() => switchMode("manual")}
-            >
-              {t("settings.import.modeManual")}
-            </button>
-          </div>
+              <button
+                type="button"
+                className={mode === "link" ? "is-selected" : ""}
+                aria-pressed={mode === "link"}
+                disabled={busy}
+                onClick={() => switchMode("link")}
+              >
+                {t("settings.import.modeLink")}
+              </button>
+              <button
+                type="button"
+                className={mode === "manual" ? "is-selected" : ""}
+                aria-pressed={mode === "manual"}
+                disabled={busy}
+                onClick={() => switchMode("manual")}
+              >
+                {t("settings.import.modeManual")}
+              </button>
+            </div>
+          )}
 
           {mode === "link" ? (
             <>
@@ -502,7 +583,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                     id="node-import-server"
                     ref={fieldRefs.server}
                     value={server}
-                    disabled={manualBusy}
+                    disabled={manualBusy || paramsLocked}
                     autoCapitalize="off"
                     autoCorrect="off"
                     spellCheck={false}
@@ -536,7 +617,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                     id="node-import-port"
                     ref={fieldRefs.port}
                     value={port}
-                    disabled={manualBusy}
+                    disabled={manualBusy || paramsLocked}
                     inputMode="numeric"
                     className="num"
                     placeholder={t("settings.import.manual.portPlaceholder")}
@@ -569,7 +650,7 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                 <select
                   id="node-import-method"
                   value={method}
-                  disabled={manualBusy}
+                  disabled={manualBusy || paramsLocked}
                   aria-invalid={manualErrors.method ? true : undefined}
                   aria-describedby={
                     manualErrors.method ? "node-import-method-error" : undefined
@@ -610,9 +691,13 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                   ref={fieldRefs.password}
                   type="password"
                   value={password}
-                  disabled={manualBusy}
+                  disabled={manualBusy || paramsLocked}
                   autoComplete="new-password"
-                  placeholder={t("settings.import.manual.passwordPlaceholder")}
+                  placeholder={
+                    editing
+                      ? t("settings.import.manual.editPasswordPlaceholder")
+                      : t("settings.import.manual.passwordPlaceholder")
+                  }
                   aria-invalid={manualErrors.password ? true : undefined}
                   aria-describedby={
                     manualErrors.password ? "node-import-password-error" : undefined
@@ -725,8 +810,16 @@ export function NodeImportDialog({ open, bridge, onClose, onNotice }: Props) {
                 aria-busy={manualBusy ? true : undefined}
               >
                 {manualBusy
-                  ? t("settings.import.busyText")
-                  : t("settings.import.manual.submit")}
+                  ? t(
+                      editing
+                        ? "settings.import.manual.saving"
+                        : "settings.import.busyText",
+                    )
+                  : t(
+                      editing
+                        ? "settings.import.manual.save"
+                        : "settings.import.manual.submit",
+                    )}
               </button>
             </>
           )}

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::agent::app_handle;
 use crate::tools::{AivpnError, Display, NextAction};
 
-pub const CONTRACT_VERSION: &str = "2.24.0";
+pub const CONTRACT_VERSION: &str = "2.25.0";
 
 pub const EV_MESSAGE_CHUNK: &str = "message-chunk";
 pub const EV_THINKING_CHUNK: &str = "thinking-chunk";
@@ -289,7 +289,7 @@ mod status_payload_tests {
             "没有插值参数时不出现 params"
         );
         assert_eq!(payload["contract_version"], json!(CONTRACT_VERSION));
-        assert_eq!(CONTRACT_VERSION, "2.24.0");
+        assert_eq!(CONTRACT_VERSION, "2.25.0");
     }
 
     /// retrying 的四个插值参数（`events.md` §3.5）；秒数取整且至少 1：
