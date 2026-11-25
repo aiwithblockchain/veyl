@@ -462,11 +462,10 @@ describe("咨询 AI 的提示词", () => {
     expect(prompt).not.toMatch(/\{\w+\}/);
   });
 
-  it("流量范围按三值给事实，direct 不会写成智能", async () => {
+  it("流量范围按两档给事实，direct 不会写成智能，旧的三值不再出现", async () => {
     const cases = [
       ["proxy_all", "流量范围：全局"],
       ["direct", "流量范围：直连"],
-      ["proxy_selected", "流量范围：指定服务走 VPN"],
     ] as const;
     for (const [mode, expected] of cases) {
       const onConsultAi = vi.fn((_prompt: string) => true);
@@ -475,6 +474,42 @@ describe("咨询 AI 的提示词", () => {
       const prompt = onConsultAi.mock.calls[0][0] as string;
       expect(prompt).toContain(expected);
       if (mode === "direct") expect(prompt).not.toContain("智能");
+      view.unmount();
+    }
+
+    // 「指定服务走 VPN」已随旧分流下线：旧配置读到 proxy_selected 时不再给这条事实。
+    const onConsultAi = vi.fn((_prompt: string) => true);
+    const view = renderSettings(makeBridge(), {
+      routingMode: "proxy_selected",
+      onConsultAi,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+    const prompt = onConsultAi.mock.calls[0][0] as string;
+    expect(prompt).not.toContain("指定服务");
+    expect(prompt).not.toContain("流量范围：");
+    view.unmount();
+  });
+
+  it("Tun 模式下端口事实标注当前模式用不到，Proxy 模式下不标注", async () => {
+    const cases = [
+      ["tun", true],
+      ["system_proxy", false],
+    ] as const;
+    for (const [mode, expectUnused] of cases) {
+      const onConsultAi = vi.fn((_prompt: string) => true);
+      const view = renderSettings(makeBridge(), {
+        connectMode: mode,
+        proxyPort: 7891,
+        onConsultAi,
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
+      const prompt = onConsultAi.mock.calls[0][0] as string;
+      expect(prompt).toContain("本地代理端口：7891");
+      if (expectUnused) {
+        expect(prompt).toContain("本地代理端口：7891（当前模式用不到）");
+      } else {
+        expect(prompt).not.toContain("当前模式用不到");
+      }
       view.unmount();
     }
   });

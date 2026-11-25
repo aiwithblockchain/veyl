@@ -1049,14 +1049,21 @@ export function Settings({
             ? translate("stage.scope.global")
             : routingMode === "direct"
               ? translate("settings.consult.fact.scopeDirect")
-              : routingMode === "proxy_selected"
-                ? translate("settings.consult.fact.scopeSelected")
-                : null;
+              : null;
         if (scope !== null) {
           parts.push(translate("settings.consult.fact.scope", { scope }));
         }
       }
-      parts.push(translate("settings.consult.fact.port", { port: proxyPort }));
+      // 端口这一行只在 Proxy 模式下出现在界面上；Tun 下也带上，
+      // 但要说明当前模式用不到，避免 AI 讲一个用户看不到的值。
+      parts.push(
+        translate(
+          connectMode === "system_proxy"
+            ? "settings.consult.fact.port"
+            : "settings.consult.fact.portUnused",
+          { port: proxyPort },
+        ),
+      );
       parts.push(
         translate("settings.consult.fact.sync", {
           interval:
