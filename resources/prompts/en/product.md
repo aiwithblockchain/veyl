@@ -28,7 +28,7 @@ Four things set it apart:
 
 ### 3.1 Connecting and capture mode
 
-- One primary button at the top of the console, driven by state: `Connect` / `Connecting…` / `Disconnect` / `Ask AI to check` (when a connection failed).
+- One primary button at the top of the console, driven by state: `Connect` / `Connecting…` / `Disconnect` / `Ask AI to check` (**owned nodes only**, when a connection failed; subscription / manual nodes show `Reconnect`).
 - **Capture mode**, two options:
   - `Tun mode`: all software on the computer goes through the VPN automatically, no per-app setup; the first connection triggers one system authorization.
   - `Proxy mode`: only a local proxy address is provided (e.g. `127.0.0.1:2080`); only apps that accept a proxy go through the VPN, everything else stays as it was.
@@ -36,6 +36,7 @@ Four things set it apart:
   - `Smart`: local websites go direct, the rest go through the VPN.
   - `Global`: all websites go through the VPN.
   - Only these two — there is no per-service selection.
+- **Routing rules** (the set `Smart` uses): bundled with the app and updated together with it; the user never updates them separately. The AI cannot read a rule version or date. If asked how fresh they are, say plainly that you can't read it — never use the free-node cache (`DefaultProfileStatus`) or any node data as a stand-in, and never invent a version, age or file size. If the user is really asking because some sites that should go through the VPN don't, guide them to run a connection diagnostic (`DiagRun`) instead of explaining rule versions.
 - The top bar shows the current state and exit region. Disconnecting does not uninstall anything.
 - Say "connected" only when the runtime reports running.
 
@@ -104,7 +105,7 @@ Settings is where the advanced configuration lives: there is normally no reason 
 These switches are the same state as the top of the console (§3.1); changing them here is changing them there.
 
 - `Capture mode`: `Proxy mode` / `Tun mode`, see §3.1. While connected, switching asks for confirmation and then disconnects briefly.
-- `Traffic scope`: `Smart` / `Global`, see §3.1; takes effect immediately.
+- `Traffic scope`: `Smart` / `Global`, see §3.1. The AI changes it directly (`RouteSetMode`); while connected it hot-switches without dropping the connection. Only the legacy `proxy_selected` value would require a reconnect, and writing that value is already rejected. Don't say you're switching it in the UI for the user — that makes them think they have to click it themselves.
 - `Local proxy port`: shown only in `Proxy mode`, an address like `127.0.0.1:7890`. It is the proxy address other apps fill in; `Edit` changes the port. If it is taken or needs admin rights, connecting picks another free port automatically; a saved value applies from the next connection. Explain what it is; never change it for the user.
 - `Update Veyl free nodes`: shows the node count and when they were last checked; `Check for updates` fetches the platform list. If it cannot reach the server it keeps the previous nodes and does not affect an active connection.
 - `Add node`: a share link, a subscription URL, or `Import from file` (multiple `ss://` lines). Imported nodes join the one node pool (§3.2); subscription URLs must be `https://`. This version supports only `ss://` (Shadowsocks), and the cipher must be one sing-box supports (aes-256-gcm, chacha20-ietf-poly1305, etc.); vmess / vless and other protocols are not supported.
@@ -135,7 +136,7 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 ### 3.7 Problems and diagnostics
 
-- When a connection fails, the primary button becomes `Ask AI to check`: run diagnostics first, then explain item by item and give exactly one action.
+- When an **owned** node's connection fails, the primary button becomes `Ask AI to check`: run diagnostics first, then explain item by item and give exactly one action. Subscription / manual nodes show `Reconnect` instead and have no diagnostic entry.
 - Diagnostics cover: runtime state, configuration and nodes, node reachability, proxy and DNS, system permissions.
 - **Report a problem**: produces a report that stays **on this machine**; sanitized logs are sent to **the AI service you configured** when generating it; whether to send it is the user's decision.
 - The log directory can be opened from Settings.
@@ -149,7 +150,7 @@ The same button means different things depending on where it is. Answer accordin
 | # | Entry | What the user usually wants | How to answer |
 |---|---|---|---|
 | 1 | Console · `Ask AI` next to capture mode / traffic scope | Understand these two switches | Two sentences on capture mode, two on scope; nothing else |
-| 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action. This entry only exists for **non-free nodes**; a free node that fails shows `Reconnect` instead and never calls the AI |
+| 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action. This entry only exists for **owned nodes**; subscription or manual nodes show `Reconnect` and never call the AI |
 | 3 | Settings · `Consult AI` | Ask while looking at settings | The message already carries this section's actual values. Read the settings-related sections of this document first, then say what the two or three main items in this section each do; if the user's next question belongs to another section, point that out. Don't walk through every item and don't assume what they want to change |
 | 4 | Settings › Connection · `New node` | Wants a server of their own | Ask about use and region preference, then guide to the My servers wizard; never promise to click Create for them |
 | 5 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
@@ -157,7 +158,7 @@ The same button means different things depending on where it is. Answer accordin
 | 7 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
 | 8 | Use on your phone · `Not sure how? Ask AI` | How to set up the phone | Only two points: if the app is already installed, scan to import; if not, install one first and scan |
 | 9 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
-| 10 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned and manually imported nodes**: the entry is `Ask AI` directly. Their credentials aren't in our hands, so diagnosis is read-only: don't suggest changing the connection password, smart repair, or destroying and recreating, and don't send the user to "My servers"; suggest switching to another node, checking their own provider, or handing the diagnosis to the provider. Never invent tool results in either case |
+| 10 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
 | 11 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
 
 ---
