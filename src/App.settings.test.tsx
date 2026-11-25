@@ -248,7 +248,7 @@ describe("设置 → 咨询 AI", () => {
   }, 15_000);
 });
 
-describe("设置 → 添加节点", () => {
+describe("节点卡 → 添加节点", () => {
   it("导入落到当前配置，主界面节点数随之变化", async () => {
     let detail: ConfigDetail = DETAIL;
     vi.spyOn(bridge, "configDetail").mockImplementation(async () => detail);
@@ -278,9 +278,7 @@ describe("设置 → 添加节点", () => {
     render(<App />);
     await screen.findByText("东京 01");
 
-    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
-    fireEvent.click(await screen.findByRole("button", { name: "添加" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加节点" }));
 
     const dialog = await screen.findByRole("dialog", { name: "添加节点" });
     fireEvent.change(
@@ -293,7 +291,6 @@ describe("设置 → 添加节点", () => {
       expect(bridge.nodeImportText).toHaveBeenCalledWith("ss://new"),
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-    fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
 
     await waitFor(() =>
       expect(document.querySelector(".stage-card__sub")?.textContent).toContain(

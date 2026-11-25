@@ -154,7 +154,6 @@ function renderSection(
       runtime={emptyRuntimeView()}
       defaultProfile={null}
       onClose={() => {}}
-      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}

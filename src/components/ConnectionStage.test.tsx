@@ -160,6 +160,7 @@ interface StageOverrides {
   trialExpiresAt?: string | null;
   danglingNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
+  onAddNode?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
   routingMode?: ConfigRouteMode | null;
@@ -205,6 +206,7 @@ function stageElement(over: StageOverrides = {}) {
       trialExpiresAt={over.trialExpiresAt ?? null}
       danglingNodeIds={over.danglingNodeIds}
       onProbe={over.onProbe}
+      onAddNode={over.onAddNode}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
       routingMode={over.routingMode ?? null}

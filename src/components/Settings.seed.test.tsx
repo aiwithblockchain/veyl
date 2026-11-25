@@ -85,7 +85,6 @@ function renderSettings(
       defaultProfile={options.profile ?? profile()}
       connectMode="system_proxy"
       onClose={() => {}}
-      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}

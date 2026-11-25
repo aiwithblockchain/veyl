@@ -59,6 +59,8 @@ interface Props {
   onPreselectApplied?: (nonce: number) => void;
   /** 手动测速：只更新延迟，不改选中、不连接。 */
   onProbe?: () => void;
+  /** 节点卡「添加节点」：打开导入 / 手动填写弹层。 */
+  onAddNode?: () => void;
   /** 本会话已手动测过速：收尾句去掉数字。 */
   manualProbed?: boolean;
   /** 测速入口是否可点；Host 据此决定 context 里是否列 client.probe。 */
@@ -118,6 +120,7 @@ export function ConnectionStage({
   preselect = null,
   onPreselectApplied,
   onProbe,
+  onAddNode,
   manualProbed = false,
   onProbeAvailabilityChange,
   routingMode = null,
@@ -633,11 +636,11 @@ export function ConnectionStage({
           <span className="stage-node__name-text">
             {displayNames[index] ?? node.name}
           </span>
-          {fastestMarkId === node.node_id ? (
-            <span className="stage-node__fastest">{t("console.node.fastest")}</span>
-          ) : null}
           {node.source === "url" || node.source === "manual" ? (
             <span className="stage-node__custom">{t("console.node.custom")}</span>
+          ) : null}
+          {fastestMarkId === node.node_id ? (
+            <span className="stage-node__fastest">{t("console.node.fastest")}</span>
           ) : null}
           {expired ? (
             <span className="stage-node__sub">{t("console.node.expired")}</span>
@@ -796,34 +799,41 @@ export function ConnectionStage({
                   ? t("console.nodes.countTrial", { count: nodes.length })
                   : t("console.nodes.count", { count: nodes.length })}
               </p>
-              {onProbe && nodes.length > 0 ? (
-                <button
-                  type="button"
-                  className="stage-probe"
-                  disabled={!canProbe}
-                  title={probeTitle}
-                  onClick={() => {
-                    if (!canProbe) return;
-                    manualProbeRef.current = true;
-                    onProbe();
-                  }}
-                >
-                  {probeRunning ? (
-                    <>
-                      <span className="stage-step__dots" aria-hidden="true">
-                        <span />
-                        <span />
-                        <span />
-                      </span>
-                      {t("console.probing")}
-                    </>
-                  ) : probeAllFailed ? (
-                    t("console.probe.again")
-                  ) : (
-                    t("console.probe.action")
-                  )}
-                </button>
-              ) : null}
+              <div className="stage-card__actions">
+                {onProbe && nodes.length > 0 ? (
+                  <button
+                    type="button"
+                    className="stage-probe"
+                    disabled={!canProbe}
+                    title={probeTitle}
+                    onClick={() => {
+                      if (!canProbe) return;
+                      manualProbeRef.current = true;
+                      onProbe();
+                    }}
+                  >
+                    {probeRunning ? (
+                      <>
+                        <span className="stage-step__dots" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+                        {t("console.probing")}
+                      </>
+                    ) : probeAllFailed ? (
+                      t("console.probe.again")
+                    ) : (
+                      t("console.probe.action")
+                    )}
+                  </button>
+                ) : null}
+                {onAddNode ? (
+                  <button type="button" className="stage-add" onClick={onAddNode}>
+                    {t("settings.import.title")}
+                  </button>
+                ) : null}
+              </div>
             </div>
             {probeAllFailed ? (
               <p className="stage-card__probe-note">{t("console.probe.allFailed")}</p>

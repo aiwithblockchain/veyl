@@ -2556,6 +2556,84 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+/* ---------- 添加节点弹层（控制台节点卡入口） ---------- */
+
+.modal--node-import {
+  width: min(460px, calc(100vw - 48px));
+}
+
+.node-import__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 0;
+}
+
+.node-import__seg {
+  align-self: flex-start;
+}
+
+.node-import__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.node-import__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 12px;
+  align-items: start;
+}
+
+.node-import__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+.node-import__field input,
+.node-import__field select {
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-raise);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.node-import__field input:focus,
+.node-import__field select:focus {
+  outline: 0;
+  border-color: var(--link);
+}
+
+.node-import__field input[aria-invalid="true"],
+.node-import__field select[aria-invalid="true"] {
+  border-color: var(--err-line);
+}
+
+.node-import__error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--err-text);
+}
+
+.node-import__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 20px 18px;
+}
+
 /* ---------- first run ---------- */
 
 .first-run {
@@ -6007,8 +6085,16 @@ details[open] > .settings-fold__summary::before {
   white-space: nowrap;
 }
 
-/* 手动测速：文字链接，不是第二个实心按钮。 */
-.stage-probe {
+.stage-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+/* 手动测速与添加节点：文字链接，不是第二个实心按钮。 */
+.stage-probe,
+.stage-add {
   position: relative;
   flex: none;
   display: inline-flex;
@@ -6031,19 +6117,30 @@ details[open] > .settings-fold__summary::before {
   inset: -14px -8px;
 }
 
+/* 与「测速」相邻：两侧各让 2px，点击区不互相覆盖。 */
+.stage-add::after {
+  content: "";
+  position: absolute;
+  inset: -14px -6px;
+}
+
 .stage-probe:hover:not(:disabled),
-.stage-probe:focus-visible {
+.stage-probe:focus-visible,
+.stage-add:hover:not(:disabled),
+.stage-add:focus-visible {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-.stage-probe:focus-visible {
+.stage-probe:focus-visible,
+.stage-add:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
   border-radius: 4px;
 }
 
-.stage-probe:disabled {
+.stage-probe:disabled,
+.stage-add:disabled {
   color: var(--ink-3);
   cursor: default;
 }
@@ -6732,6 +6829,15 @@ details[open] > .settings-fold__summary::before {
   font-weight: 500;
 }
 
+/* 用户自己加的节点（订阅 / 手填）：静态来源标签，不做胶囊、不抢状态点。 */
+.stage-node__custom {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--ink-3);
+}
+
 /* 到期未清池的免费行：与待接入同一套观感，不引新颜色。 */
 .stage-node.is-expired .stage-node__name { color: var(--ink-3); }
 
@@ -6845,15 +6951,6 @@ details[open] > .settings-fold__summary::before {
   padding: 10px 0;
   border: 0;
   background: transparent;
-/* 用户自己加的节点（订阅 / 手填）：静态来源标签，不做胶囊、不抢状态点。 */
-.stage-node__custom {
-  flex: none;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1.3;
-  color: var(--ink-3);
-}
-
   text-align: left;
   cursor: pointer;
   scroll-margin-top: 12px;

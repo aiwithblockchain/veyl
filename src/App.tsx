@@ -38,6 +38,7 @@ import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
+import { NodeImportDialog } from "./components/NodeImportDialog";
 import { MobileExport, hasReadyServer } from "./components/MobileExport";
 import { useMyServers } from "./myservers/useMyServers";
 import { useServerNodePooling } from "./myservers/useServerNodePooling";
@@ -353,6 +354,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 「在手机上使用」弹层：设置行与左栏行共用这一份开关。 */
   const [mobileExportOpen, setMobileExportOpen] = useState(false);
+  /** 节点导入 / 手动填写弹层：入口在控制台节点卡。 */
+  const [nodeImportOpen, setNodeImportOpen] = useState(false);
   const mobileExportTriggerRef = useRef<HTMLElement | null>(null);
   /** 设置在咨询 AI：右栏助手搬进弹层并排显示，原来的右栏不再渲染。 */
   const [settingsConsulting, setSettingsConsulting] = useState(false);
@@ -3218,6 +3221,7 @@ export default function App() {
             )
           }
           onProbe={handleProbe}
+          onAddNode={() => setNodeImportOpen(true)}
           manualProbed={
             vpn.activeConfig
               ? manualProbedConfigs.has(vpn.activeConfig.config_id)
@@ -3355,7 +3359,6 @@ export default function App() {
           handleAskAiFromConsole();
         }}
         onClose={closeSettings}
-        onNotice={setAppNotice}
         onRestartOnboarding={() => {
           setSettingsOpen(false);
           setShowOnboarding(true);
@@ -3465,6 +3468,13 @@ export default function App() {
           trapPaused={aiRequiredOpen || settingsOpen || mobileExportOpen}
         />
       ) : null}
+
+      <NodeImportDialog
+        open={nodeImportOpen}
+        bridge={bridge}
+        onClose={() => setNodeImportOpen(false)}
+        onNotice={setAppNotice}
+      />
 
       {quitOpen ? (
         <QuitDialog

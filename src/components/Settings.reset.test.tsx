@@ -70,7 +70,6 @@ function renderSettings(bridge: AgentBridge) {
       runtime={emptyRuntimeView()}
       defaultProfile={null}
       onClose={() => {}}
-      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}

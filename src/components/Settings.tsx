@@ -19,8 +19,6 @@ import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge"
 import type {
   ConfigConnectMode,
   ConfigRouteMode,
-  NodeImportResult,
-  NodeImportSkipped,
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
@@ -49,12 +47,11 @@ interface Props {
   onProxyPortSaved?: (port: number) => void;
   /** 当前配置的连接方式；只用于展示，不参与任何命令。 */
   connectMode?: ConfigConnectMode | null;
-  /** 当前配置 id；节点导入必须落到这套配置，而不仅是节点池。 */
+  /** 当前配置 id；接管方式切换与连接设置用它。 */
   configId?: string | null;
   /** 新建一套配置（会先关闭设置）。 */
   onNewConfig?: () => void;
   onClose: () => void;
-  onNotice: (notice: { level: "info" | "error"; text: string }) => void;
   onRestartOnboarding: () => void;
   onOpenLogs: () => void;
   onRestoreNetwork: () => void;
@@ -650,48 +647,7 @@ function protocolLabel(protocol: LlmProtocol): string {
   );
 }
 
-/** 连接方式与左栏、主界面用同一套词；设置里只读，只看 connect_mode。 */
-const IMPORT_SKIP_REASONS: Record<NodeImportSkipped["reason"], MessageKey> = {
-  duplicate: "settings.import.skip.duplicate",
-  unsupported_scheme: "settings.import.skip.scheme",
-  unsupported_method: "settings.import.skip.method",
-  malformed: "settings.import.skip.malformed",
-  subscription_empty: "settings.import.skip.empty",
-};
 
-function importSkipReason(reason: string): string {
-  return translate(
-    IMPORT_SKIP_REASONS[reason as NodeImportSkipped["reason"]] ??
-      "settings.import.skip.other",
-  );
-}
-
-function fileNameOf(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? path;
-}
-
-function describeFileImportError(error: unknown): string {
-  const bridgeError = toBridgeError(error);
-  const reason =
-    typeof bridgeError.details?.reason === "string" ? bridgeError.details.reason : null;
-  switch (reason) {
-    case "invalid_path":
-      return translate("settings.error.filePath");
-    case "file_unreadable":
-      return translate("settings.error.fileUnreadable");
-    case "file_too_large":
-      return translate("settings.error.fileTooLarge");
-    case "not_node_text":
-      return translate("settings.error.notNodeText");
-    default:
-      break;
-  }
-  if (bridgeError.code === "NOT_FOUND") {
-    return translate("settings.error.configGone");
-  }
-  return errorText(error, translate("settings.error.importFailed"));
-}
 
 /** 只把数字送进 mono；中文和单位保持正文。 */
 function withMonoDigits(text: string) {
@@ -724,7 +680,6 @@ export function Settings({
   configId = null,
   onNewConfig,
   onClose,
-  onNotice,
   onRestartOnboarding,
   onOpenLogs,
   onRestoreNetwork,
@@ -861,15 +816,8 @@ export function Settings({
   const portInputRef = useRef<HTMLInputElement>(null);
   const portEditButtonRef = useRef<HTMLButtonElement>(null);
   const returnPortFocusRef = useRef(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importText, setImportText] = useState("");
-  const [importFile, setImportFile] = useState<string | null>(null);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importResult, setImportResult] = useState<NodeImportResult | null>(null);
-  const [importError, setImportError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
-  const importDialogRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const resetDialogRef = useRef<HTMLDivElement>(null);
   const resetTriggerRef = useRef<HTMLButtonElement>(null);
@@ -881,18 +829,16 @@ export function Settings({
     open &&
       !consulting &&
       resetPhase === "idle" &&
-      !importOpen &&
       !mobileExportOpen &&
       !trapPaused,
     dialogRef,
   );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
   useFocusTrap(
-    open && consulting && resetPhase === "idle" && !importOpen && !trapPaused,
+    open && consulting && resetPhase === "idle" && !trapPaused,
     backdropRef,
   );
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
-  useFocusTrap(importOpen, importDialogRef);
 
   // App 层的端口变了（初次读取或别处保存），输入框跟着走；编辑中不打断输入。
   useEffect(() => {
@@ -1029,12 +975,6 @@ export function Settings({
     setResetCopy("idle");
     setRouteCopy("idle");
     setProxyCopy("idle");
-    setImportOpen(false);
-    setImportText("");
-    setImportFile(null);
-    setImportBusy(false);
-    setImportResult(null);
-    setImportError(null);
     setLanguageError(null);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
@@ -1284,11 +1224,6 @@ export function Settings({
       if (event.key !== "Escape") return;
       // 「在手机上使用」弹层在上层：Esc 归它，不关设置。
       if (mobileExportOpen) return;
-      // 导入弹层在设置之上：先关它。
-      if (importOpen) {
-        setImportOpen(false);
-        return;
-      }
       // 重置弹层在上层：先关它，运行中则完全忽略。
       if (resetPhase !== "idle") {
         if (resetPhase !== "running") closeReset();
@@ -1303,7 +1238,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, importOpen, portEditing, cancelProxyPortEdit, mobileExportOpen, trapPaused]);
+  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, mobileExportOpen, trapPaused]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -1502,76 +1437,6 @@ export function Settings({
     } catch (error) {
       setPendingDelete(null);
       setProviderNotice({ kind: "error", text: describeProviderError(error) });
-    }
-  };
-
-  const importFirstLine =
-    importText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean) ?? "";
-  const importIsUrl = /^https:\/\//i.test(importFirstLine);
-
-  const submitImport = async () => {
-    if (importBusy) return;
-    setImportError(null);
-    setImportResult(null);
-
-    const applyResult = (result: NodeImportResult) => {
-      setImportResult(result);
-      if (result.imported === 0) return;
-      setImportText("");
-      setImportFile(null);
-      onNotice({
-        level: "info",
-        text: t("settings.import.added", { count: result.imported }),
-      });
-    };
-
-    if (importFile) {
-      setImportBusy(true);
-      try {
-        // 全局单配置：省略 configId，由 Host 绑定全局池（池空时懒创建）。
-        applyResult(await bridge.nodeImportFile(importFile));
-      } catch (error) {
-        setImportError(describeFileImportError(error));
-      } finally {
-        setImportBusy(false);
-      }
-      return;
-    }
-
-    const text = importText.trim();
-    if (!text) return;
-    if (/^http:\/\//i.test(importFirstLine)) {
-      setImportError(t("settings.import.httpsOnly"));
-      return;
-    }
-    setImportBusy(true);
-    try {
-      applyResult(
-        importIsUrl
-          ? await bridge.nodeImportUrl(importFirstLine)
-          : await bridge.nodeImportText(text),
-      );
-    } catch (error) {
-      setImportError(errorText(error, t("settings.import.addFailed")));
-    } finally {
-      setImportBusy(false);
-    }
-  };
-
-  const chooseImportFile = async () => {
-    if (importBusy) return;
-    setImportError(null);
-    try {
-      const path = await bridge.pickNodeFile();
-      if (!path) return;
-      setImportFile(path);
-      setImportText("");
-      setImportResult(null);
-    } catch {
-      setImportError(t("settings.import.noPicker"));
     }
   };
 
@@ -2543,176 +2408,15 @@ export function Settings({
             ) : null}
 
             {connectMode ? (
-              <>
-                <SeedRefreshRow
-                  bridge={bridge}
-                  info={seedInfo}
-                  onInfo={setSeedInfo}
-                  connected={connected}
-                  open={open}
-                />
-
-                <div className="settings-row">
-                  <div>
-                    <div className="settings-row__label">{t("settings.import.title")}</div>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn--ghost"
-                    onClick={() => setImportOpen(true)}
-                  >
-                    {t("settings.import.add")}
-                  </button>
-                </div>
-              </>
+              <SeedRefreshRow
+                bridge={bridge}
+                info={seedInfo}
+                onInfo={setSeedInfo}
+                connected={connected}
+                open={open}
+              />
             ) : null}
 
-            {importOpen ? (
-              <div
-                className="modal-backdrop modal-backdrop--nested"
-                onMouseDown={() => setImportOpen(false)}
-              >
-                <div
-                  ref={importDialogRef}
-                  className="modal modal--confirm"
-                  role="dialog"
-                  aria-modal="true"
-                  aria-labelledby="import-dialog-title"
-                  onMouseDown={(event) => event.stopPropagation()}
-                >
-                  <header className="modal__head">
-                    <h2 id="import-dialog-title" className="modal__title">
-                      {t("settings.import.title")}
-                    </h2>
-                    <button
-                      type="button"
-                      className="modal__close"
-                      onClick={() => setImportOpen(false)}
-                      aria-label={t("common.close")}
-                    >
-                      <IconClose size={14} />
-                    </button>
-                  </header>
-
-                  <p className="settings-note">
-                    {t("settings.import.note")}
-                  </p>
-
-                  {importFile ? (
-                    <p className="settings-row__value">
-                      {t("settings.import.willImport")}{" "}
-                      <span className="num">{fileNameOf(importFile)}</span>
-                    </p>
-                  ) : (
-                    <div className="settings-input">
-                      <textarea
-                        aria-label={t("settings.import.urlAria")}
-                        value={importText}
-                        rows={4}
-                        disabled={importBusy}
-                        placeholder={"ss://...\nhttps://..."}
-                        onChange={(event) => {
-                          setImportText(event.target.value);
-                          setImportError(null);
-                        }}
-                      />
-                    </div>
-                  )}
-
-                  {importResult &&
-                  (importResult.imported === 0 || importResult.skipped.length > 0) ? (
-                    <div className="settings-import">
-                      {importResult.imported === 0 ? (
-                        <p
-                          className="settings-feedback settings-feedback--warn"
-                          role="status"
-                        >
-                          {t("settings.import.noneAdded")}
-                        </p>
-                      ) : null}
-                      {importResult.skipped.length > 0 ? (
-                        <ul className="settings-import__skipped">
-                          {importResult.skipped.map((item, index) => (
-                            <li key={`${item.name}-${item.reason}-${index}`}>
-                              {item.name ? `${item.name}：` : ""}
-                              {importSkipReason(item.reason)}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </div>
-                  ) : null}
-
-                  {importError ? (
-                    <p
-                      className="settings-feedback settings-feedback--error"
-                      role="alert"
-                    >
-                      {importError}
-                    </p>
-                  ) : null}
-
-                  <div className="settings-actions">
-                    {importFile ? (
-                      <>
-                        <button
-                          type="button"
-                          className="btn btn--ghost"
-                          onClick={() => void chooseImportFile()}
-                          disabled={importBusy}
-                        >
-                          {t("settings.import.reselect")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost"
-                          onClick={() => setImportFile(null)}
-                          disabled={importBusy}
-                        >
-                          {t("settings.import.useText")}
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn btn--ghost"
-                        onClick={() => void chooseImportFile()}
-                        disabled={importBusy}
-                      >
-                        {t("settings.import.fromFile")}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setImportOpen(false)}
-                      disabled={importBusy}
-                    >
-                      {t("common.cancel")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--primary"
-                      onClick={() => void submitImport()}
-                      disabled={
-                        importBusy ||
-                        (!importFile && importText.trim() === "")
-                      }
-                    >
-                      {importBusy
-                        ? importFile
-                          ? t("settings.import.busy")
-                          : importIsUrl
-                            ? t("settings.import.busyUrl")
-                            : t("settings.import.busyText")
-                        : importFile
-                          ? t("settings.import.action")
-                          : t("settings.import.add")}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : null}
           </section>
         ) : null}
 

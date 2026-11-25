@@ -74,7 +74,6 @@ function settingsUi(
   bridge: AgentBridge,
   options: {
     open?: boolean;
-    onNotice?: (notice: { level: "info" | "error"; text: string }) => void;
   } = {},
 ) {
   return (
@@ -84,7 +83,6 @@ function settingsUi(
       runtime={emptyRuntimeView()}
       defaultProfile={null}
       onClose={() => {}}
-      onNotice={options.onNotice ?? (() => {})}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -217,7 +215,6 @@ describe("设置 › 高级 › 语言", () => {
   });
 
   it("写入失败时保持原选中，行下显示失败文案，且不弹 toast", async () => {
-    const onNotice = vi.fn();
     const { bridge } = makeBridge({
       get: vi.fn(async (): Promise<AppLanguageState> => ({
         selected: "en",
@@ -227,7 +224,7 @@ describe("设置 › 高级 › 语言", () => {
         throw { code: "INTERNAL", message: "db is locked" };
       }),
     });
-    renderSettings(bridge, { onNotice });
+    renderSettings(bridge);
     await waitFor(() => expect(segButton("English").getAttribute("aria-pressed")).toBe("true"));
 
     fireEvent.click(segButton("中文"));
@@ -237,7 +234,6 @@ describe("设置 › 高级 › 语言", () => {
     ).toBeTruthy();
     expect(segButton("English").getAttribute("aria-pressed")).toBe("true");
     expect(segButton("中文").getAttribute("aria-pressed")).toBe("false");
-    expect(onNotice).not.toHaveBeenCalled();
   });
 
   it("写入成功后全局语言 store 跟着变", async () => {

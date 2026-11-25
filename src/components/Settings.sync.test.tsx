@@ -83,7 +83,6 @@ function settingsElement({
       defaultProfile={null}
       configId="cfg_1"
       onClose={() => {}}
-      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}

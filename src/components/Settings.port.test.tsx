@@ -89,7 +89,6 @@ function Harness({
         setOpen(false);
         onClose();
       }}
-      onNotice={() => {}}
       onRestartOnboarding={() => {}}
       onOpenLogs={() => {}}
       onRestoreNetwork={() => {}}
@@ -246,7 +245,7 @@ describe("端口行编辑态", () => {
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
 
-    fireEvent.click(screen.getByText("添加节点"));
+    fireEvent.click(screen.getByText("更新 Veyl 免费节点"));
 
     expect(input().value).toBe("8081");
     expect(screen.getByRole("button", { name: /保存/ })).toBeTruthy();
@@ -540,17 +539,5 @@ describe("连接页其它行", () => {
     renderHarness({ bridge: makeBridge().bridge });
     const row = document.querySelector(".seed-refresh") as HTMLElement;
     expect(within(row).queryByText(/Veyl 提供的/)).toBeNull();
-  });
-
-  it("添加节点行不再写文件导入，弹层说明支持链接与订阅", async () => {
-    renderHarness({ bridge: makeBridge().bridge });
-    expect(screen.queryByText("导入不需要联网。")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "添加" }));
-    const dialog = await screen.findByRole("dialog", { name: "添加节点" });
-    expect(
-      within(dialog).getByText(
-        "支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。",
-      ),
-    ).toBeTruthy();
   });
 });
