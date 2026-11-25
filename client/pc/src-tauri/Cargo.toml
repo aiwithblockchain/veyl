@@ -1,0 +1,18 @@
+[package]
+name = "veyl-cli"
+version = "0.1.0"
+description = "Veyl 轻量客户端（骨架）"
+edition = "2021"
+rust-version = "1.77"
+default-run = "veyl-cli"
+
+[lib]
+name = "veyl_cli_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
