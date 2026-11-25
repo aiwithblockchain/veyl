@@ -192,6 +192,8 @@ export function MobileExport({
   const wasConfirmingRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
   const aliveRef = useRef(true);
+  /** 导出是一次会打开系统对话框的异步动作：切行 / 重新生成 / 重新加载都要让它作废。 */
+  const saveRunRef = useRef(0);
 
   // 关闭后由 App 统一把焦点还给触发行（或左栏 ＋），这里不让陷阱自己归还。
   useFocusTrap(!trapPaused, dialogRef, false);
@@ -213,7 +215,13 @@ export function MobileExport({
     rowRefs.current[openId]?.scrollIntoView?.({ block: "start" });
   }, [openId]);
 
+  // 收起行或切到别的行：在途的导出结果不再属于当前界面。
+  useEffect(() => {
+    if (openId !== VEYLCLI_ID) saveRunRef.current += 1;
+  }, [openId]);
+
   const load = useCallback(async () => {
+    saveRunRef.current += 1;
     setPhase({ kind: "loading" });
     setConfirming(false);
     setRotated(false);
@@ -344,27 +352,49 @@ export function MobileExport({
     const pick = bridge.pickProfileSavePath;
     const save = bridge.mobileExportSaveFile;
     if (!pick || !save || exportState === "saving") return;
+    const run = saveRunRef.current + 1;
+    saveRunRef.current = run;
+    // 系统保存对话框可能停留很久：从打开它开始就锁住按钮，避免叠出第二个。
+    setExportState("saving");
     let path: string | null = null;
     try {
       path = await pick.call(bridge);
     } catch {
-      if (aliveRef.current) setExportState("failed");
+      if (aliveRef.current && saveRunRef.current === run) {
+        setExportState("failed");
+      }
       return;
     }
-    if (!path) return;
-    setExportState("saving");
+    if (!aliveRef.current || saveRunRef.current !== run) return;
+    if (!path) {
+      setExportState("idle");
+      return;
+    }
     try {
       const result = await save.call(bridge, path);
-      if (!aliveRef.current) return;
-      setExportState(result.state === "saved" ? "saved" : "failed");
+      if (!aliveRef.current || saveRunRef.current !== run) return;
+      // 账户状态在导出期间变了：回到与手机端相同的登录 / 无节点态，不伪装成写盘失败。
+      if (result.state === "login_required" || result.state === "no_ready_server") {
+        setExportState("idle");
+        setPhase(
+          result.state === "login_required"
+            ? { kind: "login_required" }
+            : { kind: "no_ready_server" },
+        );
+        return;
+      }
+      setExportState("saved");
     } catch {
-      if (aliveRef.current) setExportState("failed");
+      if (aliveRef.current && saveRunRef.current === run) {
+        setExportState("failed");
+      }
     }
   };
 
   const rotate = async () => {
     const source = bridge.mobileExportRotate;
     if (!source || rotating) return;
+    saveRunRef.current += 1;
     const previous = phase.kind === "ok" ? phase : null;
     setRotating(true);
     setRotateError(null);
@@ -393,6 +423,7 @@ export function MobileExport({
   };
 
   const startRotate = () => {
+    saveRunRef.current += 1;
     setCopyState("idle");
     setExportState("idle");
     setRotated(false);

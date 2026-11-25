@@ -379,6 +379,77 @@ describe("在其它设备上使用：按设备或 App 分类", () => {
     expect(within(dialog).queryByText("已保存配置文件。")).toBeNull();
   });
 
+  it("veyl-cli 导出时登录失效：切回登录态，不冒充写盘失败", async () => {
+    const bridge = makeBridge(async () => OK);
+    bridge.mobileExportSaveFile.mockResolvedValueOnce({
+      state: "login_required",
+    });
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "导出配置文件" }),
+    );
+
+    expect(await within(dialog).findByText("先登录。")).toBeTruthy();
+    expect(within(dialog).queryByText("没能保存文件，再试一次。")).toBeNull();
+  });
+
+  it("veyl-cli 导出时没有就绪服务器：切回无节点说明", async () => {
+    const bridge = makeBridge(async () => OK);
+    bridge.mobileExportSaveFile.mockResolvedValueOnce({
+      state: "no_ready_server",
+    });
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "导出配置文件" }),
+    );
+
+    expect(
+      await within(dialog).findByText(
+        "客户端只导出你自己创建的付费节点。免费和试用节点不包含。",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("veyl-cli 保存对话框打开期间按钮禁用，不能叠开第二个", async () => {
+    const bridge = makeBridge(async () => OK);
+    let release: (path: string | null) => void = () => {};
+    bridge.pickProfileSavePath.mockImplementationOnce(
+      () =>
+        new Promise<string | null>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "导出配置文件" }),
+    );
+
+    const busy = within(dialog).getByRole("button", { name: "正在导出…" });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(busy);
+    expect(bridge.pickProfileSavePath).toHaveBeenCalledTimes(1);
+    release(null);
+  });
+
+  it("veyl-cli 行在没有导出能力时不出导出按钮", async () => {
+    const bridge = makeBridge(async () => OK);
+    const raw = bridge as unknown as Record<string, unknown>;
+    delete raw.pickProfileSavePath;
+    delete raw.mobileExportSaveFile;
+    const { dialog } = setup(bridge);
+
+    fireEvent.click(row(dialog, "veyl-cli"));
+    expect(
+      within(dialog).queryByRole("button", { name: "导出配置文件" }),
+    ).toBeNull();
+  });
+
   it("展开后是两个编号步骤：① 先下载、② 再导入，标题带 App 名", async () => {
     const bridge = makeBridge(async () => OK);
     const { dialog } = setup(bridge);
