@@ -5,6 +5,7 @@ import { runBilling } from "./billing";
 import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
 import { handleServers } from "./servers";
+import { handleTraffic } from "./traffic";
 import { handleMobile } from "./mobile";
 import { handleIssues, siteBase } from "./issues";
 import { handleRules } from "./rules";
@@ -469,6 +470,10 @@ ${check}
   // 订单：下单与假支付（§19.5）。实例开通在建机链路里跟进。
   const orderResponse = await handleOrders(request, env);
   if (orderResponse) return orderResponse;
+
+  // 节点流量上报：Bearer server_token，按接收时间归周期并结算超支（traffic-billing.md §7.2）。
+  const trafficResponse = await handleTraffic(request, env);
+  if (trafficResponse) return trafficResponse;
 
   // 服务器：enrollment 回传（无需账户令牌）、列表、详情、销毁、凭据。
   const serverResponse = await handleServers(request, env);

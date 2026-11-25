@@ -34,6 +34,7 @@ export class FakeD1 {
     billing_cursor: [] as Row[],
     catalog_cache: [] as Row[],
     webhook_samples: [] as Row[],
+    server_traffic: [] as Row[],
   };
   private rateLimits = new Map<string, { window_start: number; count: number }>();
   /** 测试钩子：collectDue 结束（写计费游标）时触发，用来模拟「取到行之后被销毁」。 */
@@ -255,6 +256,48 @@ export class FakeD1 {
         last_seen_at: a[7],
         revoked_at: null,
       });
+      return null;
+    }
+    if (sql.startsWith("select coalesce(max(last_seq), -1) as last_seq from server_traffic")) {
+      const highest = this.tables.server_traffic
+        .filter((row) => row.server_id === a[0])
+        .reduce((max, row) => Math.max(max, Number(row.last_seq ?? 0)), -1);
+      return { last_seq: highest };
+    }
+    if (sql.startsWith("insert into server_traffic")) {
+      // 累加并推进 last_seq；并发请求已经把序号推高时守卫拦下（changes = 0，见 run()）。
+      const [serverId, cycleId, delta, released, seq, updatedAt] = a;
+      const row = this.tables.server_traffic.find(
+        (entry) => entry.server_id === serverId && entry.cycle_id === cycleId,
+      );
+      if (row) {
+        if (Number(row.last_seq) < Number(seq)) {
+          row.bytes = Number(row.bytes) + Number(delta);
+          row.released_bytes = Math.max(Number(row.released_bytes), Number(released));
+          row.last_seq = seq;
+          row.updated_at = updatedAt;
+        }
+      } else {
+        this.tables.server_traffic.push({
+          server_id: serverId,
+          cycle_id: cycleId,
+          bytes: Number(delta),
+          released_bytes: Number(released),
+          charged_cents: 0,
+          last_seq: seq,
+          updated_at: updatedAt,
+        });
+      }
+      return null;
+    }
+    if (sql.startsWith("update server_traffic set charged_cents = charged_cents + ?")) {
+      const [pay, serverId, cycleId, ledgerId] = a;
+      const row = this.tables.server_traffic.find(
+        (entry) => entry.server_id === serverId && entry.cycle_id === cycleId,
+      );
+      if (row && this.tables.wallet_ledger.some((w) => w.id === ledgerId)) {
+        row.charged_cents = Number(row.charged_cents) + Number(pay);
+      }
       return null;
     }
     if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from servers")) {
@@ -985,6 +1028,27 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("select coalesce(sum(t.bytes), 0) as used")) {
+      const [accountId, cycleId] = a;
+      const serverIds = new Set(
+        this.tables.servers
+          .filter((server) => server.account_id === accountId)
+          .map((server) => server.id),
+      );
+      const rows = this.tables.server_traffic.filter(
+        (row) => serverIds.has(row.server_id) && row.cycle_id === cycleId,
+      );
+      const sum = (column: string) =>
+        rows.reduce((total, row) => total + Number(row[column] ?? 0), 0);
+      return { used: sum("bytes"), released: sum("released_bytes"), charged: sum("charged_cents") };
+    }
+    if (sql.startsWith("update servers set last_seen_at") && !sql.includes("agent_version")) {
+      // 流量上报只刷新活跃时间；agent.report 的完整登记语句另有分支。
+      const [lastSeen, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server) server.last_seen_at = lastSeen;
+      return null;
+    }
     if (sql.startsWith("update servers set last_seen_at")) {
       // agent 上报的登记信息：缺失字段保持原值（SQL 侧是 COALESCE）。
       const [lastSeen, agentVersion, singboxVersion, controlPort, fingerprint, caPem, id] = a;
@@ -1365,6 +1429,21 @@ export class FakeD1 {
         if (!guarded || Number(guarded.balance_cents ?? 0) < Number(guardFloor)) return null;
       }
       const [ledgerId, kind, amount, magnitude, refType, refId, note, now, accountId] = a;
+      // 流量超支的「账号已扣额未变」守卫：并发上报只有一笔能写账。
+      if (sql.includes("from server_traffic st join servers s")) {
+        const guardAccountId = a[12];
+        const guardCycleId = a[13];
+        const threshold = Number(a[16]);
+        const serverIds = new Set(
+          this.tables.servers
+            .filter((row) => row.account_id === guardAccountId)
+            .map((row) => row.id),
+        );
+        const chargedSoFar = this.tables.server_traffic
+          .filter((row) => serverIds.has(row.server_id) && row.cycle_id === guardCycleId)
+          .reduce((total, row) => total + Number(row.charged_cents ?? 0), 0);
+        if (chargedSoFar > threshold) return null;
+      }
       const account = this.tables.accounts.find((row) => row.id === accountId);
       if (!account) return null;
       const balance = Number(account.balance_cents ?? 0);
@@ -1530,6 +1609,34 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at from servers")) {
+      // 额度池现算：账号下每台机器（含已销毁行，由 releasedBytes 按 destroyed_at 截止）。
+      return this.tables.servers
+        .filter((server) => server.account_id === a[0])
+        .map((server) => ({
+          transfer_gib: server.transfer_gib ?? 0,
+          ready_at: server.ready_at ?? null,
+          billing_anchor_at: server.billing_anchor_at ?? 0,
+          created_at: server.created_at ?? 0,
+          destroyed_at: server.destroyed_at ?? null,
+        }));
+    }
+    if (sql.startsWith("select coalesce(sum(t.bytes), 0) as used")) {
+      const [accountId, cycleId] = a;
+      const serverIds = new Set(
+        this.tables.servers
+          .filter((server) => server.account_id === accountId)
+          .map((server) => server.id),
+      );
+      const rows = this.tables.server_traffic.filter(
+        (row) => serverIds.has(row.server_id) && row.cycle_id === cycleId,
+      );
+      const sum = (column: string) =>
+        rows.reduce((total, row) => total + Number(row[column] ?? 0), 0);
+      return [
+        { used: sum("bytes"), released: sum("released_bytes"), charged: sum("charged_cents") },
+      ];
+    }
     if (sql.startsWith("select id, at, action, detail from audit_log where server_id = ?")) {
       // 参数：serverId, ...动作白名单, limit
       const args = a as unknown[];
@@ -1644,7 +1751,8 @@ export class FakeD1 {
           (row) =>
             row.account_id === a[0] &&
             (row.state !== "destroyed" ||
-              (row.failure_code === "billing_unpaid" && row.dismissed_at == null)),
+              ((row.failure_code === "billing_unpaid" || row.failure_code === "traffic_overage") &&
+                row.dismissed_at == null)),
         )
         .sort((left, right) => Number(right.created_at) - Number(left.created_at))
         .map((server) => {
@@ -1846,7 +1954,8 @@ export class FakeD1 {
       | "wallet_ledger"
       | "topups"
       | "catalog_cache"
-      | "webhook_samples",
+      | "webhook_samples"
+      | "server_traffic",
   ): Row[] {
     return this.tables[table];
   }
@@ -2118,6 +2227,19 @@ export class FakeStatement {
         );
       if (row) row.created_at = now;
       return { success: true, meta: { changes: row ? 1 : 0 } };
+    } else if (sql.startsWith("insert into server_traffic")) {
+      const [serverId, cycleId, , , seq] = this.statement.args;
+      const row = this.db
+        .rows("server_traffic")
+        .find((entry) => entry.server_id === serverId && entry.cycle_id === cycleId);
+      changes = !row || Number(row.last_seq) < Number(seq) ? 1 : 0;
+    } else if (sql.startsWith("update server_traffic set charged_cents")) {
+      const [, serverId, cycleId, ledgerId] = this.statement.args;
+      const row = this.db
+        .rows("server_traffic")
+        .find((entry) => entry.server_id === serverId && entry.cycle_id === cycleId);
+      changes =
+        row && this.db.rows("wallet_ledger").some((w) => w.id === ledgerId) ? 1 : 0;
     }
     this.db.exec(this.statement);
     return { success: true, meta: { changes } };

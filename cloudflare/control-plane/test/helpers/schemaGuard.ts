@@ -13,8 +13,10 @@ import mobileTokensSql from "../../migrations/0009_mobile_tokens.sql?raw";
 import nodeAgentSql from "../../migrations/0010_node_agent.sql?raw";
 import issuesSql from "../../migrations/0011_issues.sql?raw";
 import refreshGraceSql from "../../migrations/0012_refresh_grace.sql?raw";
+import auditIndexSql from "../../migrations/0013_audit_log_server_index.sql?raw";
+import serverTrafficSql from "../../migrations/0014_server_traffic.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}\n${refreshGraceSql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}\n${refreshGraceSql}\n${auditIndexSql}\n${serverTrafficSql}`;
 
 interface TableShape {
   columns: Set<string>;

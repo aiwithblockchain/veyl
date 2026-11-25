@@ -174,7 +174,9 @@ function serverView(
           message:
             row.failure_code === "billing_unpaid"
               ? "余额不足，已停机删除"
-              : "这台服务器没有创建成功",
+              : row.failure_code === "traffic_overage"
+                ? "流量超支，余额不足已停机"
+                : "这台服务器没有创建成功",
           retryable: false,
         }
       : null,
@@ -406,8 +408,8 @@ async function refundPlan(
   if (daily > 0 && anchor > 0 && paidUntil > 0) {
     const nPaid = Math.floor((paidUntil - anchor) / DAY_MS);
     // 「余额不足停机」和用户主动销毁同一口径：只退未开始的整天。
-    // 照「非用户原因全额退」等于让欠费停机白送已用天数。
-    const userLike = reason === "user" || reason === "billing_unpaid";
+    // 照「非用户原因全额退」等于让欠费停机白送已用天数。流量超支停机同属欠费。
+    const userLike = reason === "user" || reason === "billing_unpaid" || reason === "traffic_overage";
     if (userLike) {
       // 当天已经用掉，不退；只退还没开始的整天。
       const nNow = Math.floor((now - anchor) / DAY_MS);
@@ -415,7 +417,7 @@ async function refundPlan(
     } else {
       amount = Math.max(0, daily * Math.max(0, nPaid));
     }
-  } else if (reason !== "user" && reason !== "billing_unpaid") {
+  } else if (reason !== "user" && reason !== "billing_unpaid" && reason !== "traffic_overage") {
     amount = chargedCents;
   }
 
@@ -423,7 +425,7 @@ async function refundPlan(
   return {
     amount,
     note:
-      reason === "user" || reason === "billing_unpaid"
+      reason === "user" || reason === "billing_unpaid" || reason === "traffic_overage"
         ? "销毁退还未使用天数"
         : `建机失败退款：${reason}`,
   };
@@ -1796,7 +1798,7 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
   const result = await env.DB.prepare(
     "SELECT s.*, o.charge_mode AS charge_mode FROM servers s LEFT JOIN orders o ON o.id = s.order_id " +
       "WHERE s.account_id = ? AND (s.state != 'destroyed' OR " +
-      "(s.state = 'destroyed' AND s.failure_code = 'billing_unpaid' AND s.dismissed_at IS NULL)) " +
+      "(s.state = 'destroyed' AND s.failure_code IN ('billing_unpaid', 'traffic_overage') AND s.dismissed_at IS NULL)) " +
       "ORDER BY s.created_at DESC",
   )
     .bind(identity.accountId)
@@ -1860,6 +1862,7 @@ const EVENT_FOLD_MS = 10 * 60 * 1000;
 const DESTROY_REASON_WHITELIST = new Set([
   "user",
   "billing_unpaid",
+  "traffic_overage",
   "enrollment_expired",
   "activation_lost",
   "activate_failed",
@@ -2116,19 +2119,21 @@ async function destroy(request: Request, env: ServersEnv, serverId: string): Pro
 /**
  * 计费窗口内扣不动（余额不足）：停机销毁，没有宽限、不可恢复。
  *
- * 由每小时 Cron 触发。销毁失败（DO 暂时删不掉）返回 `false`，状态由
- * `destroyInstance` 还原，下一轮 Cron 继续试；返回 `true` 表示机器已经不在。
+ * 由每小时 Cron 与流量超支路径触发。销毁失败（DO 暂时删不掉）返回 `false`，
+ * 状态由 `destroyInstance` 还原，下一轮 Cron 继续试；返回 `true` 表示机器已经不在。
+ * `reason` 决定墓碑文案：按天续费扣不动是 `billing_unpaid`，流量超支是 `traffic_overage`。
  */
 export async function destroyUnpaidServer(
   env: ServersEnv,
   serverId: string,
   accountId: string,
+  reason: "billing_unpaid" | "traffic_overage" = "billing_unpaid",
 ): Promise<boolean> {
   if (!env.DB) return false;
   const row = await loadServer(env.DB, accountId, serverId);
   if (!row) return true;
   if (row.state === "destroyed") return true;
-  const outcome = await destroyInstance(env, row, "billing_unpaid");
+  const outcome = await destroyInstance(env, row, reason);
   return outcome.ok;
 }
 
@@ -2183,8 +2188,8 @@ async function credentials(request: Request, env: ServersEnv, serverId: string):
 /**
  * POST /v1/servers/{id}/dismiss：用户忽略「余额不足停机」留下的墓碑行。
  *
- * 只对 `state = 'destroyed' AND failure_code = 'billing_unpaid'` 生效；重复调用幂等。
- * 手动销毁的行不会出现在列表里，也不该有忽略入口。
+ * 只对 `state = 'destroyed'` 且原因是 `billing_unpaid` / `traffic_overage` 的行生效；
+ * 重复调用幂等。手动销毁的行不会出现在列表里，也不该有忽略入口。
  */
 async function dismiss(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
   const identity = await authenticate(request, env);
@@ -2192,7 +2197,11 @@ async function dismiss(request: Request, env: ServersEnv, serverId: string): Pro
   if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
 
   const row = await loadServer(env.DB, identity.accountId, serverId);
-  if (!row || row.state !== "destroyed" || row.failure_code !== "billing_unpaid") {
+  if (
+    !row ||
+    row.state !== "destroyed" ||
+    (row.failure_code !== "billing_unpaid" && row.failure_code !== "traffic_overage")
+  ) {
     return apiError("NOT_FOUND", "没有这台服务器");
   }
   if (row.dismissed_at == null) {
