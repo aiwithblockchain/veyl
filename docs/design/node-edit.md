@@ -19,7 +19,7 @@
 
 订阅节点的连接参数不改，是因为这一行是订阅内容的镜像。判重查的是库里存的 `source_key` 列（`configs.rs:653` `find_node_by_source_key`），不是按行内现有参数重算——只要本地保留原键，重导同一条订阅永远命中「重复」并整条跳过：本地改过的值既不会被订阅覆盖，也不会被它纠正，就成了一个说不清出处的节点。而服务商那边一旦改了这条，重导会算出新键、多出一条，「改过的」和「订阅原本的」并排出现。留着只读，这一行才始终等于订阅。名称可改：改名不改变镜像语义（判重只看键），订阅重导时仍按重复跳过。
 
-**密码只写不读**：表单留空表示保持原密码；本设计不提供「清空密码」——`method = none` 等价于没有凭据，需要时用「移除 + 重新添加」表达。
+**密码只写不读**：表单留空表示保持原密码。本设计不提供「清空密码」，也不支持 `method = none`：今天两条新建路径都强制密码非空（`NodeImportDialog.tsx:259`、`nodes.rs:330`），所以 `none` 节点本来就建不出来；本设计不改这个边界。
 
 ---
 
@@ -62,20 +62,25 @@ node_update {
 2. `source` 不是 `url` / `manual` → `PRECONDITION_FAILED / node_not_editable`（`details.source`）。
 3. `source = "url"` 且带了任一连接参数 → `PRECONDITION_FAILED / subscription_params_readonly`。名称照常可改。
 4. 校验与 `node_create` 同一套：名称 trim 后非空且 ≤64 字（`configs.rs:903`）；地址沿用 `validate_server`（`configs.rs:916`：≤253 字节，禁 `://`、空白、`/`、`\`、控制字符）；端口 1–65535；`method` 先 `to_ascii_lowercase` 再查 `nodes.rs:19` 的 `SUPPORTED_METHODS`；密码非空时 ≤256 字。失败按 `INVALID_ARGUMENT`，`details.reason` 与新建一致（`invalid_argument` / `unsupported_method`）。
-5. 读运行时快照（`node_id`、`config_id`）：
+5. 读运行时快照（`node_id`、`config_id`），决定要不要动运行时：
    - 正在跑的正是这个节点 → `was_current = true`，先停运行时；
-   - 否则若 `paramsChanged` 且这个节点绑在**正在连接的配置**里 → 改完后走与 `node_create` 同一条 `rebuild_running_config` 路径重建运行时（受 `mode_switches` 闸门约束：冲突返回 `CONFLICT / switch_in_progress`；重建失败按既有语义回滚或断开并报错，`rebuilt = false`）；
+   - 否则若 `paramsChanged` 且这个节点绑在**正在连接的配置**里 → 记下「写库之后要重建」，此时不动运行时；
    - 不在连接中的配置里 → 不动运行时。
    - 判断依据是运行时快照的 `node_id`，不是活动配置的 `current_node_id`：真正在跑的是运行时。**已知不一致**：`node_remove` 判 `was_current` 用的是活动配置的 `current_node_id`，两者口径不同；本批不改 `node_remove`，后续统一，评审时不要当成新缺陷。
 6. 写库（**跨两个存储，没有共同事务**）：
    1. `password` 非空时先写 `secrets.enc`；失败 → `SECRET_STORE`，节点行一行不动；
    2. 再在一个 SQLite 事务里 `upsert_node`，用**原 id**、**原 source_key** 覆盖 `name / server / port / method / updated_at`，`created_at` 不动；失败 → `INTERNAL / store_error`。
    窗口说明：第 1 步成功、第 2 步失败时，凭据已是新的、节点行还是旧的。命令整体报错，前端不猜测中间态；重试幂等（同样输入再写一遍即收敛）。
-7. 失效测速：`ProbeBatchState` 当前没有按节点失效的公开方法，需要新增（并让 `snapshot` 丢弃已失效节点）：
+7. 重建运行时（仅第 5 步记下要重建时）。**不能直接复用 `rebuild_running_config`**：它会因为 `added` 为空直接返回 `skipped / no_new_nodes`（`services.rs:8742`），日志与失败文案写的是「新节点」，而且回滚时会把 `added` 当排除集传给 `connect_body`（`services.rs:8925`）——拿被编辑节点当 `added`，一旦首轮启动失败回滚，恢复出来的配置里就没有这台节点了。做法二选一，取后者：
+   1. ~~直接复用~~（不可行）；
+   2. 把「重建原因」与「回滚排除集」拆开：`rebuild_running_config` 的 `added` 换成 `RebuildCause { AddedNodes(&[String]), NodeEdited }`，排除集只在 `AddedNodes` 时非空；日志与失败文案按原因出「新节点」或「新设置」，`new_nodes` 只在 `AddedNodes` 时返回。编辑路径首轮与回滚都用空排除集。
+   - 仍受 `mode_switches` 串行闸门约束：同配置已有切换在跑 → `CONFLICT / switch_in_progress`，本次编辑的库改动已经落库，报错只说明「这次没重建成功」，不要撤销已保存的值。
+   - 重建失败：**不自动恢复旧参数**（库里已是新值），提示「新设置没能应用，连接已断开」，用户可再改或移除；返回 `rebuilt = false`。
+8. 失效测速：`ProbeBatchState` 当前没有按节点失效的公开方法，需要新增（并让 `snapshot` 丢弃已失效节点）：
    - 该节点有在途批次 → 立即使其失效，批次回写的结果丢弃；
    - 空闲探针缓存 → 失效集合内不再命中；
    - 断开了运行时的话，运行时快照里的 `node_latency_ms` 随断开自然清空，不需要额外写。
-8. 发 `node-list-changed(reason = "node_updated", config_id = null, changed_node_ids = [nodeId])`。
+9. 发 `node-list-changed(reason = "node_updated", config_id = null, changed_node_ids = [nodeId])`。
    **不发 `config-changed`**。两条证据：运行配置里 outbound 的 tag 是 `format!("node-{}", node.id)`（`src-tauri/src/config/builder.rs:285`）——用的是节点 id 而不是名字，所以改名对运行配置零影响，不需要让运行时重新生成配置；`ConfigSummary`（`commands.md` §3.0）里也既没有节点名也没有连接参数。改参数的情况由重建处理，过程本身有运行时事件。UI 收到 `node-list-changed` 就会重拉当前配置详情。
 
 **id 与去重键不变**：`config_nodes` 绑定、当前节点指向、选择器缓存都按 `node_id` 引用；`source_key` 保持创建时的值（判重读的是这一列，不按行内参数重算），所以改过名称或参数之后再导入同一条订阅/原链接，仍按「已有相同节点」整条跳过，不会长出第二行。会出现两条的情形只有一个：订阅端自己改了这条的参数，重导算出新键，被当成新节点——这与本地是否编辑过无关。
@@ -103,11 +108,15 @@ node_update {
 
 ## 4. 契约
 
-- `commands.md`（当前 2.69.0 → 2.70.0）要改四处：§2 命令总表加一行、新增 §7.33、§12 能力↔命令映射、§13 与 AI 工具的对应关系（写「无 AI 工具」）；头部版本与变更记录同步。
-- `events.md`（当前 2.24.0 → 2.25.0）：`NodeListChangedReason` 加 `"node_updated"`。该文件规定「所有 `contract_version` 字面量恒等于文件版本，升版时全文替换」，当前共 45 处，**必须全文替换**，不是只改头部与枚举。
-- 实现侧有两处常量、一处断言要一起改：
+- `commands.md`（当前 2.69.0 → 2.70.0）要改**五处**：§2 命令总表加一行、新增 §7.33、§12 能力↔命令映射、§13 与 AI 工具的对应关系（写「无 AI 工具」）、§15.5 版本矩阵那一行；再同步头部版本与变更记录。
+- `events.md`（当前 2.24.0 → 2.25.0）：`NodeListChangedReason` 加 `"node_updated"`。版本号按该文件自己的规则改，但**不是全文替换**，分三类：
+  - 改：34 处 payload 里的 `contract_version: "2.24.0"` 字面量；文件头部版本行；三处**当前版本引用**——§0 的「当前 `2.24.0`」（:25）、`ai-request-end` 的 `error.contract_version` 取本事件契约版本那句（:462）、与顶层 `contract_version` 对比那句（:513）。
+  - 改：`routing.md` 的副本——§8 开头的「跟 `events.md`（当前 `2.24.0`）」（:538）与两个载荷字面量（:544、:567）。events.md 的变更记录已经写明「`routing.md` 两处副本随本文件」。
+  - 不改：历史注记共 7 处（「2.24.0 起事件不再携带 `text`」、§3.4.1 标题里的 `(2.24.0)`、§10 的 2.24.0 变更条目等）——那是历史，不是当前版本。
+- 实现侧有两处常量、两处断言要一起改：
   - `src-tauri/src/runtime/manager.rs:19` `EVENT_CONTRACT_VERSION`；
-  - `src-tauri/src/claurst_session/events.rs:11` 的第二份 `CONTRACT_VERSION`（`claurst_session/mod.rs:2200` 有断言写死 `2.24.0`）。
+  - `src-tauri/src/claurst_session/events.rs:11` 的第二份 `CONTRACT_VERSION`；
+  - 断言写死 `2.24.0` 的有两处：`claurst_session/events.rs:292`、`claurst_session/mod.rs:2200`。
 - `src/agent/protocol.ts` 的 `NodeListChangedReason` 联合类型加 `"node_updated"`；`mockAgent` 用该类型、没有自有版本常量，只需实现 `nodeUpdate` 的 mock 行为（改 localStorage 里的节点、作废该节点测速、发事件）。
 - `tools.md`：**不新增 AI 工具**。改节点参数会改变用户的连接选择，和移除一样属于界面动作。
 
@@ -131,7 +140,7 @@ node_update {
 ## 6. 不做
 
 - 不做批量编辑。
-- 不支持清空密码或把加密方式改成 `none`；需要时移除后重新添加。
+- 不支持清空密码或把加密方式改成 `none`（`none` 在今天的新建路径里也建不出来，见 §0）。
 - 不做「订阅节点重建」（改订阅参数只能去服务商改完重新导入）；也不改刷新逻辑去覆盖用户修改——现在的「重复整条跳过」是对的。
 - 不给 AI 工具入口。
 - 不做编辑历史/撤销；改坏了可以再改一次。
@@ -140,6 +149,7 @@ node_update {
 
 ## 7. 实现边界
 
+- **分两批**。第一批是纯重构、行为逐字不变：`rebuild_running_config` 的 `added` 换成 `RebuildCause { AddedNodes(&[String]), NodeEdited }`，改三个调用点（`node_create`、`node_attach`、回滚路径），`AddedNodes` 仍用新增 id 当排除集、`NodeEdited` 为空；提交信息写明「纯重构、无行为变化」，跑全量 `cargo test`。第二批再叠 `node_update`、界面、契约、事件与 probe 失效。分两批的理由是可审：混在一起回归时分不清是重构错还是新功能错。
 - `src-tauri/src/claurst_session/` 是本仓库自己的目录，版本常量与写死断言可以改；`claurst/` 子模块仍然只读，不碰。
 - `tools/probe_batch.rs` 只加「按 `node_id` 失效」这一条最小接口，不顺手重构批次状态机。
-- `events.md` 的版本号只做本文件内的字面量替换，不用整仓格式化或全仓替换类命令。
+- `events.md` 的版本号只改 34 处 payload 字面量与文件头部，历史注记不动，也不用整仓格式化或全仓替换类命令。

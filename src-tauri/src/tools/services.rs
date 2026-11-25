@@ -6379,7 +6379,13 @@ impl VpnToolServices for WiredServices {
         // 有人正在切换接管方式时不排队，如实告诉界面「下次连接可用」。
         let runtime_rebuild = match self.mode_switches.try_begin(&target.id) {
             Some(_rebuild_guard) => match self.require_config(&target.id) {
-                Ok(config) => self.rebuild_running_config(&config, &added_ids).await,
+                Ok(config) => {
+                    self.rebuild_running_config(
+                        &config,
+                        RebuildCause::AddedNodes(&added_ids),
+                    )
+                    .await
+                }
                 Err(_) => json!({ "status": "skipped", "reason": "config_missing" }),
             },
             None => json!({ "status": "skipped", "reason": "switch_in_progress" }),
@@ -6572,7 +6578,8 @@ impl VpnToolServices for WiredServices {
         let runtime_rebuild = if attached.is_empty() {
             Value::Null
         } else {
-            self.rebuild_running_config(&global, &attached).await
+            self.rebuild_running_config(&global, RebuildCause::AddedNodes(&attached))
+                .await
         };
 
         Ok(json!({
@@ -8341,6 +8348,27 @@ impl Drop for RenderedConfigGuard {
     }
 }
 
+/// 重建运行配置的原因：决定回滚时排除哪些节点，以及返回与日志里的说法。
+///
+/// `NodeEdited` 由第二批的 `node_update` 使用；这一批只做入口拆分，行为不变。
+enum RebuildCause<'a> {
+    /// 连接中新增了节点：回滚时排除这批节点——它们可能就是启动失败的原因。
+    AddedNodes(&'a [String]),
+    /// 节点参数被编辑：不排除任何节点，库里已经是新值。
+    #[allow(dead_code)]
+    NodeEdited,
+}
+
+impl<'a> RebuildCause<'a> {
+    /// 回滚时要排除的节点；只有「新增」才有。
+    fn excluded_on_rollback(&self) -> &'a [String] {
+        match self {
+            Self::AddedNodes(ids) => ids,
+            Self::NodeEdited => &[],
+        }
+    }
+}
+
 impl WiredServices {
     fn abort_connection(&self, error: anyhow::Error) -> anyhow::Error {
         if let Err(disable_error) = self.proxy.disable() {
@@ -8738,8 +8766,10 @@ impl WiredServices {
     ///
     /// 返回给 `node_attach` / `node_create` 的 `runtime_rebuild` 字段；
     /// 失败不影响「节点已经进池」这件事。
-    async fn rebuild_running_config(&self, config: &configs::Config, added: &[String]) -> Value {
-        if added.is_empty() {
+    async fn rebuild_running_config(&self, config: &configs::Config, cause: RebuildCause<'_>) -> Value {
+        let excluded = cause.excluded_on_rollback();
+        // 只有「新增节点」才可能一批都没有；编辑从来不会走到这里。
+        if matches!(&cause, RebuildCause::AddedNodes(_)) && excluded.is_empty() {
             return json!({ "status": "skipped", "reason": "no_new_nodes" });
         }
         // 锁只护决策段：复查 → 重读配置 → 停旧 → 记代。拉起（最长 90s）在锁外，
@@ -8778,7 +8808,7 @@ impl WiredServices {
 
             log::info!(
                 "连接中新增 {} 个节点，重建运行配置 config={}",
-                added.len(),
+                excluded.len(),
                 config.id
             );
             if let Err(error) = self.stop_for_rebuild(connection.tun).await {
@@ -8849,7 +8879,7 @@ impl WiredServices {
                     log::info!("重建运行配置完成 config={}", config.id);
                     return json!({
                         "status": "applied",
-                        "new_nodes": self.nodes_in_running_config(config, added),
+                        "new_nodes": self.nodes_in_running_config(config, excluded),
                     });
                 }
                 // 起来了但已被断开取代：节点已进池，不再接回连接。
@@ -8922,7 +8952,7 @@ impl WiredServices {
                 let rolled = self
                     .connect_body(
                         &latest,
-                        added,
+                        excluded,
                         StartContext {
                             epoch: Some(rollback_epoch),
                             lock_held: false,
@@ -15777,7 +15807,9 @@ mod main_flow_tests {
         // 先占住运行期锁，让重建在「取锁」这一步挂起。
         let hold = h.services.runtime_ops.lock().await;
         let spare_ids = [spare];
-        let mut rebuild = std::pin::pin!(h.services.rebuild_running_config(&config, &spare_ids));
+        let mut rebuild = std::pin::pin!(h
+            .services
+            .rebuild_running_config(&config, RebuildCause::AddedNodes(&spare_ids)));
         // 轮询一次：老实现会在这里跑完前置判断（都通过），然后阻塞在锁上。
         {
             struct NoopWaker;
