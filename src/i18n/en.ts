@@ -1527,7 +1527,6 @@ export const en: Record<MessageKey, string> = {
   "settings.consult.fact.noProvider": "Provider: not configured yet",
   "settings.consult.fact.mode": "Connection mode: {mode}",
   "settings.consult.fact.scope": "Traffic scope: {scope}",
-  "settings.consult.fact.scopeDirect": "Direct",
   "settings.consult.fact.port": "Local proxy port: {port}",
   "settings.consult.fact.portUnused": "Local proxy port: {port} (not used in the current mode)",
   "settings.consult.fact.sync": "Node sync interval: {interval}",

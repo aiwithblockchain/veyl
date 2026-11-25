@@ -462,10 +462,10 @@ describe("咨询 AI 的提示词", () => {
     expect(prompt).not.toMatch(/\{\w+\}/);
   });
 
-  it("流量范围按两档给事实，direct 不会写成智能，旧的三值不再出现", async () => {
+  it("流量范围按两档给事实，direct 按界面写成智能，旧的三值不再出现", async () => {
     const cases = [
       ["proxy_all", "流量范围：全局"],
-      ["direct", "流量范围：直连"],
+      ["direct", "流量范围：智能"],
     ] as const;
     for (const [mode, expected] of cases) {
       const onConsultAi = vi.fn((_prompt: string) => true);
@@ -473,7 +473,8 @@ describe("咨询 AI 的提示词", () => {
       fireEvent.click(await screen.findByRole("button", { name: "咨询 AI" }));
       const prompt = onConsultAi.mock.calls[0][0] as string;
       expect(prompt).toContain(expected);
-      if (mode === "direct") expect(prompt).not.toContain("智能");
+      // 内部值 direct 不能再以「直连」的形态出现在事实里。
+      if (mode === "direct") expect(prompt).not.toContain("流量范围：直连");
       view.unmount();
     }
 

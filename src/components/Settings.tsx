@@ -1048,7 +1048,7 @@ export function Settings({
           routingMode === "proxy_all"
             ? translate("stage.scope.global")
             : routingMode === "direct"
-              ? translate("settings.consult.fact.scopeDirect")
+              ? translate("stage.scope.smart")
               : null;
         if (scope !== null) {
           parts.push(translate("settings.consult.fact.scope", { scope }));

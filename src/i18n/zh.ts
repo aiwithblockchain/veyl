@@ -1456,7 +1456,6 @@ export const zh = {
   "settings.consult.fact.noProvider": "服务商：尚未配置",
   "settings.consult.fact.mode": "接管方式：{mode}",
   "settings.consult.fact.scope": "流量范围：{scope}",
-  "settings.consult.fact.scopeDirect": "直连",
   "settings.consult.fact.port": "本地代理端口：{port}",
   "settings.consult.fact.portUnused": "本地代理端口：{port}（当前模式用不到）",
   "settings.consult.fact.sync": "节点配置同步间隔：{interval}",
