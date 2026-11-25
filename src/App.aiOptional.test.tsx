@@ -40,10 +40,16 @@ const DETAIL: ConfigDetail = {
   layout_revision: null,
 };
 
-/** 同一条节点改成手动导入：失败行保留「问 AI」，hero 保留「智能诊断」。 */
+/** 同一条节点改成手动导入：没有「智能诊断」，也没有行内「问 AI」。 */
 const MANUAL_DETAIL: ConfigDetail = {
   ...DETAIL,
   nodes: [{ ...DETAIL.nodes[0], source: "manual" }],
+};
+
+/** 托管节点：只有 source === "owned" 才有诊断与 AI 入口。 */
+const OWNED_DETAIL: ConfigDetail = {
+  ...DETAIL,
+  nodes: [{ ...DETAIL.nodes[0], source: "owned" }],
 };
 
 const SUMMARY: ConfigSummary = {
@@ -248,7 +254,7 @@ describe("未配置 AI 的动作入口", () => {
 
   it("报告问题被拦：告警，取消后不建会话、不调 AI", async () => {
     seedSkipped();
-    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
+    useOwnedNode();
     render(<App />);
     await waitForShell();
     fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
@@ -585,13 +591,50 @@ async function failConnection() {
   return screen.findByRole("button", { name: "智能诊断" });
 }
 
-/** 手动导入节点测不通：让行内的「问 AI」入口出现。 */
-function useManualUnreachable(): () => void {
-  vi.mocked(bridge.configDetail).mockResolvedValue({
-    ...DETAIL,
-    // 手动导入节点：失败行保留「问 AI」，不进入诊断面板。
-    nodes: [{ ...DETAIL.nodes[0], source: "manual" }],
+const TOKYO_SERVER: MyServer = {
+  server_id: "srv_tokyo",
+  name: "东京 01",
+  region: "sgp1",
+  plan: "s-1vcpu-1gb",
+  state: "healthy",
+  created_at: new Date(0).toISOString(),
+  ip: "203.0.113.1",
+  port: 8388,
+  node_id: "nd_tokyo",
+  local_node_id: "node_1",
+  hourly_usd: 0.007,
+  monthly_usd: 5,
+  daily_price_cents: 30,
+  paid_until: new Date(86_400_000).toISOString(),
+  billing_state: "active",
+  grace_ends_at: null,
+  transfer_gib: 1000,
+  failure: null,
+};
+
+/**
+ * 托管节点夹具：诊断入口要求 source === "owned"，且服务器要能在 myServers 里对上，
+ * 否则 App 的 handleDiagnoseConnection 兜底早退。
+ */
+function useOwnedNode() {
+  vi.mocked(bridge.configDetail).mockResolvedValue(OWNED_DETAIL);
+  signInForServers();
+  vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [TOKYO_SERVER] });
+  vi.spyOn(bridge, "myServerIdentity").mockResolvedValue({
+    has_identity: true,
+    account_id: "acct_1",
   });
+  // 定时同步会用它的返回值整体覆盖列表：保持一致，别把映射冲掉。
+  vi.spyOn(bridge, "myServerSync").mockResolvedValue({
+    servers: [TOKYO_SERVER],
+    changed: [],
+    failed: [],
+  });
+}
+
+/** 手动导入节点测不通：行内与 hero 都不该出现 AI 入口。 */
+function useManualUnreachable(): () => void {
+  vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
   vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
     logged_in: true,
     email: "me@example.com",
@@ -600,26 +643,7 @@ function useManualUnreachable(): () => void {
     account_kind: "email",
     session_expires_at: null,
   });
-  const server: MyServer = {
-    server_id: "srv_tokyo",
-    name: "东京 01",
-    region: "sgp1",
-    plan: "s-1vcpu-1gb",
-    state: "healthy",
-    created_at: new Date(0).toISOString(),
-    ip: "203.0.113.1",
-    port: 8388,
-    node_id: "nd_tokyo",
-    local_node_id: "node_1",
-    hourly_usd: 0.007,
-    monthly_usd: 5,
-    daily_price_cents: 30,
-    paid_until: new Date(86_400_000).toISOString(),
-    billing_state: "active",
-    grace_ends_at: null,
-    transfer_gib: 1000,
-    failure: null,
-  };
+  const server = TOKYO_SERVER;
   vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [server] });
   // 账户已登录：余额读不到会被当成登录过期而清空服务器列表，这里给一个正常值。
   vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
@@ -756,8 +780,8 @@ describe("AI 入口双向闸门", () => {
 
   it("智能诊断：未配置 AI 时点问 AI 弹告警、不发消息", async () => {
     seedSkipped();
-    // hero 的「智能诊断」只对非 seed 节点出现。
-    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
+    // hero 的「智能诊断」只对托管节点出现。
+    useOwnedNode();
     // 这条用例只测 AI 闸门：helper 视作正常，别让诊断停在「打开设置」。
     vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
       runningBuild: "2026.11.1",
@@ -790,7 +814,7 @@ describe("AI 入口双向闸门", () => {
   it("智能诊断：已配置时问 AI 发出连接失败清单", async () => {
     seedSkipped();
     aiConfigured = true;
-    vi.mocked(bridge.configDetail).mockResolvedValue(MANUAL_DETAIL);
+    useOwnedNode();
     // 同上：helper 视作正常，结论才会落到「去问 AI」。
     vi.spyOn(bridge, "tunHelperInfo").mockResolvedValue({
       runningBuild: "2026.11.1",
@@ -816,30 +840,29 @@ describe("AI 入口双向闸门", () => {
     ).toBeNull();
   }, 15_000);
 
-  it("手动导入节点测不通问 AI：未配置弹告警、不发消息", async () => {
+  it("手动节点测不通没有 AI 入口：未配置 AI 也不弹告警", async () => {
     seedSkipped();
     const emitUnreachable = useManualUnreachable();
     render(<App />);
     await waitForShell();
-    fireEvent.click(screen.getByRole("button", { name: "收起助手" }));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy(),
-    );
     await waitFor(() => expect(bridge.nodeProbeAll).toHaveBeenCalled());
     emitUnreachable();
-    const button = await screen.findByRole("button", {
-      name: "就东京 01测不通咨询 AI",
-    });
+    // 「报告问题」只在连接失败/无流量时出现，补一个失败态再看它是否还在。
+    await emitConnectionFailure();
 
-    fireEvent.click(button);
+    // 测不通的读数照常显示，只是行内没有「问 AI」，hero 也没有「智能诊断」。
+    expect(await screen.findByText("测不通")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /咨询 AI/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "智能诊断" })).toBeNull();
+    // 「报告问题」与诊断无关，不该跟着被拿掉。
+    expect(screen.getByRole("button", { name: "报告问题" })).toBeTruthy();
     expect(
-      await screen.findByRole("dialog", { name: "还没有配置 AI 服务" }),
-    ).toBeTruthy();
+      screen.queryByRole("dialog", { name: "还没有配置 AI 服务" }),
+    ).toBeNull();
     expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "展开助手" })).toBeTruthy();
   }, 15_000);
 
-  it("手动导入节点测不通问 AI：已配置发出节点消息", async () => {
+  it("手动节点测不通没有 AI 入口：配置了 AI 也不出现", async () => {
     seedSkipped();
     aiConfigured = true;
     const emitUnreachable = useManualUnreachable();
@@ -847,16 +870,14 @@ describe("AI 入口双向闸门", () => {
     await waitForShell();
     await waitFor(() => expect(bridge.nodeProbeAll).toHaveBeenCalled());
     emitUnreachable();
-    const button = await screen.findByRole("button", {
-      name: "就东京 01测不通咨询 AI",
-    });
+    await emitConnectionFailure();
 
-    fireEvent.click(button);
-    await waitFor(() =>
-      expect(vi.mocked(bridge.sendMessage)).toHaveBeenCalledTimes(1),
-    );
-    const call = vi.mocked(bridge.sendMessage).mock.calls[0];
-    expect(call[1]).toContain("节点「东京 01」这次测不通");
+    expect(await screen.findByText("测不通")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /咨询 AI/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "智能诊断" })).toBeNull();
+    expect(screen.getByRole("button", { name: "报告问题" })).toBeTruthy();
+    // 配好 AI 也不该有任何自动发起。
+    expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
   }, 15_000);
 
   it("咨询 AI：已配置进入并排咨询并发出咨询消息", async () => {

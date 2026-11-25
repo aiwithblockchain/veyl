@@ -285,18 +285,18 @@ describe("连接舞台", () => {
     expect(onReconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("失败时主按钮是智能诊断，旁边保留重新连接", async () => {
+  it("托管节点失败：主按钮是智能诊断，旁边保留重新连接", async () => {
     const onDiagnose = vi.fn();
     const onStart = vi.fn();
-    const manualNode = {
+    const ownedNode = {
       ...CONFIG.nodes[0],
       node_id: "m1",
-      name: "订阅节点",
-      source: "manual" as const,
+      name: "托管服务器",
+      source: "owned" as const,
     };
     render(
       <ConnectionStage
-        config={{ ...CONFIG, current_node_id: "m1", nodes: [manualNode] }}
+        config={{ ...CONFIG, current_node_id: "m1", nodes: [ownedNode] }}
         connection="idle"
         runtime={runtime({
           state: "failed",
@@ -2441,7 +2441,7 @@ describe("测不通时的智能诊断入口", () => {
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
   });
 
-  it("手动导入节点测不通：仍保留「问 AI」，不出现智能诊断", () => {
+  it("手动导入节点测不通：没有任何诊断入口", () => {
     const MANUAL: ConfigDetail["nodes"][number] = {
       ...CONFIG.nodes[0],
       node_id: "m1",
@@ -2457,11 +2457,9 @@ describe("测不通时的智能诊断入口", () => {
       serverIdForNode: () => null,
     });
 
-    expect(
-      screen.queryByRole("button", { name: /智能诊断/ }),
-    ).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /咨询 AI/ }));
-    expect(onAskAi).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /咨询 AI/ })).toBeNull();
+    expect(onAskAi).not.toHaveBeenCalled();
   });
 
   it("免费节点测不通：只有「测不通」文字，没有任何按钮", () => {

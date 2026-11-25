@@ -2397,8 +2397,8 @@ export default function App() {
     const node = currentId
       ? (config?.nodes.find((item) => item.node_id === currentId) ?? null)
       : null;
-    // 免费节点不诊断：用户没有恢复手段（列表入口已拦，这里再兜一层）。
-    if (node?.source === "seed") return;
+    // 只有托管节点能诊断：其它来源的凭据不在我们手里（入口已拦，这里再兜一层）。
+    if (node?.source !== "owned") return;
     const server = currentId
       ? (myServers.servers.find(
           (item) => item.local_node_id === currentId,

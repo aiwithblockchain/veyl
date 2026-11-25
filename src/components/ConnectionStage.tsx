@@ -365,11 +365,11 @@ export function ConnectionStage({
     : (localPick ?? config?.current_node_id ?? null);
   const connectTargetId =
     selectedId ?? config?.current_node_id ?? nodes[0]?.node_id ?? null;
-  /** 失败发生在免费节点上：不给 AI 诊断（用户没有恢复手段，只能换节点）。 */
-  const failedOnSeed =
-    failed &&
-    nodes.find((node) => node.node_id === connectTargetId)?.source === "seed";
-  const canDiagnose = failed && onDiagnose !== undefined && !failedOnSeed;
+  /** 只有托管节点能诊断：其它来源的凭据不在我们手里，诊断给不出可执行的结论。 */
+  const failedNode =
+    nodes.find((node) => node.node_id === connectTargetId) ?? null;
+  const canDiagnose =
+    failed && onDiagnose !== undefined && failedNode?.source === "owned";
 
   const switchTo = async (nodeId: string) => {
     if (switching) return;
@@ -757,13 +757,13 @@ export function ConnectionStage({
       node.source === "owned" &&
       serverId !== null &&
       onAnalyzeNode !== undefined;
-    /** 非自有节点（或查不到服务器）仍保留「问 AI」；免费节点不保证可用，问了也只有「换个节点」。 */
+    /** 行内「问 AI」只留给托管节点；自定义与免费节点没有诊断入口。 */
     const canAskInRow =
       msState === "bad" &&
       !expired &&
       !dangling &&
       !canAnalyze &&
-      node.source !== "seed" &&
+      node.source === "owned" &&
       Boolean(onAskAi || onAskAiAboutNode);
     /** 行内要放真按钮，容器不能再用 <button>（不能嵌套）。 */
     const rowLocked = switching !== null || expired || dangling;
