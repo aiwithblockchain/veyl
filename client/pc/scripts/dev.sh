@@ -87,7 +87,10 @@ resolve_executable() {
 
 app_pids() {
   [ -n "${EXECUTABLE:-}" ] || return 0
-  pgrep -f "$APP_DEST/Contents/MacOS/$EXECUTABLE" 2>/dev/null || true
+  {
+    pgrep -f "$APP_DEST/Contents/MacOS/$EXECUTABLE" 2>/dev/null || true
+    pgrep -f "$APP_SRC/Contents/MacOS/$EXECUTABLE" 2>/dev/null || true
+  } | sort -u
 }
 
 terminate_app() {

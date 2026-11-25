@@ -59,7 +59,7 @@ printf '== veyl-cli macOS 打包 ==\n'
 printf '目录：%s\n' "$ROOT"
 printf '日志：%s\n\n' "$LOG"
 
-for tool in node npm cargo codesign hdiutil ditto xcrun python3 shasum lipo; do
+for tool in node npm cargo rustup security codesign hdiutil ditto xcrun python3 shasum lipo; do
   command -v "$tool" >/dev/null 2>&1 || die "缺少命令：$tool"
 done
 [ -d "$ROOT/node_modules" ] || die "缺少 node_modules。先执行：cd \"$ROOT\" && npm install"
@@ -103,18 +103,26 @@ find_identity() {
 }
 
 SIGN_ID="${VEYL_CLI_SIGN_IDENTITY:-$(find_identity || true)}"
+if [ "$SIGN_ID" = "-" ]; then
+  SIGN_ID=""
+fi
 if [ -z "$SIGN_ID" ]; then
+  if [ "$SKIP_NOTARIZE" -eq 0 ]; then
+    die "本机没有 Developer ID Application 证书，无法签名与公证。
+  本地验证请显式加 --skip-notarize（产物只能本机运行，不可分发）。"
+  fi
   SIGN_ID="-"
-  SKIP_NOTARIZE=1
-  printf '\n没有 Developer ID Application 证书：使用 ad-hoc 签名，跳过公证。\n'
-  printf '产物只能本机运行；要分发请安装证书后重跑，或用 VEYL_CLI_SIGN_IDENTITY 指定。\n'
+  printf '\n没有 Developer ID Application 证书：按 --skip-notarize 使用 ad-hoc 签名。\n'
+  printf '产物只能本机运行；要分发请安装证书后重跑。\n'
 else
   printf '签名身份：%s\n' "$SIGN_ID"
-fi
-if [ "$SKIP_NOTARIZE" -eq 0 ] && [ -z "${VEYL_CLI_NOTARY_PROFILE:-}" ]; then
-  die "缺少 VEYL_CLI_NOTARY_PROFILE（xcrun notarytool store-credentials 保存的 profile 名）。
+  if [ "$SKIP_NOTARIZE" -eq 0 ] && [ -z "${VEYL_CLI_NOTARY_PROFILE:-}" ]; then
+    die "缺少 VEYL_CLI_NOTARY_PROFILE（xcrun notarytool store-credentials 保存的 profile 名）。
   本地验证可以加 --skip-notarize。"
+  fi
 fi
+# TODO(TUN)：接入 helper 后，这里必须校验证书 Team 与 build.rs 编进 helper 的信任根一致；
+# 现在没有 helper，Team 不一致还不会表现为「装得上、连不上」。
 
 printf '\n[1/6] 构建前端与 .app\n'
 (cd "$ROOT" && npm run tauri -- build --target "$TARGET" --bundles app)
@@ -147,7 +155,12 @@ codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 if [ "$SKIP_NOTARIZE" -eq 0 ]; then
   printf '\n[3/6] 公证 App 并 staple\n'
-  xcrun notarytool submit "$APP_PATH" --keychain-profile "$VEYL_CLI_NOTARY_PROFILE" --wait
+  # notarytool 只接受 zip / dmg / pkg，不接受 .app 目录。
+  APP_ZIP="$BUILD_DIR/$PRODUCT-$VERSION.zip"
+  rm -f "$APP_ZIP"
+  ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"
+  xcrun notarytool submit "$APP_ZIP" --keychain-profile "$VEYL_CLI_NOTARY_PROFILE" --wait
+  rm -f "$APP_ZIP"
   xcrun stapler staple "$APP_PATH"
 else
   printf '\n[3/6] 跳过公证\n'
@@ -156,13 +169,18 @@ fi
 printf '\n[4/6] 制作 DMG\n'
 STAGE="$BUILD_DIR/dmg-stage"
 DMG="$PACKAGES_DIR/$PRODUCT-$VERSION.dmg"
+cleanup_stage() {
+  rm -rf "$STAGE" 2>/dev/null || true
+}
+trap cleanup_stage EXIT
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 ditto "$APP_PATH" "$STAGE/$PRODUCT.app"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "$PRODUCT $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
-rm -rf "$STAGE"
+cleanup_stage
+trap - EXIT
 printf '  %s\n' "$DMG"
 
 printf '\n[5/6] 签名 DMG\n'
@@ -172,6 +190,7 @@ else
   codesign --force --sign "$SIGN_ID" "$DMG"
 fi
 
+# 没有证书时只能显式 --skip-notarize；这里不再静默降级，避免把 ad-hoc 包当可分发包。
 if [ "$SKIP_NOTARIZE" -eq 0 ]; then
   printf '\n[6/6] 公证 DMG 并 staple\n'
   xcrun notarytool submit "$DMG" --keychain-profile "$VEYL_CLI_NOTARY_PROFILE" --wait

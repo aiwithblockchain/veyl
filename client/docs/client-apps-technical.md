@@ -67,7 +67,7 @@ crates/
 | `src/assets/logo.png` | `client/pc/src/assets/`、`client/Android/src/assets/`、`client/iOS/src/assets/` | 三个 APP 共用同一 logo |
 | `build/logo-variants/*` | 同目录 `assets/brand/` | 深色 / 浅色 / 透明底变体 |
 | `src-tauri/icons/*` | 各端 `src-tauri/icons/` | 用 `npm run tauri icon <logo>` 重新出各平台尺寸，避免手抄 |
-| `src/styles/app.css` 的 token 段 | 各端 `src/styles/tokens.css` | 只取颜色、间距、字号、圆角；不取主客户端布局 |
+| `src/styles/app.css` 的 token 段 | 各端 `src/styles.css` | 只取颜色、间距、字号、圆角；骨架当前是复制后的硬编码值，不引用主客户端样式 |
 | `src/i18n/` 的基建与公共词 | 各端 `src/i18n/` | 只复制轻量客户端用到的 key |
 | `src/brand.ts` | `client/pc/src/brand.ts` | 产品名改为 `veyl-cli`，其余引用方式不变 |
 
@@ -109,7 +109,7 @@ crates/
 | macOS launchd label `com.veyl.helper` | `src-tauri/resources/launchd/` | `com.veyl.cli.helper` |
 | 信任根（build.rs 嵌入的主程序 sha256） | `src-tauri/build.rs` | 改为由各 APP 自己的 build script 注入 |
 | `TUN_ADDRESS_MACOS = 172.19.0.1/30` | `tun/mod.rs:30` | veyl-cli 用独立网段（如 `172.20.0.1/30`），避免两个 APP 同时接管时地址冲突 |
-| `TUN_ADDRESS_WINDOWS = 198.18.0.1/15` | `tun/mod.rs:35` | 同上，另选一段（如 `198.19.0.1/16`） |
+| `TUN_ADDRESS_WINDOWS = 198.18.0.1/15` | `tun/mod.rs:35` | 同上，另选一段（如 `198.20.0.1/16`；不要用 `198.19.0.1/16`，它落在 /15 的范围内） |
 
 > 端口 / 管道 / 服务名的冲突在 Windows 上是**硬失败**：两套 APP 抢同一个服务名时，第二套会认为服务已安装并连到错误的二进制。这不是体验问题，是安全边界问题，抽取时必须一并改掉。
 
@@ -128,7 +128,7 @@ client/pc/
     App.tsx               单窗口：配置列表 + 连接主按钮 + 状态
     components/           ProfileList / ImportDialog / ConnectStage / StatusBar
     i18n/                 复制主客户端基建，只留需要的 key
-    styles/tokens.css
+    styles.css
     assets/logo.png
   src-tauri/
     Cargo.toml            tauri, veyl-tun (path)
@@ -283,7 +283,7 @@ go run ./cmd/internal/build_libbox -target apple -platform <platform>
 
 - `platform` 取值按官方矩阵（iOS device / simulator），构建脚本里固定；
 - 版本与桌面一致；xcframework 提交进仓库或由 CI 产出并带 sha256；
-- 扩展 target 需 Network Extension entitlement（`packet-tunnel-provider`）；upstream 文档已说明该能力在门户自助勾选（`tun-alternatives-macos.md` 记录），但**上架可行性仍未定**（需求 §12 R1）。
+- 扩展 target 需 Network Extension entitlement（`packet-tunnel-provider`）。`tun-alternatives-macos.md` 记录的是 macOS 侧的自助能力；**iOS 侧需以 Apple 官方文档核实**，上架可行性仍未定（需求 §12 R1）。
 
 ### 5.3 配置交接
 
@@ -428,7 +428,7 @@ logs_open() -> void
 | Golden | 用随包 sing-box 对装配结果跑 `check`；样本覆盖：服务端真实形状、本地任意配置、零节点、中文节点名、无 TUN 入站的自备配置 |
 | 前端 | vitest：导入弹层、状态渲染、错误文案 |
 | 集成 | PC：真机连接、断开、退出、节点热切、DNS 还原、关窗后进程与隧道保持、从菜单栏唤回窗口；Android：授权、连接、杀进程、重启、节点切换；iOS：NE 安装、连接、扩展被回收、节点切换 |
-| 验收 | 需求文档 CA-1…CA-12；三端各跑一遍；iOS 需签名版与 TestFlight 版各一次 |
+| 验收 | 需求文档 CA-1…CA-13；三端各跑一遍；iOS 需签名版与 TestFlight 版各一次 |
 
 ---
 
@@ -450,7 +450,7 @@ logs_open() -> void
 | 阶段 | 内容 | 出口条件 |
 |---|---|---|
 | **M0** | 抽取 `crates/veyl-tun` + 标识符参数化 | 主客户端行为不变，全量测试与桌面真机连接通过；交叉 review |
-| **M1** | `client/pc`（veyl-cli） | CA-1…CA-9、CA-11 在 Windows + macOS 通过 |
+| **M1** | `client/pc`（veyl-cli） | CA-1…CA-9、CA-11、CA-13 在 Windows + macOS 通过 |
 | **M2** | `client/Android` | 授权、连接、重启、零节点、令牌轮换通过；商店材料就绪 |
 | **M3** | `client/iOS` | 前置 R1 有结论；CA 全项通过 |
 

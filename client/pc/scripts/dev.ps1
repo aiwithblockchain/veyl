@@ -93,8 +93,7 @@ if (-not (Test-Path $exe)) { Fail "找不到构建产物：$exe" }
 
 Write-Host "`n[2/3] 结束旧实例"
 if ($KillExisting) {
-    $running = Get-Process -Name $cargoName -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $exe }
+    $running = Get-Process -Name $cargoName -ErrorAction SilentlyContinue
     if ($running) {
         Write-Host "  结束：$($running.Id -join ' ')"
         $running | Stop-Process -Force
@@ -103,8 +102,7 @@ if ($KillExisting) {
         Write-Host "  没有正在运行的实例"
     }
 } else {
-    $running = Get-Process -Name $cargoName -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -eq $exe }
+    $running = Get-Process -Name $cargoName -ErrorAction SilentlyContinue
     if ($running) {
         Fail "veyl-cli 正在运行（PID：$($running.Id -join ' ')）。先退出，或加 -KillExisting"
     }

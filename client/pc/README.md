@@ -98,5 +98,7 @@ client/pc/
 ## 注意
 
 - 本目录是独立应用：不要从仓库根目录的 `src/`、`src-tauri/` 直接 import；共享只通过仓库内 crate 与复制静态资源。
+- **Windows 发布包（NSIS）脚本尚未提供**：当前只有 macOS 的 `release-dmg.sh`。
+- **单实例插件尚未接入**：重复启动会起第二个进程；菜单栏 / 托盘接入时一并补。
 - `node_modules/`、`dist/`、`src-tauri/target/`、`build/` 都不入库。
-- 骨架尚未经过编译验证；首次构建如有依赖版本问题，按构建错误调整本目录的 `Cargo.toml` / `package.json`，不要改动主客户端。
+- 骨架已验证：debug 构建、`dev.sh` 的构建 / 签名 / 安装 / 启动冒烟、`release-dmg.sh` 的本机与 universal 两条路径、DMG 校验和均通过（2026-11-25）。首次构建如遇依赖版本问题，只改本目录的 `Cargo.toml` / `package.json`，不要改动主客户端。
