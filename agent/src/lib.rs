@@ -2,9 +2,10 @@
 //!
 //! Two halves live here:
 //! - the MCP control endpoint (self-signed TLS + one-time Ed25519 bearer
-//!   tokens + `rotate_credentials`), shared by the demo and production;
-//! - the machine manager (`agent::run`): enroll, install sing-box, report,
-//!   rotate, and poll the desired state.
+//!   tokens + `rotate_credentials` / `upgrade_singbox`), shared by the demo and
+//!   production;
+//! - the machine manager (`agent::run`): enroll, install sing-box, report and
+//!   rotate.
 
 pub mod agent;
 pub mod auth;

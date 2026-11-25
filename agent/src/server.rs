@@ -1,9 +1,11 @@
 //! MCP Streamable HTTP server behind tokio-rustls, with a bearer-token gate in
-//! front of *every* request (including `initialize`) and one tool.
+//! front of *every* request (including `initialize`) and two tools:
+//! `rotate_credentials` and `upgrade_singbox`.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
@@ -32,7 +34,11 @@ use tokio_util::sync::CancellationToken;
 use crate::auth::{AuthError, AuthState};
 use crate::cert;
 use crate::identity::Identity;
-use crate::rotation::Rotator;
+use crate::rotation::{RotateError, Rotator};
+
+/// Bound on the `active` re-announcement that runs before every tool call, so a
+/// dead control plane cannot delay the call itself.
+const REANNOUNCE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Everything the tool handler can observe, plus what the demo asserts on.
 pub struct ServerState {
@@ -70,7 +76,7 @@ struct NodeAgentServer {
 impl ServerHandler for NodeAgentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Veyl node agent: rotate_credentials only")
+            .with_instructions("Veyl node agent: rotate_credentials, upgrade_singbox")
     }
 
     async fn list_tools(
@@ -78,21 +84,35 @@ impl ServerHandler for NodeAgentServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let schema = json!({
+        let rotate_schema = json!({
             "type": "object",
             "properties": {
                 "reason": { "type": "string", "enum": ["blocked", "user"] }
             }
         });
-        let tool = Tool::new(
-            "rotate_credentials",
-            "Rotate this node's Shadowsocks port and password, then report the new values.",
-            schema.as_object().cloned().unwrap_or_default(),
-        );
+        // No arguments on purpose: a caller that could name a version, URL or
+        // checksum could install anything on the node.
+        let upgrade_schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        });
+        let tools = vec![
+            Tool::new(
+                "rotate_credentials",
+                "Rotate this node's Shadowsocks port and password, then report the new values.",
+                rotate_schema.as_object().cloned().unwrap_or_default(),
+            ),
+            Tool::new(
+                "upgrade_singbox",
+                "Install the sing-box version the control plane currently ships, then restart and self-check. Takes no arguments.",
+                upgrade_schema.as_object().cloned().unwrap_or_default(),
+            ),
+        ];
         Ok(ListToolsResult {
             meta: None,
             next_cursor: None,
-            tools: vec![tool],
+            tools,
         })
     }
 
@@ -101,32 +121,74 @@ impl ServerHandler for NodeAgentServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let reason = request
-            .arguments
-            .as_ref()
-            .and_then(|a| a.get("reason"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
         self.state.executions.fetch_add(1, Ordering::SeqCst);
 
-        match self.state.rotator.rotate(reason).await {
-            Ok(port) => {
-                let body = json!({ "ok": true, "port": port });
-                *self.state.last_result.lock().expect("last_result poisoned") = Some(body.clone());
-                Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
-            }
-            Err(e) => {
-                let body = json!({
-                    "ok": false,
-                    "error": {
-                        "kind": e.kind,
-                        "message": e.public_message(),
-                    }
-                });
-                *self.state.last_result.lock().expect("last_result poisoned") = Some(body.clone());
-                Ok(CallToolResult::error(vec![Content::text(body.to_string())]))
-            }
+        // Heal an `active` report that never landed before doing anything else.
+        // Bounded: a control plane that accepts the connection and never answers
+        // must not eat the tool call's own budget.
+        if tokio::time::timeout(REANNOUNCE_BUDGET, self.state.rotator.reannounce_active())
+            .await
+            .is_err()
+        {
+            tracing::warn!("active re-announce timed out; continuing with the tool call");
         }
+
+        match request.name.as_ref() {
+            "rotate_credentials" => {
+                let reason = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                match self.state.rotator.rotate(reason).await {
+                    Ok(port) => {
+                        let body = json!({ "ok": true, "port": port });
+                        Ok(self.success(body))
+                    }
+                    Err(e) => Ok(self.failure(&e)),
+                }
+            }
+            // `request.arguments` is deliberately ignored: the target comes from
+            // the agent's own server token, never from the caller.
+            "upgrade_singbox" => match self.state.rotator.upgrade_singbox().await {
+                Ok(outcome) => {
+                    let body = json!({
+                        "installed": outcome.installed,
+                        "target": outcome.target,
+                        "upgraded": outcome.upgraded,
+                    });
+                    Ok(self.success(body))
+                }
+                Err(e) => Ok(self.failure(&e)),
+            },
+            other => Err(ErrorData::invalid_params(
+                format!("unknown tool: {other}"),
+                None,
+            )),
+        }
+    }
+}
+
+impl NodeAgentServer {
+    fn success(&self, body: Value) -> CallToolResult {
+        *self.state.last_result.lock().expect("last_result poisoned") = Some(body.clone());
+        CallToolResult::success(vec![Content::text(body.to_string())])
+    }
+
+    fn failure(&self, e: &RotateError) -> CallToolResult {
+        let mut error = json!({
+            "kind": e.kind,
+            "message": e.public_message(),
+        });
+        // Only `agent_busy` carries one today; the desktop needs it to tell
+        // "another operation is running" from any other retryable failure.
+        if let Some(reason) = e.reason {
+            error["reason"] = json!(reason);
+        }
+        let body = json!({ "ok": false, "error": error });
+        *self.state.last_result.lock().expect("last_result poisoned") = Some(body.clone());
+        CallToolResult::error(vec![Content::text(body.to_string())])
     }
 }
 

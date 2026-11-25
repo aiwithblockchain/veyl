@@ -148,6 +148,8 @@ function serverView(
       : null,
     ip: row.ip,
     port: row.state === "destroyed" ? null : row.node_port,
+    // agent 最近一次上报的版本（已去掉 v 前缀）；没上报过就是 null，界面显示「未知」。
+    singbox_version: row.singbox_version ?? null,
     node_id: row.node_id,
     hourly_usd: row.hourly_usd,
     monthly_usd: row.monthly_usd,

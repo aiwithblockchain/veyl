@@ -9,12 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::DesiredState;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingRotation {
-    pub port: u16,
-    pub at_unix: u64,
-}
-
 /// Last desired state the control plane handed out. Persisted (0600) because the
 /// password appears only in the enroll response and the latest desired-state
 /// fetch; keeping it lets a restart survive a control-plane outage. Never logged.
@@ -78,9 +72,7 @@ impl fmt::Debug for AgentState {
             .field("applied_port", &self.applied_port)
             .field("cert_fingerprint", &self.cert_fingerprint)
             .field("agent_token_public_key", &self.agent_token_public_key)
-            .field("pending_rotation", &self.pending_rotation)
             .field("last_desired", &self.last_desired)
-            .field("active_unconfirmed", &self.active_unconfirmed)
             .finish()
     }
 }
@@ -101,17 +93,9 @@ pub struct AgentState {
     /// after a restart.
     #[serde(default)]
     pub agent_token_public_key: Option<String>,
-    /// Set after a rotation until the control plane's desired state reflects it.
-    /// Prevents the poll loop from undoing a just-applied port change.
-    #[serde(default)]
-    pub pending_rotation: Option<PendingRotation>,
     /// Last applied credentials, including the password (0600 file).
     #[serde(default)]
     pub last_desired: Option<StoredDesired>,
-    /// Set when an `active` report failed; the poll loop keeps re-reporting so
-    /// an installing/verifying node is not swept while it is serving fine.
-    #[serde(default)]
-    pub active_unconfirmed: bool,
 }
 
 impl AgentState {

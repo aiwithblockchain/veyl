@@ -492,6 +492,30 @@ describe("enroll 激活守卫", () => {
     expect(body.ready_at).toBeNull();
   });
 
+  it("详情带 agent 上报的 sing-box 版本；没上报过是 null", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    const detail = () =>
+      handleServers(
+        new Request(`https://example.com/v1/servers/${SERVER}`, {
+          headers: { authorization: `Bearer ${env.token}` },
+        }),
+        env as never,
+      );
+
+    const absent = await detail();
+    expect(absent?.status).toBe(200);
+    const absentBody = (await absent!.json()) as { singbox_version: string | null };
+    // 没上报过就是 null，界面显示「未知」。
+    expect(absentBody.singbox_version).toBeNull();
+
+    Object.assign(db.rows("servers")[0], { singbox_version: "1.15.0" });
+    const present = await detail();
+    const presentBody = (await present!.json()) as { singbox_version: string | null };
+    expect(presentBody.singbox_version).toBe("1.15.0");
+  });
+
   it("激活丢失要收尾：凭据标记销毁、Droplet 删除、不会多退款", async () => {
     const db = new FakeD1();
     const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };

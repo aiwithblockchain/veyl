@@ -1,10 +1,12 @@
-//! Port selection, password generation, and the rotate / desired-state apply
-//! pipelines. Every side effect goes through `Host` + `ControlApi`, so the
-//! failure paths are unit-tested without root or network.
+//! Port selection, password generation, and the rotate / desired-state apply /
+//! upgrade pipelines. Every side effect goes through `Host` + `ControlApi`, so
+//! the failure paths are unit-tested without root or network.
 
 use std::collections::BTreeSet;
 #[cfg(feature = "dev")]
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "dev")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,11 +19,7 @@ use crate::control::{ControlApi, ControlError, DesiredState, ReportRequest, Stag
 use crate::identity::Identity;
 use crate::logging::{redact_sensitive, truncate};
 use crate::singbox::{ApplyError, ApplyErrorKind, SingBox};
-use crate::state::{AgentState, PendingRotation, StateStore, StoredDesired};
-
-/// How long the agent keeps its own freshly rotated port when the control
-/// plane's desired state has not caught up yet.
-const PENDING_ROTATION_GRACE_SECS: u64 = 120;
+use crate::state::{AgentState, StateStore, StoredDesired};
 
 /// Retry an apply once in-process before reporting `failed` (the control plane
 /// destroys the machine on `failed`, so transient errors must not reach it).
@@ -42,6 +40,10 @@ pub struct RotateError {
     /// HTTP status when the control plane answered; None for local failures.
     #[serde(skip)]
     pub status: Option<u16>,
+    /// Stable cause for the tool envelope when the kind alone cannot tell two
+    /// failures apart. Only `agent_busy` today.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
 }
 
 /// `{:?}` redacts the message: it can embed a control-plane error body.
@@ -61,6 +63,7 @@ impl RotateError {
             kind: RotateErrorKind::Retryable,
             message: message.into(),
             status: None,
+            reason: None,
         }
     }
 
@@ -69,17 +72,23 @@ impl RotateError {
             kind: RotateErrorKind::Fatal,
             message: message.into(),
             status: None,
+            reason: None,
+        }
+    }
+
+    /// Another write operation (rotation / upgrade / apply) holds the lock.
+    /// The kind alone cannot say this, so the envelope carries `agent_busy`.
+    pub fn busy() -> Self {
+        Self {
+            kind: RotateErrorKind::Retryable,
+            message: "another node operation is already running".into(),
+            status: None,
+            reason: Some("agent_busy"),
         }
     }
 
     pub fn public_message(&self) -> String {
         truncate(&redact_sensitive(&self.message), 300)
-    }
-
-    /// The control plane said this server is gone or the token is dead;
-    /// retrying every 30 seconds will not help.
-    pub fn is_terminal(&self) -> bool {
-        self.status == Some(409)
     }
 }
 
@@ -100,6 +109,7 @@ impl From<ApplyError> for RotateError {
             kind: RotateErrorKind::Fatal,
             message: e.message,
             status: None,
+            reason: None,
         }
     }
 }
@@ -114,6 +124,7 @@ impl From<ControlError> for RotateError {
             kind: RotateErrorKind::Fatal,
             message: e.to_string(),
             status,
+            reason: None,
         }
     }
 }
@@ -121,6 +132,24 @@ impl From<ControlError> for RotateError {
 #[async_trait]
 pub trait Rotator: Send + Sync {
     async fn rotate(&self, reason: Option<String>) -> Result<u16, RotateError>;
+    /// Install whatever sing-box the control plane currently ships, restart and
+    /// self-check. The target is read with the agent's own server token: a
+    /// caller can never choose which binary lands on the node.
+    async fn upgrade_singbox(&self) -> Result<UpgradeOutcome, RotateError>;
+    /// Best-effort `active` announcement, run before every tool call. The
+    /// control plane treats an already-active machine as a no-op, so this heals
+    /// an `active` report that never landed without persisting a dirty flag.
+    async fn reannounce_active(&self);
+}
+
+/// What `upgrade_singbox` did. `installed` is the version the node ran before
+/// the call ("unknown" when it could not be read), `target` what the control
+/// plane ships, `upgraded` whether a binary swap happened at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpgradeOutcome {
+    pub installed: String,
+    pub target: String,
+    pub upgraded: bool,
 }
 
 /// Demo / `serve` rotator: no side effects, returns a port in the band.
@@ -145,6 +174,16 @@ impl Rotator for StubRotator {
         let n = self.next.fetch_add(1, Ordering::SeqCst);
         Ok(30000 + (n * 7919) as u16 % 1000)
     }
+
+    async fn upgrade_singbox(&self) -> Result<UpgradeOutcome, RotateError> {
+        Ok(UpgradeOutcome {
+            installed: "0.0.0-dev".into(),
+            target: "0.0.0-dev".into(),
+            upgraded: false,
+        })
+    }
+
+    async fn reannounce_active(&self) {}
 }
 
 pub fn pick_port(
@@ -171,12 +210,6 @@ pub fn generate_password(rng: &mut impl RngCore) -> String {
     crate::cert::hex(&bytes)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PollOutcome {
-    Unchanged { port: u16 },
-    Applied { port: u16 },
-}
-
 pub struct RotationEngine {
     cfg: Arc<AgentConfig>,
     singbox: Arc<SingBox>,
@@ -185,6 +218,11 @@ pub struct RotationEngine {
     store: StateStore,
     busy: Arc<tokio::sync::Mutex<()>>,
     identity: Arc<Identity>,
+    /// Whether the control plane has acknowledged this node as active since
+    /// this process started. In memory only: it exists so a failed upgrade
+    /// never reports `failed` for a machine the control plane still considers
+    /// mid-install (that report would destroy it).
+    active_confirmed: AtomicBool,
 }
 
 impl RotationEngine {
@@ -205,25 +243,12 @@ impl RotationEngine {
             store,
             busy: Arc::new(tokio::sync::Mutex::new(())),
             identity,
+            active_confirmed: AtomicBool::new(false),
         }
     }
 
     pub fn state_handle(&self) -> Arc<Mutex<AgentState>> {
         self.state.clone()
-    }
-
-    pub fn is_active_unconfirmed(&self) -> bool {
-        self.state.lock().expect("state poisoned").active_unconfirmed
-    }
-
-    fn set_active_unconfirmed(&self, unconfirmed: bool) {
-        let mut state = self.state.lock().expect("state poisoned");
-        if state.active_unconfirmed != unconfirmed {
-            state.active_unconfirmed = unconfirmed;
-            if let Err(e) = self.store.save(&state) {
-                tracing::error!(error = %e, "failed to persist active confirmation flag");
-            }
-        }
     }
 
     pub fn record_cert_fingerprint(&self, fingerprint: &str) {
@@ -296,8 +321,12 @@ impl RotationEngine {
     async fn report_failed(&self, port: u16, control_port: u16, error: &(impl std::fmt::Display + ?Sized)) {
         let mut body = self
             .report(Stage::Failed, port, control_port)
-            .with_singbox_version(self.current_version().await)
             .with_error(error.to_string());
+        // An unreadable version is left out rather than sent as "unknown": the
+        // control plane keeps the last real value (empty strings are skipped).
+        if let Some(version) = self.singbox.installed_version().await.ok().flatten() {
+            body = body.with_singbox_version(version);
+        }
         if let Some(excerpt) = self.recent_log_excerpt() {
             body = body.with_log_excerpt(excerpt);
         }
@@ -417,15 +446,9 @@ impl RotationEngine {
             "control plane accepted the rotation"
         );
 
-        self.confirm_desired(port, &password).await;
-
         let now = crate::auth::now_unix();
         let mut state = self.state.lock().expect("state poisoned");
         state.remember_port(port, self.cfg.recent_ports_keep);
-        state.pending_rotation = Some(PendingRotation {
-            port,
-            at_unix: now,
-        });
         let stored = state
             .last_desired
             .clone()
@@ -470,20 +493,43 @@ impl RotationEngine {
         }
     }
 
-    /// Best-effort check that desired-state now reflects the rotation. The
-    /// `rotated` report is already committed; a lag only means the pending
-    /// marker keeps protecting the new port.
-    async fn confirm_desired(&self, port: u16, password: &str) {
-        match self.control.desired_state().await {
-            Ok(desired) if desired.port == port && desired.password == password => {
-                tracing::info!(port, "control plane confirmed the rotated credentials");
+    /// Say `active` again with the credentials the node actually serves.
+    ///
+    /// Run once at startup and before every tool call: `apply_desired` can
+    /// succeed while its `active` report never lands, and the control plane
+    /// would then keep the machine in installing/verifying and sweep it. The
+    /// endpoint is idempotent for an already-active machine (`already_active`),
+    /// and a failure here never fails the caller.
+    pub async fn reannounce_active(&self) {
+        self.announce_active(None).await;
+    }
+
+    /// `version` overrides the version to report; `None` uses the persisted
+    /// desired state. Only announced when the node really serves that config.
+    async fn announce_active(&self, version: Option<String>) {
+        let Some(desired) = self.last_desired() else {
+            return;
+        };
+        let applied = self.singbox.applied().await.ok().flatten();
+        if !applied.map(|a| a.matches(&desired)).unwrap_or(false) {
+            return;
+        }
+        if !matches!(self.singbox.is_active().await, Ok(true)) {
+            return;
+        }
+        let version = version.unwrap_or_else(|| desired.singbox.version.clone());
+        let body = self
+            .report(Stage::Active, desired.port, desired.control_port)
+            .with_singbox_version(version);
+        match self.control.report(&body).await {
+            Ok(()) => {
+                self.active_confirmed.store(true, Ordering::SeqCst);
+                tracing::debug!(port = desired.port, "active re-announced");
             }
-            Ok(desired) => tracing::warn!(
-                desired_port = desired.port,
-                port,
-                "desired-state has not caught up with the rotation yet; pending_rotation protects it"
+            Err(e) => tracing::warn!(
+                error = %e,
+                "active re-announce failed; the node keeps serving"
             ),
-            Err(e) => tracing::warn!(error = %e, "desired-state check after rotation failed"),
         }
     }
 
@@ -627,14 +673,10 @@ impl RotationEngine {
 
         let mut state = self.state.lock().expect("state poisoned");
         state.remember_port(desired.port, self.cfg.recent_ports_keep);
-        state.pending_rotation = None;
         state.last_desired = Some(StoredDesired::from_desired(
             desired,
             crate::auth::now_unix(),
         ));
-        // Persist the "active not confirmed" flag so the poll loop keeps
-        // re-reporting even across restarts.
-        state.active_unconfirmed = active.is_err();
         if let Err(e) = self.store.save(&state) {
             tracing::error!(error = %e, "failed to persist applied port");
         }
@@ -671,16 +713,15 @@ impl RotationEngine {
         if upload_password {
             body = body.with_password(desired.password.clone());
         }
-        self.report_with_retries(&body).await
+        self.report_with_retries(&body).await.map(|()| {
+            self.active_confirmed.store(true, Ordering::SeqCst);
+        })
     }
 
-    /// Apply the desired state only when it differs. `report_when_unchanged`
-    /// makes a startup announce `active` without restarting sing-box.
-    pub async fn apply_if_needed(
-        &self,
-        desired: &DesiredState,
-        report_when_unchanged: bool,
-    ) -> Result<PollOutcome, RotateError> {
+    /// Apply the control plane's desired state when it differs, and announce
+    /// `active` even when nothing changed. Called once at startup: nothing in
+    /// the agent applies a desired state on a timer any more.
+    pub async fn apply_if_needed(&self, desired: &DesiredState) -> Result<(), RotateError> {
         if self.desired_matches(desired).await {
             // The config can match while the unit is dead (OOM, manual stop,
             // crash). Check before reporting active and retry once.
@@ -701,113 +742,203 @@ impl RotationEngine {
                 }
                 tracing::info!(port = desired.port, "sing-box restarted after a liveness check");
             }
-            if report_when_unchanged {
-                match self.report_active(desired, false).await {
-                    Ok(()) => self.set_active_unconfirmed(false),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e.public_message(),
-                            "active report failed; the poll loop will retry it"
-                        );
-                        self.set_active_unconfirmed(true);
-                    }
-                }
+            if let Err(e) = self.report_active(desired, false).await {
+                tracing::warn!(error = %e.public_message(), "active report failed");
             }
-            return Ok(PollOutcome::Unchanged {
-                port: desired.port,
-            });
+            return Ok(());
         }
         tracing::info!(
             desired_port = desired.port,
             "desired state changed, applying"
         );
-        self.apply_desired(desired, false).await?;
-        Ok(PollOutcome::Applied {
-            port: desired.port,
-        })
+        self.apply_desired(desired, false).await
     }
 
-    pub async fn poll_once(&self) -> Result<PollOutcome, RotateError> {
-        let desired = match self.control.desired_state().await {
-            Ok(desired) => desired,
-            Err(e) => {
-                if matches!(&e, ControlError::Status { status: 409, .. }) {
-                    // Terminal: the token is dead or the server was destroyed.
-                    // Let the caller pause polls instead of hammering every
-                    // 30 seconds.
-                    return Err(e.into());
-                }
-                match self.last_desired() {
-                    Some(last) => {
-                        tracing::warn!(
-                            error = %e,
-                            "desired-state fetch failed; using the persisted credentials"
-                        );
-                        last
+    /// Install the sing-box version the control plane currently ships.
+    ///
+    /// The desired state is fetched here with the agent's own server token, so
+    /// the caller cannot pick a version, URL or checksum. Credentials are not
+    /// touched: the existing config is restarted as it is and has to pass the
+    /// liveness probe again. A failure leaves the machine serving and never
+    /// reports `failed` (the control plane would treat that as a dead node).
+    async fn upgrade_inner(&self) -> Result<UpgradeOutcome, RotateError> {
+        let desired = self
+            .control
+            .desired_state()
+            .await
+            .map_err(RotateError::from)?;
+        let target = desired.singbox.version.trim_start_matches('v').to_string();
+        let current = self.singbox.installed_version().await.ok().flatten();
+        let installed = current.clone().unwrap_or_else(|| "unknown".into());
+        if current.as_deref() == Some(target.as_str()) {
+            tracing::info!(version = %target, "sing-box is already at the desired version");
+            // The control plane's version column can be stale after an `active`
+            // report that never landed; saying it again is how it catches up.
+            self.announce_active(Some(target.clone())).await;
+            return Ok(UpgradeOutcome {
+                installed,
+                target,
+                upgraded: false,
+            });
+        }
+
+        // The port comes from the config on disk: the binary swap must not
+        // require a new config, and the self-check has to prove the existing
+        // one still serves.
+        let applied = self
+            .singbox
+            .applied()
+            .await
+            .map_err(|e| RotateError::fatal(format!("read current config: {e}")))?;
+        let Some(applied) = applied else {
+            return Err(RotateError::fatal(
+                "this node has no sing-box config; rebuild it instead of upgrading",
+            ));
+        };
+
+        tracing::info!(from = %installed, to = %target, "upgrading sing-box");
+        // Keep the binary that is about to be replaced: a version that does not
+        // start must not take the node down for good.
+        let backup = self
+            .singbox
+            .backup_binary()
+            .await
+            .map_err(|e| RotateError::fatal(e.message))?;
+
+        let applied_ok: Result<(), ApplyError> = async {
+            self.singbox
+                .ensure_binary(&desired.singbox, &self.cfg.download_dir)
+                .await?;
+            self.singbox.restart().await?;
+            self.singbox
+                .verify(
+                    applied.port,
+                    self.cfg.egress_probe.parse().expect("validated"),
+                )
+                .await
+        }
+        .await;
+
+        if let Err(e) = applied_ok {
+            let mut err = RotateError::fatal(e.message);
+            if let Some(backup) = &backup {
+                let after = self.singbox.installed_version().await.ok().flatten();
+                match (&current, &after) {
+                    // Provably the same binary: the upgrade never replaced it,
+                    // so the backup is a redundant copy.
+                    (Some(before), Some(now)) if before == now => {
+                        self.singbox.discard_binary_backup(backup).await;
                     }
-                    None => return Err(e.into()),
+                    // Neither side could name a version. There is nothing to
+                    // compare, so this is the conservative choice: keep the
+                    // backup (it may be the only good binary left) and do not
+                    // restart a node we cannot judge.
+                    (None, None) => tracing::warn!(
+                        backup = %backup.display(),
+                        "cannot tell whether the binary changed; keeping the backup"
+                    ),
+                    // A different version, or a binary that used to identify
+                    // itself and no longer can: the swap happened.
+                    _ => {
+                        tracing::warn!(
+                            from = %installed,
+                            "the upgrade failed; restoring the previous binary"
+                        );
+                        match self.singbox.restore_binary(backup).await {
+                            Ok(()) => {
+                                if let Err(restart) = self.singbox.restart().await {
+                                    tracing::error!(
+                                        error = %restart.message,
+                                        "the previous binary is back but sing-box did not restart"
+                                    );
+                                }
+                                self.singbox.discard_binary_backup(backup).await;
+                            }
+                            Err(restore) => {
+                                // Keep the backup: it is the only good binary
+                                // left, and `backup_binary` reuses it next time
+                                // instead of copying whatever is installed now.
+                                tracing::error!(
+                                    error = %restore.message,
+                                    backup = %backup.display(),
+                                    "restoring the previous sing-box binary failed; the backup is kept"
+                                );
+                                err.message = format!(
+                                    "{}; restoring the previous binary failed, the backup is kept at {}",
+                                    err.message,
+                                    backup.display()
+                                );
+                            }
+                        }
+                    }
                 }
             }
-        };
-
-        // Earlier `active` reports may never have landed; re-report until the
-        // control plane acknowledges, otherwise the node is swept while serving.
-        if self.is_active_unconfirmed() {
-            let body = self
-                .report(Stage::Active, desired.port, desired.control_port)
-                .with_singbox_version(desired.singbox.version.clone());
-            match self.control.report(&body).await {
-                Ok(()) => {
-                    tracing::info!("control plane confirmed active");
-                    self.set_active_unconfirmed(false);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "active re-report failed; will retry next poll");
-                }
-            }
-        }
-
-        // A rotation just changed the port; keep it until the control plane's
-        // desired state catches up (or the grace period expires).
-        let pending = {
-            let state = self.state.lock().expect("state poisoned");
-            state.pending_rotation.clone()
-        };
-        if let Some(pending) = pending {
-            let applied_port = self.singbox.applied().await.ok().flatten().map(|a| a.port);
-            let age = crate::auth::now_unix().saturating_sub(pending.at_unix);
-            if applied_port == Some(pending.port)
-                && desired.port != pending.port
-                && age <= PENDING_ROTATION_GRACE_SECS
-            {
+            // `failed` destroys a machine the control plane still considers
+            // mid-install, so it only goes out for a node that has already been
+            // acknowledged as active. Anything else gets the tool error alone.
+            if self.active_confirmed.load(Ordering::SeqCst) {
+                self.report_failed(applied.port, desired.control_port, &err)
+                    .await;
+            } else {
                 tracing::warn!(
-                    rotated_port = pending.port,
-                    desired_port = desired.port,
-                    "desired state has not caught up with the rotation yet; keeping the rotated port"
+                    error = %err.public_message(),
+                    "upgrade failed before the control plane confirmed this node as active; reporting the error only"
                 );
-                return Ok(PollOutcome::Unchanged {
-                    port: pending.port,
-                });
             }
-            let mut state = self.state.lock().expect("state poisoned");
-            state.pending_rotation = None;
-            if let Err(e) = self.store.save(&state) {
-                tracing::error!(error = %e, "failed to clear pending rotation");
-            }
+            return Err(err);
+        }
+        if let Some(backup) = &backup {
+            self.singbox.discard_binary_backup(backup).await;
         }
 
-        self.apply_if_needed(&desired, false).await
+        // Only the version moved; the control plane refreshes `singbox_version`
+        // from this report. A failed report is not an upgrade failure: the node
+        // already serves the new binary.
+        let body = self
+            .report(Stage::Active, applied.port, desired.control_port)
+            .with_singbox_version(target.clone());
+        if let Err(e) = self.report_with_retries(&body).await {
+            tracing::error!(
+                error = %e.public_message(),
+                "upgraded, but the active report failed; the control plane keeps the old version"
+            );
+        } else {
+            self.active_confirmed.store(true, Ordering::SeqCst);
+        }
+
+        let mut state = self.state.lock().expect("state poisoned");
+        state.last_desired = Some(StoredDesired::from_desired(
+            &desired,
+            crate::auth::now_unix(),
+        ));
+        if let Err(e) = self.store.save(&state) {
+            tracing::error!(error = %e, "failed to persist the upgraded desired state");
+        }
+        drop(state);
+
+        tracing::info!(from = %installed, to = %target, "sing-box upgraded");
+        Ok(UpgradeOutcome {
+            installed,
+            target,
+            upgraded: true,
+        })
     }
 }
 
 #[async_trait]
 impl Rotator for RotationEngine {
     async fn rotate(&self, _reason: Option<String>) -> Result<u16, RotateError> {
-        let _guard = self
-            .busy
-            .try_lock()
-            .map_err(|_| RotateError::retryable("rotation already in progress"))?;
+        let _guard = self.busy.try_lock().map_err(|_| RotateError::busy())?;
         self.rotate_inner().await
+    }
+
+    async fn upgrade_singbox(&self) -> Result<UpgradeOutcome, RotateError> {
+        let _guard = self.busy.try_lock().map_err(|_| RotateError::busy())?;
+        self.upgrade_inner().await
+    }
+
+    async fn reannounce_active(&self) {
+        RotationEngine::reannounce_active(self).await;
     }
 }
 
@@ -929,7 +1060,6 @@ mod tests {
             },
             port_band: [30000, 30999],
             recent_ports_keep: 20,
-            poll_interval_secs: 30,
             egress_probe: "1.1.1.1:443".into(),
             log_level: "debug".into(),
             log: Default::default(),
@@ -1145,11 +1275,10 @@ mod tests {
             ],
         );
 
-        let outcome = engine
-            .apply_if_needed(&desired(30412, "1.14.4"), false)
+        engine
+            .apply_if_needed(&desired(30412, "1.14.4"))
             .await
             .unwrap();
-        assert_eq!(outcome, PollOutcome::Applied { port: 30412 });
         let stages: Vec<Stage> = control
             .reports
             .lock()
@@ -1223,74 +1352,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[tokio::test]
-    async fn poll_applies_only_when_desired_differs() {
-        let dir = tmpdir("poll");
-        let host = Arc::new(FakeHost::new());
-        let control = Arc::new(FakeControl {
-            reports: Mutex::new(vec![]),
-            desired: Mutex::new(desired(30412, "1.14.4")),
-            fail_report: Mutex::new(false),
-            reject_rotated: Mutex::new(false),
-        });
-        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
-
-        // No config yet -> apply.
-        assert_eq!(
-            engine.poll_once().await.unwrap(),
-            PollOutcome::Applied { port: 30412 }
-        );
-        // After apply, the same desired state is a no-op.
-        assert_eq!(
-            engine.poll_once().await.unwrap(),
-            PollOutcome::Unchanged { port: 30412 }
-        );
-        assert_eq!(
-            host.file(&cfg.singbox.config_path),
-            Some(crate::singbox::render_config(30412, "from-control-plane", "aes-256-gcm").into_bytes())
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[tokio::test]
-    async fn poll_keeps_a_fresh_rotation_until_desired_catches_up() {
-        let dir = tmpdir("pending");
-        let host = Arc::new(FakeHost::new());
-        let control = Arc::new(FakeControl {
-            reports: Mutex::new(vec![]),
-            desired: Mutex::new(desired(30412, "1.14.4")),
-            fail_report: Mutex::new(false),
-            reject_rotated: Mutex::new(false),
-        });
-        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
-
-        let port = engine.rotate(None).await.unwrap();
-
-        // The control plane still shows a pre-rotation port: do not undo it.
-        let stale = if port == 30412 { 30413 } else { 30412 };
-        *control.desired.lock().unwrap() = desired(stale, "1.14.4");
-        assert_eq!(
-            engine.poll_once().await.unwrap(),
-            PollOutcome::Unchanged { port }
-        );
-
-        // Once the control plane echoes the rotation (same port + password),
-        // polling is a no-op and clears the pending marker.
-        let config = host.file(&cfg.singbox.config_path).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&config).unwrap();
-        let password = v["inbounds"][0]["password"].as_str().unwrap().to_string();
-        *control.desired.lock().unwrap() = DesiredState {
-            port,
-            password,
-            ..desired(port, "1.14.4")
-        };
-        assert_eq!(
-            engine.poll_once().await.unwrap(),
-            PollOutcome::Unchanged { port }
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     #[test]
     fn rotate_error_debug_hides_secrets() {        let err = RotateError::fatal("rejected: password=abc123 token=tok-9");
         let debug = format!("{err:?}");
@@ -1300,7 +1361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_409_from_desired_state_is_terminal() {
+    async fn upgrade_returns_a_dead_server_token_without_installing() {
         struct TerminalControl;
         #[async_trait]
         impl ControlApi for TerminalControl {
@@ -1315,11 +1376,11 @@ mod tests {
             }
         }
 
-        let dir = tmpdir("terminal-409");
+        let dir = tmpdir("upgrade-terminal");
         let cfg = config(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let host: Arc<dyn crate::host::Host> = Arc::new(FakeHost::new());
-        let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host));
+        let host = Arc::new(FakeHost::new());
+        let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
         let identity =
             Arc::new(crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap());
         let engine = RotationEngine::new(
@@ -1330,9 +1391,10 @@ mod tests {
             StateStore::new(cfg.state_path()),
             identity,
         );
-        let err = engine.poll_once().await.unwrap_err();
+        let err = engine.upgrade_singbox().await.unwrap_err();
         assert_eq!(err.status, Some(409));
-        assert!(err.is_terminal());
+        // A node the control plane no longer knows must not be touched.
+        assert!(!host.commands().iter().any(|(p, _)| p == "install"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1358,8 +1420,8 @@ mod tests {
             &[(1, "", "inactive"), (0, "", ""), (0, "", "")],
         );
 
-        let outcome = engine.apply_if_needed(&d, true).await.unwrap();
-        assert_eq!(outcome, PollOutcome::Unchanged { port: 30412 });
+        let outcome = engine.apply_if_needed(&d).await;
+        assert!(outcome.is_ok());
         let stages: Vec<Stage> = control
             .reports
             .lock()
@@ -1393,7 +1455,7 @@ mod tests {
             &[(1, "", "inactive"), (1, "", "restart failed")],
         );
 
-        let err = engine.apply_if_needed(&d, true).await.unwrap_err();
+        let err = engine.apply_if_needed(&d).await.unwrap_err();
         assert_eq!(err.kind, RotateErrorKind::Retryable);
         let reports = control.reports.lock().unwrap();
         assert_eq!(reports.last().map(|r| r.stage), Some(Stage::Failed));
@@ -1406,8 +1468,321 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_re_reports_active_while_unconfirmed() {
-        let dir = tmpdir("active-retry");
+    async fn upgrade_installs_the_desired_version_and_reports_active() {
+        let dir = tmpdir("upgrade-ok");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        host.set_download(vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output("tar", 0, "-rwxr-xr-x 0/0 3 2024-01-01 00:00 sing-box\n", "");
+        host.put_file(
+            &cfg.download_dir.join("extract-1.15.0/sing-box"),
+            b"elf".to_vec(),
+        );
+        // `version` answers 1.14.4 twice (before the upgrade and again inside
+        // `ensure_binary`) and 1.15.0 after the install.
+        host.queue_command_outputs(
+            cfg.singbox.binary_path.to_str().unwrap(),
+            &[
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+            ],
+        );
+
+        let outcome = engine.upgrade_singbox().await.unwrap();
+        assert_eq!(
+            outcome,
+            UpgradeOutcome {
+                installed: "1.14.4".into(),
+                target: "1.15.0".into(),
+                upgraded: true,
+            }
+        );
+        let stages: Vec<Stage> = control
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.stage)
+            .collect();
+        assert_eq!(stages, vec![Stage::Active]);
+        let report = &control.reports.lock().unwrap()[0];
+        assert_eq!(report.singbox_version, "1.15.0");
+        // The config (and therefore the password) is untouched by an upgrade.
+        assert_eq!(report.port, 30412);
+        assert!(report.password.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn upgrade_is_a_no_op_when_the_version_already_matches() {
+        let dir = tmpdir("upgrade-current");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        let commands_before = host.commands().len();
+
+        let outcome = engine.upgrade_singbox().await.unwrap();
+        assert_eq!(
+            outcome,
+            UpgradeOutcome {
+                installed: "1.14.4".into(),
+                target: "1.14.4".into(),
+                upgraded: false,
+            }
+        );
+        // Only the version read may run: no download, install or restart.
+        let commands = host.commands();
+        assert_eq!(commands.len(), commands_before + 1);
+        assert!(!commands
+            .iter()
+            .any(|(p, _)| p == "install" || p == "systemctl" || p == "tar"));
+        assert!(control.reports.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn upgrade_is_refused_while_another_operation_holds_the_lock() {
+        let dir = tmpdir("upgrade-busy");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, _cfg) = engine(&dir, host, control);
+        let guard = engine.busy().try_lock_owned().unwrap();
+        let err = engine.upgrade_singbox().await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Retryable);
+        // The envelope needs to say *why* it is retryable.
+        assert_eq!(err.reason, Some("agent_busy"));
+        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_upgrade_puts_the_previous_binary_back_and_reports_failed() {
+        let dir = tmpdir("upgrade-rollback");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        // The control plane already knows this node as active.
+        *engine.state_handle().lock().unwrap() = AgentState {
+            last_desired: Some(StoredDesired::from_desired(
+                &DesiredState {
+                    password: "current-password".into(),
+                    ..desired(30412, "1.14.4")
+                },
+                0,
+            )),
+            ..Default::default()
+        };
+        engine.reannounce_active().await;
+        control.reports.lock().unwrap().clear();
+        // The running binary and the one that will replace it differ, so the
+        // rollback is visible on disk.
+        host.put_file(&cfg.singbox.binary_path, b"old-elf".to_vec());
+        host.set_download(vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output("tar", 0, "-rwxr-xr-x 0/0 3 2024-01-01 00:00 sing-box\n", "");
+        host.put_file(
+            &cfg.download_dir.join("extract-1.15.0/sing-box"),
+            b"new-elf".to_vec(),
+        );
+        // before, inside `ensure_binary`, after the install, and again when
+        // deciding whether the swap actually happened.
+        host.queue_command_outputs(
+            cfg.singbox.binary_path.to_str().unwrap(),
+            &[
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+            ],
+        );
+        // The new binary does not come up.
+        host.set_command_output("systemctl", 1, "", "restart failed");
+
+        let err = engine.upgrade_singbox().await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Fatal);
+
+        let binary_str = cfg.singbox.binary_path.to_string_lossy().to_string();
+        let backup = cfg.singbox.binary_path.with_extension("bak");
+        let backup_str = backup.to_string_lossy().to_string();
+        let backup_tmp = format!("{backup_str}.tmp");
+        let commands = host.commands();
+        // A copy of the running binary was staged next to the backup …
+        assert!(commands
+            .iter()
+            .any(|(p, args)| p == "install"
+                && args.get(2) == Some(&binary_str)
+                && args.get(3) == Some(&backup_tmp)));
+        // … and put back once the new one refused to start.
+        assert!(commands
+            .iter()
+            .any(|(p, args)| p == "install" && args.get(2) == Some(&backup_str)));
+        assert_eq!(
+            host.file(&cfg.singbox.binary_path),
+            Some(b"old-elf".to_vec()),
+            "the previous binary is back on disk"
+        );
+
+        let reports = control.reports.lock().unwrap();
+        let failed = reports.last().expect("a failed report");
+        assert_eq!(failed.stage, Stage::Failed);
+        // The report carries the version that is really installed, not the
+        // target, so `singbox_version` never jumps ahead of reality.
+        assert_eq!(failed.singbox_version, "1.14.4");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_upgrade_before_the_node_is_active_reports_nothing() {
+        let dir = tmpdir("upgrade-rollback-unconfirmed");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        host.set_download(vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output("tar", 0, "-rwxr-xr-x 0/0 3 2024-01-01 00:00 sing-box\n", "");
+        host.put_file(
+            &cfg.download_dir.join("extract-1.15.0/sing-box"),
+            b"elf".to_vec(),
+        );
+        host.queue_command_outputs(
+            cfg.singbox.binary_path.to_str().unwrap(),
+            &[
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+            ],
+        );
+        host.set_command_output("systemctl", 1, "", "restart failed");
+
+        let err = engine.upgrade_singbox().await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Fatal);
+
+        // The control plane still considers this node mid-install: a `failed`
+        // report would destroy it, so the tool error is all that goes out.
+        assert!(control.reports.lock().unwrap().is_empty());
+        // The previous binary is still put back.
+        let backup = cfg
+            .singbox
+            .binary_path
+            .with_extension("bak")
+            .to_string_lossy()
+            .to_string();
+        assert!(host
+            .commands()
+            .iter()
+            .any(|(p, args)| p == "install" && args.get(2) == Some(&backup)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn only_the_on_demand_upgrade_fetches_the_desired_state() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingControl {
+            desired: DesiredState,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl ControlApi for CountingControl {
+            async fn report(&self, _body: &ReportRequest) -> Result<(), ControlError> {
+                Ok(())
+            }
+            async fn desired_state(&self) -> Result<DesiredState, ControlError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.desired.clone())
+            }
+        }
+
+        let dir = tmpdir("no-polling");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = config(&dir);
+        let host = Arc::new(FakeHost::new());
+        host.put_file(&cfg.singbox.binary_path, b"elf".to_vec());
+        host.set_command_output(
+            &cfg.singbox.binary_path.to_string_lossy(),
+            0,
+            "sing-box version 1.14.4\n",
+            "",
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let control = Arc::new(CountingControl {
+            desired: desired(30412, "1.14.4"),
+            calls: calls.clone(),
+        });
+        let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
+        let identity =
+            Arc::new(crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap());
+        let engine = RotationEngine::new(
+            cfg.clone(),
+            singbox,
+            control,
+            Arc::new(Mutex::new(AgentState::default())),
+            StateStore::new(cfg.state_path()),
+            identity,
+        );
+        let d = desired(30412, "1.14.4");
+
+        // None of the startup / rotation / re-announce paths may fetch the
+        // desired state; only the on-demand upgrade does, once.
+        engine.apply_if_needed(&d).await.unwrap();
+        engine.reannounce_active().await;
+        engine.rotate(None).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let outcome = engine.upgrade_singbox().await.unwrap();
+        assert!(!outcome.upgraded);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_that_is_already_current_announces_active() {
+        let dir = tmpdir("upgrade-current-announce");
         let host = Arc::new(FakeHost::new());
         let d = desired(30412, "1.14.4");
         let control = Arc::new(FakeControl {
@@ -1422,50 +1797,147 @@ mod tests {
             crate::singbox::render_config(30412, &d.password, "aes-256-gcm").into_bytes(),
         );
         *engine.state_handle().lock().unwrap() = AgentState {
-            active_unconfirmed: true,
             last_desired: Some(StoredDesired::from_desired(&d, 0)),
             ..Default::default()
         };
 
-        let outcome = engine.poll_once().await.unwrap();
-        assert_eq!(outcome, PollOutcome::Unchanged { port: 30412 });
-        let stages: Vec<Stage> = control
-            .reports
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|r| r.stage)
-            .collect();
-        assert_eq!(stages, vec![Stage::Active]);
-        assert!(!engine.state_handle().lock().unwrap().active_unconfirmed);
+        let outcome = engine.upgrade_singbox().await.unwrap();
+        assert!(!outcome.upgraded);
+        // A lost `active` report must not leave `singbox_version` stale forever.
+        let reports = control.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].stage, Stage::Active);
+        assert_eq!(reports[0].singbox_version, "1.14.4");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
-    async fn poll_keeps_the_marker_when_the_active_re_report_fails() {
-        let dir = tmpdir("active-retry-fail");
+    async fn a_failed_restore_keeps_the_backup_for_the_next_attempt() {
+        let dir = tmpdir("upgrade-keep-backup");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control);
+        let backup = cfg.singbox.binary_path.with_extension("bak");
+        // A backup left by an earlier attempt is the only good binary left.
+        host.put_file(&cfg.singbox.binary_path, b"old-elf".to_vec());
+        host.put_file(&backup, b"old-elf".to_vec());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        host.set_download(vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        host.set_hash(&"f".repeat(64));
+        host.set_command_output("tar", 0, "-rwxr-xr-x 0/0 3 2024-01-01 00:00 sing-box\n", "");
+        host.put_file(
+            &cfg.download_dir.join("extract-1.15.0/sing-box"),
+            b"new-elf".to_vec(),
+        );
+        host.queue_command_outputs(
+            cfg.singbox.binary_path.to_str().unwrap(),
+            &[
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.14.4\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+                (0, "sing-box version 1.15.0\n", ""),
+            ],
+        );
+        host.set_command_output("systemctl", 1, "", "restart failed");
+        // Installing the new binary works; putting the backup back does not.
+        host.queue_command_outputs("install", &[(0, "", ""), (1, "", "restore failed")]);
+
+        let err = engine.upgrade_singbox().await.unwrap_err();
+        assert!(
+            err.public_message().contains("backup is kept"),
+            "the error must say the backup survived: {err:?}"
+        );
+        assert_eq!(host.file(&backup), Some(b"old-elf".to_vec()));
+        // An existing `.bak` is reused, never overwritten by the new binary.
+        assert!(
+            !host.commands().iter().any(|(p, args)| p == "install"
+                && args
+                    .get(3)
+                    .map(|dest| dest.ends_with("sing-box.bak.tmp"))
+                    .unwrap_or(false)),
+            "an existing backup must be reused, not replaced"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_version_on_both_sides_keeps_the_backup_without_restarting() {
+        let dir = tmpdir("upgrade-unknown-version");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.15.0")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control);
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "current-password", "aes-256-gcm").into_bytes(),
+        );
+        // `version` never answers, so neither the old nor the new binary can
+        // identify itself and there is nothing to compare.
+        host.set_command_output(
+            cfg.singbox.binary_path.to_str().unwrap(),
+            1,
+            "",
+            "version failed",
+        );
+        host.set_download(vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // The download never gets past the checksum check, so nothing is
+        // installed and nothing should be restarted.
+        host.set_hash("0000");
+
+        let err = engine.upgrade_singbox().await.unwrap_err();
+        assert!(err.public_message().contains("sha256 mismatch"), "{err:?}");
+        assert!(!host.commands().iter().any(|(p, args)| p == "systemctl"
+            && args.iter().any(|a| a == "restart")));
+        // The backup stays for the next attempt.
+        assert!(host
+            .file(&cfg.singbox.binary_path.with_extension("bak"))
+            .is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reannounce_active_only_fires_when_the_node_serves_the_state() {
+        let dir = tmpdir("reannounce");
         let host = Arc::new(FakeHost::new());
         let d = desired(30412, "1.14.4");
         let control = Arc::new(FakeControl {
             reports: Mutex::new(vec![]),
             desired: Mutex::new(d.clone()),
-            fail_report: Mutex::new(true),
+            fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
-        host.put_file(
-            &cfg.singbox.config_path,
-            crate::singbox::render_config(30412, &d.password, "aes-256-gcm").into_bytes(),
-        );
         *engine.state_handle().lock().unwrap() = AgentState {
-            active_unconfirmed: true,
             last_desired: Some(StoredDesired::from_desired(&d, 0)),
             ..Default::default()
         };
 
-        let outcome = engine.poll_once().await.unwrap();
-        assert_eq!(outcome, PollOutcome::Unchanged { port: 30412 });
-        assert!(engine.state_handle().lock().unwrap().active_unconfirmed);
+        // The config does not carry the persisted credentials: reporting
+        // `active` here would activate a node that serves something else.
+        engine.reannounce_active().await;
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, &d.password, "aes-256-gcm").into_bytes(),
+        );
+        engine.reannounce_active().await;
+        let reports = control.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].stage, Stage::Active);
+        assert_eq!(reports[0].singbox_version, "1.14.4");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

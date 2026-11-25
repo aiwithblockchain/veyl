@@ -1,4 +1,6 @@
-//! Production run loop: enroll → install/apply → serve MCP → poll desired state.
+//! Production run loop: enroll → install/apply → serve MCP. The desired state
+//! is fetched once at startup; after that, version upgrades happen only when the
+//! desktop calls `upgrade_singbox` on the MCP endpoint.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -16,7 +18,7 @@ use crate::control::{ControlApi, ControlError, ControlPlane, ControlSession, Des
 use crate::host::{Host, RealHost};
 use crate::identity::Identity;
 use crate::logging::{self, redact_sensitive, FileLogConfig};
-use crate::rotation::{PollOutcome, RotationEngine, Rotator};
+use crate::rotation::{RotationEngine, Rotator};
 use crate::singbox::SingBox;
 use crate::state::{AgentState, StateStore, StoredDesired};
 use crate::{start_agent_with_certs, AgentHandle};
@@ -26,6 +28,13 @@ const BUILTIN_SIGNER_PUBKEY: Option<&str> = option_env!("VEYL_AGENT_SIGNER_PUBKE
 
 /// How long to wait before touching the control plane again after a 409.
 const TERMINAL_BACKOFF: Duration = Duration::from_secs(600);
+
+/// How often to retry the metadata-service IP probe when it failed at startup.
+/// Converges on the first success and never talks to the control plane before.
+const IP_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// The probe is not retried forever: after these attempts the operator has to
+/// set `public_host` (or `allowed_hosts`) in the config.
+const IP_RETRY_ATTEMPTS: usize = 3;
 
 enum DesiredFetch {
     Found(DesiredState),
@@ -82,7 +91,6 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         control_port = cfg.control_port,
         mode = if restored { "restored" } else { "cold" },
         persisted_desired = state.last_desired.is_some(),
-        active_unconfirmed = state.active_unconfirmed,
         "veyl-agent starting"
     );
 
@@ -124,9 +132,8 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     let control: Arc<dyn ControlApi> =
         Arc::new(ControlSession::new(plane, server_token));
     // A 409 means the token is no longer valid for this server (consumed,
-    // expired, or the server was destroyed). Retrying every 30 seconds only
-    // spams the control plane; pause polls and say what the operator must do.
-    let mut poll_paused_until = std::time::Instant::now();
+    // expired, or the server was destroyed). Nothing else can be done locally:
+    // say what the operator has to do and serve whatever was persisted.
     let desired = match enrolled_desired {
         Some(desired) => Some(desired),
         None => match fetch_desired_with_retries(control.as_ref()).await {
@@ -145,9 +152,8 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                     status = 409,
                     reason = %message,
                     error = %message,
-                    "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
+                    "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt"
                 );
-                poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
                 let fallback = state.last_desired.as_ref().map(StoredDesired::to_desired);
                 if fallback.is_some() {
                     tracing::warn!("serving the persisted desired state until the node is rebuilt");
@@ -224,7 +230,6 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     tracing::info!(
         bind = %addr,
         public_host = %cfg.public_host.as_deref().unwrap_or("<unknown>"),
-        poll_interval_secs = cfg.poll_interval_secs,
         "agent ready"
     );
 
@@ -235,24 +240,28 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
             singbox_sha256 = %short_sha(&desired.singbox.sha256),
             "checking desired state on startup"
         );
-        if let Err(e) = engine.apply_if_needed(desired, true).await {
-            // Keep running: the control endpoint must stay reachable.
+        if let Err(e) = engine.apply_if_needed(desired).await {
+            // Keep running: the control endpoint must stay reachable, and an
+            // upgrade / rebuild can still fix the node from the desktop.
             tracing::error!(kind = ?e.kind, error = %e.public_message(), "startup apply failed");
-            if e.is_terminal() {
-                tracing::error!(
-                    status = ?e.status,
-                    reason = %e.public_message(),
-                    "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
-                );
-                poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
-            }
         }
     } else {
-        tracing::warn!("no desired state at startup; waiting for the poll loop");
+        tracing::warn!(
+            "no desired state at startup; the node serves nothing until an upgrade or a rebuild"
+        );
     }
 
-    let mut interval = tokio::time::interval(Duration::from_secs(cfg.poll_interval_secs));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // An `active` report can be lost even though the apply worked (the control
+    // plane would then keep the machine in installing/verifying and sweep it).
+    // Say it again; the endpoint is idempotent for an already-active machine.
+    engine.reannounce_active().await;
+
+    // The desired state is never polled again. The only timer left repairs a
+    // public IP the metadata service did not answer for at startup.
+    let mut ip_retries_left = IP_RETRY_ATTEMPTS;
+    let mut ip_retry = tokio::time::interval(IP_RETRY_INTERVAL);
+    ip_retry.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ip_retry.tick().await;
 
     loop {
         tokio::select! {
@@ -274,55 +283,36 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                 }
                 std::process::exit(1);
             }
-            _ = interval.tick() => {
-                if std::time::Instant::now() < poll_paused_until {
-                    tracing::warn!(
-                        "poll paused after a terminal control-plane response; rebuild this node"
-                    );
-                    continue;
-                }
-                // The public IP may have been unavailable at startup. Retry the
-                // metadata probe; on success re-sign the leaf and refresh the
-                // registration so the control plane hands out the new fingerprint.
-                if identity.public_host().is_none() && cfg.detect_public_ip {
-                    if let Some(ip) = detect_public_ip(&cfg.metadata_url).await {
-                        match identity.set_public_host(&ip) {
-                            Ok(true) => {
-                                let fingerprint = identity.leaf_fingerprint();
-                                tracing::info!(
-                                    public_ip = %ip,
-                                    fingerprint = %fingerprint,
-                                    "re-signed the leaf with the detected public IP"
-                                );
-                                engine.record_cert_fingerprint(&fingerprint);
-                                engine.report_registration().await;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to re-sign the leaf")
-                            }
+            // The public IP may have been unavailable at startup. Retry the
+            // metadata probe a few times; on success re-sign the leaf and
+            // refresh the registration so the control plane hands out the new
+            // fingerprint. Three misses and the config has to say the host.
+            _ = ip_retry.tick(),
+                if ip_retries_left > 0
+                    && identity.public_host().is_none()
+                    && cfg.detect_public_ip =>
+            {
+                ip_retries_left -= 1;
+                match detect_public_ip(&cfg.metadata_url).await {
+                    Some(ip) => match identity.set_public_host(&ip) {
+                        Ok(true) => {
+                            let fingerprint = identity.leaf_fingerprint();
+                            tracing::info!(
+                                public_ip = %ip,
+                                fingerprint = %fingerprint,
+                                "re-signed the leaf with the detected public IP"
+                            );
+                            engine.record_cert_fingerprint(&fingerprint);
+                            engine.report_registration().await;
                         }
-                    }
-                }
-                match engine.poll_once().await {
-                    Ok(PollOutcome::Unchanged { port }) => {
-                        tracing::debug!(port, "desired state unchanged");
-                    }
-                    Ok(PollOutcome::Applied { port }) => {
-                        tracing::info!(port, "desired state applied");
-                    }
-                    Err(e) if e.is_terminal() => {
-                        tracing::error!(
-                            status = ?e.status,
-                            reason = %e.public_message(),
-                            error = %e.public_message(),
-                            "control plane rejected the server token (expired or the server was destroyed); this node must be rebuilt; polls paused for 10 minutes"
-                        );
-                        poll_paused_until = std::time::Instant::now() + TERMINAL_BACKOFF;
-                    }
-                    Err(e) => {
-                        tracing::warn!(kind = ?e.kind, error = %e.public_message(), "desired-state poll failed");
-                    }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(error = %e, "failed to re-sign the leaf"),
+                    },
+                    None if ip_retries_left == 0 => tracing::error!(
+                        attempts = IP_RETRY_ATTEMPTS,
+                        "the public IP is still unknown; set public_host or allowed_hosts in the config"
+                    ),
+                    None => {}
                 }
             }
         }

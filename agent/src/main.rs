@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Enroll, install sing-box, serve MCP, and poll the desired state.
+    /// Enroll, install sing-box and serve MCP.
     Run,
     /// Dev only: serve MCP with a stub rotator (no sing-box, no control plane).
     #[cfg(feature = "dev")]

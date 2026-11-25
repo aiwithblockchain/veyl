@@ -3,7 +3,7 @@
 > 日期：2026-11-21
 > 状态：**方案待评审**。只出设计，不改代码。
 > 上游：`node-rotation-and-sync.md`（问题清单）、`claurst-mcp-integration.md`（claurst 的 MCP 能力调研）、`shared-firewall.md`（端口带）
-> 结论一句话：**节点上跑我们的 agent，它既是 sing-box 的安装者与管理者，也是一个只暴露 `rotate_credentials` 一个工具的远端 MCP server；桌面端用 claurst 自带的 MCP 客户端调用它，修复失败就引导重建。**
+> 结论一句话：**节点上跑我们的 agent，它既是 sing-box 的安装者与管理者，也是一个只暴露 `rotate_credentials` / `upgrade_singbox` 两个工具的远端 MCP server；桌面端用 claurst 自带的 MCP 客户端调用它，修复失败就引导重建。**
 
 ---
 
@@ -22,9 +22,9 @@
                                                         │
 云服务器（root）                                          │
   ├─ veeyl-agent（我们的二进制，systemd）  ←──────────────┘
-  │    ├─ MCP server，只暴露 rotate_credentials
+  │    ├─ MCP server，只暴露 rotate_credentials / upgrade_singbox
   │    ├─ sing-box 的安装/升级/配置/重启
-  │    └─ 出站轮询：登记、上报、拉取期望状态
+  │    └─ 出站请求：登记、上报；期望状态只在启动与升级时各拉一次
   └─ sing-box（Shadowsocks 入站，端口在 30000–30999 内）
 ```
 
@@ -172,14 +172,16 @@ MCP 远端传输用 Streamable HTTP。节点没有域名、也拿不到 Let's En
 
 ## 8. 工具
 
-只暴露一个：
+只暴露两个，都不接受版本号 / URL / 哈希：
 
 | 名称 | 参数 | 行为 |
 |---|---|---|
 | `rotate_credentials` | `{ reason?: "blocked" \| "user" }` | 生成新密码与端口带内的新端口 → 写配置 → `sing-box check` → 重启 → 验活（本机监听 + 出站连通）→ 成功则把新值上报控制面并返回 `{ok:true, port}` |
+| `upgrade_singbox` | `{}` | 用自身 `server_token` 拉一次 desired-state → 读目标版本 → 与本机已装版本比较 → 相同返回 `upgraded:false`；不同则下载、校验 sha256、备份旧二进制、替换、重启、验活、上报 `active`，返回 `{installed, target, upgraded}` |
 
-- 返回体**不含密码**；密码只经 agent → 控制面的鉴权通道写回，桌面端靠同步拿新值。
-- 失败分两类：`retryable`（重启失败可再试一次）与 `fatal`（配置写坏、sing-box 起不来）——后者 UI 直接引导重建。
+- 返回体**不含密码、URL 或哈希**；锁定目标版本只由控制面的 desired-state 决定，调用方无法指定。
+- `upgrade_singbox` 失败时把旧二进制换回并重启，不销毁机器、不清凭据；**restore 失败时保留 `.bak` 供下次恢复**；与轮换共用同一把 busy 锁，后到返回 `agent_busy`。
+- 轮换失败分两类：`retryable`（重启失败可再试一次）与 `fatal`（配置写坏、sing-box 起不来）——后者 UI 引导重建。升级的 `retryable` 主要是 `agent_busy`（稍后再试）；回滚也失败时才是 `fatal`，UI 引导重建。
 - 不做任意命令执行、不做参数化的路径/端口选择（端口由 agent 在带内选，密码由 agent 生成）。
 
 ## 9. 端到端流程
@@ -195,6 +197,8 @@ MCP 远端传输用 Streamable HTTP。节点没有域名、也拿不到 Let's En
 ```
 
 失败：agent 返回 fatal，或调用超时 → UI 显示「自动修复失败，需要重建节点」并就地给重建入口。
+
+升级走同一条门票通道：详情页「检查升级」→ 桌面取一次性令牌 → MCP 调 `upgrade_singbox` → agent 自拉控制面目标版本并安装 → 返回 `{installed, target, upgraded}`；失败回滚旧二进制，不销毁机器。
 
 图形版如下。两张图都以 HEAD 的实现为准，边上标注对应接口或文件；HTTP 错误码取自 `servers.ts` 的实际返回。
 
@@ -227,9 +231,7 @@ sequenceDiagram
     AG->>SB: 验活：本机监听 + 出站探测
     AG->>CP: POST /v1/agent/report {active, port, versions}
     CP-->>AG: 200 {ok:true}（已激活则 already_active）
-    loop 每 poll_interval（默认 30s）
-        AG->>CP: GET /v1/agent/desired-state（Bearer agt_…，servers.ts:1410）
-    end
+    Note over AG,CP: 之后不再轮询；升级由桌面端「检查升级」触发，agent 用自身令牌现拉一次 desired-state
 
     UI->>CP: POST /v1/servers/{id}/agent-token（账户 access token，servers.ts:1450）
     CP-->>UI: endpoint + ca_pem/指纹 + Ed25519 JWT（60s、jti）
@@ -285,8 +287,8 @@ flowchart TD
     GC -->|超时 / 不可达| GF["回滚旧配置"]
 
     H["控制面不可达"] --> H1{"agent 启动时"}
-    H1 -->|有持久化 desired| H2["用 last_desired 继续服务；轮询告警"]
-    H1 -->|无| H3["等待轮询；MCP 仍可用"]
+    H1 -->|有持久化 desired| H2["用 last_desired 继续服务；不再轮询"]
+    H1 -->|无| H3["MCP 可用但没有配置；升级会拒绝（no config），只能重建或重启 agent 重新安装"]
     H --> H4["桌面取 agent-token 失败 → agent_token_unavailable"]
 
     S["state.json 丢失 / 损坏<br/>agent/src/state.rs:155"] --> S1["备份损坏文件 → 冷启动"]
@@ -307,7 +309,7 @@ flowchart TD
 - **绑定面约束**：agent 只允许绑定两个端口——控制端口 `32100` 与 sing-box 的 SS 端口。机器无 root 密码、无 SSH，能起进程的只有 agent，所以这条由代码保证，不依赖运维纪律。
 - **带外入口**：cloud-init 会停用并禁用 SSH；机器出问题时**云厂商 console 仍是唯一的带外入口**。
 - 控制端口暴露在公网：只接受带有效一次性令牌的 MCP 请求；`initialize` 之前即验令牌。
-- 工具集只有一个，不接受自由参数。
+- 工具集只有两个（`rotate_credentials` / `upgrade_singbox`），都不接受自由参数；升级的目标版本由控制面的 desired-state 决定，调用方不能指定 URL / 版本 / 哈希。
 - 令牌一次性 + 60 秒过期；同一节点并发修复只允许一个在跑。
 - 所有调用记审计（谁、何时、结果）；密码与令牌不进日志。
 - 控制端口不做防封（已拍板）：流量近零，被封即重建。

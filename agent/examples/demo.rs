@@ -73,7 +73,7 @@ fn ok_outcome(o: &SessionOutcome) -> bool {
         .and_then(|v| v.as_u64())
         .map(|p| (30000..=30999).contains(&p))
         == Some(true);
-    o.tools == ["rotate_credentials"] && tool_ok && port_ok
+    o.tools == ["rotate_credentials", "upgrade_singbox"] && tool_ok && port_ok
 }
 
 async fn happy(

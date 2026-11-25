@@ -84,6 +84,22 @@ impl Host for FakeHost {
             .lock()
             .unwrap()
             .push((program.to_string(), args.to_vec()));
+        // `install -m MODE SRC DST` moves bytes on the real host; model that so
+        // a following `rename(dst, …)` has something to find.
+        if program == "install" && args.len() >= 4 {
+            let bytes = self
+                .files
+                .lock()
+                .unwrap()
+                .get(Path::new(&args[2]))
+                .cloned();
+            if let Some(bytes) = bytes {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(PathBuf::from(&args[3]), bytes);
+            }
+        }
         let queued = {
             let mut queues = self.queues.lock().unwrap();
             queues.get_mut(program).and_then(|q| q.pop_front())

@@ -36,10 +36,6 @@ fn default_recent_ports_keep() -> usize {
     20
 }
 
-fn default_poll_interval_secs() -> u64 {
-    30
-}
-
 fn default_egress_probe() -> String {
     "1.1.1.1:443".into()
 }
@@ -214,8 +210,6 @@ pub struct AgentConfig {
     pub port_band: [u16; 2],
     #[serde(default = "default_recent_ports_keep")]
     pub recent_ports_keep: usize,
-    #[serde(default = "default_poll_interval_secs")]
-    pub poll_interval_secs: u64,
     #[serde(default = "default_egress_probe")]
     pub egress_probe: String,
     #[serde(default = "default_log_level")]
@@ -303,9 +297,6 @@ impl AgentConfig {
                 "recent_ports_keep must leave enough free ports in the band"
             );
         }
-        if !(5..=3600).contains(&self.poll_interval_secs) {
-            bail!("poll_interval_secs must be 5..=3600");
-        }
         self.egress_probe
             .parse::<SocketAddr>()
             .with_context(|| format!("egress_probe must be host:port, got {}", self.egress_probe))?;
@@ -377,7 +368,6 @@ mod tests {
             singbox: SingBoxConfig::default(),
             port_band: default_band(),
             recent_ports_keep: default_recent_ports_keep(),
-            poll_interval_secs: default_poll_interval_secs(),
             egress_probe: default_egress_probe(),
             log_level: default_log_level(),
             log: LogConfig::default(),

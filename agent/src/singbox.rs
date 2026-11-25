@@ -6,7 +6,7 @@
 //! unit `sing-box.service`, method `aes-256-gcm`.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,6 +80,14 @@ pub fn is_safe_singbox_version(version: &str) -> bool {
 
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// `<dir>/<name>.tmp`: a sibling of the target, so the rename that installs it
+/// is atomic and never crosses a filesystem.
+fn temp_sibling(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    dest.with_file_name(name)
 }
 
 /// Reject a desired state that could escape the download dir or fetch over
@@ -375,6 +383,15 @@ impl SingBox {
     }
 
     async fn install_file(&self, source: &Path) -> Result<()> {
+        self.install_path(source, &self.cfg.binary_path).await
+    }
+
+    /// Put `source` at `dest` atomically: `install` into a sibling temp file,
+    /// then rename it over the target. Writing the target directly fails with
+    /// ETXTBSY while the old binary is running, and `install` removing it first
+    /// would leave a window with no binary on disk at all.
+    async fn install_path(&self, source: &Path, dest: &Path) -> Result<()> {
+        let tmp = temp_sibling(dest);
         let out = self
             .host
             .run(
@@ -383,17 +400,71 @@ impl SingBox {
                     "-m".to_string(),
                     "0755".to_string(),
                     source.to_string_lossy().into_owned(),
-                    self.cfg.binary_path.to_string_lossy().into_owned(),
+                    tmp.to_string_lossy().into_owned(),
                 ],
             )
             .await?;
         if !out.success() {
+            let _ = self.host.remove(&tmp).await;
             anyhow::bail!(
                 "install failed: {}",
                 crate::logging::truncate(&crate::logging::redact_sensitive(&out.summary()), 300)
             );
         }
+        if let Err(e) = self.host.rename(&tmp, dest).await {
+            let _ = self.host.remove(&tmp).await;
+            anyhow::bail!("replace {}: {e}", dest.display());
+        }
         Ok(())
+    }
+
+    /// Copy the installed binary next to itself so a failed upgrade can put the
+    /// previous version back. `None` when there is no binary yet: a fresh
+    /// install has nothing to roll back to.
+    ///
+    /// An existing `.bak` is reused and never overwritten: it is the last known
+    /// good binary, and the installed one may be exactly the version that just
+    /// failed.
+    pub async fn backup_binary(&self) -> Result<Option<PathBuf>, ApplyError> {
+        let backup = self.binary_backup_path();
+        if self
+            .host
+            .is_file(&backup)
+            .await
+            .map_err(|e| ApplyError::fatal(format!("look for the sing-box backup: {e}")))?
+        {
+            tracing::info!(backup = %backup.display(), "reusing the existing sing-box backup");
+            return Ok(Some(backup));
+        }
+        if !self
+            .host
+            .is_file(&self.cfg.binary_path)
+            .await
+            .map_err(|e| ApplyError::fatal(format!("look for the sing-box binary: {e}")))?
+        {
+            return Ok(None);
+        }
+        self.install_path(&self.cfg.binary_path, &backup)
+            .await
+            .map_err(|e| from_host(e, "back up the installed sing-box"))?;
+        Ok(Some(backup))
+    }
+
+    /// Put a backup taken by `backup_binary` back where the unit expects it.
+    /// The caller restarts the unit afterwards.
+    pub async fn restore_binary(&self, backup: &Path) -> Result<(), ApplyError> {
+        self.install_path(backup, &self.cfg.binary_path)
+            .await
+            .map_err(|e| from_host(e, "restore the previous sing-box"))?;
+        Ok(())
+    }
+
+    pub async fn discard_binary_backup(&self, backup: &Path) {
+        let _ = self.host.remove(backup).await;
+    }
+
+    fn binary_backup_path(&self) -> PathBuf {
+        self.cfg.binary_path.with_extension("bak")
     }
 
     /// Current port/password read back from config.json.

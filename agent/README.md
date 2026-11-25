@@ -2,7 +2,7 @@
 
 独立 Rust 项目（不并进 `src-tauri` 的 workspace），现在是**可用形态**：
 
-- 自签 TLS 的 MCP Streamable HTTP 端点，只暴露一个 `rotate_credentials` 工具；
+- 自签 TLS 的 MCP Streamable HTTP 端点，暴露 `rotate_credentials` 与 `upgrade_singbox` 两个工具；
 - 一次性 Ed25519 Bearer 令牌，agent 内置公钥离线验签；
 - enroll → 安装/校验 sing-box → 写配置 → systemd → 验活 → 上报的三阶段流程；
 - agent 自己生成新端口与密码的真实轮换；
@@ -14,7 +14,7 @@
 ## 结论
 
 - **MCP 链路**：`cargo run --example demo` 本机 10/10 通过（TLS + 令牌 + tools/call）。
-- **agent 主体**：`cargo test` 全部通过，覆盖令牌、证书持久化、端口选择、配置生成、安装校验、轮换失败路径、期望状态轮询与「轮换后控制面未追上」保护。
+- **agent 主体**：`cargo test` 全部通过，覆盖令牌、证书持久化、端口选择、配置生成、安装校验、轮换失败路径、启动时的期望状态应用与按需升级。
 - **未验收**：真实 Ubuntu 机器上的 systemd 行为、真实 GitHub 下载、与控制面会话的联调。这三项必须在真机上跑。
 
 ## 快速开始
@@ -103,7 +103,6 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 | `control_port` | 回退值；期望状态里的 `control_port` 优先，且必须在 SS 端口带外 |
 | `port_band` | 默认 `[30000, 30999]`，与共享防火墙规则一致 |
 | `recent_ports_keep` | 记录最近用过的端口数，轮换时排除，避免立刻复用 |
-| `poll_interval_secs` | 期望状态轮询周期，默认 30 秒 |
 | `egress_probe` | 轮换验活时的出站 TCP 目标，默认 `1.1.1.1:443` |
 | `singbox.*` | 二进制、配置、unit、systemctl/tar/install/journalctl 路径 |
 | `log_level` | `info`；`RUST_LOG` 优先 |
@@ -111,7 +110,7 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 | `log.max_bytes` | 单文件上限，默认 5242880（5 MiB） |
 | `log.keep_files` | 轮转保留份数，默认 3（`agent.log.1`…`.3`） |
 
-**公网 IP 为什么重要**：桌面端用 `https://<公网 IP>:32100` 连接。webpki 会校验证书 SAN，leaf 里没有这个 IP 时，即使信任了 CA 也会因 `NotValidForName` 失败；Host 校验也会拒绝。cloud-init 没有把 IP 传给 agent，所以默认查 DO metadata。**启动时查不到会保留上次的 SAN，并在每轮 poll 重试探测**；成功后只重签 leaf（CA 不变）、更新指纹与 Host 白名单，并刷新一次登记信息（`verifying` 上报只刷新登记字段，不会把 active 机器改回 installing）。查不到且没有历史 SAN 时必须显式配 `public_host`。
+**公网 IP 为什么重要**：桌面端用 `https://<公网 IP>:32100` 连接。webpki 会校验证书 SAN，leaf 里没有这个 IP 时，即使信任了 CA 也会因 `NotValidForName` 失败；Host 校验也会拒绝。cloud-init 没有把 IP 传给 agent，所以默认查 DO metadata。**启动时查不到会保留上次的 SAN，并在后台每分钟重试探测（最多 3 次）**；成功后只重签 leaf（CA 不变）、更新指纹与 Host 白名单，并刷新一次登记信息（`verifying` 上报只刷新登记字段，不会把 active 机器改回 installing）。查不到且没有历史 SAN 时必须显式配 `public_host`。
 
 ## 控制面接口（按现有实现对齐）
 
@@ -125,13 +124,9 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 
 `token_public_key` 是 Ed25519 公钥 JWK（`{"kty":"OKP","crv":"Ed25519","x":"…"}`）。agent 把它存进 state，重启后继续离线验桌面端令牌。
 
-**阶段语义（按控制面实现）**：`installing / verifying` 只前进不回退；`active` 才真正激活（写 node_id 收尾、订单 ready、开始计费）；`failed` 对**尚未 active** 的机器会触发销毁，对已是 `active / healthy` 的机器只记录 `last_error` 并返回 `200 {ok:true,recorded:true}`，不销毁。所以 agent 只在「期望状态驱动」的 apply 内部重试一次后仍失败时才上报 `failed`，收到 200 也继续重试；轮换失败不上报 `failed`（见下文）。每次 report 都带证书指纹和 CA PEM，否则桌面端拿不到 `agent-token`。
+**阶段语义（按控制面实现）**：`installing / verifying` 只前进不回退；`active` 才真正激活（写 node_id 收尾、订单 ready、开始计费）；`failed` 对**尚未 active** 的机器会触发销毁，对已是 `active / healthy` 的机器只记录 `last_error` 并返回 `200 {ok:true,recorded:true}`，不销毁。所以 agent 只在「期望状态驱动」的 apply 内部重试一次后仍失败时才上报 `failed`，收到 200 也继续重试；轮换失败不上报 `failed`（见下文）；升级失败只在控制面已确认这台机器 active 时才上报 `failed`（见「按需升级」）。每次 report 都带证书指纹和 CA PEM，否则桌面端拿不到 `agent-token`。
 
 **enroll 恢复语义**：enrollment token 已消费、但仍在 `enrollment_expires_at` 内且服务器未销毁时，再次 enroll 会返回**新的 `server_token`**（旧的立即失效），host/端口/密码沿用同一份。因此 `state.json` 损坏或丢失后的恢复路径就是备份坏文件、重新 enroll、用新 token 继续；不要假设第二次 enroll 一定 409。409 的 body 是 `destroyed` / `expired`（服务器已销毁 / token 过期），agent 会把 reason 原样写进日志并退避 10 分钟。
-
-**active 未确认重试**：启动时如果 `active` 上报失败，agent 把 `active_unconfirmed` 写进 `state.json`；之后每轮 poll 都会再报一次 `active`，收到 200 才清除。否则机器会在 normal serving 的情况下停在 installing/verifying，10 分钟后被控制面 sweep 销毁。
-
-注意：控制面的 `active` 已做成幂等（机器已是 active/healthy 时直接返回 200 `already_active`），agent 这边仍按“未确认才补报”收敛。
 
 `desired.password` 只在 enroll 响应里保证出现，之后由 `desired-state` 返回最新值。agent 在 enroll 成功、每次 apply/轮换成功后都把完整的 `last_desired`（含密码）写入 0600 的 `state.json`，控制面短暂不可达时重启也能恢复；该字段永不进日志。
 
@@ -141,11 +136,11 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 
 - 控制面校验端口在 `30000-30999`、密码 ≥16、同账户活服务器端口唯一；通过后更新 `servers.node_port` 并重封 credential，返回 `{ok:true, port}`。
 - 失败一律 409（`port_out_of_band` / `password_too_short` / `port_taken` / `server_destroyed`），**不销毁**。
-- agent 收尾：本地 apply + 验活成功 → 上报 `rotated`；200 才算完成；非 200 立即回滚旧配置并重启，把原因返回给调用方；随后拉一次 desired-state 确认控制面已同步（没追上由 `pending_rotation` 保护 120 秒）。
+- agent 收尾：本地 apply + 验活成功 → 上报 `rotated`；200 才算完成；非 200 立即回滚旧配置并重启，把原因返回给调用方。
 
 `active` 分支的 `port === node_port` 校验保留；`rotated` 已更新 `node_port`，所以之后的 active 不会再判漂移。
 
-`failed` 阶段对未激活机器仍会销毁；对已 active/healthy 的机器只记录 `last_error`。agent 只在期望状态驱动的 apply 内部重试一次后仍失败时才上报，并带 `error`（控制面截断 300 字写入审计 / `last_error`）。轮换失败不上报 `failed`。
+`failed` 阶段对未激活机器仍会销毁；对已 active/healthy 的机器只记录 `last_error`。agent 只在期望状态驱动的 apply 内部重试一次后仍失败时才上报，并带 `error`（控制面截断 300 字写入审计 / `last_error`）。轮换失败不上报 `failed`；升级失败只在控制面确认过 active 时上报（否则只回工具错误），读不到版本时不带 `singbox_version`，换回旧二进制失败时保留 `.bak` 供下次复用。
 
 每条 report 都带 `ca_pem`（自签 CA 的 PEM）与 `cert_fingerprint`；桌面端优先用 CA 建立信任，指纹作为兜底。
 
@@ -170,20 +165,32 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 5. 上报 `verifying`；
 6. 验活：本机 `127.0.0.1:<port>` 可连 + 一次宿主出站 TCP（默认 `1.1.1.1:443`）；
 7. 上报 `rotated`（新端口 + 新密码 + 证书指纹 + CA PEM）；非 200 立即回滚旧配置并重启，返回错误；
-8. 拉一次 desired-state 确认控制面已同步；记录 `pending_rotation`、`recent_ports`、`last_desired`，返回 `{ok:true, port}`。
+8. 记录 `recent_ports` 与 `last_desired`，返回 `{ok:true, port}`。
 
 apply/verify 遇到可重试错误（restart 失败、监听超时、出站失败、下载失败）会先在 agent 内部重试一次（间隔 2 秒）；仍失败才返回错误。`rotated` 被控制面拒绝时也会回滚旧配置，**不留半成功状态**。轮换失败不向控制面上报 `failed`——`apply` 已回滚，节点仍在服务，而控制面收到 `failed` 会直接销毁机器。失败以 `CallToolResult::error` 返回，内容 `{ok:false,error:{kind,message}}`，不含密码。只有「已有轮换在跑」返回 `retryable`，其余为 `fatal`。
 
-**防回滚**：轮换成功后，控制面的 desired-state 可能还没更新到新端口。`pending_rotation` 在 120 秒内保护新端口，避免下一轮 poll 把刚修好的端口改回去；控制面追平后自动清除。
+**没有「轮换后控制面未追上」的窗口**：`rotated` 返回 200 就代表端口与凭据已经提交，没有 200 就回滚。agent 不再有后台 apply，也就不需要 pending 标记保护新端口。
 
-## 期望状态轮询
+## 按需升级（`upgrade_singbox`）
+
+桌面端在服务器详情页点「检查升级」→ 控制面发一次性门票 → 直连 32100 调本工具。
+
+- **入参是空对象**：不接受版本、URL、哈希。App 能传版本，就等于能往节点装任意二进制。
+- 执行：用自身 `server_token` `GET /v1/agent/desired-state` 一次 → 读已安装版本 → 相同直接返回 `{installed, target, upgraded:false}`；不同则下载、校验 sha256、替换二进制、`systemctl restart`、验活（本机端口 + 出站），然后上报一次 `active`（带新版本，控制面据此刷新 `servers.singbox_version`）。
+- 返回 `{installed, target, upgraded}`；失败沿用 `{ok:false,error:{kind,reason?,message}}`（`reason` 目前只有 `agent_busy`）。
+- **替换前先把旧二进制拷成 `sing-box.bak`**：新版本重启/自检失败就换回去并重启；换回失败则保留 `.bak`（错误里带路径，下次升级直接复用它而不是覆盖）。升级全程不上报 `installing` / `verifying`，不改凭据与配置；失败只在控制面已确认这台机器 active 时才上报 `failed`（进程内标志、不落盘）并带当时实际装着的版本，装机中的机器只回工具错误、不会被一次误调用销毁。已是最新（`upgraded:false`）时也会补报一次 `active`，把丢失过的版本列修回来。
+- 与轮换共用 busy 锁：同时发起时后到的那个返回 `kind=retryable` + `reason=agent_busy`。
+- 每次工具调用前先 best-effort 补报一次 `active`（控制面对已 active 机器幂等），自愈「apply 成功但 active 上报丢了」这条路径，不需要持久化的脏标志。
+
+## 启动时的期望状态
 
 - **先监听，再 apply**：MCP 端点（32100）在首次安装/应用之前就 bind，下载慢或 systemd 卡住时桌面端仍能连上。
-- 启动时拉一次 desired；与当前 config.json + 已装版本一致时先做一次 `systemctl is-active`，服务没跑就重启一次，仍失败则上报 `failed`；正常时只上报 `active`，**不重启 sing-box**；不一致才走安装/应用流程。
-- 之后每 `poll_interval_secs` 拉一次；每次 poll 都做一次轻量 `is-active`，服务死了就重启一次，仍失败上报 `failed` 并继续重试。
-- 轮换与轮询共用一把异步锁，同一时刻只有一个 apply。
+- **desired-state 只在启动时拉一次**（enroll 响应里已经带了就不重复拉）。与当前 config.json + 已装版本一致时先做一次 `systemctl is-active`，服务没跑就重启一次，仍失败则上报 `failed`；正常时只上报 `active`，**不重启 sing-box**；不一致才走安装/应用流程。之后不再有任何周期请求。
+- **版本不再由平台定时推送**：桌面端点「检查升级」时经 MCP 调 `upgrade_singbox`（见上）。
+- **启动后再补报一次 `active`**（`last_desired` 存在且本地确实在服务这组凭据时）：apply 成功但 `active` 上报丢了这类情况靠它自愈；没有持久化标志，也不会把没在服务的节点报成 active。
+- 轮换、升级与启动 apply 共用一把异步锁，同一时刻只有一个写操作。
 - 期望状态里的 `control_port` 与当前不同会告警；改控制端口需要重启 agent 才能重新绑定（本期不做热迁移）。
-- **控制面 409 是终态**：enroll 返回 409（token 已消费/过期、服务器已销毁）时打一条 error 说明需要重建，然后退避 10 分钟再试，不退出进程（避免 systemd 每 10 秒重启刷屏）；轮询遇到 409 同样暂停 10 分钟。
+- **控制面 409 是终态**：enroll 返回 409（token 已消费/过期、服务器已销毁）时打一条 error 说明需要重建，然后退避 10 分钟再试，不退出进程（避免 systemd 每 10 秒重启刷屏）。启动时 desired-state 返回 409 只记日志并改用持久化的期望状态——没有轮询，也就没有「停药」这回事。
 
 ## 日志与脱敏
 
@@ -243,11 +250,11 @@ agent/
   src/server.rs         MCP Streamable HTTP + TLS + 验签中间件 + 工具
   src/client.rs         rmcp client（CA / 指纹 pin / 裸诊断）
   src/config.rs         配置加载与校验
-  src/state.rs          server_token / 端口历史 / pending_rotation
+  src/state.rs          server_token / 端口历史 / last_desired
   src/control.rs        enroll / report / desired-state 客户端
   src/host.rs           命令、文件、网络、下载的 Host 抽象（可测试）
   src/singbox.rs        下载校验、配置、systemd、验活
-  src/rotation.rs       端口/密码、轮换、期望状态应用、轮询
+  src/rotation.rs       端口/密码、轮换、期望状态应用、按需升级
   src/agent.rs          run 主循环
   src/logging.rs        日志初始化与脱敏
   src/main.rs           CLI：run / serve / gen-certs / mint-token

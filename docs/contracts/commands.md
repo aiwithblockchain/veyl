@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.74.0`
+> 契约版本：`2.75.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -304,6 +304,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 111 | `node_remove` | `{ nodeId }` | `{ removed: true, was_current: boolean }` | **2.68.0 新增（仅 UI）**；只移除 `source = url / manual` 的节点；一个事务里清 `config_nodes` 与 `nodes`；托管 / 免费节点 `PRECONDITION_FAILED / node_not_removable`；当前节点先停运行时；不发 AI 工具（§7.32） |
 | 112 | `node_update` | `{ nodeId, name, server?, port?, method?, password? }` | `{ updated: true, was_current, disconnected, params_changed, rebuilt, rebuild_status, message }` | **2.70.0 新增（仅 UI）**；编辑自定义节点：`url` 只改名、`manual` 可改连接参数（密码留空表示不改），`owned` / `seed` 返回 `PRECONDITION_FAILED / node_not_editable`；改的是连接中配置里的节点就按新设置重建运行时；`id` 与 `source_key` 不变；不发 AI 工具（§7.33） |
 | 113 | `mobile_export_save_file` | `{ path }` | `MobileSaveFileData`（`{ state: "saved", path, node_count } \| login_required \| no_ready_server`） | **2.71.0 新增（仅 UI）**；把账户的 sing-box 配置写到用户选择的绝对路径，供 veyl-cli 离线导入；文件含节点凭据，界面提示导入后删除（§7.34） |
+| 114 | `node_upgrade_singbox` | `{ serverId }` | `NodeUpgradeSingboxResult`（`{ installed, target, upgraded }`） | **2.75.0 新增（仅 UI）**；详情页「检查升级」；目标版本由节点用自身令牌现拉，命令不接受版本 / URL / 哈希；180 秒预算；与重置凭据互斥时 `details.reason = "agent_busy"`；失败不销毁机器、不动凭据（§7.35） |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1772,6 +1773,7 @@ type MyServer = {
   verifying_at: string | null;     // 首次进入 verifying（sing-box check 通过）的时刻；同上
   ip: string | null;
   port: number | null;
+  singbox_version: string | null;  // 节点最近一次上报的 sing-box 版本（已去掉 `v` 前缀）；agent 还没上报过为 null，界面显示「未知」（2.75.0）
   node_id: string | null;          // 控制面节点的 id（`nd_…`），结算时就写入；**不是**本地节点 id
   local_node_id: string | null;    // 本地节点 id（`nodes.id`）；null = 本地还没有这台服务器的节点行（2.43.2）
   hourly_usd: number;              // DO 成本口径，仅内部核对，不渲染
@@ -2439,6 +2441,55 @@ type MobileSaveFileData =
 - 文件含节点地址与密码：界面必须提示导入后删除；本命令不把文件内容回传给 UI。
 - 错误：`INVALID_ARGUMENT`（`invalid_path`）、`PRECONDITION_FAILED`（`insecure_profile_origin`）、`RATE_LIMITED`、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（`save_failed` / `mobile_token_corrupt`）。
 - 不注册 AI 工具：导出的是节点凭据，只能由用户显式触发。
+
+### 7.35 `node_upgrade_singbox { serverId }` → `NodeUpgradeSingboxResult`（仅 UI，2.75.0）
+
+详情页「检查升级」按钮的 Host 侧命令。与节点 agent 的 MCP 工具 `upgrade_singbox`（本节末）一一对应；Host 只负责取一次性门票并转发，**不做任何版本判断**。
+
+```ts
+type NodeUpgradeSingboxResult = {
+  installed: string;   // 调用前已安装的版本（已去掉 v 前缀）；读不到时 "unknown"
+  target: string;      // 控制面当前下发的目标版本（已去掉 v 前缀）
+  upgraded: boolean;   // false = 已经是目标版本，什么都没做
+};
+```
+
+- 通道与 §7.27 完全一致：向控制面取一次性 agent 门票 → 连 `endpoint` → `tools/call { name: "upgrade_singbox", arguments: {} }`；CA 优先、缺失时指纹回退；**180 秒预算**（一次下载 + 重启 + 自检）。
+- **只有 `serverId`，不传版本 / URL / 哈希**：目标版本由节点用自身 `server_token` 现拉一次 desired-state 决定，App 传什么都装不进去。
+- 失败 reason 共八类：`agent_token_unavailable` / `agent_tls_untrusted` / `agent_token_rejected` / `agent_tool_failed` / `agent_busy` / `agent_timeout` / `agent_unreachable` / `agent_bad_response`。`agent_busy` 是「节点上另一件写操作（重置凭据 / 升级 / 启动 apply）正在跑」，可稍后重试；`agent_tool_failed` 时节点侧原文（已脱敏、截断 300）在 `details`，界面按 reason 选文案。
+- 失败**不销毁机器、不动凭据**：端口、密码、配置原样保留，节点继续按旧版本服务（节点侧会把旧二进制换回来再重启）。
+- 升级过程中节点**不产生 `installing` / `verifying` 上报**，只在结束时报一次 `active`（带新版本，5 次退避重试）。失败时**只有控制面已确认该节点为 active / healthy 才上报 `failed`**（带当时真正装着的版本）；装机中（booting / installing / verifying）的节点只回工具错误，绝不报 `failed`——所以 `singbox_version` 不会提前跳到目标值，一次误调用也不会触发销毁。
+- 成功后**不需要重新拉凭据**（端口与密码不变）；控制面的 `singbox_version` 由那次 `active` 刷新，详情页下次 `my_server_get` 就能看到新版本。
+- 与「重置凭据」（§7.27）互斥：节点侧共用同一把 busy 锁，同时发起时后到的那个返回 `agent_busy`。
+- 不注册 AI 工具：升级会重启节点，只能由用户显式触发。
+
+#### 节点 agent 工具 `upgrade_singbox`（2.75.0）
+
+入参是一个空对象，`additionalProperties = false`——不接受 URL / 版本号 / 哈希。
+
+```json
+{ "name": "upgrade_singbox", "arguments": {} }
+```
+
+成功（MCP `isError = false`）：
+
+```json
+{ "installed": "1.14.4", "target": "1.15.0", "upgraded": true }
+```
+
+失败（MCP `isError = true`，与 `rotate_credentials` 同一信封；`reason` 是可选的稳定原因，目前只出现在 busy 时）：
+
+```json
+{ "ok": false, "error": { "kind": "retryable", "reason": "agent_busy", "message": "…" } }
+```
+
+- 执行顺序：用自身 `server_token` `GET /v1/agent/desired-state` **一次** → 读已安装版本 → 相同则直接返回 `upgraded: false`；不同则备份旧二进制（`/usr/local/bin/sing-box.bak`）、下载、校验 sha256、替换、`systemctl restart`、自检（本地端口 + 出口探测）、上报一次 `active`。
+- 失败时只要二进制真的被换过，就把 `.bak` 换回去并重启；自检失败时同样回滚。成功则删除 `.bak`。**换回失败时保留 `.bak`**，错误信息里给出路径，下一次升级直接复用它、不会拿新装的二进制覆盖——那是节点上唯一一份好的二进制。不销毁机器、不清凭据、不改端口与密码。
+- 已是最新（`upgraded:false`）时也会 best-effort 补报一次 `active`（带已安装版本），让丢失过上报的 `singbox_version` 能修回来。
+- 失败上报 `failed`（带当前实际版本）后仍以工具信封返回错误；该上报只对**已 active / healthy** 的节点发出（已 active 的机器收到 `failed` 只记录 `last_error`，不销毁），装机中的节点只回工具错误。
+- `installed` 读不到已安装版本时为 `"unknown"`，此时按「需要安装」继续走下载路径。
+- 与 `rotate_credentials` 共用 busy 锁：另一件写操作在跑时立刻返回 `kind = "retryable"`、`reason = "agent_busy"`。
+- 每次工具调用前，节点会先 best-effort 补报一次 `active`（控制面对已 active 机器是幂等 `already_active`）；补报失败不影响本次调用。
 
 ---
 
@@ -3180,7 +3231,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.74.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** |
+| `contracts/commands.md` | **2.75.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** + **节点升级改为按需：`MyServer.singbox_version`、`node_upgrade_singbox` 命令与 agent 工具 `upgrade_singbox`（2.75.0）** |
 | `contracts/events.md` | **2.25.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** + **`node-list-changed` 增 `node_updated`（2.25.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.32.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐、`NodeImportText`（两者已于 3.28.0 并入 `NodeImport`） + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions`（3.29.0 改名 `ServerOptions`）建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`（3.29.0 改名 `ServerOptionsData`）、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** + **节点写入三工具合并为 `NodeImport`，总数 40 → 38（3.28.0）** + **`CatalogOptions` 改名 `ServerOptions`，总数仍 38（3.29.0）** + **删除 `RuntimeStart` / `RuntimeStop`，`ConfigUpdate` 去掉 `routing_mode`，总数 38 → 36（3.30.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0）** + **新增只读工具 `LlmProviders`（列出服务商 + 可选单测，永不返回 Key），总数 37 → 38（3.32.0）** |
@@ -3198,6 +3249,15 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.75.0（未发布，2026-11-26：sing-box 升级改为按需触发）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.75.0`；§7.15 `MyServer` 增 `singbox_version: string \| null`（节点最近一次上报的版本，读不到为 null，界面显示「未知」） | 字段扩展 | `docs/design/singbox-upgrade-task.md` §3.2；平台不再定时推送升级，版本由用户点「检查升级」决定 |
+| 2 | §2 新增 114 `node_upgrade_singbox { serverId }` → `NodeUpgradeSingboxResult`（`{ installed, target, upgraded }`），详解见 §7.35；通道与 §7.27 相同，**不接受版本 / URL / 哈希**，目标版本由节点自己拉 desired-state 决定 | 新增命令 | 同上 §3.1 / §3.3：App 能传就等于能往节点装任意二进制 |
+| 3 | §7.35 同节定义节点 agent 的 MCP 工具 `upgrade_singbox`：入参空对象；成功 `{ installed, target, upgraded }`；失败沿用 `rotate_credentials` 的错误信封并新增可选 `error.reason`，busy 时 `retryable` + `reason = "agent_busy"`（App 透传到 `details.reason`，八类 reason）；预算 180 秒；升级中不产生 `installing` / `verifying` 上报，只在结束时报 `active`，失败报 `failed` 且带当时实际版本，**`failed` 只对已 active / healthy 的节点上报**；替换前备份 `.bak`、失败换回并重启（换回失败保留备份、下次复用）；已是最新也补报 `active` | 新增工具 | `tools.md` 无映射；2026-11-26 评审 P1/P2（Soren） |
+| 4 | 节点 agent 删除定时 desired-state 轮询（只保留启动一次）与 409 停药；**不影响本文件形状**——控制面 `desired-state` 与 `/v1/agent/report` 一字未改 | 说明 | 同上 §1 / §3.1 |
 
 ### 2.74.0（未发布，2026-11-25：AI 工具第 5 组第二片，`llm_provider_*` 映射 `LlmProviders`）
 
