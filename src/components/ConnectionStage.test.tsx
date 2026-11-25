@@ -2911,6 +2911,19 @@ describe("自定义节点移除", () => {
     ).not.toContain("stage-node__menu--up");
   });
 
+  it("测速只测当前标签里的节点，切标签后范围跟着换", () => {
+    const onProbe = vi.fn();
+    renderStage({ config: CUSTOM_CONFIG, onProbe });
+
+    // 当前选中在自定义组的 n3（美国 01）。
+    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    expect(onProbe).toHaveBeenLastCalledWith(["n3"]);
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    expect(onProbe).toHaveBeenLastCalledWith(["n2"]);
+  });
+
   it("菜单 → 就地确认 → 移除成功", async () => {
     const onRemoveNode = vi.fn(async () => ({ ok: true, wasCurrent: true }));
     renderStage({ config: CUSTOM_CONFIG, onRemoveNode });

@@ -2575,15 +2575,17 @@ export default function App() {
     setDiagnosis({ nodeName: connectionFacts.nodeName ?? "", deps });
   };
 
-  // 手动测速：只更新延迟，不改选中/不连接；点击动作随下一条消息上报。
-  const handleProbe = () => {
+  // 手动测速：只更新延迟，不改选中/不连接；只测界面上当前分组里的节点。
+  const handleProbe = (nodeIds?: string[]) => {
     lastActionRef.current = { id: "client.probe" };
     const config = vpn.activeConfig;
     if (!config || config.nodes.length === 0 || nodeProbes.run) return;
+    const wanted = nodeIds ? new Set(nodeIds) : null;
     // 停机删除的悬挂节点不测速：它连不上，测了只会亮一个「测不通」。
     const targets = config.nodes
       .map((node) => node.node_id)
-      .filter((nodeId) => !danglingNodeIds.has(nodeId));
+      .filter((nodeId) => !danglingNodeIds.has(nodeId))
+      .filter((nodeId) => wanted === null || wanted.has(nodeId));
     if (targets.length === 0) return;
     setManualProbedConfigs((current) => {
       if (current.has(config.config_id)) return current;

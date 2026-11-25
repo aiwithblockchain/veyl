@@ -7204,6 +7204,16 @@ impl VpnToolServices for WiredServices {
         };
         // 「测这 N 个」只测该配置里的 id；未知 id 忽略并在返回里点名。
         let (nodes, ignored_node_ids) = probe_batch::select_nodes(&all_nodes, node_ids.as_deref());
+        log::info!(
+            "批量测速 config={} nodes={} ids=[{}]",
+            config.id,
+            nodes.len(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         if nodes.is_empty() {
             return Err(svc_error_with_details(
                 "PRECONDITION_FAILED",

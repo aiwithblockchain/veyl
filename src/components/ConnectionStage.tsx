@@ -73,7 +73,8 @@ interface Props {
   /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
   onPreselectApplied?: (nonce: number) => void;
   /** 手动测速：只更新延迟，不改选中、不连接。 */
-  onProbe?: () => void;
+  /** 测速当前分组里的这些节点（只读，不改选中）。 */
+  onProbe?: (nodeIds: string[]) => void;
   /** 节点卡「添加节点」：打开导入 / 手动填写弹层。 */
   onAddNode?: () => void;
   /** 本会话已手动测过速：收尾句去掉数字。 */
@@ -714,6 +715,10 @@ export function ConnectionStage({
     pickedSource ?? selectedSource ?? firstNonEmpty;
   const activeGroup =
     sourceGroups.find((group) => group.key === activeSource) ?? null;
+  /** 测速只覆盖当前标签里的节点：看到什么就测什么。 */
+  const activeNodeIds = (activeGroup?.nodes ?? []).map(
+    (entry) => entry.node.node_id,
+  );
 
   /** 当前组超过 12 个节点才值得给搜索；否则搜索框只是噪音。 */
   const activeRowCount =
@@ -1238,7 +1243,7 @@ export function ConnectionStage({
                     : t("console.nodes.count", { count: nodes.length })}
                 </p>
                 <div className="stage-card__actions">
-                  {onProbe && nodes.length > 0 ? (
+                  {onProbe && activeNodeIds.length > 0 ? (
                     <button
                       type="button"
                       className="stage-probe"
@@ -1247,7 +1252,7 @@ export function ConnectionStage({
                       onClick={() => {
                         if (!canProbe) return;
                         manualProbeRef.current = true;
-                        onProbe();
+                        onProbe(activeNodeIds);
                       }}
                     >
                       {probeRunning ? (
