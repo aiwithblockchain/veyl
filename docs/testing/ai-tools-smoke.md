@@ -2,7 +2,7 @@
 
 > 日期：2026-11-25
 > 范围：在**装包后的应用**里，用真实 AI 逐条问，核对工具调用与回答事实。只读冒烟，不含建机、充值、销毁。
-> 依据：`docs/design/ai-tools-decisions.md` §1–§3、`docs/design/ai-tools-group5-gaps.md` §4、`docs/contracts/tools.md`（3.29.0；前置批去重后为 3.30.0，第 5 组补缺口上线后为 3.31.0）。
+> 依据：`docs/design/ai-tools-decisions.md` §1–§3、`docs/design/ai-tools-group5-gaps.md` §4、`docs/contracts/tools.md`（当前 **3.32.0**，工具面 38：前置批去重 3.30.0、第 5 组 3.31.0 `MyServerWallet` + 3.32.0 `LlmProviders`）。
 > 做法：每条原话照念，不替模型补充上下文；每问完记录回复摘要与 `tool_calls` 里的工具名。
 
 ---
@@ -134,25 +134,25 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 ---
 
-## 4. 第 5 组：补缺口（**第 5 组上线后执行**，前四组先跑）
+## 4. 第 5 组：补缺口（**第 5 组已上线，工具面 38**）
 
-> 本节按 `docs/design/ai-tools-group5-gaps.md` §4 写；工具名与字段以该决策单为准。上线前这七条不参与判定。
+> 本节按 `docs/design/ai-tools-group5-gaps.md` §4 写；工具名与字段以该决策单与 `docs/contracts/tools.md` 3.32.0 为准。第 5 组已上线，4.1–4.6 已参与判定。
 
 ### 4.1 余额
 
 **用户原话**：我账户里还有多少钱？
 
-**期望**：调 `MyServerWallet`，给出余额与币种，并说明这是最近一次快照（带更新时间）；未登录就说还没登录，不把未知说成 0。
+**期望**：调 `MyServerWallet`，给出余额与币种，并说明这是最近一次快照、时间是本机读取时刻；未登录就说还没登录，不把未知说成 0。
 
-**不通过的样子**：编一个余额；未登录直接答「0 元」；让用户自己去看而不给任何数字；调用充值 / 支付。
+**不通过的样子**：编一个余额；未登录直接答「0 元」；让用户自己去看而不给任何数字；调用充值 / 支付；返回里出现充值档位（面额列表）。
 
 ### 4.2 试用状态
 
 **用户原话**：试用还剩几天？过期了吗？
 
-**期望**：调 `TrialStatus`，用 `state` 与 `remaining_ms` 回答「还剩几天几小时」或「已到期」；不靠节点数量反推。
+**期望**：用 `DefaultProfileStatus` 回答试用还剩几天 / 是否过期（`TrialStatus` 已撤回、不新增）；不靠节点数量反推。
 
-**不通过的样子**：编到期日期；把免费节点数量当成剩余天数；说「还有 7 天」但拿不出依据。
+**不通过的样子**：编到期日期；把免费节点数量当成剩余天数；说「还有 7 天」但拿不出依据；说读不到试用状态却不去看 `DefaultProfileStatus`。
 
 ### 4.3 服务器扣费与有效期
 
@@ -182,17 +182,17 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 **用户原话**：我现在用的是哪个模型？帮我测一下连接。
 
-**期望**：调 `LlmProviders`，列出服务商与当前项，给出测试结果；返回值不含 API Key，只说「有没有配置」。用户要换服务商时，引导到设置，不保存 / 不切换。
+**期望**：先不带参数调 `LlmProviders`，列出服务商与当前项；要测某一项时，从 `providers[].id` 取到 id 再传 `test_provider_id`，并给出该项测试结果。返回值不含 API Key，只说「有没有配置」。用户要换服务商时，引导到设置，不保存 / 不切换。
 
-**不通过的样子**：把 API Key 或完整 base URL 里的密钥贴出来；伪造「连接正常」；替用户保存 / 切换服务商；调用不存在的服务商写工具。
+**不通过的样子**：把 API Key 或完整 base URL 里的密钥贴出来；伪造「连接正常」；替用户保存 / 切换服务商；调用不存在的服务商写工具；凭名字猜一个 `test_provider_id`（不先取列表里的 id）；编一个不存在的 id 去测。
 
 ### 4.7 机械核对（无对话）
 
 **用户原话**：（无；发布前机械检查）
 
-**期望**：`tools.md` §3 与 `TOOL_COPY` 逐名相等、工具数为 **41**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。
+**期望**：`tools.md` §3、`TOOL_COPY`、`vpn_tools()` 三处逐名相等、工具数为 **38**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。契约版本以 `tools.md` 3.32.0 与 `envelope.rs` 的 `CONTRACT_VERSION` 一致为准。
 
-**不通过的样子**：工具数不是 41；集合断言红；契约版本与 `envelope.rs` 的 `CONTRACT_VERSION` 不一致。
+**不通过的样子**：工具数不是 38；三处名字集合不相等；集合断言红；契约版本与 `envelope.rs` 的 `CONTRACT_VERSION` 不一致。
 
 ---
 
@@ -212,5 +212,4 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 - 同一事实的不同说法（「没有按服务挑选」/「目前只支持全局或智能」）。
 - 先追问还是先调工具：只要最终事实正确、没有多余写入。
 - 举例的数量、措辞长度、是否附带界面位置。
-- 第 5 组上线前，§4 的七条不参与判定；前四组必须全绿才可提交。
-- 第 5 组上线后，§4 的 4.1–4.6 按同样口径加入必绿；4.7 是机械项，与对话分开记录。
+- 第 5 组已上线：§4 的 4.1–4.6 按同样口径参与判定；4.7 是机械项，与对话分开记录。
