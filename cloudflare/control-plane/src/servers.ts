@@ -99,7 +99,11 @@ interface ServerRow {
 
 const GRACE_MS = 7 * 24 * 3600 * 1000;
 
-export type TrafficState = "ok" | "near" | "over" | "unpaid";
+/**
+ * 单台只有两态（§7.3 / §8）：扣费判据是账号池 `max(0, Σ已用 − Σ已释放)`，
+ * 单台超自己那份不产生任何扣费，所以没有 near / over——那两个概念属于账号级。
+ */
+export type TrafficState = "ok" | "unpaid";
 
 /** `MyServer` 的流量四字段（§7.3）。 */
 export interface TrafficFields {
@@ -136,7 +140,8 @@ async function accountTrafficUsed(
 /**
  * 本周期口径（§4.1）：额度按 `releasedBytes` 现算，**不读 `server_traffic.released_bytes`**
  * ——那一列只是上次上报时的快照，新机首报前是空的。
- * `near` 门槛是已释放额度的 80%；额度未知（0）时不判 near，否则 `0 >= 0` 会误报。
+ * 额度照常返回（账号池求和、「明天还能涨多少」都依赖它），但**不拿它跟本台已用比大小**：
+ * 单台没有 near / over，只有「因流量超支停机」这一个异常态。
  */
 function trafficFields(row: ServerRow, usedBytes: number, cycleId: string, now: number): TrafficFields {
   const limitBytes = releasedBytes(
@@ -151,17 +156,7 @@ function trafficFields(row: ServerRow, usedBytes: number, cycleId: string, now: 
     now,
   );
   const date = new Date(now);
-  const state: TrafficState =
-    row.failure_code === "traffic_overage"
-      ? "unpaid"
-      : limitBytes === 0
-        ? // 额度未知（老行 / 目录缺 transfer_gib）：不能凭空断言超支，落到 ok。
-          "ok"
-        : usedBytes > limitBytes
-          ? "over"
-          : usedBytes * 5 >= limitBytes * 4
-            ? "near"
-            : "ok";
+  const state: TrafficState = row.failure_code === "traffic_overage" ? "unpaid" : "ok";
   return {
     traffic_used_bytes: usedBytes,
     traffic_limit_bytes: limitBytes,

@@ -12,7 +12,6 @@ const CYCLE = "2026-11";
 
 /** 与 sqlite 用例同一组固定期望值：100 GiB、11 月 1 日建机、11 月 26 日 12 点查。 */
 const LIMIT_100GIB_NOV26 = 99_704_597_942;
-const THRESHOLD_100GIB_NOV26 = 79_763_678_354;
 /** 同上，但 11 月 23 日 12 点销毁：存活 22 个整天 → 23 天份。 */
 const LIMIT_100GIB_DESTROYED_NOV23 = 88_200_221_257;
 
@@ -120,24 +119,25 @@ afterEach(() => {
 });
 
 describe("MyServer 流量四字段 · FakeD1", () => {
-  it("按账号聚合出的已用字节决定 state：near 与 over", async () => {
+  it("单台只有 ok：用超自己那份额度也不变成 near / over（扣费按账号池）", async () => {
     const db = new FakeD1();
     const env = await envWith(db);
     addAccount(db, ACCOUNT, 10_000);
-    addServer(db, "srv_near", ACCOUNT, 30001);
+    addServer(db, "srv_low", ACCOUNT, 30001);
     addServer(db, "srv_over", ACCOUNT, 30002);
-    addTraffic(db, "srv_near", THRESHOLD_100GIB_NOV26);
+    addTraffic(db, "srv_low", 1024);
     addTraffic(db, "srv_over", LIMIT_100GIB_NOV26 + 1);
 
     const byId = Object.fromEntries((await listServers(env)).map((row) => [row.server_id, row]));
-    expect(byId.srv_near).toMatchObject({
-      traffic_used_bytes: THRESHOLD_100GIB_NOV26,
+    expect(byId.srv_low).toMatchObject({
+      traffic_used_bytes: 1024,
       traffic_limit_bytes: LIMIT_100GIB_NOV26,
-      traffic_state: "near",
+      traffic_state: "ok",
     });
     expect(byId.srv_over).toMatchObject({
       traffic_used_bytes: LIMIT_100GIB_NOV26 + 1,
-      traffic_state: "over",
+      traffic_limit_bytes: LIMIT_100GIB_NOV26,
+      traffic_state: "ok",
     });
   });
 

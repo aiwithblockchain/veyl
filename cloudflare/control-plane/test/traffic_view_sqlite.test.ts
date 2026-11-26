@@ -37,8 +37,6 @@ async function signingJwk(): Promise<string> {
 const LIMIT_100GIB_NOV26 = 99_704_597_942;
 /** 同上，但 11 月 23 日 12 点销毁：存活 22 个整天 → 23 天份。 */
 const LIMIT_100GIB_DESTROYED_NOV23 = 88_200_221_257;
-/** near 阈值 = ceil(LIMIT × 4 / 5)，见实现的整数判据。 */
-const THRESHOLD_100GIB_NOV26 = 79_763_678_354;
 /** 12 月 15 日查、11 月 1 日建机：从 12 月 1 日起算 14 个整天 → 15 天份。 */
 const LIMIT_100GIB_DEC15 = 57_521_883_428;
 
@@ -169,31 +167,28 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
     }
   });
 
-  it("near 边界：恰好 80% 是 near，少 1 字节仍是 ok；over 只看是否超过额度", async () => {
+  it("单台用量超过自己的已释放额度：仍是 ok（扣费按账号池，不按单台）", async () => {
     const { db, env, token } = await setup();
     try {
-      addServer(db, { id: "srv_near", transferGib: 100, port: 30002 });
-      addServer(db, { id: "srv_under", transferGib: 100, port: 30003 });
+      addServer(db, { id: "srv_under", transferGib: 100, port: 30002 });
       addServer(db, { id: "srv_over", transferGib: 100, port: 30004 });
-      addTraffic(db, "srv_near", CYCLE, THRESHOLD_100GIB_NOV26);
-      addTraffic(db, "srv_under", CYCLE, THRESHOLD_100GIB_NOV26 - 1);
+      addTraffic(db, "srv_under", CYCLE, 1024);
       addTraffic(db, "srv_over", CYCLE, LIMIT_100GIB_NOV26 + 1);
 
       const byId = Object.fromEntries(
         (await listServers(db, env, token)).map((server) => [server.server_id, server]),
       );
-      expect(byId.srv_near.traffic_state).toBe("near");
-      expect(byId.srv_near.traffic_used_bytes).toBe(THRESHOLD_100GIB_NOV26);
-      expect(byId.srv_near.traffic_limit_bytes).toBe(LIMIT_100GIB_NOV26);
       expect(byId.srv_under.traffic_state).toBe("ok");
-      expect(byId.srv_over.traffic_state).toBe("over");
+      expect(byId.srv_over.traffic_state).toBe("ok");
+      // 数字照常返回：界面只展示「这台用了多少」，不拿它跟额度比。
       expect(byId.srv_over.traffic_used_bytes).toBe(LIMIT_100GIB_NOV26 + 1);
+      expect(byId.srv_over.traffic_limit_bytes).toBe(LIMIT_100GIB_NOV26);
     } finally {
       db.close();
     }
   });
 
-  it("已用恰好等于额度：near，不是 over", async () => {
+  it("已用恰好等于额度：ok（不再有 near）", async () => {
     const { db, env, token } = await setup();
     try {
       addServer(db, { id: "srv_exact", transferGib: 100 });
@@ -201,7 +196,7 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
 
       const [server] = await listServers(db, env, token);
       expect(server.traffic_used_bytes).toBe(server.traffic_limit_bytes);
-      expect(server.traffic_state).toBe("near");
+      expect(server.traffic_state).toBe("ok");
     } finally {
       db.close();
     }
