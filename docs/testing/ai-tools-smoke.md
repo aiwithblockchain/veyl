@@ -238,4 +238,8 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 对应实现：`85b7ba9`（`OpenSettings` 收起 account 分区，`section: "account"` 按 schema 拒绝，`reason = account_not_in_settings`）。
 
-前四组此前已逐条实测通过（1.1–1.3、2.4、3.1–3.3）；2.1–2.3、2.5、2.6 仍由同事在真机上执行，完成后补记。
+### 2026-11-26 第 3 组回归（2.1–2.3、2.5、2.6）
+
+由同事在真机上逐条执行，结果按用户转述为**全部通过**：2.1 订阅地址（`NodeImport` + `source = "url"`，不传 `config_id`）、2.2 粘贴 `ss://`（`source = "text"`）、2.3 手动填写（`source = "manual"`，不回显密码）、2.5 缺字段（追问或缺字段报错，不写入半个节点）、2.6 来源与字段不匹配（`url` 不带 `password`）。具体 `tool_calls` 记录未回传，本行按执行人结论记录。
+
+前四组此前已逐条实测通过（1.1–1.3、2.1–2.6、3.1–3.3）。
