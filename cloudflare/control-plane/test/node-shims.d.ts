@@ -25,6 +25,8 @@ declare module "node:fs" {
   export function existsSync(path: string): boolean;
   export function mkdtempSync(prefix: string): string;
   export function writeFileSync(path: string, data: string): void;
+  export function readFileSync(path: string, encoding: "utf8"): string;
+  export function readdirSync(path: string): string[];
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
 }
 
@@ -34,4 +36,31 @@ declare module "node:os" {
 
 declare module "node:path" {
   export function join(...parts: string[]): string;
+}
+
+declare module "node:module" {
+  export function createRequire(path: string | URL): (id: string) => unknown;
+}
+
+declare module "node:url" {
+  export function fileURLToPath(url: string | URL): string;
+}
+
+// 真实 SQL 测试用 node:sqlite（Node 22+ 内置）；只为用到的最小接口声明。
+declare module "node:sqlite" {
+  export interface RunResult {
+    changes: number | bigint;
+    lastInsertRowid: number | bigint;
+  }
+  export interface StatementSync {
+    run(...params: unknown[]): RunResult;
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  }
+  export class DatabaseSync {
+    constructor(path: string);
+    exec(sql: string): void;
+    prepare(sql: string): StatementSync;
+    close(): void;
+  }
 }

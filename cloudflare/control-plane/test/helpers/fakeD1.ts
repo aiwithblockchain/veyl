@@ -102,6 +102,25 @@ export class FakeD1 {
     });
   }
 
+  /** 可清理的已销毁服务器：超龄且订单不处于 paid / provisioning（P2-2 守卫）。 */
+  private prunableServerIds(cutoff: number): Set<string> {
+    return new Set(
+      this.tables.servers
+        .filter(
+          (row) =>
+            row.state === "destroyed" &&
+            row.destroyed_at != null &&
+            Number(row.destroyed_at) < cutoff &&
+            !this.tables.orders.some(
+              (order) =>
+                order.id === row.order_id &&
+                (order.state === "paid" || order.state === "provisioning"),
+            ),
+        )
+        .map((row) => String(row.id)),
+    );
+  }
+
   exec(statement: Stmt): Row | null {
     const sql = normalise(statement.sql);
     const a = statement.args;
@@ -298,6 +317,58 @@ export class FakeD1 {
       if (row && this.tables.wallet_ledger.some((w) => w.id === ledgerId)) {
         row.charged_cents = Number(row.charged_cents) + Number(pay);
       }
+      return null;
+    }
+    if (sql.startsWith("delete from server_traffic where (server_id, cycle_id) in")) {
+      // 保留清理：非当前周期 + 超龄 + 小于该 server 历史最大 seq（最大 seq 行永远保留）。
+      // fake 按插入顺序截取前 N 条；真实 SQL 的 LIMIT 不带 ORDER BY 时顺序不保证，测试不依赖顺序。
+      const [cycle, cutoff, limit] = a;
+      const maxSeq = new Map<string, number>();
+      for (const row of this.tables.server_traffic) {
+        const id = String(row.server_id);
+        maxSeq.set(id, Math.max(maxSeq.get(id) ?? Number.NEGATIVE_INFINITY, Number(row.last_seq ?? 0)));
+      }
+      const victims = this.tables.server_traffic
+        .filter(
+          (row) =>
+            row.cycle_id !== cycle &&
+            Number(row.updated_at ?? 0) < Number(cutoff) &&
+            Number(row.last_seq ?? 0) <
+              (maxSeq.get(String(row.server_id)) ?? Number.NEGATIVE_INFINITY),
+        )
+        .slice(0, Number(limit));
+      const keys = new Set(victims.map((row) => `${row.server_id}:${row.cycle_id}`));
+      this.tables.server_traffic = this.tables.server_traffic.filter(
+        (row) => !keys.has(`${row.server_id}:${row.cycle_id}`),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from server_traffic where server_id in")) {
+      // servers 行被清理时同批删掉它的全部计量行（token 已没了，last_seq 不再有去重意义）。
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.server_traffic = this.tables.server_traffic.filter(
+        (row) => !(ids.has(String(row.server_id)) && eligible.has(String(row.server_id))),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from credentials where server_id in")) {
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.credentials = this.tables.credentials.filter(
+        (row) => !(ids.has(String(row.server_id)) && eligible.has(String(row.server_id))),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from servers where id in")) {
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.servers = this.tables.servers.filter(
+        (row) => !(ids.has(String(row.id)) && eligible.has(String(row.id))),
+      );
       return null;
     }
     if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from servers")) {
@@ -1636,6 +1707,15 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select id from servers where state = 'destroyed' and destroyed_at is not null")) {
+      const [cutoff, limit] = a;
+      const eligible = this.prunableServerIds(Number(cutoff));
+      return this.tables.servers
+        .filter((row) => eligible.has(String(row.id)))
+        .sort((left, right) => Number(left.destroyed_at) - Number(right.destroyed_at))
+        .slice(0, Number(limit))
+        .map((row) => ({ id: row.id }));
+    }
     if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at from servers")) {
       // 额度池现算：账号下每台机器（含已销毁行，由 releasedBytes 按 destroyed_at 截止）。
       return this.tables.servers
@@ -2268,6 +2348,23 @@ export class FakeStatement {
             (row.status === "pending" || row.status === "paid"),
         ).length;
       changes = active < Number(maxActive) ? 1 : 0;
+    } else if (sql.startsWith("delete from server_traffic where (server_id, cycle_id) in")) {
+      const before = this.db.rows("server_traffic").length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: before - this.db.rows("server_traffic").length } };
+    } else if (
+      sql.startsWith("delete from server_traffic where server_id in") ||
+      sql.startsWith("delete from credentials where server_id in") ||
+      sql.startsWith("delete from servers where id in")
+    ) {
+      const table = sql.includes("server_traffic")
+        ? "server_traffic"
+        : sql.includes("credentials")
+          ? "credentials"
+          : "servers";
+      const before = this.db.rows(table).length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: before - this.db.rows(table).length } };
     } else if (sql.startsWith("insert into server_traffic")) {
       const [serverId, cycleId, , , seq] = this.statement.args;
       const row = this.db
