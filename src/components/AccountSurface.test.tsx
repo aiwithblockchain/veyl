@@ -50,6 +50,14 @@ const LEDGER: BillingLedger = {
       server: null,
       note: null,
     },
+    {
+      id: "e2",
+      kind: "machine_day",
+      amount_cents: -20,
+      at: Date.UTC(2026, 10, 4, 12),
+      server: { id: "srv_1", name: "新加坡 1", plan: "s-1vcpu-1gb", region: "sgp1" },
+      note: null,
+    },
   ],
 };
 
@@ -192,6 +200,8 @@ describe("账户弹层", () => {
     const summary = await screen.findByText(/余额 \$118\.06/);
     expect(summary.textContent).toContain("充值 $120.00");
     expect(screen.getByText("+$120.00")).toBeTruthy();
+    // 金额固定两位小数、负号用 −：列宽再紧也不能只剩一位。
+    expect(screen.getByText("−$0.20")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "近 30 天账单" })).toBeNull();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
   });
