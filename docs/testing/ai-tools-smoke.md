@@ -190,7 +190,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 **用户原话**：（无；发布前机械检查）
 
-**期望**：`tools.md` §3、`TOOL_COPY`、`vpn_tools()` 三处逐名相等、工具数为 **38**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。契约版本以 `tools.md` 3.32.0 与 `envelope.rs` 的 `CONTRACT_VERSION` 一致为准。
+**期望**：`tools.md` §3、`TOOL_COPY`、`vpn_tools()` 三处逐名相等、工具数为 **38**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。契约版本以 `tools.md` 3.33.0 与 `envelope.rs` 的 `CONTRACT_VERSION` 一致为准。
 
 **不通过的样子**：工具数不是 38；三处名字集合不相等；集合断言红；契约版本与 `envelope.rs` 的 `CONTRACT_VERSION` 不一致。
 
