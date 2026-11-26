@@ -6,7 +6,7 @@
  * `AGENT_EVENTS.*`，不得出现事件名字符串字面量（契约 §9.1）。
  */
 
-export const CONTRACT_VERSION = "2.25.0" as const;
+export const CONTRACT_VERSION = "2.26.0" as const;
 
 export const AGENT_EVENTS = {
   messageChunk: "message-chunk",

@@ -110,7 +110,7 @@ type IssueSubmitConfirmDetails = {
 - 披露句固定：「会上报版本、平台、诊断步骤和这段摘要；不会上报密码、令牌、完整 IP、域名或日志文件。上报后立即公开在问题墙，只显示你邮箱的一部分。」
 - 用户取消 → `CANCELLED`，不建任何记录。
 
-**未登录**：`PRECONDITION_FAILED`，`details.reason = "not_logged_in"`，`next_actions` 指向登录；不弹确认卡。
+**未登录**：`PRECONDITION_FAILED`，`details.reason = "not_logged_in"`，不弹确认卡；**不给「去登录」一键动作**（账户已不在设置里，2026-11-26 起 `OpenSettings` 也不接受 `account`），改为 `content` 末尾写明「登录入口在左下角头像打开的账户弹层」；`next_actions` 仍只有本地报告 `IssueReport`。
 
 **离线 / 服务端关闭**：`UPSTREAM_ERROR` / `503`，`content` 写明「本地报告仍然可用」，`next_actions` 给 `IssueReport`。
 
