@@ -70,7 +70,7 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
-- The account menu holds: email, balance, top-up, sign out. "Use on other devices" is not in this menu or under Settings › Account — it is in the My servers rail (§3.5).
+- Email, balance, top-up and sign out are all under Settings › Account. "Use on other devices" is not there — it is in the My servers rail (§3.5).
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.
 
@@ -123,7 +123,7 @@ These switches are the same state as the top of the console (§3.1); changing th
 - Signed out: `Not signed in` and a `Sign in` button, with a note that signing in is needed to top up and buy servers. Sign-in itself is in §3.4.
 - Signed in: email, balance, `Top up`, `Refresh`, and the line "Balance is charged daily, per server."
 - The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
-- **There is no `Sign out` here**: it lives in the account menu on the avatar. Signing out does not affect an active connection.
+- **`Sign out` is on this page too**: signing out does not affect an active connection.
 
 #### Advanced
 
