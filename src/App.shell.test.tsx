@@ -614,7 +614,11 @@ describe("三区外壳与连接舞台", () => {
     render(<App />);
 
     await screen.findByRole("main", { name: "试用已到期" });
-    expect(screen.getByText("免费节点已从节点池移除。")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "免费节点已从节点池移除。7 天试用每人只有一次，不会再发放。",
+      ),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "新建节点" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /先试用免费节点/ })).toBeNull();
     // 到期屏没有节点可选、也没有连接动作。
@@ -667,7 +671,8 @@ describe("三区外壳与连接舞台", () => {
     expect(
       await screen.findByRole("button", { name: "连接节点" }),
     ).toBeTruthy();
-    expect(screen.queryByText("试用已到期")).toBeNull();
+    // 免费试用卡就地变成到期提醒，但整屏到期页不该出现。
+    expect(screen.queryByRole("main", { name: "试用已到期" })).toBeNull();
   });
 
   it("收到 trial-expired 后切到到期屏", async () => {
@@ -1297,7 +1302,7 @@ describe("无节点时连接屏的登录提示", () => {
 
     expect(
       await screen.findByText(
-        "免费节点不保证稳定，试用 7 天；建自己的服务器要先登录。",
+        "免费节点不保证稳定，试用 7 天，每人只有一次；建自己的服务器要先登录。",
       ),
     ).toBeTruthy();
   }, 15_000);
@@ -1319,7 +1324,7 @@ describe("无节点时连接屏的登录提示", () => {
     await renderApp();
 
     expect(
-      await screen.findByText("免费节点不保证稳定，试用 7 天。"),
+      await screen.findByText("免费节点不保证稳定，试用 7 天，每人只有一次。"),
     ).toBeTruthy();
     expect(screen.queryByText(/建自己的服务器要先登录/)).toBeNull();
   }, 15_000);
@@ -1337,7 +1342,7 @@ describe("无节点时连接屏的登录提示", () => {
       expect(container.querySelector(".activity__dot")).not.toBeNull(),
     );
 
-    expect(screen.getByText("免费节点不保证稳定，试用 7 天。")).toBeTruthy();
+    expect(screen.getByText("免费节点不保证稳定，试用 7 天，每人只有一次。")).toBeTruthy();
     expect(screen.queryByText(/建自己的服务器要先登录/)).toBeNull();
   }, 15_000);
 });

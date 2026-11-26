@@ -537,7 +537,7 @@ export const en: Record<MessageKey, string> = {
   // Trial and start choice
   "trial.expired.aria": "Trial expired",
   "trial.expired.title": "Trial expired",
-  "trial.expired.note": "The free nodes have been removed from the pool.",
+  "trial.expired.note": "The free nodes have been removed from the pool. The 7-day trial is one per person and won't be reissued.",
   "trial.expired.newNode": "New node",
   "trial.step.fetch": "Fetch the built-in configuration",
   "trial.step.join": "Add free nodes",
@@ -553,13 +553,14 @@ export const en: Record<MessageKey, string> = {
   "trial.start.aria": "No nodes yet",
   "trial.start.title": "Where do you want to start?",
   "trial.start.noteGuest":
-    "Free nodes aren't guaranteed to be stable and last 7 days. Creating your own server requires signing in.",
-  "trial.start.note": "Free nodes aren't guaranteed to be stable and last 7 days.",
+    "Free nodes aren't guaranteed to be stable; the trial lasts 7 days and is one per person. Creating your own server requires signing in.",
+  "trial.start.note":
+    "Free nodes aren't guaranteed to be stable; the trial lasts 7 days and is one per person.",
   "trial.start.newNode": "New node",
   "trial.start.newNodeSub": "Your own server is more stable",
   "trial.start.busy": "Adding free nodes",
   "trial.start.free": "Try free nodes first",
-  "trial.start.freeSub": "2 nodes, 7-day trial",
+  "trial.start.freeSub": "2 nodes, 7-day trial, one per person",
   "trial.start.emptyConfig": "This configuration has no nodes left",
   "trial.addOwnNode": "Have your own node? Add it manually",
   "trial.error.fetch": "Couldn't fetch the built-in configuration. Try again.",
@@ -871,7 +872,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.trial.emptyAvailable":
     "{count} free nodes are still available, with a 7-day trial.",
   "myservers.trial.emptyCounting": "{count} free nodes are still available; {countdown}.",
-  "myservers.trial.ended": "Trial ended",
+  "myservers.trial.ended": "Trial ended · one per person",
   "myservers.trial.onTrial": "On trial",
   "myservers.trial.availableHint":
     "{count} free nodes are still available, with a 7-day trial.",

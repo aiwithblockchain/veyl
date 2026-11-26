@@ -41,10 +41,10 @@ describe("试用口径：五种输入", () => {
     expect(trialGroupHint(null, expires, NOW)).toBe("6 天后到期");
   });
 
-  it("expired：过去时间归为 ended，空态不显示，组标题写已到期", () => {
+  it("expired：过去时间归为 ended，空态不显示，组标题写已到期与每人一次", () => {
     expect(trialPhase("active", at(-1), NOW)).toEqual({ kind: "ended" });
     expect(trialEmptyHint("active", 2, at(-1), NOW)).toBeNull();
-    expect(trialGroupHint(null, at(-1), NOW)).toBe("已到期");
+    expect(trialGroupHint(null, at(-1), NOW)).toBe("已到期，每人一次");
   });
 
   it("无时间戳：空态不显示，组标题写试用中", () => {
@@ -68,7 +68,7 @@ describe("试用口径：五种输入", () => {
     expect(empty).not.toContain("试用 7 天");
     expect(group).toBe("6 天后到期");
     expect(group).not.toBe("试用中");
-    expect(group).not.toBe("已到期");
+    expect(group).not.toBe("已到期，每人一次");
 
     expect(trialEmptyHint("available", 2, null, NOW)).not.toContain("天后到期");
     expect(trialGroupHint(null, null, NOW)).not.toContain("天后到期");
@@ -87,7 +87,7 @@ describe("试用口径：边界", () => {
 
   it("到期时刻当下与之前都算 ended，不写 0 天后", () => {
     expect(trialPhase("active", at(0), NOW)).toEqual({ kind: "ended" });
-    expect(trialGroupHint(null, at(0), NOW)).toBe("已到期");
+    expect(trialGroupHint(null, at(0), NOW)).toBe("已到期，每人一次");
     expect(trialEmptyHint("active", 2, at(0), NOW)).toBeNull();
   });
 
@@ -114,7 +114,9 @@ describe("试用口径：边界", () => {
   it("expired 状态不信未来时间：状态已过期就按 ended", () => {
     expect(trialPhase("expired", at(6 * DAY), NOW)).toEqual({ kind: "ended" });
     expect(trialEmptyHint("expired", 2, at(6 * DAY), NOW)).toBeNull();
-    expect(trialGroupHint("expired", at(6 * DAY), NOW)).toBe("已到期");
+    expect(trialGroupHint("expired", at(6 * DAY), NOW)).toBe(
+      "已到期，每人一次",
+    );
   });
 });
 
