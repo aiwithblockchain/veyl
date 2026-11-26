@@ -39,6 +39,10 @@ const CANCEL_OPTION: &str = "取消";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// 设计 §10 的 20 秒只够握手；真实轮换要等重启与验活，最坏 60 秒以上。
 const MCP_TIMEOUT: Duration = Duration::from_secs(90);
+/// 连接阶段自己的上限：机器已被销毁时 reqwest 默认会跟着系统 SYN 重试等约 75 秒，
+/// 界面就一直转「正在升级」。活着的节点握手远快于 10 秒；真正的任务预算仍由调用方的
+/// `UPGRADE_TIMEOUT` / `MCP_TIMEOUT` 兜底。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 轮换由用户在界面上确认过，agent 只需要知道不是自动排障。
 const AGENT_REASON: &str = "user";
 
@@ -368,6 +372,7 @@ fn ca_client(ca_pem: &str) -> Result<reqwest13::Client, AgentFailure> {
         .map_err(|_| AgentFailure::BadResponse("ca_pem".into()))?;
     reqwest13::Client::builder()
         .add_root_certificate(certificate)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         // 构造阶段不联网：失败只能是 CA 不可用（或本机 TLS 后端起不来），不是节点证书的问题。
         .map_err(|_| AgentFailure::BadResponse("ca_pem".into()))
@@ -440,6 +445,7 @@ fn pinned_client(expected: [u8; 32]) -> Result<reqwest13::Client, AgentFailure> 
         .with_no_client_auth();
     reqwest13::Client::builder()
         .use_preconfigured_tls(config)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|_| AgentFailure::BadResponse("tls_client".into()))
 }
