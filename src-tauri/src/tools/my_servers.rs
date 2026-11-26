@@ -166,7 +166,7 @@ impl Tool for MyServersTool {
         "查看「我的服务器」列表：名称、地区、状态、地址、是否可用、月费、流量。\
          只读；返回地址，不返回端口、密码。用户问这台机器的地址时直接答，不要绕。\
          账号本月流量只看摘要首行，不要把各台相加——列表不含已销毁的机器；\
-         流量只说已用与额度，不推算还能用几天，也不换算成钱。\
+         流量只说已用与已释放（不是本月上限），不推算还能用几天，也不换算成钱。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
          不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
          用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
@@ -223,17 +223,18 @@ impl Tool for MyServersTool {
     }
 }
 
-/// 字节按 GB（10^9）展示，保留一位小数；只做展示，不参与任何判定。
-fn gb_text(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+/// 字节按 GiB（1024³）展示，与界面 `formatTrafficGib` 同一口径；只做展示。
+fn gib_text(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
 }
 
-/// 额度为 0 = 控制面没给（额度未知）：只说已用，不编一个 0 GB 的额度。
+/// `limit` 是已释放额度（按存在天数逐日释放），不是本月上限；0 = 控制面没给，
+/// 只说已用，不编一个 0 GiB 的额度。
 fn traffic_text(used: u64, limit: u64) -> String {
     if limit == 0 {
-        format!("已用 {}", gb_text(used))
+        format!("已用 {}", gib_text(used))
     } else {
-        format!("已用 {} / 额度 {}", gb_text(used), gb_text(limit))
+        format!("已用 {} / 已释放 {}", gib_text(used), gib_text(limit))
     }
 }
 
@@ -282,25 +283,53 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let mut line = format!("- {id} | {name} | {region} | {state} | {ip} | 每天 {:.2} 美元", daily as f64 / 100.0);
-        // 模型只看得到 content：服务中的本期有效至必须写在这里（不推算剩余天数）。
+        // 计费锚点：到期前 1 小时进可扣窗口，扣成功顺延一天，扣不到当场停机销毁、无宽限。
+        // 所以既能说「已付到哪一刻」，也不能说成「有效期」或「到期」。
         if server.get("billing_state").and_then(Value::as_str) == Some("active") {
-            if let Some(paid_until) = server.get("paid_until").and_then(Value::as_str) {
+            if let Some(paid_until) = server
+                .get("paid_until")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|until| !until.is_empty())
+            {
                 let until = friendly_time(paid_until).unwrap_or_else(|| paid_until.to_string());
-                line.push_str(&format!(" | 本期有效至 {until}"));
+                line.push_str(&format!(" | 已付至 {until}（每天自动续扣；扣不到即停机）"));
             }
         }
-        // 正常的（ok）不写流量，避免摘要变长；非 ok 就是因流量超支停机，必须说出来。
-        if let Some(state) = server.get("traffic_state").and_then(Value::as_str) {
-            if state != "ok" {
-                let traffic = match (
-                    server.get("traffic_used_bytes").and_then(Value::as_u64),
-                    server.get("traffic_limit_bytes").and_then(Value::as_u64),
-                ) {
-                    (Some(used), Some(limit)) => traffic_text(used, limit),
-                    _ => "已超额度".to_string(),
-                };
-                line.push_str(&format!(" | 流量 {traffic}（未付费）"));
+        // 逐台在已释放额度 > 0 时写；旧控制面 / 新机首报前是 0，不写，避免假零值。
+        // 机型月额度与清零点只在 data 里，模型读不到，所以放在这里。
+        if let (Some(used), Some(limit)) = (
+            server.get("traffic_used_bytes").and_then(Value::as_u64),
+            server.get("traffic_limit_bytes").and_then(Value::as_u64),
+        ) {
+            if limit > 0 {
+                line.push_str(&format!(" | 本月流量 {}", traffic_text(used, limit)));
+                let mut notes = Vec::new();
+                if let Some(quota) = server
+                    .get("transfer_gib")
+                    .and_then(Value::as_i64)
+                    .filter(|quota| *quota > 0)
+                {
+                    notes.push(format!("机型月额度 {quota} GiB"));
+                }
+                if let Some(reset) = server
+                    .get("traffic_reset_at")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|reset| !reset.is_empty())
+                {
+                    let reset = friendly_time(reset).unwrap_or_else(|| reset.to_string());
+                    notes.push(format!("{reset} 清零"));
+                }
+                if !notes.is_empty() {
+                    line.push_str(&format!("（{}）", notes.join("，")));
+                }
             }
+        }
+        // 非 ok 就是因流量超支停机，必须说出来。台账仍是账户级，单台不标「已超」。
+        match server.get("traffic_state").and_then(Value::as_str) {
+            Some("ok") | None => {}
+            Some(_) => line.push_str(" | 流量超支已停机（未付费）"),
         }
         if ready {
             line.push_str(" | 可建配置");
@@ -560,21 +589,29 @@ mod tests {
         }
     }
 
-    /// 服务中的本期有效至写进摘要；结算前不给日期，也不给派生日数。
+    /// 计费是按天自动续扣，扣不到即停机；不写成「有效期」或「到期」。
     #[test]
-    fn a_paid_server_shows_its_period_end_in_the_summary() {
+    fn a_paid_server_says_how_far_it_is_paid_not_an_expiry() {
         let active = summarise_servers(&[json!({
             "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
             "ip": "203.0.113.1", "node_ready": true, "daily_price_cents": 30,
             "paid_until": "2026-11-27T10:00:00Z", "billing_state": "active",
         })], None);
-        assert!(active.contains("本期有效至"), "{active}");
+        assert!(active.contains("已付至"), "{active}");
+        assert!(active.contains("每天自动续扣"), "{active}");
+        assert!(active.contains("扣不到即停机"), "{active}");
+        for forbidden in ["有效期", "到期"] {
+            assert!(
+                !active.contains(forbidden),
+                "不能出现「{forbidden}」：{active}"
+            );
+        }
 
         let pending = summarise_servers(&[json!({
             "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "creating",
             "paid_until": null, "billing_state": "pending",
         })], None);
-        assert!(!pending.contains("本期有效至"), "{pending}");
+        assert!(!pending.contains("已付至"), "{pending}");
         assert!(!pending.contains("约可运行"), "{pending}");
     }
 
@@ -594,10 +631,17 @@ mod tests {
         });
         let text = summarise_servers(&servers, Some(&pool));
         assert!(
-            text.starts_with("本月流量：已用 5.4 GB / 额度 100.0 GB"),
+            text.starts_with("本月流量：已用 5.0 GiB / 已释放 93.1 GiB"),
             "首行必须是账号池：{text}"
         );
-        assert!(!text.contains("1.1 GB"), "正常的机器不写流量：{text}");
+        assert!(
+            !text.contains("本月流量：已用 1.0"),
+            "不能把逐台求和当账号总量：{text}"
+        );
+        assert!(
+            text.contains("本月流量 已用 1.0 GiB"),
+            "每台自己的用量照写：{text}"
+        );
     }
 
     /// 旧控制面没有池子：整段不出现，也绝不补一个 0。
@@ -614,7 +658,7 @@ mod tests {
     fn the_pool_survives_an_empty_server_list() {
         let pool = json!({ "used_bytes": 500_000_000_u64, "limit_bytes": 100_000_000_000_u64 });
         let text = summarise_servers(&[], Some(&pool));
-        assert!(text.contains("本月流量：已用 0.5 GB / 额度 100.0 GB"), "{text}");
+        assert!(text.contains("本月流量：已用 0.5 GiB / 已释放 93.1 GiB"), "{text}");
         assert!(text.contains("还没有自建服务器"), "{text}");
     }
 
@@ -623,13 +667,31 @@ mod tests {
     fn an_unknown_limit_is_not_printed_as_zero() {
         let pool = json!({ "used_bytes": 500_000_000_u64, "limit_bytes": 0 });
         let text = summarise_servers(&[], Some(&pool));
-        assert!(text.contains("本月流量：已用 0.5 GB"), "{text}");
+        assert!(text.contains("本月流量：已用 0.5 GiB"), "{text}");
         assert!(!text.contains("额度"), "{text}");
     }
 
-    /// 非 ok（unpaid）的机器必须在摘要里带上已用 / 额度；正常的机器不带。
+    /// 每台都写本月流量：已释放额度、机型月额度、清零点（本机时区）都要出来。
     #[test]
-    fn an_unpaid_server_shows_its_traffic_in_the_summary() {
+    fn a_server_row_carries_released_quota_and_reset_time() {
+        let text = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "traffic_used_bytes": 3_200_000_000_u64,
+            "traffic_limit_bytes": 12_000_000_000_u64,
+            "transfer_gib": 50,
+            "traffic_reset_at": "2026-12-01T00:00:00Z",
+            "traffic_state": "ok",
+        })], None);
+        assert!(text.contains("已释放 11.2 GiB"), "{text}");
+        assert!(text.contains("机型月额度 50 GiB"), "{text}");
+        assert!(text.contains("清零"), "{text}");
+        assert!(!text.contains("流量超支"), "正常机不标超支：{text}");
+        assert!(!text.contains("GB"), "单位只能 GiB，不能混 GB：{text}");
+    }
+
+    /// 非 ok（unpaid）额外标「流量超支已停机」；流量数字每台照写。
+    #[test]
+    fn an_unpaid_server_is_marked_as_stopped_for_traffic() {
         let text = summarise_servers(&[json!({
             "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
             "ip": null, "node_ready": false, "daily_price_cents": 30,
@@ -638,17 +700,55 @@ mod tests {
             "traffic_state": "unpaid",
         })], None);
         assert!(
-            text.contains("流量 已用 6.0 GB / 额度 5.0 GB（未付费）"),
+            text.contains("本月流量 已用 5.6 GiB / 已释放 4.7 GiB"),
             "{text}"
         );
+        assert!(text.contains("流量超支已停机（未付费）"), "{text}");
+    }
 
-        let ok = summarise_servers(&[json!({
-            "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "active",
+    /// 旧控制面给空串：不能拼出「已付至 （…）」或「（ 清零）」。
+    #[test]
+    fn empty_timestamps_do_not_leave_empty_parentheses() {
+        let text = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "paid_until": "   ", "billing_state": "active",
             "traffic_used_bytes": 1_000_000_000_u64,
             "traffic_limit_bytes": 50_000_000_000_u64,
+            "traffic_reset_at": "",
             "traffic_state": "ok",
         })], None);
-        assert!(!ok.contains("流量"), "正常的机器不写流量：{ok}");
+        assert!(!text.contains("已付至"), "{text}");
+        assert!(!text.contains("清零"), "{text}");
+        assert!(!text.contains("（）"), "{text}");
+        assert!(!text.contains("（ "), "{text}");
+    }
+
+    /// 旧控制面四字段默认 0：逐台不写流量，不能编「已用 0.0 GiB」。
+    #[test]
+    fn legacy_zero_traffic_is_not_reported_as_zero() {
+        let text = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "traffic_used_bytes": 0, "traffic_limit_bytes": 0,
+            "traffic_reset_at": "", "traffic_state": "ok",
+        })], None);
+        assert!(!text.contains("本月流量"), "{text}");
+        assert!(!text.contains("0.0 GiB"), "{text}");
+    }
+
+    /// 单位与界面一致：GiB（1024³），任何一处都不出现 GB。
+    #[test]
+    fn traffic_uses_gib_not_gb() {
+        let text = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "traffic_used_bytes": 536_870_912_000_u64,
+            "traffic_limit_bytes": 536_870_912_000_u64,
+            "transfer_gib": 500,
+            "traffic_reset_at": "2026-12-01T00:00:00Z",
+            "traffic_state": "ok",
+        })], None);
+        assert!(text.contains("已用 500.0 GiB / 已释放 500.0 GiB"), "{text}");
+        assert!(text.contains("机型月额度 500 GiB"), "{text}");
+        assert!(!text.contains("GB"), "不能混用 GB：{text}");
     }
 
     /// 已销毁的服务器给用户能懂的原因；内部 failure_code 不能交给模型。

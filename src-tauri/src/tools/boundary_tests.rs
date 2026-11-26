@@ -605,7 +605,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.37.0",
+                env["contract_version"], "3.38.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1259,7 +1259,7 @@ async fn my_servers_reports_the_account_pool_not_a_sum() {
     );
     let content = env["summary"].as_str().unwrap_or("");
     assert!(
-        content.contains("本月流量：已用 5.4 GB / 额度 100.0 GB"),
+        content.contains("本月流量：已用 5.0 GiB / 已释放 93.1 GiB"),
         "首行必须是账号池：{content}"
     );
     assert_eq!(env["data"]["servers"][0]["traffic_state"], "ok");
@@ -1273,7 +1273,7 @@ async fn my_servers_reports_the_account_pool_not_a_sum() {
         "不能把逐台求和当账号总量：{content}"
     );
     assert!(
-        content.contains("流量 已用 1.1 GB / 额度 50.0 GB（未付费）"),
+        content.contains("流量超支已停机（未付费）"),
         "unpaid 的机器必须写进摘要：{content}"
     );
 
@@ -1294,8 +1294,11 @@ async fn my_servers_reports_the_account_pool_not_a_sum() {
         "没有池子就不出这个字段：{env}"
     );
     assert!(
-        !env["summary"].as_str().unwrap_or("").contains("本月流量"),
-        "{env}"
+        !env["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("本月流量："),
+        "没有池子就没有账号池那一行（逐台流量照写）：{env}"
     );
 
     auth::clear_tokens_for_test();
