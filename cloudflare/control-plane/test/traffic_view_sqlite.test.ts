@@ -49,6 +49,7 @@ interface ServerSpec {
   state?: string;
   destroyedAt?: number | null;
   failureCode?: string | null;
+  dismissedAt?: number | null;
   port?: number;
 }
 
@@ -56,8 +57,8 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
   db.run(
     "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, " +
       "daily_price_cents, billing_anchor_at, state, node_port, transfer_gib, ready_at, failure_code, " +
-      "created_at, updated_at, destroyed_at, billing_state) " +
-      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+      "created_at, updated_at, destroyed_at, billing_state, dismissed_at) " +
+      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     spec.id,
     ACCOUNT,
     `ord_${spec.id}`,
@@ -71,6 +72,7 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
     NOW - 60 * DAY_MS,
     NOW - 60 * DAY_MS,
     spec.destroyedAt ?? null,
+    spec.dismissedAt ?? null,
   );
 }
 
@@ -296,7 +298,7 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
     }
   });
 
-  it("traffic_pool 计入列表里看不到的已销毁机器，且与 accountTotals 同源", async () => {
+  it("traffic_pool 计入列表里看不到的已销毁机器与已 dismiss 的墓碑，且与 accountTotals 同源", async () => {
     const { db, env, token } = await setup();
     try {
       addServer(db, { id: "srv_live", transferGib: 100, port: 30011 });
@@ -308,8 +310,19 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
         destroyedAt: NOW - 3 * DAY_MS,
         port: 30012,
       });
+      // 已 dismiss 的余额不足墓碑：同样不在列表里，同样计入池子。
+      addServer(db, {
+        id: "srv_dismissed",
+        transferGib: 100,
+        state: "destroyed",
+        destroyedAt: NOW - 3 * DAY_MS,
+        failureCode: "billing_unpaid",
+        dismissedAt: NOW - DAY_MS,
+        port: 30013,
+      });
       addTraffic(db, "srv_live", CYCLE, 1024);
       addTraffic(db, "srv_gone", CYCLE, 400 * GIB);
+      addTraffic(db, "srv_dismissed", CYCLE, 200 * GIB);
 
       const response = await handleServers(listRequest(token), env as never);
       expect(response?.status).toBe(200);
@@ -319,8 +332,8 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
       };
       expect(body.servers.map((server) => server.server_id)).toEqual(["srv_live"]);
       expect(body.traffic_pool).toEqual({
-        used_bytes: 400 * GIB + 1024,
-        limit_bytes: LIMIT_100GIB_NOV26 + LIMIT_100GIB_DESTROYED_NOV23,
+        used_bytes: 400 * GIB + 200 * GIB + 1024,
+        limit_bytes: LIMIT_100GIB_NOV26 + 2 * LIMIT_100GIB_DESTROYED_NOV23,
       });
 
       // 防「另写一份求和」：必须与扣费用的 accountTotals 逐字节一致。

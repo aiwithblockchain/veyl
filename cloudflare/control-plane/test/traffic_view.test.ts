@@ -13,6 +13,8 @@ const CYCLE = "2026-11";
 /** 与 sqlite 用例同一组固定期望值：100 GiB、11 月 1 日建机、11 月 26 日 12 点查。 */
 const LIMIT_100GIB_NOV26 = 99_704_597_942;
 const THRESHOLD_100GIB_NOV26 = 79_763_678_354;
+/** 同上，但 11 月 23 日 12 点销毁：存活 22 个整天 → 23 天份。 */
+const LIMIT_100GIB_DESTROYED_NOV23 = 88_200_221_257;
 
 type Row = Record<string, unknown>;
 
@@ -34,7 +36,12 @@ function addServer(
   id: string,
   accountId: string,
   port: number,
-  extra: { state?: string; destroyedAt?: number | null } = {},
+  extra: {
+    state?: string;
+    destroyedAt?: number | null;
+    failureCode?: string | null;
+    dismissedAt?: number | null;
+  } = {},
 ): void {
   db.rows("servers").push({
     id,
@@ -56,7 +63,8 @@ function addServer(
     created_at: Date.UTC(2026, 10, 1),
     updated_at: Date.UTC(2026, 10, 1),
     destroyed_at: extra.destroyedAt ?? null,
-    failure_code: null,
+    failure_code: extra.failureCode ?? null,
+    dismissed_at: extra.dismissedAt ?? null,
     charge_mode: "at_ready",
   });
 }
@@ -153,17 +161,26 @@ describe("MyServer 流量四字段 · FakeD1", () => {
     expect(servers[0].traffic_state).toBe("ok");
   });
 
-  it("traffic_pool 计入列表里看不到的已销毁机器", async () => {
+  it("traffic_pool 计入列表里看不到的已销毁机器与已 dismiss 的墓碑", async () => {
     const db = new FakeD1();
     const env = await envWith(db);
     addAccount(db, ACCOUNT, 10_000);
     addServer(db, "srv_live", ACCOUNT, 30005);
+    // 用户主动销毁：不在列表里，但扣费口径仍然计入。
     addServer(db, "srv_gone", ACCOUNT, 30006, {
       state: "destroyed",
       destroyedAt: NOW - 3 * 24 * 3600 * 1000,
     });
+    // 已 dismiss 的余额不足墓碑：同样不在列表里，同样计入池子。
+    addServer(db, "srv_dismissed", ACCOUNT, 30007, {
+      state: "destroyed",
+      destroyedAt: NOW - 3 * 24 * 3600 * 1000,
+      failureCode: "billing_unpaid",
+      dismissedAt: NOW - 24 * 3600 * 1000,
+    });
     addTraffic(db, "srv_live", 1024);
     addTraffic(db, "srv_gone", 400 * 1024 * 1024 * 1024);
+    addTraffic(db, "srv_dismissed", 200 * 1024 * 1024 * 1024);
 
     const response = await handleServers(
       new Request("https://example.com/v1/servers", {
@@ -177,8 +194,12 @@ describe("MyServer 流量四字段 · FakeD1", () => {
       traffic_pool: { used_bytes: number; limit_bytes: number };
     };
     expect(body.servers.map((row) => row.server_id)).toEqual(["srv_live"]);
-    expect(body.traffic_pool.used_bytes).toBe(400 * 1024 * 1024 * 1024 + 1024);
-    // 两台机器都按 §4.1 释放额度（销毁那台截止 destroyed_at）。
-    expect(body.traffic_pool.limit_bytes).toBeGreaterThan(LIMIT_100GIB_NOV26);
+    expect(body.traffic_pool.used_bytes).toBe(
+      400 * 1024 * 1024 * 1024 + 200 * 1024 * 1024 * 1024 + 1024,
+    );
+    // 三台都按 §4.1 释放额度：活着那台 99,704,597,942；两台 11 月 23 日销毁的各 88,200,221,257。
+    expect(body.traffic_pool.limit_bytes).toBe(
+      LIMIT_100GIB_NOV26 + 2 * LIMIT_100GIB_DESTROYED_NOV23,
+    );
   });
 });
