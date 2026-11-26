@@ -1750,6 +1750,11 @@ body[data-resizing] {
   padding: 22px 28px 8px;
 }
 
+/* 未登录时 body 是最后一个子元素：补回与有 footer 时相同的底边距。 */
+.account-surface > .account-surface__body:last-child {
+  padding-bottom: 22px;
+}
+
 /* 弹层头部不画线：全页只有两条 hair。 */
 .account-surface .modal__head {
   padding: 16px 28px 0;

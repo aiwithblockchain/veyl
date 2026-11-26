@@ -46,6 +46,13 @@ describe("充值面板（账户弹层内嵌）", () => {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
     }
     expect(screen.queryByLabelText("自定义金额")).toBeNull();
+
+    // 收纳时指向的目标还不存在：不挂悬空的 aria-controls。
+    const other = screen.getByRole("button", { name: "其他" });
+    expect(other.getAttribute("aria-controls")).toBeNull();
+    fireEvent.click(other);
+    expect(other.getAttribute("aria-controls")).toBe("myservers-topup-custom");
+    expect(document.getElementById("myservers-topup-custom")).toBeTruthy();
   });
 
   it("打开收银台：交给外层关面板，不进入等待态", async () => {
@@ -178,7 +185,8 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(onTopUp).not.toHaveBeenCalled();
     expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
 
-    fireEvent.change(input, { target: { value: "10" } });    const submit = screen.getByRole("button", {
+    fireEvent.change(input, { target: { value: "10" } });
+    const submit = screen.getByRole("button", {
       name: "充值 $10",
     }) as HTMLButtonElement;
     expect(submit.disabled).toBe(false);

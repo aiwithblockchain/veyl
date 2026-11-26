@@ -131,7 +131,7 @@ export function MyServerTopUp({ wallet, onTopUp, onCheckoutOpened }: Props) {
           type="button"
           className={`myservers-topup__denom${customOpen ? " is-open" : ""}`}
           aria-expanded={customOpen}
-          aria-controls="myservers-topup-custom"
+          aria-controls={customOpen ? "myservers-topup-custom" : undefined}
           disabled={busy}
           onClick={() => setCustomOpen((value) => !value)}
         >

@@ -985,6 +985,13 @@ describe("三区外壳与连接舞台", () => {
     await waitFor(() => expect(topup?.getAttribute("data-pointed")).toBe("true"));
     expect(create).not.toHaveBeenCalled();
 
+    // 第一下 Esc 只收充值面板，第二下才关账户层。
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(topup?.getAttribute("aria-hidden")).toBe("true"),
+    );
+    expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
+
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),

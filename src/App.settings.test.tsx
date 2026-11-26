@@ -459,6 +459,7 @@ describe("余额刷新的门禁（App 接线）", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: /^账户，/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "充值" }));
     fireEvent.click(await screen.findByRole("button", { name: "$10" }));
 
     await waitFor(() =>
