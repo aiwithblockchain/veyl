@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.76.0`
+> 契约版本：`2.77.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -700,7 +700,7 @@ type ImportSkipReason =
 | 边界 | 要求 |
 |---|---|
 | 协议 | **仅 `https`**。`http` 一律 `INVALID_ARGUMENT`，`details.reason = "insecure_url"`——订阅链接里通常直接含节点密码，明文传输等于把它交给链路上的每一个人 |
-| 支持的格式 | base64 编码的 `ss://` 多行列表；或直接是换行的 `ss://` 列表。两种 SIP002 形态都要认：`ss://base64(method:password)@host:port#name` 与整段 base64 的 `ss://base64(method:password@host:port)#name` |
+| 支持的格式 | ① base64 编码的 `ss://` 多行列表；② 直接是换行的 `ss://` 列表（两种 SIP002 形态都要认：`ss://base64(method:password)@host:port#name` 与整段 base64 的 `ss://base64(method:password@host:port)#name`）；③ **Clash 配置的块状 `proxies:` 子集**：只取 `type: ss` 的条目（`name` / `server` / `port` / `cipher` / `password`），其它类型按 `unsupported_scheme` 跳过，plugin、flow 写法、锚点 / 别名按 `malformed` 跳过。手写解析，不引 YAML 库；别名展开这类以订阅内容为入口的风险不存在 |
 | SSRF | 只允许解析到**公网**地址；禁止重定向到内网；最多 3 次重定向；响应 ≤ 1 MB；超时 10 s。用户填的 URL 由我们发起请求，不设限就能访问本机与内网服务 |
 | 拉不到 | `UPSTREAM_ERROR`，`details.reason = "fetch_failed"`，**不保存空配置、不创建节点** |
 | 自动连接 | **不做**。拉下来的东西来自任何地方，用户确认之后才生效 |
@@ -711,7 +711,9 @@ type ImportSkipReason =
 - 返回值与日志**永不含密码**，不回显订阅内容。
 - 本阶段**只做 Shadowsocks**，method 白名单由 Host 常量维护（`nodes::SUPPORTED_METHODS`，覆盖 sing-box 支持的 Shadowsocks 方法）；白名单变化不要求改表结构。
 
-错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
+错误：`INVALID_ARGUMENT`（`insecure_url`、`invalid_url`、`not_subscription`、`not_node_text`）、`NOT_FOUND`（`configId`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
+
+- `not_subscription` = 认出是 Clash 配置，但里面没有能用的 Shadowsocks 节点；`not_node_text` = 内容压根不是节点列表（空、乱码、既没有 `ss://` 也没有根级 `proxies:`）。界面按这两个 reason 分别给「Clash 里没有可用节点」和「内容里没有可用节点」，不要再回落到「检查地址」。
 
 ### 4.1.1 `node_import_text { text, configId? }` → `NodeImportResult`
 
@@ -721,9 +723,9 @@ type ImportSkipReason =
 
 | 边界 | 要求 |
 |---|---|
-| 支持的格式 | 与 §4.1 同一套逐行解析：换行的 `ss://` 列表，或整段 base64 编码的 `ss://` 列表；两种 SIP002 形态都认 |
+| 支持的格式 | 与 §4.1 同一套：换行的 `ss://` 列表、整段 base64 编码的 `ss://` 列表，或 Clash 配置的块状 `proxies:` 子集（只取 `type: ss`）；两种 SIP002 形态都认 |
 | 逐条解析 | 一行失败只影响该行：成功的进 `nodes`，失败的进 `skipped`（`unsupported_scheme` / `unsupported_method` / `malformed`），**不整批作废** |
-| 一条都用不了 | `INVALID_ARGUMENT`，`details.reason = "not_node_text"`，可读消息「粘贴的内容里没有可用的节点（支持多行 ss:// 链接）」 |
+| 一条都用不了 | `INVALID_ARGUMENT`：内容是 Clash 但没有可用的 ss → `details.reason = "not_subscription"`；压根不是节点列表 → `"not_node_text"`。可读消息「内容里没有可用的节点（支持 ss:// 链接或 Clash 配置）」 |
 | 去重 | 沿用 `source_key`（`server` + `port` + `method` + `name`）。重复不报错，计入 `skipped`（`reason = "duplicate"`），不新建记录 |
 | 来源 | 落库为 `source = "manual"`（用户自己提供，不是订阅） |
 | 自动连接 | **不做** |
@@ -771,8 +773,8 @@ type ImportSkipReason =
 | 编码 | 按 UTF-8 解码，非法字节替换为 U+FFFD，**不做编码猜测**。GBK 等文本里的 `ss://` 行是 ASCII，仍能解析；只有中文节点名可能变成替换字符。JSON 也按文本逐行处理，不要求是合法 JSON |
 | 大小上限 | **1 MiB**（与 `import_seed_file`、URL 拉取一致）。先看 `metadata.len()`，超限不读全文 → `file_too_large`，`details.max_bytes = 1048576` |
 | 扩展名 | **不按扩展名过滤**。`.txt` / `.json` / 无扩展名都收；对话框建议 `.txt,.json`，命令不据此拒绝——扩展名不代表内容 |
-| 支持的格式 | 与 §4.1.1 同一套：多行 `ss://` 链接，或整段 base64 的 `ss://` 列表。**本轮不解析 Clash YAML**；YAML 或其它格式落到 `not_node_text`，不新增 `unsupported_format`——解析器无法可靠区分「格式不对」与「格式对但没有节点」 |
-| 一条都用不了 | `INVALID_ARGUMENT`，`details.reason = "not_node_text"`，可读消息「这个文件里没有可用的节点（支持多行 ss:// 链接）」 |
+| 支持的格式 | 与 §4.1.1 同一套：多行 `ss://` 链接、整段 base64 的 `ss://` 列表，或 Clash 配置的块状 `proxies:` 子集。**不按扩展名判断格式**：先看根级 `proxies:`，再看 `ss://`，都不命中才落到 `not_node_text`。不新增 `unsupported_format`——解析器无法可靠区分「格式不对」与「格式对但没有节点」 |
+| 一条都用不了 | `INVALID_ARGUMENT`：Clash 但没有可用的 ss → `not_subscription`；其它 → `not_node_text`（与 §4.1.1 同一个解析实现） |
 | 去重 | 同 `source_key`。重复计入 `skipped`（`duplicate`），不新建记录 |
 | 来源 | `source = "manual"`（用户自己提供） |
 | 自动连接 | **不做** |
@@ -3249,6 +3251,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.77.0（未发布，2026-11-26：订阅支持 Clash 配置的 `proxies:` 子集）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.77.0`；§4.1 / §4.1.1 / §4.1.2 的「支持的格式」新增 Clash 配置的块状 `proxies:` 子集：只取 `type: ss` 条目（`name` / `server` / `port` / `cipher` / `password`），其它类型按 `unsupported_scheme` 跳过，plugin、flow 写法、锚点 / 别名按 `malformed` 跳过；method 与 2022 PSK 规则沿用 §4.2 | 能力扩展 | 2026-11-26：免费节点生态里 Clash YAML 占比高；手写解析不引 YAML 依赖，也避开别名展开 |
+| 2 | 错误原因区分：`not_subscription` = 认出 Clash 但里面没有可用的 Shadowsocks 节点；`not_node_text` = 内容压根不是节点列表。§4.1 的错误原因表补 `not_node_text`；**§4.1.1 / §4.1.2（粘贴、文件）也按同一 reason 透传，不再一律折叠成 `not_node_text`**。界面据此分别给出格式说明，不再回落到「检查地址」 | 语义澄清 | 同上；此前两种情况共用 `not_subscription`，界面只剩一句误导的兜底 |
 
 ### 2.76.0（未发布，2026-11-26：method 白名单摘掉 `none`，2022 系列校验 PSK）
 

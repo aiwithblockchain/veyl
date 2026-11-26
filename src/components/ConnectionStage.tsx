@@ -119,6 +119,29 @@ type TabSource = "owned" | "custom";
 /** 到期提醒点过「知道了」就记住，避免每次启动都再弹一次。 */
 const TRIAL_EXPIRED_DISMISSED_KEY = "veyl.ui.trialExpiredDismissed.v1";
 
+/** 测速入口的转速表图标：指针用聚焦紫红，表盘跟当前文字色（深灰）。 */
+function SpeedIcon() {
+  return (
+    <svg
+      className="stage-probe__icon"
+      viewBox="-86 89 769 480"
+      width="20"
+      height="13"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <g fill="currentColor">
+        <path d="M-59.7,529.3c-14.6,0-27.3-12.7-27.3-27.3s12.7-27.3,27.3-27.3H-5.1c14.6,0,27.3,12.7,27.3,27.3s-12.7,27.3-27.3,27.3h-54.6ZM599.3,529.3c-14.6,0-27.3-12.7-27.3-27.3s12.7-27.3,27.3-27.3h54.6c14.6,0,27.3,12.7,27.3,27.3s-12.7,27.3-27.3,27.3h-54.6ZM31.3,247.1c-10.9-10.9-10.9-27.3,0-38.2,10.9-10.9,27.3-10.9,38.2,0l27.3,27.3c10.9,10.9,10.9,27.3,0,38.2-10.9,10.9-27.3,10.9-38.2,0l-27.3-27.3ZM524.7,208.9c10.9-10.9,27.3-10.9,38.2,0,10.9,10.9,10.9,27.3,0,38.2l-27.3,27.3c-10.9,10.9-27.3,10.9-38.2,0-10.9-10.9-10.9-27.3,0-38.2l27.3-27.3ZM269.8,147c0-14.6,12.7-27.3,27.3-27.3s27.3,12.7,27.3,27.3v54.6c0,14.6-12.7,27.3-27.3,27.3s-27.3-12.7-27.3-27.3v-54.6Z" />
+        <path d="M-28.9,505.5c-1.1-10.8-1.6-21.7-1.6-32.6,0-182,145.6-329.5,327.7-329.5s329.5,147.5,329.5,329.5-.5,21.8-1.6,32.6h54.7c1-11.4,1.5-22.9,1.5-34.5-1.8-211.2-172.9-380.5-384.1-380.5S2.2,181.5-56.1,325.4c-24.4,58.4-33.5,120.1-28.4,180.1H-28.9Z" />
+      </g>
+      <path
+        className="stage-probe__needle"
+        d="M318.1,427l-187.7-52.7c-10.1-2.8-20.9,1.4-26.3,10.3h0c-5.5,8.9-4.4,20.4,2.7,28.2l131.9,143.6c35.5,38.6,98,32.6,125.5-12.1h0c27.4-44.7,4.5-103.2-46-117.4Z"
+      />
+    </svg>
+  );
+}
+
 /**
  * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
  * 旧 Console 的结构（大计时器 + 右侧小按钮 + 底部节点面板）不再使用。
@@ -1359,7 +1382,12 @@ export function ConnectionStage({
                         ) : noteHome === "free" && probeAllFailed ? (
                           t("console.probe.again")
                         ) : (
-                          t("console.probe.action")
+                          <>
+                            <SpeedIcon />
+                            <span className="sr-only">
+                              {t("console.probe.action")}
+                            </span>
+                          </>
                         )}
                       </button>
                     ) : null}
@@ -1427,13 +1455,39 @@ export function ConnectionStage({
                       ) : noteHome === activeSource && probeAllFailed ? (
                         t("console.probe.again")
                       ) : (
-                        t("console.probe.action")
+                        <>
+                          <SpeedIcon />
+                          <span className="sr-only">
+                            {t("console.probe.action")}
+                          </span>
+                        </>
                       )}
                     </button>
                   ) : null}
                   {onAddNode ? (
-                    <button type="button" className="stage-add" onClick={onAddNode}>
-                      {t("settings.import.title")}
+                    <button
+                      type="button"
+                      className="stage-add"
+                      onClick={onAddNode}
+                      title={t("settings.import.title")}
+                    >
+                      <svg
+                        className="stage-add__icon"
+                        viewBox="0 0 16 16"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <path d="M8 3v10M3 8h10" />
+                      </svg>
+                      <span className="sr-only">
+                        {t("settings.import.title")}
+                      </span>
                     </button>
                   ) : null}
                 </div>
@@ -1461,6 +1515,17 @@ export function ConnectionStage({
                     }`}
                     onClick={() => selectSource(group.key)}
                   >
+                    {group.key === selectedTabSource ? (
+                      <span
+                        className="stage-tabs__inuse"
+                        role="img"
+                        aria-label={
+                          connected
+                            ? t("console.inUse")
+                            : t("console.current.label")
+                        }
+                      />
+                    ) : null}
                     <span className="stage-tabs__label">{group.label}</span>
                     <span className="stage-tabs__count num">
                       {group.nodes.length + group.pending.length}

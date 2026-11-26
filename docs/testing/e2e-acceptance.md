@@ -4409,9 +4409,9 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
 - **目的**：验证文件通道的「选文件 → 确认 → 点导入」流程、1 MB 限制、空结果文案与文件名展示。依据 `node_import_file` 契约 §4.1.2 / IA §3.2 C13 / C15。
 - **前置条件**：`node_import_file` 已实现（随本批次验证）；准备四个文件：
   - `nodes.txt`：两行 `ss://`。
-  - `nodes.json`：内容同样是两行 `ss://`（命令按文本逐行解析，**不解析 Clash / 种子 JSON**）。
+  - `nodes.json`：内容同样是两行 `ss://`（命令按文本解析，**不按扩展名或 JSON 结构判断格式**）。
   - `big.txt`：超过 1 MB 的任意文本。
-  - `clash.json`：一个真实的 Clash 配置 JSON（没有 `ss://` 行），用来验证空结果。
+  - `clash.json`：一个真实的 Clash 配置 **JSON**（不是 YAML 块状写法，也没有 `ss://` 行），用来验证空结果；同一份配置改写成 YAML 时应能导入其中的 `ss` 节点（2.77.0 起）。
   - 可选：一个只含不支持加密方式的 `ss://` 文件，用来验证逐条跳过。
 
   可用的 `ss://` 样本（两行，直接复制）：

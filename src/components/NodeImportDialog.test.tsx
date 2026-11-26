@@ -35,6 +35,19 @@ function makeBridge() {
   } as unknown as AgentBridge;
 }
 
+function importedNode(name: string): NodeSummary {
+  return {
+    node_id: `nd_${name}`,
+    name,
+    server: "203.0.113.9",
+    port: 8388,
+    method: "aes-256-gcm",
+    protocol: "shadowsocks",
+    source: "url",
+    created_at: 0,
+  };
+}
+
 function renderDialog(
   over: {
     bridge?: AgentBridge;
@@ -101,7 +114,7 @@ describe("链接 / 订阅段", () => {
 
     expect(
       within(dialog).getByText(
-        "支持多行 ss:// 链接或 https 订阅地址；文件里的节点密码不要外传。",
+        "支持 ss:// 链接、Clash 配置或 https 订阅地址；文件里的节点密码不要外传。",
       ),
     ).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "从文件导入" })).toBeTruthy();
@@ -137,6 +150,110 @@ describe("链接 / 订阅段", () => {
     );
     expect(within(dialog).getByText("旧节点：已有同名节点")).toBeTruthy();
     expect(within(dialog).queryByText("duplicate")).toBeNull();
+  });
+
+  it("导入成功后弹层里列出已添加的节点，不只报跳过的", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportUrl: ReturnType<typeof vi.fn> }).nodeImportUrl =
+      vi.fn(async () => ({
+        imported: 2,
+        skipped: [],
+        nodes: [importedNode("东京 01"), importedNode("新加坡 01")],
+      }));
+    renderDialog({ bridge });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "https://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(await within(dialog).findByText("已添加 2 个节点")).toBeTruthy();
+    expect(within(dialog).getByText("东京 01")).toBeTruthy();
+    expect(within(dialog).getByText("新加坡 01")).toBeTruthy();
+  });
+
+  it("重复导入同一订阅：说清都在节点池里，不再铺一屏重复行", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportUrl: ReturnType<typeof vi.fn> }).nodeImportUrl =
+      vi.fn(async () => ({
+        imported: 0,
+        skipped: [
+          { name: "东京 01", reason: "duplicate" },
+          { name: "新加坡 01", reason: "duplicate" },
+        ],
+        nodes: [],
+      }));
+    renderDialog({ bridge });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "https://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(
+      await within(dialog).findByText("这些节点都已经在节点池里了。"),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("东京 01：已有同名节点")).toBeNull();
+  });
+
+  it("重复导入 Clash 订阅：跳过里混着非 ss 与不支持的 cipher，仍说清都在节点池里", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportUrl: ReturnType<typeof vi.fn> }).nodeImportUrl =
+      vi.fn(async () => ({
+        imported: 0,
+        skipped: [
+          { name: "东京 01", reason: "duplicate" },
+          { name: null, reason: "unsupported_scheme" },
+          { name: null, reason: "unsupported_scheme" },
+          { name: "Old", reason: "unsupported_method" },
+        ],
+        nodes: [],
+      }));
+    renderDialog({ bridge });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "https://sub.example/clash.yaml" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(
+      await within(dialog).findByText("这些节点都已经在节点池里了。"),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText("没有添加节点")).toBeNull();
+    expect(within(dialog).queryByText(/^跳过 4 个/)).toBeNull();
+  });
+
+  it("混合结果：列出已添加的，跳过按原因汇总并可展开明细", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeImportUrl: ReturnType<typeof vi.fn> }).nodeImportUrl =
+      vi.fn(async () => ({
+        imported: 1,
+        skipped: [
+          { name: "France 01", reason: "unsupported_scheme" },
+          { name: "France 02", reason: "unsupported_scheme" },
+          { name: "Old", reason: "unsupported_method" },
+        ],
+        nodes: [importedNode("东京 01")],
+      }));
+    renderDialog({ bridge });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "https://sub.example/nodes" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    expect(await within(dialog).findByText("已添加 1 个节点")).toBeTruthy();
+    expect(within(dialog).getByText("东京 01")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "跳过 3 个：不是 ss:// 链接 2、加密方式或密钥不支持 1",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByText("France 01：不是 ss:// 链接")).toBeTruthy();
   });
 
   it("已连接时导入提示要重新连接后才能测速", async () => {
@@ -557,10 +674,10 @@ describe("切段与改输入：旧结果不残留", () => {
 
     fireEvent.change(field, { target: { value: "ss://a" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
-    expect(await within(dialog).findByText("旧节点：已有同名节点")).toBeTruthy();
+    expect(await within(dialog).findByText("这些节点都已经在节点池里了。")).toBeTruthy();
 
     fireEvent.change(field, { target: { value: "ss://b" } });
-    expect(within(dialog).queryByText("旧节点：已有同名节点")).toBeNull();
+    expect(within(dialog).queryByText("这些节点都已经在节点池里了。")).toBeNull();
   });
 
   it("切换分段清掉两边的错误与结果", () => {

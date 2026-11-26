@@ -1862,8 +1862,8 @@ fn report_error_value(error: crate::reports::ReportError) -> Value {
 
 /// 文件导入的核心，抽出来是为了能脱离 Tauri `State` 测。
 ///
-/// 读文件失败用契约 §4.1.2 的三个 reason；解析失败沿用文本导入的
-/// `not_node_text`，只把可读消息换成文件措辞（解析器是共用的）。
+/// 读文件失败用契约 §4.1.2 的三个 reason；解析失败沿用文本导入的 reason
+/// （`not_node_text` / `not_subscription`），只把可读消息换成文件措辞（解析器是共用的）。
 pub(crate) async fn import_nodes_from_file(
     services: &dyn crate::tools::VpnToolServices,
     path: &str,

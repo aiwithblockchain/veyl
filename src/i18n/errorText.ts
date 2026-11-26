@@ -185,6 +185,7 @@ export const ERROR_REASON_TEXT: Record<string, ReasonEntry> = {  // 登录 / 账
   insecure_url: "error.reason.insecureUrl",
   fetch_failed: "error.reason.fetchFailed",
   not_node_text: "error.reason.notNodeText",
+  not_subscription: "error.reason.notSubscription",
   unsupported_method: "error.reason.unsupportedMethod",
   invalid_argument: "error.reason.invalidArgument",
   node_not_in_config: "error.reason.nodeNotInConfig",

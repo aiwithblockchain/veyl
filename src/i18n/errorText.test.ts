@@ -91,6 +91,15 @@ describe("errorText", () => {
     ).toBe("读写本地数据失败，稍后再试。");
   });
 
+  it("Clash 配置没有可用的 Shadowsocks 节点时说清格式，不让用户去查地址", () => {
+    expect(
+      errorText(
+        { code: "INVALID_ARGUMENT", details: { reason: "not_subscription" } },
+        FALLBACK,
+      ),
+    ).toBe("这是 Clash 配置，但里面没有可用的 Shadowsocks 节点。");
+  });
+
   it("英文界面取 en 字典", () => {
     setLanguage("en");
     expect(errorText({ code: "TIMEOUT" }, "fallback")).toBe(
