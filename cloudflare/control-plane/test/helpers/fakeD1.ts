@@ -1724,6 +1724,18 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select t.server_id as server_id, t.bytes as bytes from server_traffic t")) {
+      // 本周期每台机器的已用字节（MyServer 流量四字段）。
+      const [accountId, cycleId] = a;
+      const serverIds = new Set(
+        this.tables.servers
+          .filter((server) => server.account_id === accountId)
+          .map((server) => server.id),
+      );
+      return this.tables.server_traffic
+        .filter((row) => serverIds.has(row.server_id) && row.cycle_id === cycleId)
+        .map((row) => ({ server_id: row.server_id, bytes: row.bytes ?? 0 }));
+    }
     if (sql.startsWith("select w.id as id, w.ref_type as ref_type")) {
       const [accountId, cutoff, now, limit] = a;
       const servers = this.tables.servers;
