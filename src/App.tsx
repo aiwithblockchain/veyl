@@ -38,7 +38,6 @@ import { HelperPermissionDialog } from "./components/HelperPermissionDialog";
 import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
-import { MyServerTopUp } from "./components/MyServerTopUp";
 import { AccountSurface, type AccountPoint } from "./components/AccountSurface";
 import { NodeImportDialog } from "./components/NodeImportDialog";
 import { MobileExport, hasReadyServer } from "./components/MobileExport";
@@ -371,6 +370,7 @@ export default function App() {
   /** 账户是独立弹层：头像、AI 指路、充值入口都开这一层。 */
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountPoint, setAccountPoint] = useState<AccountPoint | null>(null);
+  const walletRefocusCleanupRef = useRef<(() => void) | null>(null);
   /** 「在其它设备上使用」弹层：设置行与左栏行共用这一份开关。 */
   const [mobileExportOpen, setMobileExportOpen] = useState(false);
   /** 节点导入 / 手动填写弹层：入口在控制台节点卡。 */
@@ -650,12 +650,13 @@ export default function App() {
     // Esc 与「返回」相同；登录弹窗在最上层时只关弹窗，一次按键只解一层。
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (myServers.loginOpen || newNodeBusyRef.current) return;
+      // 上层弹层（登录 / 账户）在时一次按键只解一层。
+      if (myServers.loginOpen || accountOpen || newNodeBusyRef.current) return;
       closeNewNode();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [newNodeOpen, myServers.loginOpen]);
+  }, [newNodeOpen, myServers.loginOpen, accountOpen]);
   const [trialNonce, setTrialNonce] = useState(0);
   /** 首屏等配置与试用状态都读回来再决定渲染，避免闪一下两选一。 */
   const [stageReady, setStageReady] = useState(false);
@@ -860,11 +861,38 @@ export default function App() {
     setSettingsOpen(true);
   };
 
-  const openAccount = () => {
+  const openAccount = (row?: string) => {
     setSettingsOpen(false);
-    setAccountPoint(null);
+    setAccountPoint(row ? { row, nonce: Date.now() } : null);
     setAccountOpen(true);
   };
+
+  /** 付款页回来后补刷余额：focus 或可见二选一先到即撤，不看 30 秒门禁。 */
+  const armWalletRefocus = () => {
+    walletRefocusCleanupRef.current?.();
+    const cleanup = () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      walletRefocusCleanupRef.current = null;
+    };
+    const onFocus = () => {
+      cleanup();
+      void myServers.refreshWallet({ force: true, trigger: "focus" });
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") onFocus();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    walletRefocusCleanupRef.current = cleanup;
+  };
+
+  useEffect(
+    () => () => {
+      walletRefocusCleanupRef.current?.();
+    },
+    [],
+  );
 
   const refreshSnapshot = useCallback(() => {
     lastSnapshotAtRef.current = Date.now();
@@ -1124,9 +1152,7 @@ export default function App() {
         if (section === "account") {
           // 账户已不是设置的一段：只留一层，先关设置再开账户。
           setSettingsConsulting(false);
-          setSettingsOpen(false);
-          setAccountPoint({ row: row ?? null, nonce: Date.now() });
-          setAccountOpen(true);
+          openAccount(row ?? undefined);
         } else {
           // 契约里叫 connection，界面内部叫 network。
           const target: SettingsSection = section === "connection" ? "network" : section;
@@ -2629,6 +2655,7 @@ export default function App() {
     userLogoutRef.current = true;
     const result = await myServers.logout();
     if (result.ok) {
+      walletRefocusCleanupRef.current?.();
       setAppNotice({ level: "info", text: translate("app.loggedOut") });
       // 原本就没登录时不会触发过期 effect，这里自己把标志清掉。
       if (!wasLoggedIn) userLogoutRef.current = false;
@@ -2640,6 +2667,15 @@ export default function App() {
   };
 
   // 换一个账户：换新设备身份后再登录，避免旧设备绑在停用账户上重登失败。
+  const handleCheckoutOpened = () => {
+    setAccountOpen(false);
+    setAppNotice({
+      level: "info",
+      text: translate("account.checkoutOpened"),
+    });
+    armWalletRefocus();
+  };
+
   const handleSwitchAccount = async () => {
     const ok = await myServers.reRegister();
     if (ok) {
@@ -3103,7 +3139,7 @@ export default function App() {
                 setDestination("servers");
               }}
               onEnsureIdentity={myServers.ensureIdentity}
-              onTopUp={myServers.openTopUp}
+              onTopUp={() => openAccount("account.topup")}
               onAuthRequired={myServers.openLogin}
               aiSelection={stageSelect}
               initialSelection={newNodeSelection}
@@ -3138,7 +3174,7 @@ export default function App() {
           detailError={myServers.detailError}
           detailRetrying={myServers.detailRetrying}
           readOnly={myServers.identityProblem !== null}
-          onTopUp={myServers.openTopUp}
+          onTopUp={() => openAccount("account.topup")}
           onNew={() => openNewNode("servers")}
           onLogin={myServers.openLogin}
           onRefreshAccount={() => void myServers.refreshAccount()}
@@ -3307,7 +3343,8 @@ export default function App() {
           onForceRefresh={() =>
             void myServers.refreshWallet({ force: true, trigger: "manual" })
           }
-          onTopUp={() => myServers.openTopUp()}
+          onTopUp={myServers.topup}
+          onCheckoutOpened={handleCheckoutOpened}
           onLogin={() => {
             setAccountOpen(false);
             myServers.openLogin();
@@ -3317,23 +3354,8 @@ export default function App() {
           onSwitchAccount={handleSwitchAccount}
           onLogout={handleAccountLogout}
           onClose={() => setAccountOpen(false)}
-          trapPaused={myServers.topupOpen || aiRequiredOpen}
+          trapPaused={aiRequiredOpen}
           point={accountPoint}
-        />
-      ) : null}
-
-      {myServers.topupOpen ? (
-        <MyServerTopUp
-          wallet={myServers.wallet}
-          loading={myServers.walletLoading}
-          error={myServers.walletError}
-          onRetry={() => void myServers.refreshWallet({ trigger: "retry" })}
-          onTopUp={myServers.topup}
-          onClose={myServers.closeTopUp}
-          onRefreshBalance={() =>
-            void myServers.refreshWallet({ force: true, trigger: "manual" })
-          }
-          nested={settingsOpen || accountOpen}
         />
       ) : null}
 

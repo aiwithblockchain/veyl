@@ -8,7 +8,7 @@ import { MyServerTopUp } from "./MyServerTopUp";
 const WALLET: MyServerWallet = {
   balance_cents: 100,
   currency: "USD",
-  denominations_cents: [1000, 2000],
+  denominations_cents: [600, 1000, 2500, 5000, 10000],
   updated_at: new Date(0).toISOString(),
 };
 
@@ -20,118 +20,57 @@ const TOPUP: MyServerTopup = {
 
 afterEach(cleanup);
 
-function renderTopUp(
+function renderPanel(
   onTopUp: (cents: number) => Promise<MyServerTopup> = async () => TOPUP,
-  onRetry: () => void = () => {},
-  onClose: () => void = () => {},
-  wallet: MyServerWallet = WALLET,
+  onCheckoutOpened: () => void = () => {},
+  wallet: MyServerWallet | null = WALLET,
 ) {
   const { container } = render(
     <MyServerTopUp
       wallet={wallet}
-      loading={false}
-      error={null}
-      onRetry={onRetry}
       onTopUp={onTopUp}
-      onClose={onClose}
+      onCheckoutOpened={onCheckoutOpened}
     />,
   );
   return container;
 }
 
-describe("充值弹层", () => {
-  it("成功打开收银台：弹层保留、只留关闭，档位与提交都禁用", async () => {
-    const onClose = vi.fn();
-    renderTopUp(async () => TOPUP, () => {}, onClose);
-    fireEvent.change(screen.getByLabelText("自定义金额"), {
-      target: { value: "36" },
-    });
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
-
-    expect(
-      await screen.findByText(
-        "已在浏览器打开收款页。付完款后点「刷新」查看余额。",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled();
-    for (const name of ["$10", "$20"]) {
-      expect(
-        (screen.getByRole("button", { name }) as HTMLButtonElement).disabled,
-        name,
-      ).toBe(true);
-    }
-    expect(
-      (screen.getByLabelText("自定义金额") as HTMLInputElement).disabled,
-    ).toBe(true);
-    expect(
-      (screen.getByRole("button", { name: "充值 $36" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
-
-    // 底部「关闭」仍可关。
-    const closes = screen.getAllByRole("button", { name: "关闭" });
-    fireEvent.click(closes[closes.length - 1]);
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it("等待态给「刷新」按钮，点击强制刷新余额", async () => {
-    const onRefreshBalance = vi.fn();
-    render(
-      <MyServerTopUp
-        wallet={WALLET}
-        loading={false}
-        error={null}
-        onRetry={() => {}}
-        onTopUp={async () => TOPUP}
-        onClose={() => {}}
-        onRefreshBalance={onRefreshBalance}
-      />,
-    );
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
-    expect(
-      await screen.findByText("已在浏览器打开收款页。付完款后点「刷新」查看余额。"),
-    ).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
-    expect(onRefreshBalance).toHaveBeenCalledTimes(1);
-  });
-
-  it("余额是钱包数字块，5 个档位都在", () => {
-    renderTopUp(async () => TOPUP, () => {}, () => {}, {
-      ...WALLET,
-      denominations_cents: [600, 1000, 2500, 5000, 10000],
-    });
-
-    expect(screen.getByText("当前余额")).toBeTruthy();
-    const amount = screen.getByText("$1.00");
-    expect(amount.className).toContain("myservers-topup__balance-amount");
-    expect(amount.className).toContain("num");
-
+describe("充值面板（账户弹层内嵌）", () => {
+  it("5 个价格档位都在，档位是整美元", () => {
+    renderPanel();
     for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
     }
   });
 
-  it("checkout_url 为空：保留直接到账提示，不关闭弹窗", async () => {
-    const onClose = vi.fn();
-    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
-      topup_id: "top_1",
-      checkout_url: null,
-      denomination_cents: 1000,
-    }));
-    renderTopUp(onTopUp, () => {}, onClose);
+  it("打开收银台：交给外层关面板，不进入等待态", async () => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(async () => TOPUP, onCheckoutOpened);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
 
+    await waitFor(() => expect(onCheckoutOpened).toHaveBeenCalledTimes(1));
+    expect(
+      (screen.getByRole("button", { name: "$10" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.queryByText(/已在浏览器打开收款页/)).toBeNull();
+  });
+
+  it("checkout_url 为空：保留直接到账提示", async () => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(
+      async () => ({ ...TOPUP, checkout_url: null }),
+      onCheckoutOpened,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText("已充值 $10.00。")).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
   it("收银台打不开：不说已打开，给重新打开与可复制链接", async () => {
-    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(async () => {
       throw {
         code: "INTERNAL",
         message: "收银台打不开。",
@@ -141,17 +80,14 @@ describe("充值弹层", () => {
         },
         retryable: true,
       };
-    });
-    renderTopUp(onTopUp);
+    }, onCheckoutOpened);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText(/收银台暂时打不开/)).toBeTruthy();
-    expect(screen.queryByText(/已打开支付页面/)).toBeNull();
     expect(screen.getByRole("button", { name: "重新打开支付页面" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制链接" })).toBeTruthy();
-    expect(
-      screen.getByText("https://pay.example.com/session/abc"),
-    ).toBeTruthy();
+    expect(screen.getByText("https://pay.example.com/session/abc")).toBeTruthy();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
   it("没有链接时只给重试", async () => {
@@ -163,9 +99,9 @@ describe("充值弹层", () => {
         retryable: true,
       };
     });
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByRole("button", { name: "重试" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新打开支付页面" })).toBeNull();
 
@@ -173,10 +109,10 @@ describe("充值弹层", () => {
     await waitFor(() => expect(onTopUp).toHaveBeenCalledTimes(2));
   });
 
-  it("自定义金额：合法时按整美元发起充值并保留等待态", async () => {
-    const onClose = vi.fn();
+  it("自定义金额：合法时按整美元发起充值", async () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
-    renderTopUp(onTopUp, () => {}, onClose);
+    const onCheckoutOpened = vi.fn();
+    renderPanel(onTopUp, onCheckoutOpened);
 
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "36" },
@@ -188,16 +124,11 @@ describe("充值弹层", () => {
     fireEvent.click(submit);
 
     await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(3600));
-    expect(
-      await screen.findByText(
-        "已在浏览器打开收款页。付完款后点「刷新」查看余额。",
-      ),
-    ).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onCheckoutOpened).toHaveBeenCalledTimes(1);
   });
 
   it("空输入：按钮写「充值」且禁用", () => {
-    renderTopUp();
+    renderPanel();
 
     const submit = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
@@ -205,7 +136,7 @@ describe("充值弹层", () => {
   });
 
   it("非法输入：输入时不报错，失焦后才提示并置 aria-invalid", () => {
-    renderTopUp();
+    renderPanel();
     const input = screen.getByLabelText("自定义金额");
 
     fireEvent.change(input, { target: { value: "3" } });
@@ -224,7 +155,7 @@ describe("充值弹层", () => {
 
   it("自定义金额：wallet 的 min/max 生效", async () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
-    renderTopUp(onTopUp, () => {}, () => {}, {
+    renderPanel(onTopUp, () => {}, {
       ...WALLET,
       min_topup_cents: 1000,
       max_topup_cents: 2000,
@@ -248,12 +179,12 @@ describe("充值弹层", () => {
   });
 
   it("自定义金额：默认范围下 6/300 可提交，300.01/5 被拦", async () => {
-    // 不走收银台（checkout_url=null），否则第一次成功就会锁住等待态。
+    // 不走收银台（checkout_url=null），成功也不会关面板。
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
       ...TOPUP,
       checkout_url: null,
     }));
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
     const input = screen.getByLabelText("自定义金额");
     const submit = () => screen.getByRole("button", { name: /^充值/ }) as HTMLButtonElement;
 
@@ -280,7 +211,7 @@ describe("充值弹层", () => {
 
   it("自定义金额：前导零 06 视为 6", async () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
 
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "06" },
@@ -295,7 +226,7 @@ describe("充值弹层", () => {
 
   it("自定义金额：超长数字提交被拦", () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "999999999999999999999" },
     });
@@ -315,21 +246,15 @@ describe("充值弹层", () => {
         true,
       );
     });
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText("充值太频繁，请一小时后再试。")).toBeTruthy();
   });
 
-  it("焦点陷阱：Tab 在弹层内循环", async () => {
-    const container = renderTopUp();
-    const dialog = container.querySelector(".myservers-topup") as HTMLElement;
-    const buttons = Array.from(dialog.querySelectorAll("button"));
-    expect(buttons.length).toBeGreaterThan(1);
-
-    const last = buttons[buttons.length - 1];
-    last.focus();
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(document.activeElement).toBe(buttons[0]);
+  it("没有钱包时不渲染档位，只看自定义输入", () => {
+    renderPanel(async () => TOPUP, () => {}, null);
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(screen.getByLabelText("自定义金额")).toBeTruthy();
   });
 });

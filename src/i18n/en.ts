@@ -918,6 +918,8 @@ export const en: Record<MessageKey, string> = {
   "account.retry": "Retry",
   "account.topUp": "Top up",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
+  "account.checkoutOpened":
+    "Checkout is open in your browser. Your balance will update after payment.",
   "account.identity.lost":
     "This device lost its identity and needs to register again. Your account and servers are intact.",
   "account.identity.lostLabel": "Register this device again",
@@ -1033,20 +1035,14 @@ export const en: Record<MessageKey, string> = {
     "Your account and servers are intact; check your network and try again.",
 
   // Top up
-  "topup.title": "Top up",
-  "topup.balance": "Current balance",
-  "topup.refreshing": "Refreshing",
-  "topup.loading": "Loading top-up options…",
   "topup.retry": "Retry",
   "topup.none": "No top-up options are available right now.",
-  "topup.refresh": "Refresh",
   "topup.custom.label": "Custom amount",
   "topup.custom.placeholder": "36",
   "topup.custom.hint": "$6–$300, whole dollars",
   "topup.custom.invalid": "Enter a whole-dollar amount from $6 to $300",
   "topup.custom.submit": "Top up {amount}",
   "topup.submit": "Top up",
-  "topup.waiting": "Checkout is open in your browser. After paying, click Refresh to update your balance.",
   "topup.reopenCheckout": "Reopen checkout",
   "topup.copyLink": "Copy link",
   "topup.charged": "Topped up {amount}.",
@@ -1626,6 +1622,7 @@ export const en: Record<MessageKey, string> = {
   "settings.account.billingNote": "Balance is charged per day, separately for each server.",
   "billing.summary": "Balance {balance} · Last {days} days: top-up {topup} · charges {charge}",
   "billing.column.kind": "Type",
+  "billing.column.server": "Server",
   "billing.column.date": "Date",
   "billing.column.amount": "Amount",
   "billing.kind.topup": "Top-up",

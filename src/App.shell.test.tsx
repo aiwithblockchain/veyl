@@ -958,7 +958,7 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
   }, 15_000);
 
-  it("创建前余额不足：就地给去充值，不发起下单", async () => {
+  it("创建前余额不足：去充值打开账户弹层并落在充值块，向导状态还在", async () => {
     signInForWizard();
     await renderApp();
     const create = vi.spyOn(bridge, "myServerCreate");
@@ -974,8 +974,17 @@ describe("三区外壳与连接舞台", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(await screen.findByText(/余额不足，还差/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
-    expect(await screen.findByRole("dialog", { name: "充值" })).toBeTruthy();
+
+    expect(await screen.findByRole("dialog", { name: "账户" })).toBeTruthy();
+    const topup = document.querySelector('[data-point="account.topup"]');
+    await waitFor(() => expect(topup?.getAttribute("data-pointed")).toBe("true"));
     expect(create).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
   }, 15_000);
 
   it("AI 未配置时点「问 AI」弹统一告警，不展开面板也不进设置", async () => {

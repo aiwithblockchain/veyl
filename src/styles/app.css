@@ -1819,6 +1819,55 @@ body[data-resizing] {
   border-bottom: 1px solid var(--line);
 }
 
+/* 充值 / 账单：就地区块，与上面的行只靠分隔线分区。 */
+.account-surface__section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-surface__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* 账单在 720 宽里占满一行：表格自滚，列不折行。 */
+.account-surface__section .billing-panel {
+  padding: 0;
+}
+
+.account-surface__section .billing-summary {
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--hair);
+}
+
+.account-surface__section .billing-table th,
+.account-surface__section .billing-table td {
+  padding: 9px 10px;
+}
+
+.account-surface__section .billing-table th:first-child,
+.account-surface__section .billing-table td:first-child {
+  padding-left: 0;
+}
+
+.account-surface__section .billing-table th:last-child,
+.account-surface__section .billing-table td:last-child {
+  padding-right: 0;
+}
+
+.account-surface__section .billing-table__server {
+  max-width: 360px;
+}
+
+.account-surface__section .billing-empty {
+  padding: 16px 0;
+}
+
 .settings-row__aside {
   display: flex;
   align-items: center;
@@ -2400,15 +2449,7 @@ body[data-resizing] {
   color: var(--warn-text);
 }
 
-/* 账单弹层（设置 › 账户）：表头固定、内容区自己滚动；金额只用 --ink，不红不绿。 */
-
-.modal--bills {
-  display: flex;
-  flex-direction: column;
-  width: min(560px, calc(100vw - 48px));
-  max-height: min(70vh, 640px);
-  overflow: hidden;
-}
+/* 账单表格（账户弹层内）：表头固定、表体自己滚动；金额只用 --ink，不红不绿。 */
 
 .billing-summary {
   margin: 0;
@@ -2420,6 +2461,7 @@ body[data-resizing] {
 
 .billing-body {
   flex: 1;
+  max-height: 320px;
   overflow-y: auto;
 }
 
@@ -2457,13 +2499,16 @@ body[data-resizing] {
   text-align: right;
 }
 
+.billing-table__kind {
+  width: 1%;
+  white-space: nowrap;
+}
+
 .billing-table__server {
-  display: block;
   max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-top: 2px;
   color: var(--ink-3);
   font-size: 12px;
 }
@@ -3468,24 +3513,9 @@ body[data-resizing] {
 }
 
 .myservers-topup {
-  width: min(420px, calc(100vw - 48px));
-}
-
-.myservers-topup__balance {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-
-.myservers-topup__balance-label {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.myservers-topup__balance-amount {
-  font-size: 20px;
-  line-height: 1.2;
-  color: var(--ink);
+  gap: 12px;
 }
 
 .myservers-topup__grid {

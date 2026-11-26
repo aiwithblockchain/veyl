@@ -204,7 +204,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const walletRef = useRef<MyServerWallet | null>(null);
   walletRef.current = wallet;
   const [loginOpen, setLoginOpen] = useState(false);
-  const [topupOpen, setTopupOpen] = useState(false);
 
   const loggedIn = isSignedIn(account);
   /** 回调里判断登录态用 ref：把 loggedIn 放进依赖会让 refreshWallet 换身份、连带重跑列表加载。 */
@@ -685,7 +684,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
           selfLogoutAtRef.current = 0;
           return;
         }
-        setTopupOpen(false);
         markLoggedOut();
       }
     });
@@ -959,7 +957,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       accountLoadedRef.current = true;
       setAccountLoaded(true);
       setIdentityLostState(false);
-      setTopupOpen(false);
       markLoggedOut();
       setView("wizard");
       return { ok: true };
@@ -990,12 +987,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
 
   const openLogin = () => setLoginOpen(true);
   const closeLogin = () => setLoginOpen(false);
-
-  const openTopUp = () => {
-    setTopupOpen(true);
-    void refreshWallet({ trigger: "topup" });
-  };
-  const closeTopUp = () => setTopupOpen(false);
 
   const ordered = (serverId: string | null) => {
     pinnedSelectionRef.current = serverId;
@@ -1210,9 +1201,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     closeLogin,
     loginStart,
     loginVerify,
-    topupOpen,
-    openTopUp,
-    closeTopUp,
     topup,
     logout,
     retrying,

@@ -126,9 +126,9 @@
 
 ## 5. UI
 
-- 层级：账户页的 `充值` 是整页唯一实心主按钮（`.btn--primary`，`--ink` 实心；`刷新` 仍是文字链接、`退出登录` 是 danger-ghost）；弹层顶部余额做成钱包数字——`当前余额` 12 / `--ink-3` 标签、金额 20 mono / `--ink`（与账户页同一个 `formatUsdCents`），档位上方不再写指令文案。
+- 层级：充值已就地并进账户弹层——余额 20 mono + `刷新` 文字链接，充值块常驻在余额下方（5 档 + 自定义 + 单一实心 CTA），档位上方不写指令文案；退出登录 danger-ghost 在最底。
 - 档位：两列网格，档位高 48、金额 16 mono/500；奇数档时最后一档横跨整行（5 档时 `$100` 通栏），hover/focus 只换边框（`--hair-strong` / `--ink`），不做实心填充。
-- 充值弹层显示：
+- 充值块显示：
   - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`（整美元，不带 `.00`）；
   - 一个自定义金额输入框：`$6–$300`，整美元，占位符 `36`；
   - 提交按钮：空输入时为 `充值`（禁用）；合法时为 `充值 $X`（整额不带 `.00`）。
@@ -137,8 +137,8 @@
   - 只允许整数美元（`^\d+$`，不接受小数点、负号、空值）；
   - `6 <= 金额 <= 300`；
   - 输入过程中不报错；失焦后或点过提交且值非法才显示「请输入 $6–$300 的整美元金额」并置 `aria-invalid`；清空回到中性 hint；不发起请求。
-- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开后**保留弹层**，原位 `role="status"` 显示「已在浏览器打开收款页。付完款后点「刷新」查看余额。」；等待期间快捷档、输入与提交都禁用，底部动作行只留 `刷新`（强制刷新，不受 30 秒门禁限制）与 `关闭`（避免重复建单吃掉频控额度）。
-- 支付成功后由等待态的 `刷新` 强制刷新余额；窗口重新聚焦时也会补刷（受 30 秒门禁）。没有新手档卡片、没有年度组、没有「首次专享」。
+- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开后**关闭整个账户弹层**并给 toast（`account.checkoutOpened`：已在浏览器打开收付款页。付款完成后余额会自动更新。）——不保留面板、不把金额格置灰。
+- 回到 App 时（窗口 focus 或重新可见，先到先算）强制刷新一次余额，不受 30 秒门禁限制；余额已直接到账（没有 `checkout_url`）时留在面板里给 `topup.charged`；收银台打不开时面板不关，给错误与「重新打开支付页面 / 复制链接 / 重试」。
 - 旧客户端只显示 5 个快捷按钮，仍可正常充值；新客户端多一个自定义输入框。
 - 文案 key（中英同批）：
   - `topup.custom.label`：自定义金额 / Custom amount
@@ -147,7 +147,7 @@
   - `topup.custom.invalid`：请输入 $6–$300 的整美元金额 / Enter a whole-dollar amount from $6 to $300
   - `topup.custom.submit`：充值 {amount} / Top up {amount}
   - `topup.submit`：充值 / Top up
-  - `topup.waiting`：已在浏览器打开收款页。付完款后点「刷新」查看余额。/ Checkout is open in your browser. After paying, click Refresh to update your balance.
+  - `account.checkoutOpened`：已在浏览器打开收付款页。付款完成后余额会自动更新。/ Checkout is open in your browser. Your balance will update after payment.
 - Checkout 侧：`product_data.name = "Veyl Service Credits"`，description 用现有的 `Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.`
 
 ---

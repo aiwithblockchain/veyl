@@ -6,6 +6,7 @@ import type {
   AgentBridge,
   BillingLedger,
   MyServerAccount,
+  MyServerTopup,
   MyServerWallet,
 } from "../agent/bridge";
 import { AccountSurface } from "./AccountSurface";
@@ -15,7 +16,7 @@ afterEach(cleanup);
 const WALLET: MyServerWallet = {
   balance_cents: 920,
   currency: "USD",
-  denominations_cents: [1000],
+  denominations_cents: [600, 1000, 2500, 5000, 10000],
   updated_at: new Date(0).toISOString(),
 };
 
@@ -26,6 +27,12 @@ const ACCOUNT: MyServerAccount = {
   device_id: "dev_1",
   account_kind: "email",
   session_expires_at: null,
+};
+
+const TOPUP: MyServerTopup = {
+  topup_id: "top_1",
+  checkout_url: "https://pay.example.com/session/abc",
+  denomination_cents: 1000,
 };
 
 const LEDGER: BillingLedger = {
@@ -63,6 +70,7 @@ function renderSurface(
     bridge: makeBridge(),
     account: ACCOUNT,
     wallet: WALLET,
+    onTopUp: async () => TOPUP,
     onClose: () => {},
     ...over,
   };
@@ -70,10 +78,9 @@ function renderSurface(
 }
 
 describe("账户弹层", () => {
-  it("邮箱、余额、刷新与充值都在同一层", () => {
+  it("邮箱、余额、充值块与账单都在同一层", async () => {
     const force = vi.fn();
-    const topUp = vi.fn();
-    renderSurface({ onForceRefresh: force, onTopUp: topUp });
+    renderSurface({ onForceRefresh: force });
 
     expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
     const email = screen.getByText("buyer@example.com");
@@ -83,13 +90,14 @@ describe("账户弹层", () => {
     expect(amount.className).toContain("account-surface__amount");
     expect(amount.className).toContain("num");
 
-    const topUpButton = screen.getByRole("button", { name: "充值" });
-    expect(topUpButton.className).toContain("btn--primary");
-    fireEvent.click(topUpButton);
-    expect(topUp).toHaveBeenCalledTimes(1);
-
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(force).toHaveBeenCalledTimes(1);
+
+    // 充值就地：5 档直接摊在余额下面。
+    for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
+      expect(screen.getByRole("button", { name }), name).toBeTruthy();
+    }
+    expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
   });
 
   it("打开就刷新一次余额（走门禁），未登录不发", () => {
@@ -151,24 +159,63 @@ describe("账户弹层", () => {
     expect(screen.getByText("—")).toBeTruthy();
   });
 
-  it("账单：打开后 Esc 只关账单，焦点回到「查看账单」", async () => {
-    const load = vi.fn(async () => LEDGER);
+  it("充值成功打开收银台：交给 App 关面板，不就地置灰", async () => {
+    const onCheckoutOpened = vi.fn();
+    const onTopUp = vi.fn(async () => TOPUP);
+    renderSurface({ onCheckoutOpened, onTopUp });
+
+    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(1000));
+    expect(onCheckoutOpened).toHaveBeenCalledTimes(1);
+    // 面板不自己关，也不进入等待态。
+    expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "$10" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("余额已经到账（没有 checkout_url）：原地提示已充值", async () => {
+    const onCheckoutOpened = vi.fn();
+    renderSurface({
+      onCheckoutOpened,
+      onTopUp: async () => ({ ...TOPUP, checkout_url: null }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+    expect(await screen.findByText("已充值 $10.00。")).toBeTruthy();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
+  });
+
+  it("账单在弹层里就地显示：合计与行，不再弹第二层", async () => {
+    renderSurface();
+
+    const summary = await screen.findByText(/余额 \$118\.06/);
+    expect(summary.textContent).toContain("充值 $120.00");
+    expect(screen.getByText("+$120.00")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "近 30 天账单" })).toBeNull();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("账单空时仍显示汇总与空态", async () => {
+    renderSurface({
+      bridge: makeBridge({
+        myServerBillingLedger: vi.fn(async () => ({ ...LEDGER, entries: [] })),
+      }),
+    });
+    expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
+    expect(screen.getByText(/余额 \$118\.06/)).toBeTruthy();
+  });
+
+  it("账单失败就在块内给原因与重试", async () => {
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce({ code: "TIMEOUT", message: "" })
+      .mockResolvedValueOnce(LEDGER);
     renderSurface({ bridge: makeBridge({ myServerBillingLedger: load }) });
 
-    const trigger = screen.getByRole("button", { name: "查看账单" });
-    trigger.focus();
-    fireEvent.click(trigger);
-
-    await screen.findByRole("dialog", { name: "近 30 天账单" });
-    expect(load).toHaveBeenCalledWith(30);
+    expect(await screen.findByText("账单没有加载出来")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
-
-    fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "近 30 天账单" })).toBeNull(),
-    );
-    expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it("退出登录：成功后关闭账户层；失败原位给错误与重试", async () => {
@@ -218,8 +265,8 @@ describe("账户弹层", () => {
     });
 
     expect(screen.queryByText("余额")).toBeNull();
-    expect(screen.queryByRole("button", { name: "充值" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "查看账单" })).toBeNull();
+    expect(screen.queryByText("充值")).toBeNull();
+    expect(screen.queryByText("近 30 天账单")).toBeNull();
     expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
     expect(screen.getByText(/这个账户已停用/)).toBeTruthy();
 
@@ -229,7 +276,7 @@ describe("账户弹层", () => {
     await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
   });
 
-  it("未登录：只给登录入口，不出现余额", () => {
+  it("未登录：只给登录入口，不出现余额与充值", () => {
     const onLogin = vi.fn();
     renderSurface({
       account: { ...ACCOUNT, logged_in: false, email: null },
@@ -237,13 +284,20 @@ describe("账户弹层", () => {
     });
 
     expect(screen.queryByText("余额")).toBeNull();
-    expect(screen.queryByRole("button", { name: "充值" })).toBeNull();
+    expect(screen.queryByText("充值")).toBeNull();
     const login = screen.getByRole("button", { name: "登录" });
     fireEvent.click(login);
     expect(onLogin).toHaveBeenCalledTimes(1);
   });
 
-  it("Esc 与点遮罩都关闭；AI 指路滚到余额行并高亮", () => {
+  it("trapPaused（AI 告警在上层）：Esc 不关账户层", () => {
+    const onClose = vi.fn();
+    renderSurface({ onClose, trapPaused: true });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("Esc 与点遮罩都关闭；AI 指路滚到充值块并高亮", () => {
     const onClose = vi.fn();
     const first = renderSurface({ onClose });
     fireEvent.keyDown(window, { key: "Escape" });
@@ -259,10 +313,10 @@ describe("账户弹层", () => {
     const scrollSpy = vi.fn();
     HTMLElement.prototype.scrollIntoView = scrollSpy;
     const third = renderSurface({
-      point: { row: "account.balance", nonce: 1 },
+      point: { row: "account.topup", nonce: 1 },
     });
     const row = third.container.querySelector(
-      '[data-point="account.balance"]',
+      '[data-point="account.topup"]',
     ) as HTMLElement;
     expect(row).toBeTruthy();
     expect(scrollSpy).toHaveBeenCalled();

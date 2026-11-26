@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   AgentBridge,
   BillingEntryKind,
@@ -9,8 +9,6 @@ import { toBridgeError } from "../agent/errors";
 import { getLanguage, translate, useT, type Language, type MessageKey } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import { formatUsdCents } from "../myservers/labels";
-import { useFocusTrap } from "../ui/focus";
-import { IconClose } from "./icons";
 
 const WINDOW_DAYS = 30;
 
@@ -79,28 +77,23 @@ function serverLabel(server: BillingLedgerServer): string {
   return `${server.name} · ${server.plan} / ${server.region}`;
 }
 
-function amountLabel(cents: number): string {
+export function amountLabel(cents: number): string {
   // 正负都用同一份 --ink 颜色，只靠前缀区分；小数固定两位。零不带号。
   if (cents === 0) return formatUsdCents(0);
   const sign = cents < 0 ? "−" : "+";
   return `${sign}${formatUsdCents(Math.abs(cents))}`;
 }
 
-export function BillingLedgerDialog({
+/** 最近 30 天账单：纯表格，自取数据；外壳（标题、滚动、关闭）由账户弹层负责。 */
+export function BillingLedgerTable({
   bridge,
   language,
-  onClose,
 }: {
   bridge: AgentBridge;
   language: Language;
-  onClose: () => void;
 }) {
   const t = useT();
-  const dialogRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  // 焦点归还由 Settings 的 returnBillsFocusRef 独占：这里的 trap 不自带 restore，
-  // 否则会把 previous 改写成设置内部元素，再关设置时回不到打开设置的那个控件。
-  useFocusTrap(true, dialogRef, false);
 
   const load = useCallback(async () => {
     setPhase({ kind: "loading" });
@@ -117,70 +110,35 @@ export function BillingLedgerDialog({
   }, [load]);
 
   return (
-    <div
-      className="modal-backdrop modal-backdrop--nested"
-      onMouseDown={onClose}
-    >
-      <div
-        ref={dialogRef}
-        className="modal modal--bills"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="billing-dialog-title"
-        tabIndex={-1}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="modal__head">
-          <h2 id="billing-dialog-title" className="modal__title">
-            {t("settings.account.bills")}
-          </h2>
-          <button
-            type="button"
-            className="modal__close"
-            onClick={onClose}
-            aria-label={t("common.close")}
-          >
-            <IconClose size={14} />
-          </button>
-        </header>
-
-        {phase.kind === "loading" ? (
-          <div className="billing-panel" role="status">
-            <p className="billing-status">{t("billing.loading")}</p>
-            <div className="billing-placeholder" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
+    <div className="billing-inline">
+      {phase.kind === "loading" ? (
+        <div className="billing-panel" role="status">
+          <p className="billing-status">{t("billing.loading")}</p>
+          <div className="billing-placeholder" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+            <span />
           </div>
-        ) : null}
+        </div>
+      ) : null}
 
-        {phase.kind === "failed" ? (
-          <div className="billing-panel" role="alert">
-            <h3 className="billing-failed__title">{t("billing.failedTitle")}</h3>
-            <p className="billing-failed__reason">{phase.message}</p>
-            <p className="billing-failed__next">{t("billing.failedNext")}</p>
-            <div className="settings-actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => {
-                  void load();
-                  // 重试按钮随面板卸载：先把焦点交给弹层本身，读屏不丢位置。
-                  dialogRef.current?.focus();
-                }}
-              >
-                {t("account.retry")}
-              </button>
-            </div>
+      {phase.kind === "failed" ? (
+        <div className="billing-panel" role="alert">
+          <h3 className="billing-failed__title">{t("billing.failedTitle")}</h3>
+          <p className="billing-failed__reason">{phase.message}</p>
+          <p className="billing-failed__next">{t("billing.failedNext")}</p>
+          <div className="settings-actions">
+            <button type="button" className="btn btn--ghost" onClick={() => void load()}>
+              {t("account.retry")}
+            </button>
           </div>
-        ) : null}
+        </div>
+      ) : null}
 
-        {phase.kind === "ready" ? (
-          <BillingLedgerBody ledger={phase.ledger} language={language} />
-        ) : null}
-      </div>
+      {phase.kind === "ready" ? (
+        <BillingLedgerBody ledger={phase.ledger} language={language} />
+      ) : null}
     </div>
   );
 }
@@ -213,6 +171,7 @@ function BillingLedgerBody({
             <thead>
               <tr>
                 <th scope="col">{t("billing.column.kind")}</th>
+                <th scope="col">{t("billing.column.server")}</th>
                 <th scope="col">{t("billing.column.date")}</th>
                 <th scope="col" className="billing-table__amount-head">
                   {t("billing.column.amount")}
@@ -223,17 +182,19 @@ function BillingLedgerBody({
               {ledger.entries.map((entry) => (
                 <tr key={entry.id}>
                   <td className="billing-table__kind">
-                    <span className="billing-table__label">
-                      {t(KIND_LABELS[entry.kind])}
-                    </span>
-                    {entry.server && SERVER_KINDS.has(entry.kind) ? (
-                      <span
-                        className="billing-table__server"
-                        title={serverLabel(entry.server)}
-                      >
-                        {serverLabel(entry.server)}
-                      </span>
-                    ) : null}
+                    {t(KIND_LABELS[entry.kind])}
+                  </td>
+                  <td
+                    className="billing-table__server"
+                    title={
+                      entry.server && SERVER_KINDS.has(entry.kind)
+                        ? serverLabel(entry.server)
+                        : undefined
+                    }
+                  >
+                    {entry.server && SERVER_KINDS.has(entry.kind)
+                      ? serverLabel(entry.server)
+                      : null}
                   </td>
                   <td className="billing-table__date num">
                     {formatBillingDay(entry.at, language)}

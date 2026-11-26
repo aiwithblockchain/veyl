@@ -445,4 +445,36 @@ describe("余额刷新的门禁（App 接线）", () => {
     await waitFor(() => expect(wallet.mock.calls.length).toBe(2));
   });
 
+  it("收银台打开后：关闭账户层、给 toast，回窗口时补刷一次余额", async () => {
+    const wallet = prepareWallet();
+    vi.spyOn(bridge, "myServerTopup").mockResolvedValue({
+      topup_id: "top_1",
+      checkout_url: "https://pay.example.com/session/abc",
+      denomination_cents: 1000,
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^账户，/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
+    );
+    expect(
+      await screen.findByText("已在浏览器打开收付款页。付款完成后余额会自动更新。"),
+    ).toBeTruthy();
+
+    const before = wallet.mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(wallet.mock.calls.length).toBe(before + 1));
+
+    // 一次性：再回窗口不再补刷。
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
+  });
+
 });
