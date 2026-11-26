@@ -58,7 +58,6 @@ const STATIC_CONTROLS: StaticControl[] = [
     kind: "button",
     label: "settings.tab.connection",
   },
-  { id: "settings.account", screen: "settings", kind: "button", label: "controls.account" },
   {
     id: "settings.advanced",
     screen: "settings",

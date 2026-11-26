@@ -228,7 +228,7 @@
 
 - `IssueReport` 的第一阶段把 `materials`（runtime、checks、logs 行号、domains）放在 `data`（契约 `tools.md:1752`），summary 只有一句「材料已收集」。第二阶段要求模型写 `report_markdown`，但模型既看不到 `materials`，也看不到 `report_dir`（只在 `data` / facts），无法按契约引用 `日志/<文件>:<行号>`。
 - `IssueReport` 的两个 `actions` 由 Host 填并且只带 `report_id`（`issue_report.rs:150-155`），这部分是符合契约的。
-- `submit_issue_to_public_wall` 的 summary 带标题与链接（`issue_wall.rs:336-350`），符合「发到问题墙」的可见结果；失败时给 `IssueReport` / `OpenSettings` 下一步（`issue_wall.rs:162-187`）。
+- `submit_issue_to_public_wall` 的 summary 带标题与链接（`issue_wall.rs:336-350`），符合「发到问题墙」的可见结果；失败时只给 `IssueReport` 下一步（`issue_wall.rs:162-187`）。未登录（`not_logged_in`）不再有「去登录」一键动作（2026-11-26 随账户移出设置删除），改为 summary 里写明「登录入口在左下角头像打开的账户弹层」（`issue_wall.rs:174-185`）。
 - `read_public_issue_wall` 的 content 由 `render_list` / `render_thread` 生成（`issue_wall.rs:760-850`），是少数把完整结果放进 content 的工具。
 
 ### 2.8 AI 服务与设置（4）
@@ -328,7 +328,7 @@
 | 连接 | `VpnConnect.config_id` 可选；`VpnDisconnect` 无参数 |
 | 诊断 / 网络 | `HttpCheck.url` 1–2048 字符，`timeout_ms` 1000–15000；`NetRepair.action` ∈ `restore_direct` / `flush_dns` / `set_proxy` / `clear_proxy`，`port` 1024–65535；`DiagRun.include_logs` boolean |
 | 报告 / 问题墙 | `IssueReport.log_lines` 40–400，`report_markdown` ≤131072，不接受 `path` / `file` / `dir`；`submit_issue_to_public_wall.title` 8–120、`summary` 30–2000、`expected` / `actual` / `repro` ≤500，`diagnosis.stage` ∈ `connectivity` / `config_update` / `rotate` / `ai`，`steps` ≤3；`read_public_issue_wall.query` ≤100、`issue_id` ≤32、`platform` ∈ `macos` / `windows` / `linux`、`stage` 同上、`limit` 1–20 |
-| AI / 设置 | `DeepseekSaveKey.key` 20–200 且以 `sk-` 开头；`OpenSettings.section` ∈ `ai` / `connection` / `account` / `advanced`，`row` 只认 12 个登记行；`SetUserRegion.region` 匹配 `^[A-Za-z]{2}$` |
+| AI / 设置 | `DeepseekSaveKey.key` 20–200 且以 `sk-` 开头；`OpenSettings.section` ∈ `ai` / `connection` / `advanced`（`account` 以 `account_not_in_settings` 拒绝），`row` 只认 9 个登记行；`SetUserRegion.region` 匹配 `^[A-Za-z]{2}$` |
 | 服务器 | `MyServers` 无参数；`MyServerFailure.serverId` 非空；`NodeRotateCredentials.server_id` 非空，只接受 `srv_` + base64url 字符 |
 | 长任务 / 会话 | `JobGet.job_id` 必填；`AskUserQuestion` schema 来自 claurst，Veyl 额外要求 `options` 为非空字符串数组 |
 
@@ -591,8 +591,8 @@
 
 #### N4 `OpenSettings`：入参绑死设置页的段 / 行 id
 
-- `section` 只能是 `ai` / `connection` / `account` / `advanced`（`settings.rs:32`、`:133-143`）。
-- `row` 只认 12 个登记行（`settings.rs:17-30`）。
+- `section` 只能是 `ai` / `connection` / `advanced`（`settings.rs:29`）；`account` 被单独拒绝并提示「让用户点左下角的头像打开账户弹层」（`account_not_in_settings`，`settings.rs:64-70`，3.36.0）。
+- `row` 只认 9 个登记行（`settings.rs:17-27`；`account.*` 已全部移出）。
 - 返回的 `settings-point` 事件由设置页消费（`App.tsx:1117-1125`）。
 - 离开设置页没有任何意义。
 
@@ -630,12 +630,12 @@
 
 ### 3.4 缺口
 
-#### G1 余额读不到
+#### G1 余额读不到（已由 `MyServerWallet` 解决，3.31.0）
 
-- 产品口径：「连接状态、节点列表、余额、服务器状态都通过工具读取，不猜、不编」（`product.md:23`）。
-- 账户节：「余额是外部系统的快照，会过期…按界面显示回答，不要自行推算余额」（`product.md:118-119`）。
-- 实际：没有任何工具返回余额。`OpenSettings` 只能把用户带到 `account.balance` 行（`settings.rs:24`）。
-- 结果：用户在 AI 对话里问「我余额多少」时，模型只能让用户看界面，不能自己回答。
+- 产品口径：「连接状态、节点列表、余额、服务器状态都通过工具读取，不猜、不编」（`product.md` §2）。
+- 账户弹层：「余额是外部系统的快照，会过期…按界面显示回答，不要自行推算余额」（`product.md` §3.4）。
+- 审计时（2026-11-24）：没有任何工具返回余额。`OpenSettings` 只能把用户带到 `account.balance` 行（`settings.rs:24`）。
+- 现状（2026-11-26）：`MyServerWallet`（3.31.0）只读返回余额快照，AI 可以直接答金额；`OpenSettings` 已不接受 `section: "account"`（3.36.0，`account_not_in_settings`），余额只在左下角头像打开的账户弹层——要带用户看界面时口头指点头像，不调工具打开。
 
 #### G2 试用状态读不到
 
@@ -671,7 +671,7 @@
 #### G7 「在手机上使用」没有工具
 
 - 产品：「只导出付费节点…给的是「手机 App 列表 + 一个二维码 / 链接」」（`product.md:77-80`）。
-- 没有工具读取导出状态、节点数量或生成链接；`OpenSettings` 只能指到 `account.mobile` 行。
+- 没有工具读取导出状态、节点数量或生成链接；入口只在「我的服务器」左栏（`rail.useOnPhone`），`OpenSettings` 已无可指的行（`account.mobile` 于 3.33.0 随账号浮层删除）。
 - 产品 §4 #8 的入口是「不会操作？问 AI」，AI 只能讲通用步骤，读不到「现在有哪些付费节点可导出」。
 
 #### G8 AI 服务商配置没有通用工具
@@ -736,7 +736,7 @@
 | P2 | content 泄露实现词 / 内部值（代理端口、`direct`、`state=`、job id、`sing-box`） | 违反系统提示词与工具 description 自己的措辞规则 | S14–S17 |
 | P2 | `ConfigDetail` 打印节点端口，`MyServers` 却明确不给端口 | 同一台服务器两个工具口径相反，AI 可能说出界面没有的端口 | S24 |
 | P2 | `is_readonly` 把 `NodeProbe` 当只读、漏掉 `HttpCheck` / `MyServers` | `NodeProbe` 停运行时后界面仍报 `changed=none`；两个只读工具的失败可能误报 `unknown` | S21 |
-| P2 | 余额 / 试用状态 / 到期时间没有工具 | AI 无法回答余额、试用剩余时间、下次扣费 | G1–G3 |
+| P2 | 试用状态 / 到期时间没有工具（余额已有 `MyServerWallet`，G1 已解决） | AI 无法回答试用剩余时间、下次扣费 | G2–G3 |
 | P2 | `submit_issue_to_public_wall` 要求模型提供拿不到的 `diagnosis.session_id`；`MyServerFailure` 的 `serverId` 只在 `lastAction` | 模型只能编值，幂等键、日志关联或失败定位失效 | G13、G15 |
 | P3 | 文档漂移（`tool-display.md` 数量与已删工具、`ai-docs-management.md` 工具名大小写、契约 §3.1 旧代码） | 维护者按文档实现会对不上 | S10–S13 |
 | P3 | `MyServers` 构造 8 行 facts，展示层只保留 4 行 | 第 5–8 台服务器在卡片上不显示 | S23 |

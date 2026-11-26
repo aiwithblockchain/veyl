@@ -71,6 +71,7 @@ Running a node on your own server gives you a dedicated, stable exit.
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
 - Email, balance, top-up and sign out are all in the Account panel opened from the bottom-left avatar. "Use on other devices" is not there — it is in the My servers rail (§3.5).
+- The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.
 
@@ -87,13 +88,12 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 ### 3.6 Settings
 
-Settings is where the advanced configuration lives: there is normally no reason to open it; take the user there when they ask. There is a single `Consult AI` at the top — read this section first to learn what the four sections cover, then ask which module the user wants to discuss; do not walk through every row.
+Settings is where the advanced configuration lives: there is normally no reason to open it; take the user there when they ask. There is a single `Consult AI` at the top — read this section first to learn what the three sections cover, then ask which module the user wants to discuss; do not walk through every row. Account is not in Settings: it is the separate panel opened from the bottom-left avatar (§3.4).
 
 | Section | Covers |
 |---|---|
 | `AI` | Which AI service answers the user, and how to add another |
 | `Connection` | Capture mode, traffic scope, local proxy port, free nodes, importing nodes |
-| `Account` | Sign-in state, balance and top-up |
 | `Advanced` | Language, repair network, problem report, connection program and logs, diagnostics |
 
 #### AI
@@ -117,13 +117,6 @@ These switches are the same state as the top of the console (§3.1); changing th
 - `Update Veyl free nodes`: shows the node count and when they were last checked; `Check for updates` fetches the platform list. If it cannot reach the server it keeps the previous nodes and does not affect an active connection.
 - `Add node`: a share link, a subscription URL, or `Import from file` (multiple `ss://` lines). Imported nodes join the one node pool (§3.2); subscription URLs must be `https://`. This version supports only `ss://` (Shadowsocks), and the cipher must be one sing-box supports (aes-256-gcm, chacha20-ietf-poly1305, etc.); vmess / vless and other protocols are not supported.
 - There is no node switcher here: nodes are switched at the bottom of the console (§3.2).
-
-#### Account
-
-- Signed out: `Not signed in` and a `Sign in` button, with a note that signing in is needed to top up and buy servers. Sign-in itself is in §3.4.
-- Signed in: email, balance, `Top up`, `Refresh`, and the line "Balance is charged daily, per server."
-- The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
-- **`Sign out` is on this page too**: signing out does not affect an active connection.
 
 #### Advanced
 

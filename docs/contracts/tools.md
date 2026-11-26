@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.35.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段；3.35.0 在 `LlmProviders` 的 content 里补 service provider id，工具数均不变）。**第 5 组完成，工具面 38。**
+> 契约版本：`3.36.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段；3.35.0 在 `LlmProviders` 的 content 里补 service provider id；3.36.0 收口 `OpenSettings`：账户移出设置，工具数均不变）。**第 5 组完成，工具面 38。**
 >
-> ⚠️ 本文件 3.35.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.36.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -112,7 +112,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.35.0";
+  contract_version: "3.36.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -896,7 +896,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.35.0";
+  contract_version: "3.36.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1100,7 +1100,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.35.0";
+  contract_version: "3.36.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1896,7 +1896,7 @@ type ConfigSetModeData = {
 {
   "type": "object",
   "properties": {
-    "section": { "enum": ["ai", "connection", "account", "advanced"] },
+    "section": { "enum": ["ai", "connection", "advanced"] },
     "row": { "type": "string", "minLength": 1, "maxLength": 40 }
   },
   "required": ["section"],
@@ -1907,13 +1907,14 @@ type ConfigSetModeData = {
 ```ts
 type OpenSettingsData = {
   opened: true;
-  section: "ai" | "connection" | "account" | "advanced";
+  section: "ai" | "connection" | "advanced";
   row: string | null;        // 实际高亮的行；没匹配上为 null
   row_matched: boolean;
 };
 ```
 
 - `PermissionLevel::ReadOnly`；不写库、不发命令、不打开系统窗口。
+- **账户不在设置里**（2026-11-26）：设置只有 AI / 连接 / 高级三段；账户由左下角头像打开独立弹层。`section: "account"` 按 schema 拒绝（`INVALID_ARGUMENT`，`details.reason = "account_not_in_settings"`），工具不指路到账户。
 - **触发约束**：只在用户问「这个设置在哪里 / 怎么改」，或模型要边指边解释某个设置项时调用。**一轮对话最多一次**，不得为了「展示能力」连续调用，也不得在用户没问设置时顺手打开。
 - **行 id 登记表**（唯一来源；与 `commands.md` §9.1.1 的 `controls` 同源）：
 
@@ -1924,8 +1925,6 @@ type OpenSettingsData = {
 | `connection.port` | 本地代理端口（仅代理配置出现） |
 | `ai.provider` | 默认 AI |
 | `ai.other` | 其他 AI 服务 |
-| `account.login` | 登录 / 退出登录 |
-| `account.balance` | 余额与充值 |
 | `advanced.core` | 运行时核心版本 |
 | `advanced.helper` | 系统助手（helper） |
 | `advanced.logs` | 日志目录 |
@@ -1933,7 +1932,7 @@ type OpenSettingsData = {
 
 - **未知 `row` 不是错误**：降级为 `row: null`、`row_matched: false`，仍然打开 `section`。工具的目的是把用户带到地方，不是校验模型拼的字符串。
 - 成功后 Host 发 `settings-point`；UI 负责打开、滚动、高亮 2 秒。
-- **`display`**：成功「已打开设置 · 连接」（段名用中文：AI / 连接 / 账户 / 高级）；`row_matched: false` 时同一句，不提行名。
+- **`display`**：成功「已打开设置 · 连接」（段名用中文：AI / 连接 / 高级）；`row_matched: false` 时同一句，不提行名。
 - 无确认点、不 destructive。它与 `ConfigSetMode` 的区别：只指路，什么都不改。
 
 ---
@@ -2441,6 +2440,12 @@ type LlmProvidersData = {
 ---
 
 ## 8. 变更记录
+
+### 3.36.0（未发布，2026-11-26：`OpenSettings` 收口——账户移出设置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.36.0`；§4.50 `OpenSettings` 的 `section` 枚举收缩为 `ai` / `connection` / `advanced`，`row` 登记表删除 `account.login` / `account.balance`（11 → 9 项），`section: "account"` 按 schema 拒绝（`INVALID_ARGUMENT`，`details.reason = "account_not_in_settings"`）。**账户不在设置里，改由左下角头像打开的独立账户弹层承担**；工具不再指路到账户。工具总数不变（38） | 枚举收缩 / 行登记收缩 | 账户已独立成弹层（2026-11-26）；`src-tauri/src/tools/settings.rs` 的 `SECTIONS` / `SETTINGS_ROWS` 与 `envelope.rs` 的 `CONTRACT_VERSION` 同步 |
 
 ### 3.35.0（未发布，2026-11-26：`LlmProviders` 的 `content` 每行带 service provider id）
 

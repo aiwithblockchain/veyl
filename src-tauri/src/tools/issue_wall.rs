@@ -178,11 +178,10 @@ impl Tool for SubmitIssueToPublicWallTool {
                     .and_then(Value::as_str)
                     == Some("not_logged_in")
                 {
-                    outcome = outcome.with_next(NextAction {
-                        label: "去登录".into(),
-                        tool: "OpenSettings".into(),
-                        args: json!({ "section": "account", "row": "account.login" }),
-                    });
+                    // 账户已不在设置里（2026-11-26）：不能再指路到设置 › 账户。
+                    outcome
+                        .summary
+                        .push_str("登录入口在左下角头像打开的账户弹层。");
                 }
                 outcome
             }

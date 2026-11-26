@@ -17,7 +17,6 @@ describe("静态控件登记表", () => {
     expect(staticControlsFor("settings").map((item) => item.id)).toEqual([
       "settings.ai",
       "settings.connection",
-      "settings.account",
       "settings.advanced",
     ]);
     expect(isKnownControlId("client.primary")).toBe(true);
