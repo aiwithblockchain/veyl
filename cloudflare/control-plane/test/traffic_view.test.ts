@@ -29,7 +29,13 @@ function addAccount(db: FakeD1, id: string, balance: number): void {
   db.rows("devices").push({ id: DEVICE, account_id: ACCOUNT, revoked_at: null });
 }
 
-function addServer(db: FakeD1, id: string, accountId: string, port: number): void {
+function addServer(
+  db: FakeD1,
+  id: string,
+  accountId: string,
+  port: number,
+  extra: { state?: string; destroyedAt?: number | null } = {},
+): void {
   db.rows("servers").push({
     id,
     account_id: accountId,
@@ -37,7 +43,7 @@ function addServer(db: FakeD1, id: string, accountId: string, port: number): voi
     name: `机器 ${id}`,
     region: "sgp1",
     plan: "s-1vcpu-1gb",
-    state: "active",
+    state: extra.state ?? "active",
     node_port: port,
     hourly_usd: 0,
     monthly_usd: 0,
@@ -49,7 +55,7 @@ function addServer(db: FakeD1, id: string, accountId: string, port: number): voi
     billing_state: "active",
     created_at: Date.UTC(2026, 10, 1),
     updated_at: Date.UTC(2026, 10, 1),
-    destroyed_at: null,
+    destroyed_at: extra.destroyedAt ?? null,
     failure_code: null,
     charge_mode: "at_ready",
   });
@@ -145,5 +151,34 @@ describe("MyServer 流量四字段 · FakeD1", () => {
     expect(servers.map((row) => row.server_id)).toEqual(["srv_mine"]);
     expect(servers[0].traffic_used_bytes).toBe(0);
     expect(servers[0].traffic_state).toBe("ok");
+  });
+
+  it("traffic_pool 计入列表里看不到的已销毁机器", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db);
+    addAccount(db, ACCOUNT, 10_000);
+    addServer(db, "srv_live", ACCOUNT, 30005);
+    addServer(db, "srv_gone", ACCOUNT, 30006, {
+      state: "destroyed",
+      destroyedAt: NOW - 3 * 24 * 3600 * 1000,
+    });
+    addTraffic(db, "srv_live", 1024);
+    addTraffic(db, "srv_gone", 400 * 1024 * 1024 * 1024);
+
+    const response = await handleServers(
+      new Request("https://example.com/v1/servers", {
+        headers: { authorization: `Bearer ${env.token}` },
+      }),
+      env as never,
+    );
+    expect(response?.status).toBe(200);
+    const body = (await response?.json()) as {
+      servers: Row[];
+      traffic_pool: { used_bytes: number; limit_bytes: number };
+    };
+    expect(body.servers.map((row) => row.server_id)).toEqual(["srv_live"]);
+    expect(body.traffic_pool.used_bytes).toBe(400 * 1024 * 1024 * 1024 + 1024);
+    // 两台机器都按 §4.1 释放额度（销毁那台截止 destroyed_at）。
+    expect(body.traffic_pool.limit_bytes).toBeGreaterThan(LIMIT_100GIB_NOV26);
   });
 });

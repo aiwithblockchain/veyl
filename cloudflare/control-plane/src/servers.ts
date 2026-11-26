@@ -13,6 +13,7 @@ import {
   signDetached,
 } from "./lib/crypto";
 import { cycleIdOf, releasedBytes } from "./traffic_cycle";
+import { accountTotals } from "./traffic_pool";
 import { apiError, json } from "./lib/http";
 import {
   AGENT_CONTROL_PORT,
@@ -1895,9 +1896,13 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
   const rows = result.results ?? [];
   await refreshBooting(env, rows);
   const money = await serverMoney(env.DB, identity.accountId);
-  const traffic = await trafficFieldsFor(env.DB, identity.accountId, rows, Date.now());
+  const now = Date.now();
+  const traffic = await trafficFieldsFor(env.DB, identity.accountId, rows, now);
+  // 账号级池子与扣费同源（accountTotals）：列表里看不到的已销毁 / 已 dismiss 机器也计入。
+  const pool = await accountTotals(env.DB, identity.accountId, cycleIdOf(now), now);
   return json({
     servers: rows.map((row, index) => serverView(row, traffic[index], money.get(row.id))),
+    traffic_pool: { used_bytes: pool.used, limit_bytes: pool.released },
   });
 }
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { handleServers } from "../src/servers";
 import { signAccessToken } from "../src/lib/crypto";
+import { accountTotals } from "../src/traffic_pool";
 import { openMigratedDb, sqliteAvailable, type SqliteD1 } from "./helpers/sqliteD1";
 
 const ACCOUNT = "acct_traffic_view";
@@ -290,6 +291,44 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
       );
       expect(byId.srv_destroyed.traffic_limit_bytes).toBe(LIMIT_100GIB_DESTROYED_NOV23);
       expect(byId.srv_before_cycle.traffic_limit_bytes).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("traffic_pool 计入列表里看不到的已销毁机器，且与 accountTotals 同源", async () => {
+    const { db, env, token } = await setup();
+    try {
+      addServer(db, { id: "srv_live", transferGib: 100, port: 30011 });
+      // 用户主动销毁：不在列表里，但扣费口径仍然计入。
+      addServer(db, {
+        id: "srv_gone",
+        transferGib: 100,
+        state: "destroyed",
+        destroyedAt: NOW - 3 * DAY_MS,
+        port: 30012,
+      });
+      addTraffic(db, "srv_live", CYCLE, 1024);
+      addTraffic(db, "srv_gone", CYCLE, 400 * GIB);
+
+      const response = await handleServers(listRequest(token), env as never);
+      expect(response?.status).toBe(200);
+      const body = (await response?.json()) as {
+        servers: ServerBody[];
+        traffic_pool: { used_bytes: number; limit_bytes: number };
+      };
+      expect(body.servers.map((server) => server.server_id)).toEqual(["srv_live"]);
+      expect(body.traffic_pool).toEqual({
+        used_bytes: 400 * GIB + 1024,
+        limit_bytes: LIMIT_100GIB_NOV26 + LIMIT_100GIB_DESTROYED_NOV23,
+      });
+
+      // 防「另写一份求和」：必须与扣费用的 accountTotals 逐字节一致。
+      const totals = await accountTotals(db as unknown as D1Database, ACCOUNT, CYCLE, NOW);
+      expect(body.traffic_pool).toEqual({
+        used_bytes: totals.used,
+        limit_bytes: totals.released,
+      });
     } finally {
       db.close();
     }
