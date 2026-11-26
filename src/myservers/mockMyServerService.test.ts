@@ -129,6 +129,77 @@ describe("首次取凭据才落本地节点行", () => {
   });
 });
 
+describe("账单流水样例", () => {
+  const STORE_KEY = "veyl.mock.myServers";
+  const ACCOUNT_KEY = "veyl.mock.account";
+
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem(
+      ACCOUNT_KEY,
+      JSON.stringify({ logged_in: true, email: "a@b.co" }),
+    );
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        servers: [],
+        orders: [],
+        next_id: 1,
+        balance_cents: 420,
+      }),
+    );
+  });
+
+  it("20 笔、五类齐全，totals 与逐行求和一致", () => {
+    const ledger = new MockMyServerService().billingLedger();
+
+    expect(ledger.entries).toHaveLength(20);
+    expect(new Set(ledger.entries.map((entry) => entry.kind))).toEqual(
+      new Set(["topup", "machine_day", "traffic", "refund", "other"]),
+    );
+    expect(ledger.entries.some((entry) => entry.server === null)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.server !== null)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.amount_cents > 0)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.amount_cents < 0)).toBe(true);
+    // other 类也要一正一负：否则界面里认不出的类别永远测不到正负号。
+    const other = ledger.entries.filter((entry) => entry.kind === "other");
+    expect(other.some((entry) => entry.amount_cents > 0)).toBe(true);
+    expect(other.some((entry) => entry.amount_cents < 0)).toBe(true);
+    expect(ledger.truncated).toBe(false);
+    // totals 与控制面同口径：充值只合计 topup，扣费合计所有负数。
+    expect(ledger.totals.topup_cents).toBe(
+      ledger.entries
+        .filter((entry) => entry.kind === "topup")
+        .reduce((sum, entry) => sum + entry.amount_cents, 0),
+    );
+    expect(ledger.totals.charge_cents).toBe(
+      -ledger.entries
+        .filter((entry) => entry.amount_cents < 0)
+        .reduce((sum, entry) => sum + entry.amount_cents, 0),
+    );
+    // 倒序：第一条最新；时间都是毫秒且落在窗口内。
+    expect(ledger.entries[0].at).toBeGreaterThan(ledger.entries[19].at);
+    expect(ledger.entries[0].at).toBeGreaterThan(Date.now() - 86_400_000);
+    expect(ledger.balance_cents).toBe(420);
+  });
+
+  it("days 合法就用它，越界与省略都回落 30", () => {
+    const service = new MockMyServerService();
+    expect(service.billingLedger(7).window_days).toBe(7);
+    expect(service.billingLedger(100).window_days).toBe(30);
+    expect(service.billingLedger(0).window_days).toBe(30);
+    expect(service.billingLedger().window_days).toBe(30);
+  });
+
+  it("未登录不返回样例", () => {
+    localStorage.setItem(
+      ACCOUNT_KEY,
+      JSON.stringify({ logged_in: false, email: null }),
+    );
+    expect(() => new MockMyServerService().billingLedger()).toThrow();
+  });
+});
+
 describe("建机余额门槛（日价 × 7）", () => {
   const STORE_KEY = "veyl.mock.myServers";
   const ACCOUNT_KEY = "veyl.mock.account";

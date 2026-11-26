@@ -189,6 +189,122 @@ describe("智能修复命令", () => {
   });
 });
 
+describe("账单流水（2.76.0）", () => {
+  const LEDGER = {
+    balance_cents: 11806,
+    currency: "USD",
+    window_days: 30,
+    truncated: false,
+    totals: { topup_cents: 12000, charge_cents: 294 },
+    entries: [
+      {
+        id: "wl_2",
+        kind: "machine_day",
+        amount_cents: -20,
+        at: 1_764_000_000_000,
+        server: {
+          id: "srv_1",
+          name: "新加坡 1",
+          plan: "s-1vcpu-1gb",
+          region: "sgp1",
+        },
+        note: null,
+      },
+      {
+        id: "wl_1",
+        kind: "topup",
+        amount_cents: 12000,
+        at: 1_763_000_000_000,
+        server: null,
+        note: "充值",
+      },
+    ],
+  };
+
+  it("命令名与 days 传对；省略时不传 days；毫秒时间原样保留", async () => {
+    invoke.mockResolvedValueOnce(LEDGER);
+    const ledger = await new TauriAgentBridge().myServerBillingLedger(7);
+
+    expect(invoke).toHaveBeenLastCalledWith("my_server_billing_ledger", {
+      days: 7,
+    });
+    expect(ledger.entries[0].at).toBe(1_764_000_000_000);
+    expect(ledger.entries[0].server?.region).toBe("sgp1");
+    expect(ledger.entries[1].server).toBeNull();
+
+    invoke.mockResolvedValueOnce(LEDGER);
+    await new TauriAgentBridge().myServerBillingLedger();
+    expect(invoke).toHaveBeenLastCalledWith("my_server_billing_ledger", {});
+  });
+
+  it("认不出的 kind 归 other；坏条目整条丢弃，null 机器合法", async () => {
+    invoke.mockResolvedValueOnce({
+      ...LEDGER,
+      entries: [
+        { ...LEDGER.entries[0], kind: "promo" },
+        { ...LEDGER.entries[0], id: "" },
+        { ...LEDGER.entries[0], at: 0 },
+        { ...LEDGER.entries[0], at: 1_764_000_000 },
+        { ...LEDGER.entries[0], at: 1_764_000_000_000.5 },
+        { ...LEDGER.entries[0], amount_cents: "12" },
+        { ...LEDGER.entries[0], amount_cents: 12.5 },
+        { ...LEDGER.entries[0], server: { id: "srv_1" } },
+        LEDGER.entries[1],
+      ],
+    });
+
+    const ledger = await new TauriAgentBridge().myServerBillingLedger();
+    expect(ledger.entries).toHaveLength(2);
+    expect(ledger.entries[0].kind).toBe("other");
+    expect(ledger.entries[1]).toMatchObject({ kind: "topup", server: null });
+  });
+
+  it("totals 是全量，原样透传而不是按 entries 重算", async () => {
+    invoke.mockResolvedValueOnce({
+      ...LEDGER,
+      truncated: true,
+      totals: { topup_cents: 99999, charge_cents: 1 },
+    });
+
+    const ledger = await new TauriAgentBridge().myServerBillingLedger();
+    expect(ledger.truncated).toBe(true);
+    expect(ledger.totals).toEqual({ topup_cents: 99999, charge_cents: 1 });
+  });
+
+  it("顶层形状不对按上游错误处理", async () => {
+    for (const broken of [
+      { ...LEDGER, balance_cents: -1 },
+      { ...LEDGER, balance_cents: 10.5 },
+      { ...LEDGER, window_days: 31 },
+      { ...LEDGER, totals: undefined },
+      { ...LEDGER, totals: { topup_cents: 1.5, charge_cents: 0 } },
+      { ...LEDGER, entries: "nope" },
+    ]) {
+      invoke.mockResolvedValueOnce(broken);
+      await expect(
+        new TauriAgentBridge().myServerBillingLedger(),
+      ).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
+    }
+  });
+
+  it("失败信封的 code 与 reason 原样保留", async () => {
+    invoke.mockRejectedValueOnce({
+      code: "UNAUTHENTICATED",
+      message: "",
+      retryable: true,
+      details: { reason: "auth_required" },
+    });
+
+    const error = await new TauriAgentBridge()
+      .myServerBillingLedger()
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      code: "UNAUTHENTICATED",
+      details: { reason: "auth_required" },
+    });
+  });
+});
+
 describe("检查升级命令（2.75.0）", () => {
   it("命令名与参数键传对，三个字段原样返回", async () => {
     invoke.mockResolvedValueOnce({

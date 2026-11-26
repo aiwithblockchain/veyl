@@ -530,6 +530,32 @@ pub async fn my_server_wallet() -> Result<Value, Value> {
     }
 }
 
+/// 近 N 天账单流水（仅 UI，2.76.0）。
+#[tauri::command]
+pub async fn my_server_billing_ledger(days: Option<i64>) -> Result<Value, Value> {
+    match crate::control_plane::billing::ledger(days).await {
+        Ok(ledger) => {
+            log::debug!(
+                "我的服务器：账单流水 window_days={} entries={} truncated={}",
+                ledger.window_days,
+                ledger.entries.len(),
+                ledger.truncated
+            );
+            Ok(json!(ledger))
+        }
+        Err(error) => {
+            log::warn!(
+                "我的服务器：账单流水失败 code={} reason={} retryable={} message={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable,
+                error.message
+            );
+            Err(error.envelope())
+        }
+    }
+}
+
 /// 创建充值会话并在系统浏览器打开（仅 UI）。
 #[tauri::command]
 pub async fn my_server_topup(app: tauri::AppHandle, denomination: i64) -> Result<Value, Value> {

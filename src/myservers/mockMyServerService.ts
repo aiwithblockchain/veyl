@@ -1,4 +1,6 @@
 import type {
+  BillingLedger,
+  BillingLedgerEntry,
   MyServer,
   MyServerAccount,
   MyServerCatalog,
@@ -635,6 +637,96 @@ export class MockMyServerService {
       currency: "USD",
       denominations_cents: [...TOPUP_CENTS],
       updated_at: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * 近 N 天账单样例：20 笔、覆盖五类，既有 null 机器也有正负金额。
+   * `totals` 与控制面同一口径（充值只算 topup、扣费算所有负数），所以与逐行求和一致；
+   * 样例 20 笔，`truncated` 恒为 false。
+   */
+  billingLedger(days?: number): BillingLedger {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (!readAccount().logged_in) {
+      loginError("UNAUTHENTICATED", "需要先登录。", "auth_required", true);
+    }
+    // 越界与省略都落到 30：控制面也是这么回落的。
+    const windowDays =
+      days !== undefined && Number.isInteger(days) && days >= 1 && days <= 30
+        ? days
+        : 30;
+    const now = Date.now();
+    const sgp = {
+      id: "srv_mock_sgp",
+      name: "新加坡 1",
+      plan: "s-1vcpu-1gb",
+      region: "sgp1",
+    };
+    const nyc = {
+      id: "srv_mock_nyc",
+      name: "纽约 1",
+      plan: "s-1vcpu-512mb-10gb",
+      region: "nyc1",
+    };
+    const sfo = {
+      id: "srv_mock_sfo",
+      name: "旧金山 2",
+      plan: "s-1vcpu-2gb",
+      region: "sfo2",
+    };
+    const rows: Array<
+      [
+        BillingLedgerEntry["kind"],
+        number,
+        BillingLedgerEntry["server"],
+        string | null,
+      ]
+    > = [
+      ["topup", 1200, null, "充值"],
+      ["machine_day", -20, sgp, null],
+      ["machine_day", -20, sgp, null],
+      ["traffic", -15, sgp, null],
+      ["machine_day", -20, nyc, null],
+      ["machine_day", -20, nyc, null],
+      ["traffic", -45, nyc, null],
+      ["refund", 200, nyc, "流量超支退回"],
+      ["machine_day", -30, sfo, null],
+      ["machine_day", -30, sfo, null],
+      ["traffic", -120, sfo, null],
+      ["other", 300, null, "活动赠额"],
+      ["topup", 2400, null, "充值"],
+      ["machine_day", -20, sgp, null],
+      ["machine_day", -20, sgp, null],
+      ["traffic", -10, sgp, null],
+      ["machine_day", -20, nyc, null],
+      ["refund", 50, sgp, "重复扣费退回"],
+      ["other", -80, null, "人工调账"],
+      ["machine_day", -20, nyc, null],
+    ];
+    const entries: BillingLedgerEntry[] = rows.map(
+      ([kind, amount, server, note], index) => ({
+        id: `wl_mock_${String(index + 1).padStart(2, "0")}`,
+        kind,
+        amount_cents: amount,
+        at: now - index * 3_600_000,
+        server,
+        note,
+      }),
+    );
+    return {
+      balance_cents: readStore().balance_cents,
+      currency: "USD",
+      window_days: windowDays,
+      truncated: false,
+      totals: {
+        topup_cents: entries
+          .filter((entry) => entry.kind === "topup")
+          .reduce((sum, entry) => sum + entry.amount_cents, 0),
+        charge_cents: entries
+          .filter((entry) => entry.amount_cents < 0)
+          .reduce((sum, entry) => sum - entry.amount_cents, 0),
+      },
+      entries,
     };
   }
 

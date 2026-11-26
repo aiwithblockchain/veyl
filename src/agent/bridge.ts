@@ -900,6 +900,46 @@ export interface MyServerTopup {
   denomination_cents: number;
 }
 
+/** 账单流水类别（2.76.0）；`machine_day` 已包含建机第 0 天由 `order` 写下的那笔。 */
+export type BillingEntryKind =
+  | "topup"
+  | "machine_day"
+  | "traffic"
+  | "refund"
+  | "other";
+
+/** 账单里出现过的机器摘要；解析不出机器时条目里的 `server` 为 null。 */
+export interface BillingLedgerServer {
+  id: string;
+  name: string;
+  plan: string;
+  region: string;
+}
+
+/** 一笔流水（`commands.md` §7.36）。 */
+export interface BillingLedgerEntry {
+  id: string;
+  kind: BillingEntryKind;
+  /** USD 分：扣费为负、入账为正。 */
+  amount_cents: number;
+  /** epoch **毫秒**（不是秒），客户端按本地日展示。 */
+  at: number;
+  server: BillingLedgerServer | null;
+  note: string | null;
+}
+
+/** 近 N 天账单（2.76.0，仅 UI）。 */
+export interface BillingLedger {
+  balance_cents: number;
+  currency: string;
+  /** 实际生效的天数：入参越界时控制面回落为 30。 */
+  window_days: number;
+  /** 列表被 1000 条上限截断；`totals` 仍是全量。 */
+  truncated: boolean;
+  totals: { topup_cents: number; charge_cents: number };
+  entries: BillingLedgerEntry[];
+}
+
 /** 手机端导出（commands.md §7.21 / §7.22，2.48.0 起含 Shadowrocket 配置）。 */
 export type MobileExportFormat =
   | { format: "singbox"; url: string; qr_data_url: string }
@@ -1192,6 +1232,8 @@ export interface AgentBridge {
   myServerLogout(): Promise<MyServerAccount>;
   /** 余额与充值档位（2.28.1）；前端不做金额运算。 */
   myServerWallet(): Promise<MyServerWallet>;
+  /** 近 N 天账单流水（2.76.0，仅 UI）；`days` 缺省 30，越界由控制面回落。 */
+  myServerBillingLedger(days?: number): Promise<BillingLedger>;
   /** 创建充值收银台会话；Host 负责用系统浏览器打开。 */
   myServerTopup(denominationCents: number): Promise<MyServerTopup>;
   /** 手机端导出（2.46.0）；Host 未接入时不实现，界面按生成失败处理。 */

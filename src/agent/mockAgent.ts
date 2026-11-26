@@ -814,6 +814,10 @@ export class MockAgentBridge implements AgentBridge {
     return this.myServers.wallet();
   }
 
+  async myServerBillingLedger(days?: number) {
+    return this.myServers.billingLedger(days);
+  }
+
   async myServerTopup(denomination: number) {
     return this.myServers.topup(denomination);
   }
