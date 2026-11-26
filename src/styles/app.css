@@ -1725,13 +1725,70 @@ body[data-resizing] {
   word-break: break-all;
 }
 
-/* 设置 › 账户：邮箱整行省略，金额与账号菜单同一格式。 */
-.settings-account__identity {
+/* 账户弹层：720 宽、单层单滚动；标签 12，金额 20 mono。 */
+.account-surface {
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(86vh, 780px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.account-surface__body {
+  /* 弹层里唯一的滚动容器：header / footer 固定，账单不再自己滚。 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px 20px;
+}
+
+.account-surface__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: none;
+  padding: 12px 22px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.account-surface__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-surface__row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.account-surface__row > .btn {
+  flex: 0 0 auto;
+}
+
+.account-surface__main {
+  min-width: 0;
+}
+
+.account-surface__identity {
   flex: 1;
   min-width: 0;
 }
 
-.settings-account__email {
+.account-surface__label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.account-surface__email {
   margin-top: 2px;
   font-size: 15px;
   color: var(--ink);
@@ -1740,30 +1797,129 @@ body[data-resizing] {
   text-overflow: ellipsis;
 }
 
-.settings-account__amount {
-  margin: 2px 0 0;
+.account-surface__amount {
+  margin-top: 2px;
   font-size: 20px;
   line-height: 1.2;
-  letter-spacing: 0;
   color: var(--ink);
 }
 
-.settings-account__amount + .settings-note {
+.account-surface__amount + .settings-note {
   margin-top: 4px;
 }
 
-.settings-account__error {
+.account-surface__traffic {
+  margin: 2px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.account-surface__traffic-near,
+.account-surface__traffic-over {
+  margin-left: 8px;
+  color: var(--amber);
+}
+
+.account-surface__traffic-reset {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.account-surface__error {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin: 2px 0 0;
+  margin-top: 2px;
   font-size: 12px;
   line-height: 1.45;
   color: var(--amber);
 }
 
-.settings-account__error + .settings-note {
+.account-surface__error + .settings-note {
   margin-top: 4px;
+}
+
+.account-surface__aside {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.account-surface__recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 充值 / 账单：就地区块，与上面的行只靠分隔线分区。 */
+.account-surface__section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-surface__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* 账单在 720 宽里占满一行：固定列宽，机器列吃剩余，金额列不被裁。
+   展开后只有账户 body 一个滚动容器，表头 sticky 在它上面。 */
+.account-surface__section .billing-table {
+  table-layout: fixed;
+}
+
+.account-surface__section .billing-table th {
+  background: var(--bg-card);
+}
+
+.account-surface__section .billing-table th,
+.account-surface__section .billing-table td {
+  padding: 9px 10px;
+}
+
+.account-surface__section .billing-table th:first-child,
+.account-surface__section .billing-table td:first-child {
+  padding-left: 0;
+}
+
+/* 金额列右边缘留出与左列相同的 10px，最后一位不被滚动容器裁掉。 */
+.account-surface__section .billing-table th:last-child,
+.account-surface__section .billing-table td:last-child {
+  padding-right: 10px;
+}
+
+/* 固定布局只取表头第一行的宽度：列宽必须写在 th 上。 */
+.account-surface__section .billing-table th:nth-child(1) {
+  width: 88px;
+}
+
+.account-surface__section .billing-table th:nth-child(3) {
+  width: 96px;
+}
+
+.account-surface__section .billing-table th:nth-child(4) {
+  width: 108px;
+}
+
+.account-surface__section .billing-table__server {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-surface__section .billing-footnote {
+  padding: 10px 0 4px;
 }
 
 .settings-row__aside {
@@ -2345,6 +2501,152 @@ body[data-resizing] {
 
 .reset-last--warn {
   color: var(--warn-text);
+}
+
+/* 账单（账户弹层内）：默认折叠成一行摘要；展开后表头 sticky，滚动交给弹层 body。 */
+
+.billing-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.billing-disclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.billing-disclosure--toggle {
+  cursor: pointer;
+}
+
+.billing-disclosure--toggle:hover {
+  color: var(--ink);
+}
+
+.billing-disclosure--failed .billing-disclosure__text {
+  color: var(--amber);
+}
+
+.billing-disclosure__text {
+  min-width: 0;
+}
+
+.billing-disclosure__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.billing-disclosure__chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(45deg);
+  transition: transform 120ms ease-out;
+}
+
+.billing-disclosure__chevron.is-open {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.billing-disclosure--empty {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.billing-disclosure__note {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.billing-details {
+  padding-top: 6px;
+}
+
+.billing-more {
+  padding-top: 10px;
+}
+
+.billing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.billing-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--hair);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.billing-table td {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: top;
+}
+
+.billing-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.billing-table__amount-head,
+.billing-table__amount {
+  text-align: right;
+}
+
+.billing-table__kind {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.billing-table__server {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.billing-table__date {
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.billing-table__amount {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.billing-footnote {
+  margin: 0;
+  padding: 10px 20px 14px;
+  color: var(--ink-3);
+  font-size: 12px;
 }
 
 /* provider 列表与表单 */
@@ -3216,6 +3518,16 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.myservers__traffic {
+  color: var(--ink-2);
+}
+
+.myservers__traffic-reset {
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 .myservers__notice {
   margin: 0;
   font-size: 12px;
@@ -3295,19 +3607,82 @@ body[data-resizing] {
 }
 
 .myservers-topup {
-  width: min(420px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .myservers-topup__grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
+/* 窄窗放不下 5 等分：退成 3 列，单档仍不低于 44 高。 */
+@media (max-width: 619px) {
+  .myservers-topup__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 .myservers-topup__option {
+  height: 44px;
   min-height: 44px;
+  border-color: var(--hair);
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.myservers-topup__option:not(:disabled):hover {
+  border-color: var(--hair-strong);
+  background: transparent;
+  color: var(--ink);
+}
+
+.myservers-topup__option:not(:disabled):focus-visible {
+  border-color: var(--ink);
+}
+
+.myservers-topup__custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.myservers-topup__custom-label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.myservers-topup__custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.myservers-topup__input {
+  height: 44px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-raise);
+  color: var(--ink);
+  font: inherit;
   font-size: 15px;
   font-variant-numeric: tabular-nums;
+}
+
+.myservers-topup__input:focus {
+  outline: 0;
+  border-color: var(--link);
+}
+
+.myservers-topup__submit {
+  height: 44px;
+  padding: 0 18px;
+  font-size: 15px;
 }
 
 .myservers__detail {
@@ -3332,7 +3707,7 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-/* 标题区第一行：左「返回 + 标题」，右「让 AI 帮我选」；放不下时整颗换行。 */
+/* 标题区第一行：左「返回 + 标题」；放不下时整行换行。 */
 .myservers__wizard-head {
   display: flex;
   align-items: flex-start;
@@ -4204,6 +4579,12 @@ body[data-resizing] {
   margin: 0;
 }
 
+.myservers__confirm-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
 /* ---------- 流量范围开关（hero 第二行） ---------- */
 
 .scope {
@@ -5071,187 +5452,6 @@ body[data-resizing] {
 .account-avatar:not(.has-initial):not(.is-loading) {
   border: 1px solid var(--hair-strong);
   color: var(--ink-3);
-}
-
-/* 账号菜单：透明遮罩，点空白处关闭。 */
-.account-menu__backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  background: transparent;
-}
-
-/* 账号菜单：锚在导航头像右侧（全仓只有这一种布局）。 */
-.account-menu {
-  position: absolute;
-  left: calc(100% + 12px);
-  bottom: -8px;
-  z-index: 61;
-  width: 280px;
-  padding: 8px;
-  border: 1px solid var(--hair-strong);
-  border-radius: 10px;
-  background: var(--card);
-  box-shadow:
-    0 8px 24px rgba(23, 22, 20, 0.12),
-    0 1px 2px rgba(23, 22, 20, 0.06);
-}
-
-/* 头部只留邮箱：头像就是锚点，菜单里不再重复。 */
-.account-menu__email {
-  height: 36px;
-  padding: 0 12px;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 36px;
-  color: var(--ink-2);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.account-menu__balance {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 40px;
-}
-
-.account-menu__balance-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.account-menu__label {
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.account-menu__amount {
-  font-family: var(--mono);
-  font-size: 20px;
-  line-height: 1.1;
-  letter-spacing: 0;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-
-.account-menu__amount-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.account-menu__refreshing {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--ink-3);
-  white-space: nowrap;
-}
-
-.account-menu__spinner {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px solid currentColor;
-  border-top-color: transparent;
-  animation: spin 0.9s linear infinite;
-}
-
-.account-menu__balance-error {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--amber);
-}
-
-.account-menu__topup {
-  flex: none;
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-}
-
-.account-menu__divider {
-  height: 1px;
-  margin: 8px 0;
-  background: var(--hair);
-}
-
-.account-menu__error {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px;
-  margin: 0 0 4px;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--red);
-}
-
-.account-menu__link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--link);
-  font-size: 12px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.account-menu__identity {
-  margin: 0 0 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ink-2);
-}
-
-.account-menu__recover {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  height: 36px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 500;
-  text-align: left;
-}
-
-.account-menu__recover:hover {
-  background: var(--bg-hover);
-}
-
-.account-menu__recover--secondary {
-  color: var(--ink-2);
-  font-weight: 400;
-}
-
-.account-menu__logout {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  height: 36px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--red);
-  font-size: 13px;
-  font-weight: 500;
-  text-align: left;
-}
-
-.account-menu__logout:hover {
-  background: var(--bg-hover);
 }
 
 .rail__error {
@@ -7230,11 +7430,6 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 标题区右上角的 ghost 按钮：不抢创建主按钮。 */
-.wizard-ask-ai {
-  flex: none;
 }
 
 .myservers__failure .btn {

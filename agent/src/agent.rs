@@ -37,6 +37,11 @@ const IP_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// set `public_host` (or `allowed_hosts`) in the config.
 const IP_RETRY_ATTEMPTS: usize = 3;
 
+/// Bound for resending a frozen `rotated` report on the metering tick. It runs
+/// only when a report is frozen, so an idle machine never talks to the control
+/// plane on this path.
+const ROTATION_FLUSH_BUDGET: Duration = Duration::from_secs(10);
+
 enum DesiredFetch {
     Found(DesiredState),
     Unavailable,
@@ -338,6 +343,21 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
             // error inside `tick` is a log line, never a process event.
             _ = traffic_tick.tick() => {
                 meter.tick_now().await;
+                // A `rotated` report whose response was lost converges here
+                // without waiting for the next tool call; nothing is sent when
+                // no report is frozen. Bounded so a hung control plane cannot
+                // starve the meter, and run after it so metering never waits.
+                if tokio::time::timeout(
+                    ROTATION_FLUSH_BUDGET,
+                    engine.flush_pending_rotation(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        "the frozen rotation report timed out; retrying on the next tick"
+                    );
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 # 流量额度与计费
 
 > 日期：2026-11-25
-> 状态：已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10
+> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。30 天账单已实现（接口 `4e375c6` / 契约 2.76.0 与 Tauri 命令 `eb8c281` / 账户页弹层已上线）。流量四字段控制面已完成（契约 2.78.0），**App 侧接线与展示未接**（§7.3 / §8）。**未实现**：余额三次提醒（§5.4 的预测与提前量）；§5.4 的「扣不动即销毁」已随扣费路径落地。
 > 上游：`billing-notes.md`（支付与日价）、`servers-list-detail.md`（详情页事实区）、`node-agent-mcp.md`（agent 通道）
 > 事实来源：DigitalOcean 带宽文档 <https://docs.digitalocean.com/platform/billing/bandwidth/>（2026-11-25 核实）
 
@@ -39,7 +39,7 @@
 | 4 | 单台每计费周期最多累计 28 天（672 小时） | "up to a maximum of 2,419,200 seconds (28 days) per monthly billing cycle" |
 | 5 | 超额 **$0.01/GiB**，不分区、不分机型 | 文档原文 |
 | 6 | 销毁后**停止累计**，已用流量**不清零** | 累计按"存在"计算；用量记在团队池上 |
-| 7 | 计费周期 = 账户 billing cycle（开户周年日），不是自然月 | "per monthly billing cycle" |
+| 7 | 计费周期 = **自然月（UTC）**，每月 1 日 00:00 UTC 清零 | 原写「开户周年日」是错的；2026-11-26 以官方文档复核："billing cycles are monthly … calendar month"、"invoice … on the first day of each month" |
 | 8 | 机型额度：`s-1vcpu-512mb-10gb` 500 GiB、`s-1vcpu-1gb` 1,000 GiB、`s-1vcpu-2gb` 2,000 GiB | DO 定价页；目录里 `transfer_gib` 由 `size.transfer × 1000` 得到 |
 | 9 | **没有**按机器查累计量的 API；Billing 页用量 T+1，明细 CSV 需手动申请 | OpenAPI 里只有 `/v2/monitoring/metrics/droplet/bandwidth`（Mbps 速率） |
 
@@ -78,7 +78,7 @@
 - 因此 `cycle_id` 直接由 UTC 年月推导（`YYYY-MM`），**不需要调用 DO 接口**；发票只在月末对账时用。
 - **不用我们自己的 30 天，也不做固定 28 天窗口**：长度和 DO 不一致时，一年会多清零几次，每次多给一份「第 1 天额度」（500 GB 机型约 $0.18），是净亏。28 天只是**单台机器在一个 DO 周期内最多累计的额度封顶**，不是我们的周期。
 - 额度与用量都在同一边界归零，两者必须同源，否则超额判断会错位。
-- 降级：拿不到 DO 边界时退化为固定 28 天滚动窗口（长度与 DO 封顶一致，不会多给），并在日志里标记为降级运行。
+- 不需要降级路径：`cycle_id` 由 UTC 年月本地推导，全程不调 DO 接口，所以不存在「拿不到 DO 边界」的情况。（初稿写过「退化为固定 28 天滚动窗口」，既没实现也与这条矛盾，已删除。）
 
 ### 4.1 公式
 
@@ -107,12 +107,13 @@
   - 与 DO 团队级「按存在秒累计」一致：DO 在机器存在期间攒出的额度留在团队池里，不会因为销毁而作废。按「未用额度作废」实现会反向多收用户，不做。
 - 换机型重建：新机器按新机型的日额度从建机当天重新释放；旧机器的已释放额度保留在账号总和里。
 - 账号层面的判断永远是：`Σ 各机器已用 > Σ 各机器已释放` 才有超额，与机器换过几次无关。
+- **已释放额度是现算的**：控制面从 `servers` 表按账号重算每台机器的额度（用 `ready_at` 与本周期内的 `destroyed_at` 推导），**不是**把 `server_traffic.released_bytes` 求和。那一列只是当次上报时刻的快照，不参与扣费——按列求和会在「周期开始后还没人上报」或「新机首次上报前」漏掉额度。
 
 ### 4.4 周期切换时发生什么
 
 每月 1 日 00:00 UTC：
 
-1. 旧周期的 `server_traffic` 行封存，历史保留；
+1. 旧周期的 `server_traffic` 行封存（保留 45 天，见 §7.4），不再参与扣费；
 2. 新周期已用流量从 0 开始；
 3. 已释放额度回到「第 1 天」（500 GB 机型 17.86 GB），之后每天继续累加。
 
@@ -137,6 +138,7 @@ over_bytes      = max(0, 本周期已用 − 已释放额度)
 - 只对**增量**扣，`已扣_cents` 落库，重复上报不会重复扣。
 - 扣费与额度判断都在控制面做；agent 只上报字节数，不参与钱的计算。
 - **扣的是「此刻累计」**：`已用` 与 `已释放` 都取当刻值，额度随机器存活逐日长出来。所以一次突发会被即时扣费；如果这台机器之后继续存活、额度追上用量，DO 月末的净算可能是 0，我们**不退回**已扣的部分（v1 不做负增量退款，见 §10 第 5 项）。方向是我方多收，不会少收，所以不会被用户套利。
+- 「不退回」只指**超支那一笔**。机器因流量超支被停机销毁时，机器费仍按现有停机路径退还未开始的整天（`traffic_overage` 与 `billing_unpaid` 同口径），已扣的超支不退回。
 
 ### 5.2 余额不足
 
@@ -207,7 +209,7 @@ table inet veyl_meter {
 本地状态（**原子写**：临时文件 + rename）：
 
 ```
-{ counter_last, pending_bytes, last_saved_at, last_ok_at, seq }
+{ counter_last, pending_bytes, last_saved_at, last_ok_at, seq, pending_attempt? }
 ```
 
 每 30 秒读一次计数器，**落盘每 5 分钟一次**，上报按事件触发：
@@ -217,10 +219,15 @@ cur     = nft_bytes()
 delta   = if cur < counter_last { cur } else { cur - counter_last }   // 负增量=计数器归零
 pending += delta; counter_last = cur
 if now - last_saved_at >= 5 分钟: save()
-if pending >= 256 MB || now - last_ok_at >= 30 分钟:
-    POST /v1/agent/traffic { seq, delta_bytes: pending }
-    2xx → pending = 0; seq += 1; last_ok_at = now; save()
+if pending_attempt 还在:                       // 上一批没收到 2xx
+    原样重发 pending_attempt 里的 (seq, bytes)，不重算
+elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
+    pending_attempt = { seq, delta_bytes: pending }; save()   // 先冻结并落盘
+    POST /v1/agent/traffic
+    2xx → pending -= pending_attempt.bytes; seq += 1; last_ok_at = now; pending_attempt = None; save()
 ```
+
+- **先冻结再发**：请求发出前把这一批的 `(seq, bytes)` 落盘，失败时只重发这一批的原值。否则响应丢失后的重试会带上期间新增的字节，而控制面按 `seq` 去重会把新增的那部分永久丢掉（少算）。
 
 - **agent 不知道计费周期**，报文里不带周期；归属由控制面按收到时间决定（§6.5）。
 - 上报失败不清 `pending`，下个窗口重发；控制面按 `(server_id, seq)` 去重，只接受递增序列。
@@ -265,13 +272,13 @@ if pending >= 256 MB || now - last_ok_at >= 30 分钟:
 
 | 位置 | 改动 | 量级 |
 |---|---|---|
-| `agent/src/traffic.rs`（新增） | nft 表管理、计数读取、累加器、状态文件、上报触发 | ~200 行 |
+| `agent/src/traffic.rs`（新增） | nft 表管理、计数读取、累加器、状态文件、上报触发 | ~460 行（不含测试） |
 | `agent/src/agent.rs` | 复用现有 select 循环加一个 30 秒 tick（轮询已删，循环仍在） | ~20 行 |
 | `agent/src/control.rs` | 新增 `traffic()` 调用 | ~15 行 |
 | `agent/src/config.rs` | 读间隔 / 落盘间隔 / 上报阈值三个参数 | ~15 行 |
-| `cloudflare/control-plane/src/traffic.ts`（新增） | `POST /v1/agent/traffic`、去重、按接收时间归周期、累加、额度与超支扣费 | ~310 行（`servers.ts` 只加路由转发） |
-| `cloudflare/control-plane/src/wallet.ts` | 近 30 天按日归集（账单弹层的数据源） | ~80 行 |
-| `cloudflare/control-plane/migrations/0014_server_traffic.sql` | `server_traffic` + `billing_warnings` | ~25 行 |
+| `cloudflare/control-plane/src/traffic.ts`（新增） | `POST /v1/agent/traffic`、去重、按接收时间归周期、累加、额度与超支扣费 | ~310 行。路由挂在 `index.ts`；`servers.ts` 另加 ~33 行（`traffic_overage` 墓碑文案、退款白名单、销毁原因口径） |
+| `cloudflare/control-plane/src/billing_report.ts`（新增，`4e375c6`） | `GET /v1/billing/ledger`：流水式账单弹层的数据源（不做按日归集，§8.1） | ~250 行，含真实 SQLite 测试 |
+| `cloudflare/control-plane/migrations/0014_server_traffic.sql` | `server_traffic` | ~13 行（`billing_warnings` **未实现**，随 §5.4 提醒落地） |
 | App（`account-billing-ui.md`） | 账单弹层、总可用带宽、账户入口重构、预警弹框 | 单独一批 |
 
 ### 6.10 测试与验收
@@ -300,14 +307,14 @@ if pending >= 256 MB || now - last_ok_at >= 30 分钟:
 
 ### 7.1 控制面表
 
-`server_traffic`（按机器 × 周期存历史，销毁后保留作审计）：
+`server_traffic`（按机器 × 周期存历史；保留 45 天，之后随 `servers` 一起清理，见 §7.4）：
 
 | 列 | 说明 |
 |---|---|
 | `server_id` | 服务器 id |
 | `cycle_id` | `YYYY-MM`（UTC 自然月，**控制面按收到上报的时间判定**） |
 | `bytes` | 本周期已用出站字节 |
-| `released_bytes` | 本周期已释放额度快照（按天释放，封顶 28 天） |
+| `released_bytes` | 本周期已释放额度**快照**（写于最近一次上报，仅供审计；账号池按 §4.3 从 `servers` 表现算，不读这一列） |
 | `charged_cents` | 本周期已扣的超支金额 |
 | `last_seq` | 已接受的最大上报序号（去重用，按 server 记、跨周期不清零） |
 | `updated_at` | 最后上报时间 |
@@ -324,73 +331,165 @@ Authorization: Bearer <server_token>
 
 200 { "ok": true }
 400 { "ok": false, "reason": "invalid_body" }
-401 unknown token
+401 { "ok": false, "reason": "missing_token" }      // 没带 Authorization
+401 { "ok": false, "reason": "unknown_token" }      // 令牌对不上任何机器
 409 { "ok": false, "reason": "server_destroyed" }   // 终态，agent 停止上报
+503 { "ok": false, "reason": "unavailable" }        // D1 未绑定
 ```
 
 - `seq` 每个 server 单调递增、永不清零；`seq <= last_seq` 视为重复，回 200 但不记账。
 - 归属周期 = 控制面收到请求时的 UTC 年月，agent 不传周期。
-- 接受 delta 后：`bytes += delta`，并按 §5.1 在同一事务里算并扣超支。
+- 接受 delta 后分两步，**不是同一个事务**：
+  1. `server_traffic.bytes += delta` 与 `last_seq` 推进是**一条原子写入**（`ON CONFLICT … WHERE last_seq < excluded.last_seq`，并发时后到的那条 `changes = 0`，按重复处理）；
+  2. 再按 §5.1 算超支并扣费，扣费在 `recordLedgerEntry` 的 `db.batch` 里原子完成——账本行、`accounts.balance_cents`、`server_traffic.charged_cents` 三者同批。「算」本身在批外：先读 `accountTotals`，再在 batch 的 guard 里复核「账号已扣额未变」，变了就这笔不写（并发时由另一笔负责）。
+- 两步之间进程中断也不会永久错账：下一次上报按 `应付 − 已扣` 补算。
 
-### 7.3 客户端契约（`commands.md` 2.75.0）
+### 7.3 客户端契约（`commands.md` 2.82.0，控制面已实现四字段；状态取值本批收窄）
+
+> 2026-11-26：控制面 `serverView` 已返回这四个字段（列表 / 详情 / 改名三个回包统一），契约 2.78.0 落地。同日收窄 `traffic_state` 的取值（2.82.0）：**单台不再有 `near` / `over`**，理由见 §8。
 
 `MyServer` 增：
 
 ```ts
-traffic_used_bytes: number;      // 本周期已用
-traffic_limit_bytes: number;     // 本周期已释放额度
-traffic_reset_at: string;        // 周期结束时间（ISO）
-traffic_state: "ok" | "near" | "over" | "unpaid";
+traffic_used_bytes: number;      // 本周期已用（UTC 自然月），没有上报行 = 0
+traffic_limit_bytes: number;     // 本周期已释放额度，控制面按 §4.1 现算，不是上报快照
+traffic_reset_at: string;        // 下个 UTC 月 1 日 00:00（ISO），本周期清零点
+traffic_state: "ok" | "unpaid";
 ```
+
+- **`traffic_state` 只有两态**：`ok`（正常，不区分用得多还是少）与 `unpaid`（因流量超支、余额不足已停机）。
+- **单台没有 `over` / `near`**：扣费判据是账号池（`max(0, Σ已用 − Σ已释放)`），单台超自己那份不产生任何扣费。把单台标成 `over` 会让用户以为正在被扣钱，而账号其实没超。
+- `traffic_limit_bytes` **照常返回**——账号池的求和依赖它，界面只是不再拿它跟本台已用比大小；它和 `transfer_gib` 一起用于算「明天还能涨多少」（§8.2），所以不能删。
+- 已释放额度为 0 表示**额度未知**（老行 / 目录缺 `transfer_gib`），界面显示「额度未知」，不显示成 0 GiB。
+- 已销毁的行照样带这四个字段；界面按 `state` / `failure_code` 只渲染墓碑，不渲染流量行（§8）。
 
 不改现有字段；`transfer_gib` 保留为目录展示用。
 
 ---
 
+### 7.4 保留与清理
+
+清理跑在计费 cron 里（`wrangler.jsonc` 里实际是**每小时**一次，不是每天），与账本裁剪同一处，**分批量删**。
+
+| 数据 | 保留 | 规则 |
+|---|---|---|
+| `wallet_ledger` **机器费**明细 | **≥31 天** | 裁剪边界取 `min(上上个月末, now − 31 天)`；更早的折叠成 `snapshot`。充值 / 超支 / 退款明细目前**永久保留**（见「已知限制」） |
+| `server_traffic` | 45 天 | 删 `cycle_id != 当前周期` **且** `updated_at < 45 天前` **且** `last_seq < 该 server 的历史最大 last_seq`。例外：**`servers` 行还在时**，该机器的最大 `last_seq` 那一行保留（去重基准）；`servers` 行本身被清理时，它的全部 `server_traffic` 行同批删掉 |
+| `servers`（仅 `destroyed`）与 `credentials` | 45 天 | 判定用 `destroyed_at`；删 `servers` 行时**同批删 `credentials`**，否则留下永久孤儿密文 |
+
+- **裁剪边界必须再夹一个 `now − 31 天`**：现有 `archiveCutoff` 是「上上个月末」，保留期实际只有 **28–61 天**（最短在 3 月 1 日：2 月 + 本月头 1 天 = 28 天），30 天窗口最多会被切掉 **2 天**。夹上 `min(…, now − 31 天)` 后才保证 ≥31 天，`billing.ts:58` 注释里的「31–60 天」也要改。
+- **`snapshot` 行仍要显式排除**：夹上 `now − 31 天` 之后 `cutoff ≤ now − 31 天 < now − 30 天`，它已不可能落进窗口——保留这条过滤是**防御性**的，防止以后有人改了边界公式又漏掉。
+- **`server_traffic` 的两条保护**：① 当前周期永不删；② 还要保护该 server 的历史 `last_seq` 最大值——去重取 `MAX(last_seq) WHERE server_id = ?` 且跨周期，若某 server 全部行都超龄（agent 挂了、或机器已销毁），整批删掉会让 `MAX` 归零，一个压了很久的旧 seq 重发就会被重复记账。加上「`last_seq` 小于历史最大值」的条件就没有这个缺口。
+- **新增索引 0015**：`server_traffic(updated_at)`、`servers(destroyed_at)` 目前都没有；迁移只追加不改，`0014` 里「不随 servers 删除」的注释也要一并修正。
+- **只能按行值定位**：`server_traffic` 是复合主键 `(server_id, cycle_id)`、没有单列 id，账本裁剪那套 `WHERE id IN (...)` 不能照抄，用 `rowid` 或 `(server_id, cycle_id) IN (...)`。
+- **已知限制**：当前账本裁剪只清 `server_day`（`billing.ts:551/588`），充值、超支、退款的明细一直留着。要么同批扩上，要么在文档里写明「明细保留 31 天」只对机器费成立。
+- **删 `servers` 行的连带影响**：该 server 的**所有** agent 接口都会返回 401（不只是流量上报），而不是 409。机器已销毁、agent 随之消失，实际不会发生，记录备查。
+- **已接受的残留**：用户销毁「从未激活」的存量 upfront 机器时，订单会停在 `provisioning`（`destroyInstance` 对 `reason='user'` 不改订单状态），而清理带订单守卫，这类 destroyed 行会**永久保留**。这是有意的：这些行数量极少，且清掉会让补建逻辑多出一条重建路径。要根治得改销毁语义（把 provisioning 订单置 `failed`），不在本批。
+- `dodo_payment` 目前没有写入方（支付只接了 Stripe），账单映射里保留但不会有数据。
+
+---
+
 ## 8. 用户可见状态
+
+**分工（2026-11-26 定）：单台只回答「这台用了多少」，账号只回答「还剩多少、超没超」。** 两个问题各归一处，不互相冒充。
 
 服务器详情事实区「流量」一行（`servers-list-detail.md` §2 已有该行）：
 
 ```
-流量      已用 128 GB · 可用 352 GB        12 月 3 日重置
+流量      已用 115.2 GiB        12月3日重置
 ```
 
-| 状态 | 展示 |
+| 情况 | 展示 |
 |---|---|
-| `ok` | `已用 X GB · 可用 Y GB`，数字 `--ink-2` |
-| `near`（已释放额度的 80%） | 同上 + 一行琥珀小字「流量快用完了」 |
-| `over` | `已用 X GB · 超出 Y GB，按 $0.02/GB 从余额扣` |
-| `unpaid`（超支且余额不足已停） | `流量超支，余额不足已停机`，状态点琥珀 |
+| 有数据 | `已用 X GiB`；行尾按**本地日**给 `12月3日重置` |
+| 额度未知（`traffic_limit_bytes = 0`） | `已用 X GiB · 额度未知`——不显示成 0 GiB |
+| `traffic_state = "unpaid"`（超支且余额不足已停） | `流量超支，余额不足已停机`，状态点琥珀 |
+| 已销毁（`destroyed`） | 不渲染流量行，由墓碑文案承担 |
 
-- 列表行只给紧凑状态，不显示百分比。
-- 单位统一用 **GB** 展示、**GiB** 计算（差 7%，不要混用）。
+- **单台不显示额度、剩余、百分比，也没有 `near` / `over`**：扣费判据是账号池（`max(0, Σ已用 − Σ已释放)`），单台超自己那份不产生任何扣费。把单台标成「已超出」会让用户以为正在被扣钱，而账号其实没超。
+- **列表行没有流量标记**：任何「快用完 / 已超出」的短词都是单台判据，一并下线。列表行只保留机器状态。
+- 单位统一 **GiB**（与 DO 的额度口径、超额单价、带宽页一致），界面不写 GB。
+- 账号级是**唯一**可以说「还剩多少、超出多少、按多少扣」的地方；数字必须由控制面下发、**客户端不得对 `servers[]` 求和**（原因见 §8.2）。
 
-### 8.1 近 30 天消费账单（需求，设计待定）
+### 8.1 近 30 天消费账单（已定）
 
-用户要能在界面上看到**最近 30 天每天的消费**，而不是只有余额一个数。
+用户要能看见钱花在哪，而不是只有余额一个数。目的是减少「为什么扣这么快」的客服，同时让流量超支可见。
 
-- 展示内容：每天一行，含机器费、流量超支、当日合计；只做最近 30 天。
-- 目的：让用户看得见钱花在哪，减少「为什么扣这么快」的客服；也是流量超支最直观的可见化。
-- 数据来源：钱包流水（`wallet_ledger`）与各机器的 `charged_cents`，按天归集。
-- 说明：30 天会跨两个计费周期，**不能只读当前周期的 `server_traffic` 行**，必须按天归集流水。
+**形态：流水式，一行一笔，不按天汇总。**
+
+- 顶部一行汇总：`充值 $120.00 · 扣费 $2.94`（余额显示在账户页上方；示例数字自洽：期初 $1.00 + 充值 $120.00 − 扣费 $2.94 = $118.06）。
+- 每行三列：**类别 / 日期 / 金额**，按时间倒序。
+- 类别五种：`充值`、`机器费`、`流量超支`、`退款`、`其他`（兜底：映射不到前四类的流水，例如人工调账；只显示类别，**不丢行**）。
+- **每台机器一行**：机器费、流量超支、退款都落到具体机器，行内补一句机器标识（截断名 + 机型 / 地区）；同一天三台机器就是三行。依据是库里本来就是每台机器每天一行（`ref_id = <server_id>:<bucket>`），展示不需要合并，而用户最常问的正是「哪台在烧钱」。
+- 日期按**本地日**显示（用户看的是自己的日子）；计费周期仍按 UTC 月。两者口径不同，但界面**不写周期说明**：「近 30 天」是滚动窗口，本来就不是计费周期，写一句反而让用户把两者当成一回事（`account-billing-ui.md` §2.3 同此口径）。
+- 数据源只有 `wallet_ledger`，类别映射（`ref_type`）：`stripe_payment` / `dodo_payment` → 充值；**`order` 与 `server_day` 都 → 机器费**；`server_traffic` → 流量超支；`server_refund` → 退款。查询显式排除 `ref_type = 'snapshot'`。
+  - **`order` 不能漏**：第 0 天的机器费由 `settleOrder` 用 `refType: "order"`、`refId = order_id` 写入，`server_day` 从第 1 天才开始。漏掉它，每台机器的第一天就不显示，只活一天的机器在账单里一分钱都看不到，顶部扣费合计也会偏小。
+  - **机器标识按 `ref_type` 分派**：`server_day` / `server_traffic` / `server_refund` 取 `ref_id` 前缀里的 server id；`order` 要走 `orders.id → servers.order_id`。解析不出来时退化成只显示类别，但**不要丢行**。
+- 金额符号统一 **`$`**（余额、目录价、现有界面都用美元）。
+- 日期取流水行的 **`created_at`**（不是 bucket，补扣会把多个 bucket 写在同一毫秒）；本地日由**客户端**按 `Intl` 换算——D1 没有 `AT TIME ZONE`，workerd 里 `strftime(...,'localtime')` 返回的仍是 UTC。接口回原始 epoch ms。
+- 30 天窗口严格小于账本保留期（§7.4），所以**不需要读 `snapshot` 行**。整个接口只查 `wallet_ledger` 一张表：流量超支那类来自账本里的扣费流水（`ref_type='server_traffic'`），**不查 `server_traffic` 表**——那张表只记计量明细，账单不依赖它。
+- **接口**：`GET /v1/billing/ledger?days=30`（`days` 1–30，默认 30）。窗口是**半开区间** `(now − days×86400s, now]`；`at` 回 `created_at` 的 epoch ms，本地日由客户端换算。
+- **列表上限 1000 条**，达到上限时返回 `truncated: true`；**顶部合计必须用独立聚合查询**（与列表同条件），不能对截断后的列表求和，否则超过 1000 笔的用户看到的合计会偏小。
+- 响应字段：`balance_cents`、`currency`、`window_days`、`totals{topup_cents, charge_cents}`、`entries[{id, kind, amount_cents, at, server, note}]`、`truncated`。`kind` 取 `topup` / `machine_day` / `traffic` / `refund` / `other`。
 - 界面与入口见 `account-billing-ui.md`（设置 › 账户的「近 30 天账单」弹层）。
 
-### 8.2 账号级总可用带宽
+### 8.2 账号级：额度、超出与「明天涨多少」
 
-多台服务器不需要单独算法，账号级就是一个式子：
+账号级只用一个式子，和扣费同源：
 
 ```
 账号可用 = Σ 各机器已释放额度 − Σ 已用流量
 ```
 
-- 为正：`可用 X GB · 12 月 1 日重置`。
-- 为负：`已超出 X GB，按 $0.02/GB 扣余额`（琥珀）。
-- 与扣费口径同源——超额本来就是按账号判的，界面不必按机器分别展示再相加。
-- 待定（下一轮讨论）：
-  - 入口放哪：账户/钱包页，还是服务器详情；
-  - 按账号汇总，还是按机器分列；
-  - 日界用 UTC 还是用户本地时区（与周期清零的 UTC 口径不同，需要单独定）；
-  - 是否允许点某一天看明细。
+**入口与形态（2026-11-26 定）**：放**账户弹层**（左下角头像打开的那个），**一个汇总行**，不按机器分列：
+
+```
+本月流量   已用 115.2 / 143.0 GiB      明天 +5.1 GiB      12月1日重置
+```
+
+三种状态（由 `traffic_pool` 的两个数推导，客户端比较即可，不另设字段）：
+
+| 状态 | 条件 | 追加 |
+|---|---|---|
+| `ok` | 已用 < 已释放 × 80% | 无 |
+| `near` | 已用 ≥ 已释放 × 80% 且未超 | 琥珀小字「流量快用完了」 |
+| `over` | 已用 > 已释放 | 琥珀「超出 Z GiB，按 $0.02/GiB 扣余额」——**全产品唯一可以承诺扣费的地方** |
+
+`near` 用整数比较（`used × 5 ≥ limit × 4`）。超出时，「明天 +X」让位给扣费提示，两者不同时抢注意力。
+
+**「明天 +X GiB」怎么算**（客户端从列表算，不需要新字段）：
+
+```
+对每台 state ≠ destroyed 的机器：日额度 = transfer_gib × GiB ÷ 28
+                                剩余   = 月额度 − traffic_limit_bytes
+                                明天增量 = min(日额度, 剩余)
+账号明天增量 = Σ 明天增量
+```
+
+- 到 28 天封顶的机器贡献 0，不是固定值。
+- **增量为 0 时不显示这一段**：单台已封顶的，销毁确认里不出现「还在给你每天加…」那句；账号全部封顶的，账户行不显示「明天 +0 GiB」——一句「每天加 0」比不写更让人困惑。
+- 已销毁的机器不再增长（`releasedBytes` 按 `destroyed_at` 截止），所以从列表求和是准确的——**这不是"对 `servers[]` 求和算账号余额"**，算的是增量，销毁机器的增量本来就是 0。
+- 存在的意义：让用户理解「留着机器额度会自己长」，从而不轻易删除。
+
+**销毁确认里要说清后果**（2026-11-26 定，这是唯一真正影响决策的时刻）：
+
+```
+销毁「新加坡 1」？
+这台还在给你每天加 1.3 GiB 额度。删掉后本月额度不再增长，
+已用的流量仍然算在账号里。
+```
+
+这句话同时挡住两个常见误解：删了额度会不会回来（不会）、已用的量会不会跟着消失（不会）。
+
+**数字来源与红线**：`traffic_pool` 必须由控制面下发，客户端**不得对 `servers[]` 求和**当账号余额：
+
+- `GET /v1/servers` 只返回**非销毁**行与未 dismiss 的墓碑；用户主动销毁的机器、已 dismiss 的墓碑不在列表里。
+- 扣费用的 `accountTotals` 把**所有** server（含已销毁）的 `server_traffic` 与 `releasedBytes` 都算进去（§4.3：销毁后已用与已释放额度都留在池里）。
+- 一台 500 GiB 机器用掉 400 GiB 后销毁，列表里看不到这 400 GiB，求和会得出「账号未超」而实际已扣钱。
+
+- `limit_bytes = 0` 时显示「额度未知」，与单台同口径。
+- 重置日按**本地日**渲染（客户端从 `traffic_reset_at` 换算），与账单弹层同一套；周期本身是 UTC 自然月，界面不写「周期」二字。
+- 待定（下一轮讨论）：是否允许点某一天看明细。
 
 ---
 

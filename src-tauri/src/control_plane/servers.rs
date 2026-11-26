@@ -113,6 +113,22 @@ pub struct MyServer {
     pub daily_price_cents: i64,
     /// 每月公网出口额度快照（GiB）；0 = 未知，不参与任何扣费。
     pub transfer_gib: i64,
+    /// 本周期（UTC 自然月）已用字节；没有上报行 = 0（契约 2.78.0）。
+    #[serde(default, deserialize_with = "deserialize_lenient_bytes")]
+    pub traffic_used_bytes: u64,
+    /// 本周期已释放额度（字节），控制面现算、不是快照；额度未知 = 0。
+    #[serde(default, deserialize_with = "deserialize_lenient_bytes")]
+    pub traffic_limit_bytes: u64,
+    /// 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面不给时为空串。
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub traffic_reset_at: String,
+    /// `ok` | `unpaid`（单台没有 near/over，那是账号池的判定）；缺字段、null、
+    /// 认不出的值——包括旧控制面还在发的 `near` / `over`——一律降级 `ok`。
+    #[serde(
+        default = "default_traffic_state",
+        deserialize_with = "deserialize_lenient_traffic_state"
+    )]
+    pub traffic_state: String,
     /// 这台服务器实际扣过的钱（USD 分）；没扣过 = 0。
     #[serde(default)]
     pub charged_cents: i64,
@@ -134,6 +150,75 @@ pub struct MyServer {
     pub grace_ends_at: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerFailure>,
+}
+
+fn default_traffic_state() -> String {
+    "ok".into()
+}
+
+/// 字节字段的宽解析：整数与非负浮点都收，其余（null、字符串、负数）按 0。
+///
+/// 口径与账单流水的逐条宽松一致：滚动升级期间宁可显示 0，也不能因为
+/// 一个流量字段让整页服务器消失。
+fn deserialize_lenient_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value.min(u64::MAX as f64) as u64)
+            })
+            .unwrap_or(0),
+        _ => 0,
+    })
+}
+
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(value)) => value,
+        _ => String::new(),
+    })
+}
+
+fn deserialize_lenient_traffic_state<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(value)) if TRAFFIC_STATES.contains(&value.as_str()) => value,
+        _ => default_traffic_state(),
+    })
+}
+
+/// 单台只有两态：`ok` / `unpaid`。滚动升级期间旧控制面还会发 `near` / `over`，
+/// 它们不在白名单里，按 `ok` 降级，绝不因此让整页解析失败。
+const TRAFFIC_STATES: [&str; 2] = ["ok", "unpaid"];
+
+/// `GET /v1/servers` 的账号级流量池（契约 2.79.0）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficPool {
+    pub used_bytes: u64,
+    pub limit_bytes: u64,
+}
+
+/// `my_server_list` 的返回：服务器列表 + 账号级流量池。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ServerList {
+    pub servers: Vec<MyServer>,
+    /// 账号池；控制面没给（旧版本）时缺省，不影响解析。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_pool: Option<TrafficPool>,
+    /// 有条目解析失败 → 这不是一份完整快照，不能拿它做镜像收敛。
+    #[serde(skip)]
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +261,11 @@ pub struct MyServerWallet {
     /// 充值档位，直接来自控制面，Host 不排序、不换算。
     #[serde(default)]
     pub denominations_cents: Vec<i64>,
+    /// 自定义充值范围（USD 分）；控制面未提供时两者都按 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_topup_cents: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_topup_cents: Option<i64>,
     /// 控制面不给时间，由 Host 补本地时间。
     #[serde(default)]
     pub updated_at: String,
@@ -550,26 +640,61 @@ fn parse_order(raw: Value) -> Result<RawOrder, CpError> {
     serde_json::from_value(raw).map_err(|_| CpError::invalid_response("订单响应格式不正确"))
 }
 
-/// 拉取并校验控制面的服务器列表；**不碰本地缓存**。
+/// 拉取控制面的服务器列表；**不碰本地缓存**。
 ///
 /// 拆出来给后台轮询用：那边要先看「哪台刚变成 destroyed、是不是正在连着」，
 /// 才能在落库发事件之前停运行时。缓存与事件统一走 [`cache_all`]。
-pub(crate) async fn fetch_all() -> Result<Vec<MyServer>, CpError> {
+pub(crate) async fn fetch_all() -> Result<ServerList, CpError> {
     let client = ControlPlane::new()?;
     let raw = client.get("/v1/servers").await?;
+    parse_server_list(&raw)
+}
+
+/// 解析 `GET /v1/servers` 的响应体。逐条宽松：单条坏条目跳过，不整页失败。
+fn parse_server_list(raw: &Value) -> Result<ServerList, CpError> {
     let values = raw
         .get("servers")
         .and_then(Value::as_array)
         .ok_or_else(|| CpError::invalid_response("服务器列表响应缺少 servers"))?;
     let mut servers = Vec::with_capacity(values.len());
+    let mut dropped = 0usize;
     for value in values {
-        let mut server: MyServer = serde_json::from_value(value.clone())
-            .map_err(|_| CpError::invalid_response("服务器列表条目格式不正确"))?;
-        validate_server(&mut server)?;
+        let Ok(mut server) = serde_json::from_value::<MyServer>(value.clone()) else {
+            dropped += 1;
+            continue;
+        };
+        if validate_server(&mut server).is_err() {
+            dropped += 1;
+            continue;
+        }
         remember_server_failure(&server);
         servers.push(server);
     }
-    Ok(servers)
+    if dropped > 0 {
+        log::warn!(
+            "服务器列表有 {dropped} 条无法解析，已跳过；这份快照不完整，不做镜像收敛"
+        );
+    }
+    Ok(ServerList {
+        servers,
+        traffic_pool: parse_traffic_pool(raw.get("traffic_pool")),
+        complete: dropped == 0,
+    })
+}
+
+/// `traffic_pool` 整体缺失或不是对象时视为「控制面没给」；对象内的字段缺失按 0，
+/// 但两个键都认不出来时也按没给——空对象不等于「额度 0」。
+fn parse_traffic_pool(value: Option<&Value>) -> Option<TrafficPool> {
+    let pool = value?.as_object()?;
+    let used = pool.get("used_bytes").and_then(Value::as_u64);
+    let limit = pool.get("limit_bytes").and_then(Value::as_u64);
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
+    Some(TrafficPool {
+        used_bytes: used.unwrap_or(0),
+        limit_bytes: limit.unwrap_or(0),
+    })
 }
 
 /// 把一次列表快照写进本地镜像，状态变了就发 `my-server-changed`。
@@ -577,13 +702,18 @@ pub(crate) async fn fetch_all() -> Result<Vec<MyServer>, CpError> {
 /// 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
 /// 「云端已无这台服务器」的完整快照；落库与收敛必须共用同一个连接，
 /// 否则并发 list 的旧快照可能删掉新快照刚建的行。
-pub(crate) fn cache_all(servers: &mut [MyServer]) {
+pub(crate) fn cache_all(servers: &mut [MyServer], prune: bool) {
     let Some(store) = crate::store::global() else {
         return;
     };
     let conn = store.conn();
     for server in servers.iter_mut() {
         cache_and_link(&conn, server);
+    }
+    // 有条目被跳过时这份列表不是完整快照，「云端已无这台服务器」无从判断，
+    // 此时只做 upsert、不删行。
+    if !prune {
+        return;
     }
     let ids: Vec<&str> = servers
         .iter()
@@ -594,10 +724,15 @@ pub(crate) fn cache_all(servers: &mut [MyServer]) {
     }
 }
 
+/// 列表 + 账号级流量池；命令层用它，同步流程只用列表。
+pub async fn list_with_pool() -> Result<ServerList, CpError> {
+    let mut list = fetch_all().await?;
+    cache_all(&mut list.servers, list.complete);
+    Ok(list)
+}
+
 pub async fn list() -> Result<Vec<MyServer>, CpError> {
-    let mut servers = fetch_all().await?;
-    cache_all(&mut servers);
-    Ok(servers)
+    Ok(list_with_pool().await?.servers)
 }
 
 /// 列表里缺失的 owned 节点：`source_key` 不在本次列表里，可能服务器已经没了。
@@ -782,6 +917,18 @@ fn parse_wallet(raw: Value) -> Result<MyServerWallet, CpError> {
     }
     if wallet.denominations_cents.iter().any(|cents| *cents <= 0) {
         return Err(CpError::invalid_response("充值面额必须是正整数分"));
+    }
+    match (wallet.min_topup_cents, wallet.max_topup_cents) {
+        (Some(min), Some(max)) => {
+            if min < 100 || max < min {
+                return Err(CpError::invalid_response("充值范围不合法"));
+            }
+        }
+        // 两者必须同时出现；缺一个就都按未提供处理，客户端用自己的兜底值。
+        _ => {
+            wallet.min_topup_cents = None;
+            wallet.max_topup_cents = None;
+        }
     }
     if wallet.currency.trim().is_empty() {
         wallet.currency = default_currency();
@@ -1057,6 +1204,11 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             monthly_usd: old.monthly_usd,
             daily_price_cents: old.daily_price_cents,
             transfer_gib: old.transfer_gib,
+            // 流量按新机器的周期重新开始；下一次列表以控制面为准。
+            traffic_used_bytes: 0,
+            traffic_limit_bytes: 0,
+            traffic_reset_at: String::new(),
+            traffic_state: default_traffic_state(),
             // 新订单的钱还没结算，等下一次列表/详情以控制面为准。
             charged_cents: 0,
             refunded_cents: 0,
@@ -1467,6 +1619,11 @@ pub(crate) fn local_server(server_id: &str) -> Option<MyServer> {
         monthly_usd: row.monthly_usd,
         daily_price_cents: row.daily_price_cents,
         transfer_gib: row.transfer_gib,
+        // 本地镜像不存流量；拿不到远端时按「本周期没用过、额度未知」展示。
+        traffic_used_bytes: 0,
+        traffic_limit_bytes: 0,
+        traffic_reset_at: String::new(),
+        traffic_state: default_traffic_state(),
         // 本地缓存只存服务器状态，不存钱；拿不到远端时按「没扣过/没退过」展示。
         charged_cents: 0,
         refunded_cents: 0,
@@ -1513,6 +1670,110 @@ mod tests {
             "grace_ends_at": null,
             "failure": null
         })
+    }
+
+    #[test]
+    fn traffic_fields_default_when_the_control_plane_is_old() {
+        let list = parse_server_list(&json!({ "servers": [sample_server_json()] })).unwrap();
+        assert_eq!(list.servers.len(), 1);
+        let server = &list.servers[0];
+        assert_eq!(server.traffic_used_bytes, 0);
+        assert_eq!(server.traffic_limit_bytes, 0);
+        assert_eq!(server.traffic_reset_at, "");
+        assert_eq!(server.traffic_state, "ok");
+        assert_eq!(list.traffic_pool, None);
+        assert!(list.complete);
+    }
+
+    #[test]
+    fn traffic_fields_accept_the_contract_and_normalize_junk() {
+        let mut value = sample_server_json();
+        value["traffic_used_bytes"] = json!(123_456_789_u64);
+        value["traffic_limit_bytes"] = json!(1.5e9_f64);
+        value["traffic_reset_at"] = json!("2026-12-01T00:00:00Z");
+        value["traffic_state"] = json!("unpaid");
+
+        let mut junk = sample_server_json();
+        junk["server_id"] = json!("srv_2");
+        junk["traffic_used_bytes"] = json!(-5);
+        junk["traffic_limit_bytes"] = json!("nope");
+        junk["traffic_reset_at"] = Value::Null;
+        junk["traffic_state"] = json!("weird");
+
+        let list = parse_server_list(&json!({ "servers": [value, junk] })).unwrap();
+        assert_eq!(list.servers.len(), 2);
+        assert_eq!(list.servers[0].traffic_used_bytes, 123_456_789);
+        assert_eq!(list.servers[0].traffic_limit_bytes, 1_500_000_000);
+        assert_eq!(list.servers[0].traffic_reset_at, "2026-12-01T00:00:00Z");
+        assert_eq!(list.servers[0].traffic_state, "unpaid");
+        assert_eq!(list.servers[1].traffic_used_bytes, 0);
+        assert_eq!(list.servers[1].traffic_limit_bytes, 0);
+        assert_eq!(list.servers[1].traffic_reset_at, "");
+        assert_eq!(list.servers[1].traffic_state, "ok");
+    }
+
+    /// 单台只有 ok / unpaid。滚动升级期间旧控制面还会发 near / over，
+    /// 它们必须降级成 ok，而不是让界面拿到一个已经不存在的状态。
+    #[test]
+    fn retired_traffic_states_degrade_to_ok() {
+        let mut near = sample_server_json();
+        near["traffic_state"] = json!("near");
+        let mut over = sample_server_json();
+        over["server_id"] = json!("srv_2");
+        over["traffic_state"] = json!("over");
+        let mut unpaid = sample_server_json();
+        unpaid["server_id"] = json!("srv_3");
+        unpaid["traffic_state"] = json!("unpaid");
+
+        let list = parse_server_list(&json!({ "servers": [near, over, unpaid] })).unwrap();
+        let states: Vec<&str> = list
+            .servers
+            .iter()
+            .map(|server| server.traffic_state.as_str())
+            .collect();
+        assert_eq!(states, vec!["ok", "ok", "unpaid"]);
+    }
+
+    #[test]
+    fn one_broken_entry_does_not_hide_the_rest() {
+        let mut broken = sample_server_json();
+        broken["server_id"] = json!("srv_2");
+        broken["created_at"] = json!("not-a-date");
+
+        let list =
+            parse_server_list(&json!({ "servers": [sample_server_json(), broken] })).unwrap();
+        assert_eq!(list.servers.len(), 1);
+        assert_eq!(list.servers[0].server_id, "srv_1");
+        assert!(!list.complete, "跳过了条目就不能拿这份快照做收敛");
+    }
+
+    #[test]
+    fn the_account_traffic_pool_is_optional_and_lenient() {
+        let raw = json!({
+            "servers": [],
+            "traffic_pool": { "used_bytes": 10, "limit_bytes": 20 }
+        });
+        assert_eq!(
+            parse_server_list(&raw).unwrap().traffic_pool,
+            Some(TrafficPool {
+                used_bytes: 10,
+                limit_bytes: 20
+            })
+        );
+        let raw = json!({ "servers": [], "traffic_pool": { "used_bytes": 10 } });
+        assert_eq!(
+            parse_server_list(&raw).unwrap().traffic_pool,
+            Some(TrafficPool {
+                used_bytes: 10,
+                limit_bytes: 0
+            })
+        );
+        let raw = json!({ "servers": [], "traffic_pool": "nope" });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
+        let raw = json!({ "servers": [], "traffic_pool": {} });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
+        let raw = json!({ "servers": [] });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
     }
 
     #[test]
@@ -1587,6 +1848,10 @@ mod tests {
             monthly_usd: 6.0,
             daily_price_cents: 20,
             transfer_gib: 1000,
+            traffic_used_bytes: 0,
+            traffic_limit_bytes: 0,
+            traffic_reset_at: String::new(),
+            traffic_state: default_traffic_state(),
             charged_cents: 0,
             refunded_cents: 0,
             paid_until: Some("2026-11-15T08:00:00Z".into()),
@@ -1864,6 +2129,53 @@ mod tests {
             .is_empty());
         assert!(parse_wallet(json!({ "balance_cents": 0, "denominations_cents": [0] })).is_err());
         assert!(parse_wallet(json!({ "balance_cents": -1 })).is_err());
+    }
+
+    #[test]
+    fn a_wallet_response_carries_optional_topup_range() {
+        // 缺失：两者都 None，序列化时两个 key 都不出现。
+        let wallet = parse_wallet(json!({ "balance_cents": 0 })).unwrap();
+        assert_eq!(wallet.min_topup_cents, None);
+        assert_eq!(wallet.max_topup_cents, None);
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert!(value.get("min_topup_cents").is_none());
+        assert!(value.get("max_topup_cents").is_none());
+
+        // 合法。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+            "max_topup_cents": 30000,
+        }))
+        .unwrap();
+        assert_eq!(wallet.min_topup_cents, Some(600));
+        assert_eq!(wallet.max_topup_cents, Some(30000));
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert_eq!(value["min_topup_cents"], 600);
+        assert_eq!(value["max_topup_cents"], 30000);
+
+        // 只给一个：都按未提供处理。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+        }))
+        .unwrap();
+        assert_eq!(wallet.min_topup_cents, None);
+        assert_eq!(wallet.max_topup_cents, None);
+
+        // 非法范围。
+        assert!(parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 50,
+            "max_topup_cents": 30000,
+        }))
+        .is_err());
+        assert!(parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+            "max_topup_cents": 500,
+        }))
+        .is_err());
     }
 
     #[test]

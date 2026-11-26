@@ -87,7 +87,7 @@ function renderSettings(
     routingMode?: "direct" | "proxy_all" | "proxy_selected" | null;
     onSetRoutingMode?: (mode: "direct" | "proxy_all") => Promise<{ ok: boolean; message?: string }>;
     onConnectModeChanged?: (mode: "tun" | "system_proxy") => void;
-    section?: "ai" | "network" | "account" | "advanced";
+    section?: "ai" | "network" | "advanced";
     runtimeView?: RuntimeView;
     proxyPort?: number;
     onAskAi?: (text: string, section: string) => void;
@@ -207,17 +207,17 @@ describe("连接 tab", () => {
 
 
 describe("tab 语义与键盘", () => {
-  it("四个 tab 有 tab 角色", async () => {
+  it("三个 tab 有 tab 角色（账户已独立成弹层）", async () => {
     renderSettings(makeBridge(), { section: "ai" });
     await screen.findByText("用哪个 AI 服务");
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent),
-    ).toEqual(["AI", "连接", "账户", "高级"]);
+    ).toEqual(["AI", "连接", "高级"]);
     expect(document.querySelector(".settings-section__title")).toBeNull();
   });
 
-  it("四个 tab 都有对应的 tabpanel", async () => {
-    for (const section of ["ai", "network", "account", "advanced"] as const) {
+  it("三个 tab 都有对应的 tabpanel", async () => {
+    for (const section of ["ai", "network", "advanced"] as const) {
       renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
       await screen.findByRole("tabpanel");
       const panel = screen.getByRole("tabpanel");
@@ -233,13 +233,13 @@ describe("tab 语义与键盘", () => {
     const tabs = screen.getAllByRole("tab");
 
     fireEvent.keyDown(tabs[1], { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "账户" }).getAttribute("aria-selected")).toBe(
+    expect(screen.getByRole("tab", { name: "高级" }).getAttribute("aria-selected")).toBe(
       "true",
     );
-    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "账户" }));
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "高级" }));
 
-    fireEvent.keyDown(screen.getByRole("tab", { name: "账户" }), { key: "End" });
-    expect(screen.getByRole("tab", { name: "高级" }).getAttribute("aria-selected")).toBe(
+    fireEvent.keyDown(screen.getByRole("tab", { name: "高级" }), { key: "Home" });
+    expect(screen.getByRole("tab", { name: "AI" }).getAttribute("aria-selected")).toBe(
       "true",
     );
   });
@@ -338,7 +338,7 @@ describe("关于信息（在高级里）", () => {
 
 describe("文案扫描", () => {
   it("可见文本没有禁用词与英文跳过原因", async () => {
-    for (const section of ["ai", "network", "account", "advanced"] as const) {
+    for (const section of ["ai", "network", "advanced"] as const) {
       renderSettings(makeBridge(), { section, connectMode: "system_proxy" });
       await screen.findByRole("tab", { name: "AI" });
       const text = document.querySelector(".modal--settings")?.textContent ?? "";
@@ -540,10 +540,9 @@ describe("咨询 AI 的提示词", () => {
     expect(prompt).toContain("尚未配置 Key");
   });
 
-  it("分区名跟着页签走：AI / 账户 / 高级", async () => {
+  it("分区名跟着页签走：AI / 高级", async () => {
     const cases = [
       ["ai", "AI"],
-      ["account", "账户"],
       ["advanced", "高级"],
     ] as const;
     for (const [section, label] of cases) {

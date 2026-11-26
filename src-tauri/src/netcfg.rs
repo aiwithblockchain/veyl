@@ -90,13 +90,27 @@ pub fn read() -> Result<NetConfig, String> {
     }
 }
 
-/// 本机能否解析探针域名。
+/// 单次系统命令的上限。网络重置的每一步都必须有界，命令卡住不能拖垮整条请求。
+pub const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 本机能否解析探针域名。无超时版本：`getaddrinfo` 不可中断，断网时单次要等
+/// 5–7 秒。**不要在请求路径上直接调它**，用 [`dns_resolvable_within`]。
 pub fn dns_resolvable() -> bool {
     use std::net::ToSocketAddrs;
     (DNS_PROBE_DOMAIN, 443)
         .to_socket_addrs()
         .map(|mut addrs| addrs.next().is_some())
         .unwrap_or(false)
+}
+
+/// 带硬超时的解析探测：`getaddrinfo` 无法被中断，只能在**等待侧**限时；
+/// 超时按「解析不出来」处理，后台线程会在 OS 自己的超时后自然退出。
+pub fn dns_resolvable_within(timeout: std::time::Duration) -> bool {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(dns_resolvable());
+    });
+    receiver.recv_timeout(timeout).unwrap_or(false)
 }
 
 /// `scutil --dns` 里配置的全部 nameserver（去重）。
@@ -161,10 +175,8 @@ pub fn flush_dns() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         run("/usr/bin/dscacheutil", &["-flushcache"])?;
-        // mDNSResponder 可能以非零退出，刷新本身已经生效。
-        let _ = std::process::Command::new("/usr/bin/killall")
-            .args(["-HUP", "mDNSResponder"])
-            .status();
+        // mDNSResponder 可能以非零退出，刷新本身已经生效；但命令本身要有界。
+        let _ = run_with_timeout("/usr/bin/killall", &["-HUP", "mDNSResponder"], COMMAND_TIMEOUT);
         Ok(())
     }
     #[cfg(windows)]
@@ -179,14 +191,53 @@ pub fn flush_dns() -> Result<(), String> {
 }
 
 pub fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(program)
+    run_with_timeout(program, args, COMMAND_TIMEOUT)
+}
+
+/// 带超时的命令执行：到点 kill 并返回错误，绝不无限期等一个卡住的系统命令。
+pub fn run_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(program)
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|error| format!("执行 {program} 失败：{error}"))?;
-    if !output.status.success() {
-        return Err(format!("{program} 返回 {}", output.status));
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    pipe.read_to_end(&mut stdout)
+                        .map_err(|error| format!("读取 {program} 输出失败：{error}"))?;
+                }
+                if !status.success() {
+                    return Err(format!("{program} 返回 {status}"));
+                }
+                return Ok(String::from_utf8_lossy(&stdout).to_string());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{program} 超时（{:?}）已终止", timeout));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("等待 {program} 失败：{error}"));
+            }
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// 只关掉「指向本机指定端口」的系统代理，不动别人的设置。
@@ -216,7 +267,8 @@ mod macos {
             dns: DnsInfo {
                 servers: read_dns_servers(),
                 probe_domain: DNS_PROBE_DOMAIN.to_string(),
-                resolvable: dns_resolvable(),
+                // 请求路径上不能挂在一个无超时的 getaddrinfo 上。
+                resolvable: dns_resolvable_within(COMMAND_TIMEOUT),
             },
             route: read_route(),
             interfaces: read_interfaces(),
@@ -448,6 +500,24 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 卡住的系统命令必须被 kill，而不是无限期等。
+    #[test]
+    fn a_hung_command_is_killed_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let error = run_with_timeout("sleep", &["5"], std::time::Duration::from_millis(200))
+            .unwrap_err();
+        assert!(error.contains("超时"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    /// 解析探测在等待侧有硬上限：断网时单次 getaddrinfo 能等 5–7 秒。
+    #[test]
+    fn a_resolver_probe_is_bounded_by_the_caller() {
+        let started = std::time::Instant::now();
+        assert!(!dns_resolvable_within(std::time::Duration::ZERO));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     #[test]
     fn platform_name_is_known() {

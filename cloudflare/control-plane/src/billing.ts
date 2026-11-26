@@ -15,6 +15,16 @@ const MAX_CATCH_UP_DAYS = 30;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 5;
 const PRUNE_BATCH = 5000;
+/** 历史数据保留期：server_traffic 与已销毁机器同为 45 天（traffic-billing.md §7.4）。 */
+const RETENTION_MS = 45 * DAY_MS;
+/** 单条 DELETE / 单页扫描的上限：每轮多次分页，不写无界大 DELETE。 */
+const TRAFFIC_PRUNE_BATCH = 1000;
+/**
+ * D1 单条语句最多 100 个绑定参数：servers 清理每条语句绑 `99 个 id + 1 个 cutoff = 100`。
+ * `TRAFFIC_PRUNE_BATCH` 不受影响——那条 DELETE 只绑 3 个参数（周期 / 截止时间 / LIMIT）。
+ */
+const SERVERS_PRUNE_BATCH = 99;
+const RETENTION_MAX_PAGES = 5;
 /** 刷新令牌保留 30 天：已用过/已作废的历史只需覆盖轮换重放窗口。 */
 const TOKEN_RETENTION_MS = 30 * DAY_MS;
 const TOKEN_PRUNE_BATCH = 1000;
@@ -44,6 +54,10 @@ export interface BillingReport {
   reaped: number;
   settleReaped: number;
   archived: number;
+  /** 超龄的历史 `server_traffic` 行（保留每台机器的最大 last_seq 行）。 */
+  trafficPruned: number;
+  /** 已销毁超过 45 天的 servers 行（同批删掉对应 credentials）。 */
+  serversPruned: number;
   tokensPruned: number;
   accountsPruned: number;
   drift: number;
@@ -55,10 +69,15 @@ function chargeForDay(dailyCents: number, dayIndex: number): number {
   return Math.floor((monthly * (dayIndex + 1)) / 30) - Math.floor((monthly * dayIndex) / 30);
 }
 
-/** 账本裁剪边界：上上个月末，实际保留 31–60 天。用上月末会只留 1–31 天。 */
-function archiveCutoff(now: number): number {
+/**
+ * 账本裁剪边界：`min(上上个月末, now − 31 天)`，保证机器费明细至少保留 31 天。
+ * 只用上上个月末时真实保留期是 28–61 天（3 月 1 日只剩 28 天），会切掉 30 天账单窗口。
+ * 文档 §7.4 引用的行号会随重构浮动，以函数名为准。
+ */
+export function archiveCutoff(now: number): number {
   const date = new Date(now);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1) - 1;
+  const monthEnd = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1) - 1;
+  return Math.min(monthEnd, now - 31 * DAY_MS);
 }
 
 function monthKey(at: number): string {
@@ -67,7 +86,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -147,6 +166,8 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   }
 
   report.archived = await archiveLedger(env, now);
+  report.trafficPruned = await pruneServerTraffic(env, now);
+  report.serversPruned = await pruneDestroyedServers(env, now);
   report.tokensPruned = await pruneRefreshTokens(env, now);
   report.accountsPruned = await pruneOrphanAccounts(env, now);
   return report;
@@ -540,6 +561,9 @@ async function pruneOrphanAccounts(env: BillingEnv, now: number): Promise<number
 /**
  * 账本归档（§4.12）：逐账户先写月末快照，成功后再删该账户已过期明细。
  * 快照没写成就不删——宁可多留，不能留下无依据的余额。
+ *
+ * 已知限制（traffic-billing.md §7.4）：这里只裁剪 `server_day`（机器费）明细；
+ * 充值、流量超支（`server_traffic`）与退款明细目前永久保留，本批不动。
  */
 async function archiveLedger(env: BillingEnv, now: number): Promise<number> {
   const db = env.DB;
@@ -566,6 +590,8 @@ async function archiveLedger(env: BillingEnv, now: number): Promise<number> {
         .first<{ balance_after_cents: number }>();
       if (!last) continue;
 
+      // 快照按裁剪边界所在 UTC 月归集；边界被 now−31 天夹住后不一定是月末，
+      // 但按月生成的 refId 仍然幂等，INSERT OR IGNORE 不会重复写。
       const refId = `${row.account_id}:${monthKey(cutoff)}`;
       await db
         .prepare(
@@ -593,6 +619,107 @@ async function archiveLedger(env: BillingEnv, now: number): Promise<number> {
     } catch (error) {
       console.error(`[billing] archive_failed account=${row.account_id} error=${String(error)}`);
     }
+  }
+  return pruned;
+}
+
+/**
+ * `server_traffic` 保留清理（§7.4）：三个条件缺一不可——
+ * 1) 不是当前周期（当前周期还在累加）；
+ * 2) `updated_at` 超过 45 天（防止删掉 agent 仍在用的行）；
+ * 3) `last_seq` 小于该 server 的历史最大值。去重取 `MAX(last_seq) WHERE server_id = ?`
+ *    且跨周期；若某台机器所有行都超龄，整批删掉会让 MAX 归零，一个压了很久的旧 seq
+ *    重发就会被重复记账。加这条后每台机器的最大 seq 行永远保留。
+ * 复合主键没有单列 id，用行值 `(server_id, cycle_id)` 定位，不依赖 rowid。
+ */
+export async function pruneServerTraffic(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB;
+  if (!db) return 0;
+  const cycle = monthKey(now);
+  const cutoff = now - RETENTION_MS;
+  let pruned = 0;
+  try {
+    for (let page = 0; page < RETENTION_MAX_PAGES; page += 1) {
+      const deleted = await db
+        .prepare(
+          "DELETE FROM server_traffic WHERE (server_id, cycle_id) IN (" +
+            "SELECT st.server_id, st.cycle_id FROM server_traffic st " +
+            "WHERE st.cycle_id != ? AND st.updated_at < ? " +
+            "AND st.last_seq < (SELECT MAX(t2.last_seq) FROM server_traffic t2 WHERE t2.server_id = st.server_id) " +
+            "LIMIT ?)",
+        )
+        .bind(cycle, cutoff, TRAFFIC_PRUNE_BATCH)
+        .run();
+      const changes = Number((deleted as { meta?: { changes?: number } }).meta?.changes ?? 0);
+      pruned += changes;
+      if (changes < TRAFFIC_PRUNE_BATCH) break;
+    }
+  } catch (error) {
+    console.error(`[billing] traffic_prune_failed error=${String(error)}`);
+  }
+  return pruned;
+}
+
+/**
+ * 已销毁超过 45 天的 servers 行清理（§7.4）：同批删对应 credentials 与 server_traffic，
+ * 否则会留下永久孤儿密文 / 孤儿计量行（token 已随 servers 行消失，last_seq 不再有去重意义）。
+ *
+ * 只删「订单不处于 paid / provisioning」的机器：仅删服务器行会解开 `servers_order` 唯一约束，
+ * 补建逻辑（含 `s.id IS NULL`）可能把一台用户已销毁的机器重新建出来并继续扣费。
+ * 三条语句都带同样的 destroyed + 订单守卫，避免 servers 行没删掉却删了从属数据。
+ *
+ * 已知影响：更早的 `wallet_ledger` 行 `ref_id` 会指向已删除的 server id（悬空）；
+ * 账单 §8.1 允许解析失败时只显示类别，且超支 / 退款明细本就永久保留，故不级联清理。
+ */
+export async function pruneDestroyedServers(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB;
+  if (!db) return 0;
+  const cutoff = now - RETENTION_MS;
+  let pruned = 0;
+  try {
+    for (let page = 0; page < RETENTION_MAX_PAGES; page += 1) {
+      const rows = await db
+        .prepare(
+          "SELECT id FROM servers WHERE state = 'destroyed' AND destroyed_at IS NOT NULL " +
+            "AND destroyed_at < ? " +
+            "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = servers.order_id " +
+            "AND o.state IN ('paid', 'provisioning')) " +
+            "ORDER BY destroyed_at ASC LIMIT ?",
+        )
+        .bind(cutoff, SERVERS_PRUNE_BATCH)
+        .all<{ id: string }>();
+      const ids = (rows.results ?? []).map((row) => String(row.id));
+      if (ids.length === 0) break;
+      const placeholders = ids.map(() => "?").join(", ");
+      const guard =
+        " AND server_id IN (SELECT id FROM servers WHERE state = 'destroyed' " +
+        "AND destroyed_at IS NOT NULL AND destroyed_at < ? " +
+        "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = servers.order_id " +
+        "AND o.state IN ('paid', 'provisioning')))";
+      const results = await db.batch([
+        db
+          .prepare(`DELETE FROM server_traffic WHERE server_id IN (${placeholders})${guard}`)
+          .bind(...ids, cutoff),
+        db
+          .prepare(`DELETE FROM credentials WHERE server_id IN (${placeholders})${guard}`)
+          .bind(...ids, cutoff),
+        db
+          .prepare(
+            `DELETE FROM servers WHERE id IN (${placeholders}) AND state = 'destroyed' ` +
+              "AND destroyed_at IS NOT NULL AND destroyed_at < ? " +
+              "AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = servers.order_id " +
+              "AND o.state IN ('paid', 'provisioning'))",
+          )
+          .bind(...ids, cutoff),
+      ]);
+      const removed = Number(
+        (results[2] as { meta?: { changes?: number } } | undefined)?.meta?.changes ?? 0,
+      );
+      pruned += removed;
+      if (ids.length < SERVERS_PRUNE_BATCH) break;
+    }
+  } catch (error) {
+    console.error(`[billing] server_prune_failed error=${String(error)}`);
   }
   return pruned;
 }

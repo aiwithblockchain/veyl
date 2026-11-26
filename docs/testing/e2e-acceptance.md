@@ -4411,7 +4411,7 @@ grep -E 'runtime-state-changed|stop|start' "$APP_LOG" | tail -10
   - `nodes.txt`：两行 `ss://`。
   - `nodes.json`：内容同样是两行 `ss://`（命令按文本解析，**不按扩展名或 JSON 结构判断格式**）。
   - `big.txt`：超过 1 MB 的任意文本。
-  - `clash.json`：一个真实的 Clash 配置 **JSON**（不是 YAML 块状写法，也没有 `ss://` 行），用来验证空结果；同一份配置改写成 YAML 时应能导入其中的 `ss` 节点（2.77.0 起）。
+  - `clash.json`：一个真实的 Clash 配置 **JSON**（不是 YAML 块状写法，也没有 `ss://` 行），用来验证空结果；同一份配置改写成 YAML 时应能导入其中的 `ss` 节点（2.83.0 起）。
   - 可选：一个只含不支持加密方式的 `ss://` 文件，用来验证逐条跳过。
 
   可用的 `ss://` 样本（两行，直接复制）：

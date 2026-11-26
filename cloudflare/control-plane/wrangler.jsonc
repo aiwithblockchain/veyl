@@ -43,8 +43,11 @@
 		"ENROLL_BASE_URL": "https://veyl.dessage.xyz",
 		// 生产使用独立的凭据签名密钥（dev 是 cp-2026-11），公钥内置在客户端。
 		"CREDENTIAL_KEY_ID": "cp-2026-12",
-		// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
-		"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
+		// UI 快捷充值档（USD 分）：仅快捷按钮，不是支付白名单。$6 / $10 / $25 / $50 / $100。
+		"TOPUP_DENOMINATIONS_CENTS": "[600,1000,2500,5000,10000]",
+		// 自定义充值范围（USD 分）：$6–$300，整美元。
+		"MIN_TOPUP_CENTS": "600",
+		"MAX_TOPUP_CENTS": "30000",
 		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
 		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/payment/return",
@@ -52,9 +55,9 @@
 		// 发布 agent 时把版本、sha256、下载地址换成当次 release 的真实值。
 		// sha256 必须是 64 位十六进制：占位符对不上时建机请求直接失败（agent_unconfigured），
 		// 不会先建出一台注定起不来的机器。
-		"AGENT_VERSION": "0.1.4",
-		"AGENT_SHA256": "ba9756ae1aee708fb63e92c1cc0e841591407a5a743a263afc1b4d3336b10082",
-		"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.4/veyl-agent-linux-amd64",
+		"AGENT_VERSION": "0.1.5",
+		"AGENT_SHA256": "54fe61c93dc23bade4923a842bcf338f5b7d35ca14d2cdd1325cafeb55226307",
+		"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.5/veyl-agent-linux-amd64",
 		// 期望状态下发给 agent 的 sing-box 版本与下载地址。
 		"SING_BOX_VERSION": "1.14.4",
 		"SING_BOX_SHA256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
@@ -84,15 +87,18 @@
 				"PUBLIC_SITE_URL": "https://veyl-edge-dev.pages.dev",
 				"ENROLL_BASE_URL": "https://dev.veyl.dessage.xyz",
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
-				// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
-				"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
+				// UI 快捷充值档（USD 分）：仅快捷按钮，不是支付白名单。$6 / $10 / $25 / $50 / $100。
+				"TOPUP_DENOMINATIONS_CENTS": "[600,1000,2500,5000,10000]",
+				// 自定义充值范围（USD 分）：$6–$300，整美元。
+				"MIN_TOPUP_CENTS": "600",
+				"MAX_TOPUP_CENTS": "30000",
 				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
 				"APP_PAYMENT_RETURN_URL": "https://dev.veyl.dessage.xyz/payment/return",
 				// 同生产：发布 agent 时换成当次 release 的真实值（dev 可以先指向 pre-release）。
-				"AGENT_VERSION": "0.1.4",
-				"AGENT_SHA256": "ba9756ae1aee708fb63e92c1cc0e841591407a5a743a263afc1b4d3336b10082",
-				"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.4/veyl-agent-linux-amd64",
+				"AGENT_VERSION": "0.1.5",
+				"AGENT_SHA256": "54fe61c93dc23bade4923a842bcf338f5b7d35ca14d2cdd1325cafeb55226307",
+				"AGENT_DOWNLOAD_URL": "https://github.com/aiwithblockchain/veyl/releases/download/agent-v0.1.5/veyl-agent-linux-amd64",
 				"SING_BOX_VERSION": "1.14.4",
 				"SING_BOX_SHA256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
 				"SING_BOX_DOWNLOAD_URL": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",

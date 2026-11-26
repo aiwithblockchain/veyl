@@ -1,6 +1,7 @@
 //! 控制面（Cloudflare Workers）接入层。
 
 pub mod auth;
+pub mod billing;
 pub mod catalog;
 pub mod client;
 pub mod credentials;

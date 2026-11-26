@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.32.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38）。**第 5 组完成，工具面 38。**
+> 契约版本：`3.36.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段；3.35.0 在 `LlmProviders` 的 content 里补 service provider id；3.36.0 收口 `OpenSettings`：账户移出设置，工具数均不变）。**第 5 组完成，工具面 38。**
 >
-> ⚠️ 本文件 3.32.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.36.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -21,7 +21,7 @@
 2. 模型看不到凭据。所有含 `uuid` / `password` / `private_key` / `token` 的字段不得出现在工具返回值里。
 3. 工具入参一律按 JSON Schema 严格校验（`additionalProperties: false`），Host 在 `execute` 内再做一次业务校验。
 
-统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件版本（当前 `3.29.0`）；实现侧只允许有一个常量对应本文件。
+统一约定：字段 **snake_case**、时间 **ISO 8601 UTC + `Z`**（落库实体的时间字段为 Unix 毫秒，见 `commands.md` §1.5）、错误码 **大写下划线**。本文件里所有 `contract_version` 的字面量恒等于本文件头部版本；实现侧只允许有一个常量对应本文件。
 
 > **3.0.0 的模型变化**：`profile`（一个节点 = 一条配置）换成 `config`（一套方案）+ `node`（一台服务器）。工具名与入参同步改名，旧名**不保留别名**。命令与工具的对应关系见 `commands.md` §12。
 
@@ -112,7 +112,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.32.0";
+  contract_version: "3.36.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -896,7 +896,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.32.0";
+  contract_version: "3.36.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1100,7 +1100,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.32.0";
+  contract_version: "3.36.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1800,13 +1800,14 @@ type CoreUpgradeData = {
 ```
 
 - `PermissionLevel::ReadOnly`；不访问云厂商 API，只读 Host 已有的服务器列表（与 UI 同一份）。
-- `data`：`{ servers: [{ server_id, name, region, state, ip, node_ready, monthly_usd, daily_price_cents, transfer_gib, failure, destroyed_reason }] }`。
+- `data`：`{ servers: [{ server_id, name, region, state, ip, node_ready, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state, failure, destroyed_reason }] }`。
   - `state` 取值见 `commands.md` §7.15；`node_ready` 表示是否已可用来建配置。
   - **`ip` 可以给（3.22.1）**：用户已同意 AI 能说出自己服务器的地址（排障用）。`null` 表示控制面还没给出，如实说未知，不要编造。**端口不给**：界面只显示 IP，AI 说端口会与界面不一致，且对用户没有额外价值。
   - **密码、节点 id、provider id 等内部字段一律不给**；工具按固定白名单重建每一条。
+  - **计费（3.34.0）**：`paid_until` 是本期的有效至（ISO 8601 UTC；结算前 / 从未计费为 `null`），`billing_state` 原样透出控制面的枚举字符串（取值见 `commands.md` §7.18），工具层不翻译也不推算；两个字段都是界面已经显示的值。
   - **已销毁的行带 `destroyed_reason`（3.21.3）**：`failure.code = "billing_unpaid"` → 「因余额不足停机删除」，其余 destroyed → 「已销毁」。同时把内部 `failure` 置 null，**不给模型原始 `failure_code`**。
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
-- **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，可用时追加「可建配置」，已销毁时追加人话原因。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
+- **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，服务中时追加「本期有效至 …」（3.34.0），可用时追加「可建配置」，已销毁时追加人话原因。**不给派生值**：不推算「约可运行 N 天」、不给「下次扣费具体时刻」（产品已拍板）。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
 - **设备身份 / 会话过期（3.26.0）**：`PRECONDITION_FAILED / auth_required`，**不返回服务器数据**；模型应请用户先登录，不能拿空列表演示成「你没有服务器」。
 - `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态 · IP（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
@@ -1895,7 +1896,7 @@ type ConfigSetModeData = {
 {
   "type": "object",
   "properties": {
-    "section": { "enum": ["ai", "connection", "account", "advanced"] },
+    "section": { "enum": ["ai", "connection", "advanced"] },
     "row": { "type": "string", "minLength": 1, "maxLength": 40 }
   },
   "required": ["section"],
@@ -1906,13 +1907,14 @@ type ConfigSetModeData = {
 ```ts
 type OpenSettingsData = {
   opened: true;
-  section: "ai" | "connection" | "account" | "advanced";
+  section: "ai" | "connection" | "advanced";
   row: string | null;        // 实际高亮的行；没匹配上为 null
   row_matched: boolean;
 };
 ```
 
 - `PermissionLevel::ReadOnly`；不写库、不发命令、不打开系统窗口。
+- **账户不在设置里**（2026-11-26）：设置只有 AI / 连接 / 高级三段；账户由左下角头像打开独立弹层。`section: "account"` 按 schema 拒绝（`INVALID_ARGUMENT`，`details.reason = "account_not_in_settings"`），工具不指路到账户。
 - **触发约束**：只在用户问「这个设置在哪里 / 怎么改」，或模型要边指边解释某个设置项时调用。**一轮对话最多一次**，不得为了「展示能力」连续调用，也不得在用户没问设置时顺手打开。
 - **行 id 登记表**（唯一来源；与 `commands.md` §9.1.1 的 `controls` 同源）：
 
@@ -1923,9 +1925,6 @@ type OpenSettingsData = {
 | `connection.port` | 本地代理端口（仅代理配置出现） |
 | `ai.provider` | 默认 AI |
 | `ai.other` | 其他 AI 服务 |
-| `account.login` | 登录 / 退出登录 |
-| `account.balance` | 余额与充值 |
-| `account.mobile` | 在手机上使用（3.22.0 新增；打开设置 › 账户并高亮这一行，不打开弹层、不读 URL） |
 | `advanced.core` | 运行时核心版本 |
 | `advanced.helper` | 系统助手（helper） |
 | `advanced.logs` | 日志目录 |
@@ -1933,7 +1932,7 @@ type OpenSettingsData = {
 
 - **未知 `row` 不是错误**：降级为 `row: null`、`row_matched: false`，仍然打开 `section`。工具的目的是把用户带到地方，不是校验模型拼的字符串。
 - 成功后 Host 发 `settings-point`；UI 负责打开、滚动、高亮 2 秒。
-- **`display`**：成功「已打开设置 · 连接」（段名用中文：AI / 连接 / 账户 / 高级）；`row_matched: false` 时同一句，不提行名。
+- **`display`**：成功「已打开设置 · 连接」（段名用中文：AI / 连接 / 高级）；`row_matched: false` 时同一句，不提行名。
 - 无确认点、不 destructive。它与 `ConfigSetMode` 的区别：只指路，什么都不改。
 
 ---
@@ -2334,11 +2333,11 @@ type LlmProvidersData = {
 ```
 
 - `PermissionLevel::ReadOnly`；数据源与界面同一份 `llm_provider_list`（`commands.md` §9.4），不自行推算。
-- `test_provider_id` 必须是**已保存**的服务商 id：只测这一项、复用 `llm_provider_test` 的判定，不落库、不改任何配置；不存在 → `NOT_FOUND`。
+- `test_provider_id` 必须是**已保存**的服务商 id：只测这一项、复用 `llm_provider_test` 的判定，不落库、不改任何配置；不存在 → `NOT_FOUND`。**传名称不算命中**（不做名称模糊匹配），返回 `NOT_FOUND`，message 提示先取 id。
 - **永不返回 Key**，也不返回令牌与请求头；`base_url` 去掉 userinfo（`https://sk-xxx@…` 的密钥不进模型上下文）。
 - `last_result.error` 已经过 `llm::redact_secrets`（`llm.rs:608`）：`sk-` 开头且长度 ≥8 的片段替换为 `sk-***`；错误文本本身不含 Key 原文。非 `sk-` 开头的凭据不由这层兜底。
 - **不提供保存 / 删除 / 切换**：写配置与输入密钥只走界面；`DeepseekSetupKey` / `DeepseekSaveKey` 维持现状，只覆盖 DeepSeek，描述里写「换服务商请让用户到设置里改」。
-- **`content` 必须给**：当前服务商与模型、共有几个服务商；带 `test_provider_id` 时给该项的成功 / 失败原因（失败原因为脱敏后的结果）。
+- **`content` 必须给**：当前服务商与模型、共有几个服务商；**每个服务商一行，行内必须带 service provider 的 id**（形如 `deepseek` 或 `p_xxx`）——模型只能读 `content`，拿不到 id 就没法传 `test_provider_id`。id 仅供调用，不要念给用户。带 `test_provider_id` 时给该项的成功 / 失败原因（失败原因为脱敏后的结果）。
 - **待回填**：`id` 枚举与内置项的呈现规则以实现的服务商注册表为准。
 
 错误：`NOT_FOUND`、`INTERNAL`。
@@ -2441,6 +2440,30 @@ type LlmProvidersData = {
 ---
 
 ## 8. 变更记录
+
+### 3.36.0（未发布，2026-11-26：`OpenSettings` 收口——账户移出设置）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.36.0`；§4.50 `OpenSettings` 的 `section` 枚举收缩为 `ai` / `connection` / `advanced`，`row` 登记表删除 `account.login` / `account.balance`（11 → 9 项），`section: "account"` 按 schema 拒绝（`INVALID_ARGUMENT`，`details.reason = "account_not_in_settings"`）。**账户不在设置里，改由左下角头像打开的独立账户弹层承担**；工具不再指路到账户。工具总数不变（38） | 枚举收缩 / 行登记收缩 | 账户已独立成弹层（2026-11-26）；`src-tauri/src/tools/settings.rs` 的 `SECTIONS` / `SETTINGS_ROWS` 与 `envelope.rs` 的 `CONTRACT_VERSION` 同步 |
+
+### 3.35.0（未发布，2026-11-26：`LlmProviders` 的 `content` 每行带 service provider id）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.35.0`；§4.60 `LlmProviders` 的 `content` 要求补一条：每个服务商一行，行内必须带 service provider 的 id（形如 `deepseek` 或 `p_xxx`），`id` 仅供调用、不要念给用户；`test_provider_id` **传名称不算命中**，返回 `NOT_FOUND` 且 message 提示先取 id。`data`、权限与行为不变；工具总数不变（38） | 内容口径 | 模型只能读 `content`，拿不到 id 就无法传 `test_provider_id` |
+
+### 3.34.0（未发布，2026-11-26：`MyServers` 补 `paid_until` / `billing_state`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.34.0`；§4.48 `MyServers` 的可见字段补 `paid_until`（string \| null，服务中的本期有效至；结算前 / 从未计费为 `null`）与 `billing_state`（原样透出的枚举字符串）；白名单 10 → 12，`content` 服务中时追加「本期有效至 …」。**不给派生值**：不推算「约可运行 N 天」、不给「下次扣费具体时刻」。工具总数不变（38） | 字段扩展 | 第 5 组决策单 §2.3；产品已拍板不推算派生日数 |
+
+### 3.33.0（未发布，2026-11-26：`OpenSettings` 行登记表移除 `account.mobile`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.33.0`；§4.50 行登记表移除 `account.mobile`（该行随账号浮层删除，设置 › 账户不再有「在其它设备上使用」行），登记表 12 → 11 项（`src-tauri/src/tools/settings.rs` 的 `SETTINGS_ROWS` 与 `envelope.rs` 的 `CONTRACT_VERSION` 同步）。工具总数不变 | 行登记收缩 | 账号浮层删除（2026-11-26） |
 
 ### 3.32.0（未发布，2026-11-25：第 5 组第二片，新增 `LlmProviders`，37 → 38）
 

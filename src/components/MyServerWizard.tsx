@@ -27,8 +27,6 @@ interface Props {
   onEnsureIdentity: () => Promise<boolean>;
   /** 余额不足时的唯一去处。 */
   onTopUp: () => void;
-  /** 次级入口：让 AI 帮我选。 */
-  onAskAi?: () => void;
   /** Host 回 auth_required 时拉起登录框（不能只看本地 account）。 */
   onAuthRequired?: () => void;
   /** 地区和档位选择变化：用于上报 last_action。 */
@@ -177,7 +175,6 @@ export function MyServerWizard({
   onOrdered,
   onEnsureIdentity,
   onTopUp,
-  onAskAi,
   onSelect,
   onSelectionApplied,
   onBusyChange,
@@ -461,16 +458,6 @@ export function MyServerWizard({
         ) : null}
         <h4 className="myservers__wizard-title">{tr("wizard.title")}</h4>
       </div>
-      {onAskAi ? (
-        <button
-          type="button"
-          className="btn btn--ghost wizard-ask-ai"
-          disabled={busy}
-          onClick={onAskAi}
-        >
-          {tr("controls.askAi")}
-        </button>
-      ) : null}
     </header>
   );
 

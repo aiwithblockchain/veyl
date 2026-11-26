@@ -41,6 +41,10 @@ const SERVER: MyServer = {
   billing_state: "active",
   grace_ends_at: null,
   transfer_gib: 1000,
+  traffic_used_bytes: 0,
+  traffic_limit_bytes: 0,
+  traffic_reset_at: "",
+  traffic_state: "ok",
   failure: null,
 };
 
@@ -587,7 +591,7 @@ describe("下单成功后回到详情", () => {
 });
 
 describe("设备身份丢失后的恢复入口", () => {
-  it("账号菜单给「重新注册设备」，点击后重新注册并回到正常态", async () => {
+  it("设置 › 账户给「重新注册设备」，点击后重新注册并回到正常态", async () => {
     prepare([]);
     let recovered = false;
     vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
@@ -687,7 +691,7 @@ describe("设备 / 账户被停用的出路", () => {
     expect(
       await screen.findByRole("button", { name: "账户，未登录" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
   }, 15_000);
 
   it("账户停用：主行动「换一个账户」重新注册设备并打开登录", async () => {
@@ -828,7 +832,7 @@ describe("设备 / 账户被停用的出路", () => {
     ).toBeTruthy();
   }, 15_000);
 
-  it("收到 my-server-account-cleared 后收起菜单并回到未登录", async () => {
+  it("收到 my-server-account-cleared 后账户页回到未登录", async () => {
     prepare([]);
 
     render(<App />);
@@ -838,7 +842,7 @@ describe("设备 / 账户被停用的出路", () => {
       await screen.findByRole("button", { name: "账户，me@example.com" }),
     );
     expect(
-      await screen.findByRole("dialog", { name: "账户菜单" }),
+      await screen.findByRole("dialog", { name: "账户" }),
     ).toBeTruthy();
 
     act(() => {
@@ -853,9 +857,9 @@ describe("设备 / 账户被停用的出路", () => {
     expect(
       await screen.findByRole("button", { name: "账户，未登录" }),
     ).toBeTruthy();
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull(),
-    );
+    const surface = screen.getByRole("dialog", { name: "账户" });
+    expect(await within(surface).findByRole("button", { name: "登录" })).toBeTruthy();
+    expect(within(surface).queryByText("me@example.com")).toBeNull();
   }, 15_000);
 
   it("account_blocked 优先于身份丢失", async () => {
@@ -1426,17 +1430,8 @@ describe("左栏门禁", () => {
   }, 15_000);
 });
 
-describe("新建节点：AI 入口按配置显隐", () => {
-  async function openWizard() {
-    render(<App />);
-    await screen.findByRole("button", { name: /我的服务器/ });
-    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
-    await screen.findByRole("main", { name: "新建节点" });
-  }
-
-  it("AI 可用：标题区右上角出现 ghost「让 AI 帮我选」", async () => {
+describe("新建节点：不再有 AI 入口", () => {
+  it("AI 已配置时，向导标题区也没有「让 AI 帮我选」", async () => {
     prepare([SERVER]);
     localStorage.setItem("veyl.onboarding.skipped", "1");
     vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
@@ -1455,21 +1450,13 @@ describe("新建节点：AI 入口按配置显隐", () => {
       activeProviderId: "deepseek",
     } as never);
 
-    await openWizard();
-    const ask = await screen.findByRole("button", { name: "让 AI 帮我选" });
-    expect(ask.className).toContain("btn--ghost");
-    expect(ask.closest(".myservers__wizard-head")).toBeTruthy();
-  }, 15_000);
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
+    await screen.findByRole("main", { name: "新建节点" });
 
-  it("AI 未配置：不渲染这个入口", async () => {
-    prepare([SERVER]);
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
-      providers: [],
-      activeProviderId: null,
-    } as never);
-
-    await openWizard();
     expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   }, 15_000);
 });

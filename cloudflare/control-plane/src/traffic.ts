@@ -9,14 +9,17 @@
 import { sha256B64u } from "./lib/crypto";
 import { json } from "./lib/http";
 import { destroyUnpaidServer, type ServersEnv } from "./servers";
+import { GIB, cycleIdOf, releasedBytes, type ReleasedRow } from "./traffic_cycle";
+import { accountTotals, type TrafficTotals } from "./traffic_pool";
 import { balanceCents, recordLedgerEntry } from "./wallet";
 
-const GIB = 1024 ** 3;
-const DAY_MS = 24 * 3600 * 1000;
+// 周期与额度的纯函数在 traffic_cycle.ts（断开与 servers.ts 的循环 import），
+// 这里沿用旧导出，调用点不用改。
+export { cycleIdOf, cycleStartOf, releasedBytes, GIB, DAY_MS, RELEASE_DAYS } from "./traffic_cycle";
+export type { ReleasedRow } from "./traffic_cycle";
+
 /** 超出单价：$0.02/GiB = 2 分/GiB（§3）。 */
 const CENTS_PER_GIB = 2;
-/** 额度按天释放，单台每周期最多累计 28 天（§4.1）。 */
-const RELEASE_DAYS = 28;
 
 export interface TrafficEnv {
   DB?: D1Database;
@@ -28,20 +31,6 @@ interface TrafficServerRow extends ReleasedRow {
   account_id: string;
 }
 
-interface ReleasedRow {
-  transfer_gib: number | null;
-  ready_at: number | null;
-  billing_anchor_at: number;
-  created_at: number;
-  destroyed_at: number | null;
-}
-
-interface TrafficTotals {
-  used: number;
-  released: number;
-  charged: number;
-}
-
 function bearerToken(request: Request): string | null {
   const header = request.headers.get("authorization") ?? "";
   if (!header.startsWith("Bearer ")) return null;
@@ -51,81 +40,6 @@ function bearerToken(request: Request): string | null {
 
 function agentJson(body: unknown, status = 200): Response {
   return json(body, status, { "cache-control": "no-store" });
-}
-
-/** 周期 = UTC 自然月，清零点在每个 1 日 00:00 UTC（§4.0）。 */
-export function cycleIdOf(now: number): string {
-  const date = new Date(now);
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-
-function cycleStartOf(cycleId: string): number {
-  const [year, month] = cycleId.split("-").map(Number);
-  return Date.UTC(year, month - 1, 1);
-}
-
-/**
- * 单台机器在本周期的已释放额度（§4.1）：
- * `min(月额度, 日额度 × (本周期存活天数 + 1))`，`+1` 是建机预付的那一天。
- * 存活天数只算本周期内，按整天向下取整。
- *
- * 计算截止 `destroyed_at ?? now`，周期开始前就已销毁的机器不计；
- * 因此周期内销毁的机器会把已累计额度留在账号池里（与 DO 团队级按存在秒累计一致），
- * 不按「未用额度作废」的字面读法反向多收用户。
- */
-export function releasedBytes(
-  server: ReleasedRow,
-  cycleId: string,
-  now: number,
-): number {
-  const monthly = Math.round(Math.max(0, Number(server.transfer_gib ?? 0)) * GIB);
-  // 额度未知（旧行 / 目录缺 transfer）：不释放任何额度，也不据此扣费，见 settleOverage。
-  if (monthly <= 0) return 0;
-  const cycleStart = cycleStartOf(cycleId);
-  const destroyedAt = server.destroyed_at == null ? null : Number(server.destroyed_at);
-  if (destroyedAt !== null && destroyedAt <= cycleStart) return 0;
-  const end = destroyedAt ?? now;
-  const anchor = Number(server.ready_at ?? server.billing_anchor_at ?? server.created_at ?? end);
-  const from = Math.max(cycleStart, anchor);
-  const days = Math.max(0, Math.floor((end - from) / DAY_MS));
-  return Math.min(monthly, Math.floor((monthly / RELEASE_DAYS) * (days + 1)));
-}
-
-/**
- * 账号本周期口径：`used` / `charged` 来自各机器上报行；
- * `released` 从 `servers` 表现算账号下**每台**机器，不依赖「本周期有上报行」——
- * 否则周期开始后、静默或新机首报前的窗口里额度会缺席，导致同账号其它机器被多扣。
- */
-async function accountTotals(
-  db: D1Database,
-  accountId: string,
-  cycleId: string,
-  now: number,
-): Promise<TrafficTotals> {
-  const row = await db
-    .prepare(
-      "SELECT COALESCE(SUM(t.bytes), 0) AS used, COALESCE(SUM(t.charged_cents), 0) AS charged " +
-        "FROM server_traffic t JOIN servers s ON s.id = t.server_id " +
-        "WHERE s.account_id = ? AND t.cycle_id = ?",
-    )
-    .bind(accountId, cycleId)
-    .first<{ used: number; charged: number }>();
-  const servers = await db
-    .prepare(
-      "SELECT transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at " +
-        "FROM servers WHERE account_id = ?",
-    )
-    .bind(accountId)
-    .all<ReleasedRow>();
-  const released = (servers.results ?? []).reduce(
-    (sum, server) => sum + releasedBytes(server, cycleId, now),
-    0,
-  );
-  return {
-    used: Number(row?.used ?? 0),
-    released,
-    charged: Number(row?.charged ?? 0),
-  };
 }
 
 function dueCents(totals: TrafficTotals): number {

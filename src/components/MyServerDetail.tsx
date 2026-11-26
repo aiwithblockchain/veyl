@@ -15,9 +15,14 @@ import {
   serverTone,
 } from "../myservers/labels";
 import { isTombstone } from "../myservers/tombstones";
+import {
+  formatTrafficGib,
+  formatTrafficReset,
+  trafficTomorrowBytes,
+} from "./traffic";
 import { rotateNodeCredentials } from "../myservers/rotateCredentials";
 import { copyText } from "../ui/clipboard";
-import { t, useT } from "../i18n";
+import { t, useLanguage, useT } from "../i18n";
 import type { MessageKey } from "../i18n";
 import { errorText as describeError, failureText } from "../i18n/errorText";
 
@@ -114,6 +119,7 @@ export function MyServerDetail({
   onDiagnose,
 }: Props) {
   const tr = useT();
+  const language = useLanguage();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -445,7 +451,10 @@ export function MyServerDetail({
           </div>
 
           <p className="myservers__billing is-expired" role="status">
-            {serverTombstoneText()}
+            {server.traffic_state === "unpaid" ||
+            server.failure?.code === "traffic_overage"
+              ? tr("detail.trafficUnpaid")
+              : serverTombstoneText()}
           </p>
 
           {error ? (
@@ -510,6 +519,25 @@ export function MyServerDetail({
   const failed = server.state === "error";
   // 停机中 / 已销毁：对象已不在，事实区只留地区；危险块也不再有销毁。
   const halted = destroying || server.state === "gone";
+  /** 流量超支停机：状态点按琥珀，即便后端没把它标成 destroyed。 */
+  const headTone =
+    server.traffic_state === "unpaid" ? "warn" : serverTone(server);
+  /** 已销毁（墓碑）与停机中不渲染流量行，由墓碑文案承担。 */
+  const showTraffic = !failed && !halted && server.state !== "destroyed";
+  /** 单台只说「这台用了多少」：额度、剩余与扣费判据都在账号级。 */
+  const trafficText =
+    server.traffic_state === "unpaid"
+      ? tr("detail.trafficUnpaid")
+      : server.traffic_limit_bytes === 0
+        ? tr("detail.trafficUnknown", {
+            used: formatTrafficGib(server.traffic_used_bytes),
+          })
+        : tr("detail.trafficUsed", {
+            used: formatTrafficGib(server.traffic_used_bytes),
+          });
+  const trafficReset = formatTrafficReset(server.traffic_reset_at, language);
+  /** 这台明天还会加多少额度；封顶（或额度为 0）时是 0，销毁说明整句不出现。 */
+  const tomorrowBytes = trafficTomorrowBytes(server);
   /** 欠费 / 停用：右侧给「去充值」主按钮，销毁仍在左；停机/已销毁与失败态不掺和。 */
   const deficient =
     (server.billing_state === "past_due" || server.billing_state === "expired") &&
@@ -601,8 +629,8 @@ export function MyServerDetail({
               </button>
             ) : null}
           </div>
-          <span className={`myservers__state is-${serverTone(server)}`}>
-            <span className={`led is-${serverTone(server)}`} aria-hidden />
+          <span className={`myservers__state is-${headTone}`}>
+            <span className={`led is-${headTone}`} aria-hidden />
             {serverDetailState(server)}
           </span>
         </div>
@@ -710,10 +738,20 @@ export function MyServerDetail({
               </dd>
             </div>
           ) : null}
-          {!failed && !halted && server.transfer_gib > 0 ? (
+          {showTraffic ? (
             <div>
               <dt>{tr("detail.traffic")}</dt>
-              <dd>{tr("detail.trafficMonthly", { gib: server.transfer_gib })}</dd>
+              <dd className="myservers__traffic">
+                {trafficText}
+                {trafficReset ? (
+                  <>
+                    {" "}
+                    <span className="myservers__traffic-reset">
+                      {tr("detail.trafficResetAt", { date: trafficReset })}
+                    </span>
+                  </>
+                ) : null}
+              </dd>
             </div>
           ) : null}
         </dl>
@@ -793,6 +831,13 @@ export function MyServerDetail({
                   ? tr("detail.destroyConfirmProvisioning")
                   : tr("detail.destroyConfirm")}
               </p>
+              {tomorrowBytes > 0 ? (
+                <p className="myservers__confirm-note">
+                  {tr("detail.destroyTraffic", {
+                    amount: formatTrafficGib(tomorrowBytes),
+                  })}
+                </p>
+              ) : null}
               <div className="myservers__actions">
                 <button
                   type="button"

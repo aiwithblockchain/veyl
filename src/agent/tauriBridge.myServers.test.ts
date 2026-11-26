@@ -107,6 +107,93 @@ describe("按天计费的归一化", () => {
   });
 });
 
+describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
+  it("缺字段时补 0 / 空串 / ok，条目仍保留", async () => {
+    invoke.mockResolvedValueOnce({ servers: [SERVER] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers).toHaveLength(1);
+    expect(list.servers[0].traffic_used_bytes).toBe(0);
+    expect(list.servers[0].traffic_limit_bytes).toBe(0);
+    expect(list.servers[0].traffic_reset_at).toBe("");
+    expect(list.servers[0].traffic_state).toBe("ok");
+    expect(list.traffic_pool).toBeUndefined();
+  });
+
+  it("脏值逐字段兜底，不影响同条其它字段与其它条目", async () => {
+    const good = {
+      ...SERVER,
+      traffic_used_bytes: 4_294_967_296,
+      traffic_limit_bytes: 32_212_254_720,
+      traffic_reset_at: "2026-12-01T00:00:00.000Z",
+      traffic_state: "unpaid",
+    };
+    const dirty = {
+      ...SERVER,
+      server_id: "srv_2",
+      traffic_used_bytes: -1,
+      traffic_limit_bytes: "nope",
+      traffic_reset_at: null,
+      traffic_state: "weird",
+    };
+    invoke.mockResolvedValueOnce({ servers: [good, dirty] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers).toHaveLength(2);
+    expect(list.servers[0]).toMatchObject({
+      traffic_used_bytes: 4_294_967_296,
+      traffic_limit_bytes: 32_212_254_720,
+      traffic_reset_at: "2026-12-01T00:00:00.000Z",
+      traffic_state: "unpaid",
+    });
+    expect(list.servers[1]).toMatchObject({
+      server_id: "srv_2",
+      state: "healthy",
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: 0,
+      traffic_reset_at: "",
+      traffic_state: "ok",
+    });
+  });
+
+  it("旧控制面/旧 Rust 发来的 near / over 降级为 ok", async () => {
+    const near = { ...SERVER, server_id: "srv_near", traffic_state: "near" };
+    const over = { ...SERVER, server_id: "srv_over", traffic_state: "over" };
+    invoke.mockResolvedValueOnce({ servers: [near, over] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers.map((server) => server.traffic_state)).toEqual([
+      "ok",
+      "ok",
+    ]);
+  });
+
+  it("账号池可缺省；内层字段缺失按 0，非对象当没给", async () => {
+    invoke.mockResolvedValueOnce({
+      servers: [SERVER],
+      traffic_pool: { used_bytes: 1024, limit_bytes: 2048 },
+    });
+    expect((await new TauriAgentBridge().myServerList()).traffic_pool).toEqual({
+      usedBytes: 1024,
+      limitBytes: 2048,
+    });
+
+    invoke.mockResolvedValueOnce({
+      servers: [SERVER],
+      traffic_pool: { used_bytes: 1024 },
+    });
+    expect((await new TauriAgentBridge().myServerList()).traffic_pool).toEqual({
+      usedBytes: 1024,
+      limitBytes: 0,
+    });
+
+    invoke.mockResolvedValueOnce({ servers: [SERVER], traffic_pool: "nope" });
+    expect(
+      (await new TauriAgentBridge().myServerList()).traffic_pool,
+    ).toBeUndefined();
+  });
+});
+
 describe("结账返回订单（2.39.0）", () => {
   it("按订单归一化：保留 server_id，不读 charged_cents", async () => {
     invoke.mockResolvedValueOnce({
@@ -186,6 +273,122 @@ describe("智能修复命令", () => {
       .catch((err: unknown) => err);
 
     expect(rotateFailureReason(error)).toBe("agent_timeout");
+  });
+});
+
+describe("账单流水（2.76.0）", () => {
+  const LEDGER = {
+    balance_cents: 11806,
+    currency: "USD",
+    window_days: 30,
+    truncated: false,
+    totals: { topup_cents: 12000, charge_cents: 294 },
+    entries: [
+      {
+        id: "wl_2",
+        kind: "machine_day",
+        amount_cents: -20,
+        at: 1_764_000_000_000,
+        server: {
+          id: "srv_1",
+          name: "新加坡 1",
+          plan: "s-1vcpu-1gb",
+          region: "sgp1",
+        },
+        note: null,
+      },
+      {
+        id: "wl_1",
+        kind: "topup",
+        amount_cents: 12000,
+        at: 1_763_000_000_000,
+        server: null,
+        note: "充值",
+      },
+    ],
+  };
+
+  it("命令名与 days 传对；省略时不传 days；毫秒时间原样保留", async () => {
+    invoke.mockResolvedValueOnce(LEDGER);
+    const ledger = await new TauriAgentBridge().myServerBillingLedger(7);
+
+    expect(invoke).toHaveBeenLastCalledWith("my_server_billing_ledger", {
+      days: 7,
+    });
+    expect(ledger.entries[0].at).toBe(1_764_000_000_000);
+    expect(ledger.entries[0].server?.region).toBe("sgp1");
+    expect(ledger.entries[1].server).toBeNull();
+
+    invoke.mockResolvedValueOnce(LEDGER);
+    await new TauriAgentBridge().myServerBillingLedger();
+    expect(invoke).toHaveBeenLastCalledWith("my_server_billing_ledger", {});
+  });
+
+  it("认不出的 kind 归 other；坏条目整条丢弃，null 机器合法", async () => {
+    invoke.mockResolvedValueOnce({
+      ...LEDGER,
+      entries: [
+        { ...LEDGER.entries[0], kind: "promo" },
+        { ...LEDGER.entries[0], id: "" },
+        { ...LEDGER.entries[0], at: 0 },
+        { ...LEDGER.entries[0], at: 1_764_000_000 },
+        { ...LEDGER.entries[0], at: 1_764_000_000_000.5 },
+        { ...LEDGER.entries[0], amount_cents: "12" },
+        { ...LEDGER.entries[0], amount_cents: 12.5 },
+        { ...LEDGER.entries[0], server: { id: "srv_1" } },
+        LEDGER.entries[1],
+      ],
+    });
+
+    const ledger = await new TauriAgentBridge().myServerBillingLedger();
+    expect(ledger.entries).toHaveLength(2);
+    expect(ledger.entries[0].kind).toBe("other");
+    expect(ledger.entries[1]).toMatchObject({ kind: "topup", server: null });
+  });
+
+  it("totals 是全量，原样透传而不是按 entries 重算", async () => {
+    invoke.mockResolvedValueOnce({
+      ...LEDGER,
+      truncated: true,
+      totals: { topup_cents: 99999, charge_cents: 1 },
+    });
+
+    const ledger = await new TauriAgentBridge().myServerBillingLedger();
+    expect(ledger.truncated).toBe(true);
+    expect(ledger.totals).toEqual({ topup_cents: 99999, charge_cents: 1 });
+  });
+
+  it("顶层形状不对按上游错误处理", async () => {
+    for (const broken of [
+      { ...LEDGER, balance_cents: -1 },
+      { ...LEDGER, balance_cents: 10.5 },
+      { ...LEDGER, window_days: 31 },
+      { ...LEDGER, totals: undefined },
+      { ...LEDGER, totals: { topup_cents: 1.5, charge_cents: 0 } },
+      { ...LEDGER, entries: "nope" },
+    ]) {
+      invoke.mockResolvedValueOnce(broken);
+      await expect(
+        new TauriAgentBridge().myServerBillingLedger(),
+      ).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
+    }
+  });
+
+  it("失败信封的 code 与 reason 原样保留", async () => {
+    invoke.mockRejectedValueOnce({
+      code: "UNAUTHENTICATED",
+      message: "",
+      retryable: true,
+      details: { reason: "auth_required" },
+    });
+
+    const error = await new TauriAgentBridge()
+      .myServerBillingLedger()
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      code: "UNAUTHENTICATED",
+      details: { reason: "auth_required" },
+    });
   });
 });
 

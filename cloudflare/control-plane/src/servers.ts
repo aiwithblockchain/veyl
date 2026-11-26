@@ -12,6 +12,8 @@ import {
   signAgentToken,
   signDetached,
 } from "./lib/crypto";
+import { cycleIdOf, releasedBytes } from "./traffic_cycle";
+import { accountTotals } from "./traffic_pool";
 import { apiError, json } from "./lib/http";
 import {
   AGENT_CONTROL_PORT,
@@ -97,6 +99,86 @@ interface ServerRow {
 
 const GRACE_MS = 7 * 24 * 3600 * 1000;
 
+/**
+ * 单台只有两态（§7.3 / §8）：扣费判据是账号池 `max(0, Σ已用 − Σ已释放)`，
+ * 单台超自己那份不产生任何扣费，所以没有 near / over——那两个概念属于账号级。
+ */
+export type TrafficState = "ok" | "unpaid";
+
+/** `MyServer` 的流量四字段（§7.3）。 */
+export interface TrafficFields {
+  traffic_used_bytes: number;
+  traffic_limit_bytes: number;
+  traffic_reset_at: string;
+  traffic_state: TrafficState;
+}
+
+/**
+ * 本周期每台机器的已用字节：一条按账号聚合的查询，列表逐台填，不做 N+1。
+ * 没有上报行 = 0（新机首报前就是这种情况）。
+ */
+async function accountTrafficUsed(
+  db: D1Database,
+  accountId: string,
+  cycleId: string,
+): Promise<Map<string, number>> {
+  const result = await db
+    .prepare(
+      "SELECT t.server_id AS server_id, t.bytes AS bytes FROM server_traffic t " +
+        "JOIN servers s ON s.id = t.server_id " +
+        "WHERE s.account_id = ? AND t.cycle_id = ?",
+    )
+    .bind(accountId, cycleId)
+    .all<{ server_id: string; bytes: number }>();
+  const used = new Map<string, number>();
+  for (const row of result.results ?? []) {
+    used.set(String(row.server_id), Number(row.bytes ?? 0));
+  }
+  return used;
+}
+
+/**
+ * 本周期口径（§4.1）：额度按 `releasedBytes` 现算，**不读 `server_traffic.released_bytes`**
+ * ——那一列只是上次上报时的快照，新机首报前是空的。
+ * 额度照常返回（账号池求和、「明天还能涨多少」都依赖它），但**不拿它跟本台已用比大小**：
+ * 单台没有 near / over，只有「因流量超支停机」这一个异常态。
+ */
+function trafficFields(row: ServerRow, usedBytes: number, cycleId: string, now: number): TrafficFields {
+  const limitBytes = releasedBytes(
+    {
+      transfer_gib: row.transfer_gib ?? null,
+      ready_at: row.ready_at ?? null,
+      billing_anchor_at: row.billing_anchor_at,
+      created_at: row.created_at,
+      destroyed_at: row.destroyed_at,
+    },
+    cycleId,
+    now,
+  );
+  const date = new Date(now);
+  const state: TrafficState = row.failure_code === "traffic_overage" ? "unpaid" : "ok";
+  return {
+    traffic_used_bytes: usedBytes,
+    traffic_limit_bytes: limitBytes,
+    traffic_reset_at: new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1)).toISOString(),
+    traffic_state: state,
+  };
+}
+
+/** 列表 / 详情共用：同一请求内所有机器共用一个 `now` 与一次聚合查询。 */
+async function trafficFieldsFor(
+  db: D1Database,
+  accountId: string,
+  rows: ServerRow[],
+  now: number,
+): Promise<TrafficFields[]> {
+  if (rows.length === 0) return [];
+  const cycleId = cycleIdOf(now);
+  const used = await accountTrafficUsed(db, accountId, cycleId);
+  return rows.map((row) => trafficFields(row, used.get(row.id) ?? 0, cycleId, now));
+}
+
+
 /** 钱去哪了：按账号一次聚合每台服务器的扣费与退款，列表/详情共用，避免 N+1。 */
 async function serverMoney(
   db: D1Database,
@@ -125,6 +207,7 @@ async function serverMoney(
 
 function serverView(
   row: ServerRow,
+  traffic: TrafficFields,
   money?: { chargedCents: number; refundedCents: number },
 ) {
   // 结算前没有「已付到」的时刻（at_ready 的服务器在 pending 阶段 paid_until = NULL）。
@@ -159,6 +242,8 @@ function serverView(
     billing_state: row.billing_state ?? "active",
     // 扣费口径（2.39.0）：存量服务器/订单行缺省按 upfront，新单是 at_ready。
     charge_mode: row.charge_mode ?? "upfront",
+    // 本周期流量（2.78.0）：已用 / 已释放额度 / 下个 UTC 月 1 日重置 / 状态。
+    ...traffic,
     grace_ends_at:
       pastDue && paidUntil != null
         ? new Date(paidUntil + GRACE_MS).toISOString()
@@ -1806,7 +1891,14 @@ async function listServers(request: Request, env: ServersEnv): Promise<Response>
   const rows = result.results ?? [];
   await refreshBooting(env, rows);
   const money = await serverMoney(env.DB, identity.accountId);
-  return json({ servers: rows.map((row) => serverView(row, money.get(row.id))) });
+  const now = Date.now();
+  const traffic = await trafficFieldsFor(env.DB, identity.accountId, rows, now);
+  // 账号级池子与扣费同源（accountTotals）：列表里看不到的已销毁 / 已 dismiss 机器也计入。
+  const pool = await accountTotals(env.DB, identity.accountId, cycleIdOf(now), now);
+  return json({
+    servers: rows.map((row, index) => serverView(row, traffic[index], money.get(row.id))),
+    traffic_pool: { used_bytes: pool.used, limit_bytes: pool.released },
+  });
 }
 
 async function getServer(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
@@ -1818,7 +1910,8 @@ async function getServer(request: Request, env: ServersEnv, serverId: string): P
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
   await refreshBooting(env, [row]);
   const money = await serverMoney(env.DB, identity.accountId);
-  return json(serverView(row, money.get(row.id)));
+  const traffic = await trafficFieldsFor(env.DB, identity.accountId, [row], Date.now());
+  return json(serverView(row, traffic[0], money.get(row.id)));
 }
 
 /** 创建记录时间线（my-server-events.md §2.2 / commands.md §7.31）。 */
@@ -2073,7 +2166,8 @@ async function rename(request: Request, env: ServersEnv, serverId: string): Prom
   row.name = raw;
 
   const money = await serverMoney(env.DB, identity.accountId);
-  return json(serverView(row, money.get(row.id)));
+  const traffic = await trafficFieldsFor(env.DB, identity.accountId, [row], Date.now());
+  return json(serverView(row, traffic[0], money.get(row.id)));
 }
 
 async function destroy(request: Request, env: ServersEnv, serverId: string): Promise<Response> {

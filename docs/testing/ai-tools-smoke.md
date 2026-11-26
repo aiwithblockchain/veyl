@@ -174,7 +174,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 **用户原话**：手机上怎么用？
 
-**期望**：讲清步骤，并把用户带到「设置 › 账户 › 在手机上使用」（`OpenSettings` 的 `account.mobile` 行）；只指路，不打开弹层、不贴导出链接或令牌。
+**期望**：讲清步骤，并把用户带到「我的服务器」左栏的手机导出入口「在其它设备上使用」（`rail.useOnPhone`；只在已登录、列表可读且至少一台服务器节点就绪时出现，设备身份按未登录处理、不显示）。只指路，不打开弹层、不贴导出链接或令牌，也不要说「已替你导出」。
 
 **不通过的样子**：把导出 URL、二维码内容或令牌贴进对话；说「扫这个码就行」但不给入口；承诺已替用户导出。
 
@@ -190,7 +190,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 
 **用户原话**：（无；发布前机械检查）
 
-**期望**：`tools.md` §3、`TOOL_COPY`、`vpn_tools()` 三处逐名相等、工具数为 **38**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。契约版本以 `tools.md` 3.32.0 与 `envelope.rs` 的 `CONTRACT_VERSION` 一致为准。
+**期望**：`tools.md` §3、`TOOL_COPY`、`vpn_tools()` 三处逐名相等、工具数为 **38**；`toolDisplay.test.ts` 绿；`boundary_tests.rs` 的工具数与契约版本通过。契约版本以 `tools.md` 3.33.0 与 `envelope.rs` 的 `CONTRACT_VERSION` 一致为准。
 
 **不通过的样子**：工具数不是 38；三处名字集合不相等；集合断言红；契约版本与 `envelope.rs` 的 `CONTRACT_VERSION` 不一致。
 
@@ -213,3 +213,33 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 - 先追问还是先调工具：只要最终事实正确、没有多余写入。
 - 举例的数量、措辞长度、是否附带界面位置。
 - 第 5 组已上线：§4 的 4.1–4.6 按同样口径参与判定；4.7 是机械项，与对话分开记录。
+
+---
+
+## 6. 验收记录
+
+### 2026-11-26 第 5 组（工具面 38，`tools.md` 3.35.0）
+
+在打包后的应用里用真实 AI 逐条提问，由用户实操并核对 `tool_calls`：
+
+| 条目 | 结论 | 说明 |
+|---|---|---|
+| 4.1 余额 | 通过 | 调 `MyServerWallet`，余额 + 币种 + 本机读取时间，无面额列表 |
+| 4.2 试用状态 | 通过 | 走 `DefaultProfileStatus`，未出现 `TrialStatus` |
+| 4.3 服务器扣费 | 通过 | `MyServers` 给出本期有效至，无「约还能跑 N 天」 |
+| 4.4 批量测速 | 通过 | 说明批量在界面做，未循环调用 `NodeProbe` |
+| 4.5 手机使用 | 通过 | 指到「我的服务器」左栏入口，未断开连接、未贴令牌 |
+| 4.6 AI 服务商 | 通过 | 先取 `[id: deepseek]` 再测；期间修过一次 content 不带 id 的问题 |
+| 4.7 机械核对 | 通过 | `tools.md` §3 / `TOOL_COPY` / `vpn_tools()` 三处 38，`check-contracts` 91 项通过 |
+
+### 2026-11-26 账户入口复测（工具面 38，`tools.md` 3.36.0）
+
+问「余额在哪看？怎么退出登录？」，模型答：左下角头像点开是「账户」弹层，余额与充值都在里面，退出登录也在同一弹层、不影响当前连接；并说明余额是某一刻的读数、刷新失败时显示上次金额。**未再出现「设置 › 账户」。**
+
+对应实现：`85b7ba9`（`OpenSettings` 收起 account 分区，`section: "account"` 按 schema 拒绝，`reason = account_not_in_settings`）。
+
+### 2026-11-26 第 3 组回归（2.1–2.3、2.5、2.6）
+
+由同事在真机上逐条执行，结果按用户转述为**全部通过**：2.1 订阅地址（`NodeImport` + `source = "url"`，不传 `config_id`）、2.2 粘贴 `ss://`（`source = "text"`）、2.3 手动填写（`source = "manual"`，不回显密码）、2.5 缺字段（追问或缺字段报错，不写入半个节点）、2.6 来源与字段不匹配（`url` 不带 `password`）。具体 `tool_calls` 记录未回传，本行按执行人结论记录。
+
+前四组此前已逐条实测通过（1.1–1.3、2.1–2.6、3.1–3.3）。

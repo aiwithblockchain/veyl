@@ -153,7 +153,7 @@
 | `src/App.tsx` | 给设置传强制刷新回调；没有定时轮询，不需要计算 `walletVisible` |
 | `src/components/AccountMenu.tsx` | 挂载时调用 `onRefreshWallet()`（节流）；失败且 `wallet` 存在时显示旧值 + 旧值提示 + `重试` |
 | `src/components/Settings.tsx` | `open && section === "account"` 时触发节流刷新；余额行加 `刷新` 文字链接，点击调用强制刷新；失败有旧值时同文案 |
-| 样式 | 复用 `.settings-link`、`.account-menu__balance-error`、`.settings-account__error`；不新增 token、不加图标 |
+| 样式 | 复用 `.settings-link`、`.account-menu__balance-error`、`.account-surface__error`；不新增 token、不加图标 |
 
 - 不新增依赖，不引入状态管理库；复用现有 `refreshWallet`。
 - 菜单是条件渲染，挂载即打开的语义成立；不必在 App 的点击处理里重复触发。

@@ -721,7 +721,7 @@ describe("三区外壳与连接舞台", () => {
       expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy(),
     );
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   });
 
   it("未登录点新建节点：弹登录，不打开向导", async () => {
@@ -880,12 +880,12 @@ describe("三区外壳与连接舞台", () => {
     // 复用向导，但不渲染服务器页外壳与列表列。
     expect(document.querySelector(".rail")).toBeNull();
     expect(document.querySelector(".myservers")).toBeNull();
-    // 地区按大洲分组，类型三档，主按钮与次级入口都在。
+    // 地区按大洲分组，类型三档，主按钮在；次级 AI 入口已移除。
     expect(screen.getByText("亚洲")).toBeTruthy();
     expect(screen.getByText("北美洲")).toBeTruthy();
     expect(screen.getAllByRole("radio", { name: /1 核/ }).length).toBe(3);
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   }, 15_000);
 
   it("client 宿主：导航高亮仍在连接，Esc 与返回相同", async () => {
@@ -963,7 +963,7 @@ describe("三区外壳与连接舞台", () => {
     expect(screen.queryByRole("heading", { name: "新建节点" })).toBeNull();
   }, 15_000);
 
-  it("创建前余额不足：就地给去充值，不发起下单", async () => {
+  it("创建前余额不足：去充值打开账户弹层并落在充值块，向导状态还在", async () => {
     signInForWizard();
     await renderApp();
     const create = vi.spyOn(bridge, "myServerCreate");
@@ -979,33 +979,17 @@ describe("三区外壳与连接舞台", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(await screen.findByText(/余额不足，还差/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
-    expect(await screen.findByRole("dialog", { name: "充值" })).toBeTruthy();
-    expect(create).not.toHaveBeenCalled();
-  }, 15_000);
 
-  it("让 AI 帮我选只发消息，不建机", async () => {
-    signInForWizard();
-    await renderApp();
-    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
-      requestId: "req_ai_pick",
-    });
-    const create = vi.spyOn(bridge, "myServerCreate");
-    fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
-    await screen.findByRole("heading", { name: "新建节点" });
-
-    // 助手在窄窗口默认收起：点「让 AI 帮我选」必须先把面板展开，消息不能发进看不见的地方。
-    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我选" }));
-    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("button", { name: "展开助手" })).toBeNull();
-    const call = send.mock.calls[0];
-    expect(call[1]).toBe("帮我选一个地区和规格。");
-    expect(
-      (call[2] as { context: { screen: string; last_action: { id: string } } })
-        .context,
-    ).toMatchObject({ screen: "new_node", last_action: { id: "new_node.ask_ai" } });
+    expect(await screen.findByRole("dialog", { name: "账户" })).toBeTruthy();
+    const topup = document.querySelector('[data-point="account.topup"]');
+    await waitFor(() => expect(topup?.getAttribute("data-pointed")).toBe("true"));
     expect(create).not.toHaveBeenCalled();
-    expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy();
   }, 15_000);
 
   it("AI 未配置时点「问 AI」弹统一告警，不展开面板也不进设置", async () => {
@@ -1162,6 +1146,7 @@ describe("三区外壳与连接舞台", () => {
       "为什么有的软件没走 VPN",
       "为什么个别网站还是打不开",
       "终端里的命令也想走 VPN",
+      "如何在手机上使用",
     ]);
 
     fireEvent.click(
@@ -1180,7 +1165,7 @@ describe("三区外壳与连接舞台", () => {
     );
   }, 15_000);
 
-  it("导航账户图标打开账号菜单，不跳转我的服务器", async () => {
+  it("导航账户图标打开账户弹层，不跳转我的服务器", async () => {
     localStorage.setItem(
       "veyl.mock.account",
       JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
@@ -1203,12 +1188,9 @@ describe("三区外壳与连接舞台", () => {
 
     await renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
-    expect(
-      await screen.findByRole("dialog", { name: "账户菜单" }),
-    ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "充值" })).toBeTruthy();
-    expect(screen.getByText("$12.30")).toBeTruthy();
-    // 账户是浮层，不切 destination。
+    const surface = await screen.findByRole("dialog", { name: "账户" });
+    expect(await within(surface).findByText("$12.30")).toBeTruthy();
+    // 账户是独立覆盖层，不切 destination。
     expect(
       screen.queryByRole("complementary", { name: "服务器列表" }),
     ).toBeNull();
@@ -1246,8 +1228,10 @@ describe("三区外壳与连接舞台", () => {
 
     await renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
-    await screen.findByRole("dialog", { name: "账户菜单" });
-    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    const surface = await screen.findByRole("dialog", { name: "账户" });
+    fireEvent.click(
+      await within(surface).findByRole("button", { name: "退出登录" }),
+    );
 
     expect(await screen.findByText("已退出登录")).toBeTruthy();
     expect(screen.queryByText("登录已过期，请重新登录。")).toBeNull();

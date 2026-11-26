@@ -55,7 +55,8 @@ struct SavedDns {
     /// `State:/Network/Service/<uuid>/DNS` 里的 uuid。
     service: String,
     /// 我们写进去的地址。恢复前用它判断「现在的值还是不是我们的」。
-    written: String,
+    /// 转发器模式下是两条（`127.0.0.1` 首选 + 公网次选），回退路径下只有一条。
+    written: Vec<String>,
     /// 原本有没有这条状态键。没有 = 系统自动（DHCP）。
     had_state: bool,
     servers: Vec<String>,
@@ -88,13 +89,20 @@ enum RestoreAction {
     },
 }
 
+fn is_ours(saved: &SavedDns, value: &str) -> bool {
+    saved.written.iter().any(|written| written == value)
+}
+
 fn restore_action(current: &[String], saved: &SavedDns) -> RestoreAction {
     if current.is_empty() {
         return RestoreAction::Rescue {
             use_snapshot: false,
         };
     }
-    if current == [saved.written.clone()] {
+    // 「整组都还是我们写的」：顺序可能被系统重排，按集合比。
+    let all_ours = current.len() == saved.written.len()
+        && current.iter().all(|value| is_ours(saved, value));
+    if all_ours {
         return if saved.had_state {
             RestoreAction::Write {
                 servers: saved.servers.clone(),
@@ -106,11 +114,11 @@ fn restore_action(current: &[String], saved: &SavedDns) -> RestoreAction {
             }
         };
     }
-    if current.iter().any(|value| value == &saved.written) {
+    if current.iter().any(|value| is_ours(saved, value)) {
         // 摘掉我们写入的地址，也摘掉旧设计留下的隧道对端（升级后可能残留）。
         let remaining: Vec<String> = current
             .iter()
-            .filter(|value| *value != &saved.written && value.as_str() != LEGACY_PEER)
+            .filter(|value| !is_ours(saved, value) && value.as_str() != LEGACY_PEER)
             .cloned()
             .collect();
         if remaining.is_empty() {
@@ -144,6 +152,31 @@ fn strip_legacy_peer(servers: &mut Vec<String>, search: &mut Vec<String>) -> boo
     true
 }
 
+/// 摘掉上次崩溃前写进去的地址。返回清理后是否还能当「用户原本有自定义 DNS」。
+///
+/// 只在本次要写回环时调用（转发器模式）。判定依据是**回环在列表里**——
+/// 那是我们写的铁证；一旦成立，整套目标地址（回环 + 公网次选）都当残留摘掉，
+/// 否则崩溃重启后会把 `223.5.5.5` 当成用户的原始值写回去。列表里其它地址
+/// （用户自己的）保持不动。
+fn strip_stale_targets(
+    servers: &mut Vec<String>,
+    search: &mut Vec<String>,
+    had_state: bool,
+    targets: &[String],
+) -> bool {
+    let loopback = super::dns_forwarder::LISTEN_IP;
+    if !servers.iter().any(|value| value == loopback) {
+        return had_state;
+    }
+    servers.retain(|value| value != loopback && !targets.iter().any(|target| target == value));
+    eprintln!("veyl-helper: 忽略上次残留的 DNS（{targets:?}）作为原始值");
+    if servers.is_empty() {
+        search.clear();
+        return false;
+    }
+    had_state
+}
+
 /// 一次系统 DNS 还原的执行记录，给停止路径写人类可读日志用。
 ///
 /// 一行一个事实，地址不是敏感信息、照实打；回读不一致与任何失败都带实际值。
@@ -156,7 +189,7 @@ pub(super) struct RestoreReport {
     /// 停止前系统实际使用的 `resolver #1` 的 nameserver（scutil --dns）。
     pub resolver1: Option<String>,
     /// 连接期我们写进去的地址（用来回答「当前里是不是还有我们的」）。
-    pub target: Option<String>,
+    pub target: Option<Vec<String>>,
     /// 处理分支：write / remove_peer / rescue / nothing / no_snapshot / read_failed。
     pub branch: &'static str,
     /// 实际写进去的地址；没写为 None。
@@ -199,10 +232,9 @@ impl RestoreReport {
         }
         let before = match &self.before {
             Some(values) => {
-                let ours = self
-                    .target
-                    .as_deref()
-                    .is_some_and(|target| values.iter().any(|value| value == target));
+                let ours = self.target.as_ref().is_some_and(|targets| {
+                    values.iter().any(|value| targets.iter().any(|target| target == value))
+                });
                 format!("当前={values:?} 条数={} 含我们的={ours}", values.len())
             }
             None => "当前=读不到".to_string(),
@@ -313,14 +345,33 @@ impl DnsHijack {
     }
 }
 
+/// 把「接管失败」与「回滚结果」拼成一条可上报的原因。
+///
+/// 回滚本身失败时绝不能只报写失败：机器可能正停在我们的地址上，调用方
+/// （和用户日志）必须看到这一点。
+fn join_restore_error(error: String, report: &RestoreReport) -> String {
+    match (&report.error, report.branch) {
+        (Some(restore), branch) => format!("{error}；回滚失败（分支 {branch}）：{restore}"),
+        (None, branch) => format!("{error}；已回滚（分支 {branch}）"),
+    }
+}
+
 /// 第一次失败后等一会儿再试：服务刚起来时读不到 PrimaryService 是瞬时的。
 const RETRY_DELAY: Duration = Duration::from_millis(400);
 
-/// 把系统解析器指向公网地址；失败重试一次，仍失败就返回未接管的原因。
+/// 把系统解析器指向给定地址；失败重试一次，仍失败就返回未接管的原因。
 ///
 /// 调用方**不要**因此让连接失败——照常连，把 `applied=false` 报给界面。
-pub(super) fn activate() -> DnsHijack {
-    activate_with(activate_once)
+///
+/// 转发器模式写两条地址（`127.0.0.1` 首选 + 公网次选）：次选是兜底，转发器
+/// 线程挂了或 helper 被强杀时，mDNSResponder 会自动退到它，机器不会失去解析。
+/// 回退路径（转发器起不来）只写一条公网地址。还原逻辑按「整组是否都还是我们写的」判定。
+pub(super) fn activate_with_targets(targets: &[String]) -> DnsHijack {
+    if targets.is_empty() {
+        return DnsHijack::failed("没有可写入的 DNS 地址");
+    }
+    let owners = targets.to_vec();
+    activate_with(move || activate_once(&owners))
 }
 
 /// 重试逻辑单独抽出来，测试可以注入「第一次失败、第二次成功」的时序。
@@ -344,8 +395,8 @@ fn activate_with(mut attempt: impl FnMut() -> Result<(), String>) -> DnsHijack {
 ///
 /// **幂等**：已经改过（`SAVED` 有值）就不再读一遍当前值。否则第二次 start 会把
 /// 我们自己设的地址记成「原始值」，之后再也恢复不回去。
-fn activate_once() -> Result<(), String> {
-    let target = SYSTEM_DNS_TARGET.to_string();
+fn activate_once(targets: &[String]) -> Result<(), String> {
+    let targets_owned = targets.to_vec();
 
     let mut guard = SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // 快照可能属于旧服务（连接期间换过网络）：复用前先确认它还是当前主服务，
@@ -368,6 +419,16 @@ fn activate_once() -> Result<(), String> {
             // 只要它出现在列表里就摘掉（不必整组相等：激活时我们确认过还没接管）。
             // 注意**不能**把本次要写的公网地址也当残留：那可能是用户自己设的。
             let had_state = had_state && strip_legacy_peer(&mut servers, &mut search);
+            // 上一次崩溃前写进去的回环地址不能当「原始值」：重启后没有监听，
+            // 恢复时写回去等于让系统去问一个空端口。只在本次也要写回环时清理
+            // （转发器模式），且**只清回环**——公网地址可能是用户自己设的。
+            let writes_loopback = targets
+                .iter()
+                .any(|value| value == super::dns_forwarder::LISTEN_IP);
+            let mut had_state = had_state;
+            if writes_loopback {
+                had_state = strip_stale_targets(&mut servers, &mut search, had_state, targets);
+            }
             // 服务级没有原始值时靠它兜底，绝不能让机器落进「没有 DNS」。
             let mut global_servers = global_dns_servers().unwrap_or_default();
             global_servers.retain(|value| value != LEGACY_PEER);
@@ -375,7 +436,7 @@ fn activate_once() -> Result<(), String> {
                 &mut guard,
                 SavedDns {
                     service: service.clone(),
-                    written: target.clone(),
+                    written: targets_owned.clone(),
                     had_state,
                     servers,
                     search,
@@ -386,15 +447,19 @@ fn activate_once() -> Result<(), String> {
         }
     };
 
-    if let Err(error) = write_service_dns(&service, &[target.as_str()], &[]) {
-        let _ = restore_locked(&mut guard, None);
-        return Err(error);
+    let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+    if let Err(error) = write_service_dns(&service, &refs, &[]) {
+        // 回滚失败不能静默：错误里要同时带上「写失败」和「回滚结果」。
+        let report = restore_locked(&mut guard, None);
+        return Err(join_restore_error(error, &report));
     }
-    if let Err(error) = verify_written(&service, &target, None) {
-        let _ = restore_locked(&mut guard, None);
-        return Err(error);
+    if let Err(error) = verify_written(&service, targets, None) {
+        let report = restore_locked(&mut guard, None);
+        return Err(join_restore_error(error, &report));
     }
-    eprintln!("veyl-helper: 系统 DNS 已指向 {target}（查询走隧道，由 hijack-dns 回答；服务 {service}）");
+    eprintln!(
+        "veyl-helper: 系统 DNS 已指向 {refs:?}（查询走隧道，由 hijack-dns 回答；服务 {service}）"
+    );
     Ok(())
 }
 
@@ -450,6 +515,93 @@ pub(super) fn restore_at_exit() {
     for line in report.lines() {
         eprintln!("veyl-helper: [diag] {line}");
     }
+}
+
+/// 不变量兜底：**转发器不在运行、系统 DNS 却仍含 `127.0.0.1`** 时，立刻把
+/// 服务级 DNS 改写成剩下的公网地址并 flush。
+///
+/// 不能把「不断网」押在 mDNSResponder 会回落到次选上：监听假死、回滚失败、
+/// SIGKILL 之后都可能只剩一个死回环。这条幂等，复核失败、启动失败、stop 前
+/// 都调一次。
+pub(super) fn ensure_no_dangling_loopback() -> Result<bool, String> {
+    ensure_no_dangling_loopback_within(None)
+}
+
+/// 退出路径专用：拿锁最多自旋到 deadline，整条改写也压在 deadline 内；超时就
+/// 放弃，残留交给下次启动的 sweep。launchd 等着旧进程退出——拉起越快，
+/// SIGKILL 留下的死回环窗口越短，所以这里绝不能阻塞。
+pub(super) fn ensure_no_dangling_loopback_at_exit() -> Result<bool, String> {
+    ensure_no_dangling_loopback_within(Some(Instant::now() + Duration::from_millis(500)))
+}
+
+fn ensure_no_dangling_loopback_within(deadline: Option<Instant>) -> Result<bool, String> {
+    // 不变量只在「没有监听者」时成立：转发器还活着就什么都不做，避免把
+    // 正在工作的主路径改掉。
+    if super::dns_forwarder::is_running() {
+        return Ok(false);
+    }
+    let loopback = super::dns_forwarder::LISTEN_IP;
+    let service = primary_service_within(deadline)?;
+    let (_, servers, search) = read_service_dns_within(&service, deadline)?;
+
+    let mut guard = match deadline {
+        None => SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Some(at) => loop {
+            match SAVED.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < at => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    return Err("等待 DNS 快照锁超时，已放弃兜底（下次启动清扫会处理）".into())
+                }
+            }
+        },
+    };
+    if deadline_passed(deadline) {
+        return Err("回环兜底超过时限，已放弃（下次启动清扫会处理）".to_string());
+    }
+    // 先只读快照：改写成功后才把回环从 `written` 摘掉（失败时快照必须原样，
+    // 否则之后的 restore 会判不出「当前还是我们写的」）。
+    let remaining: Option<Vec<String>> = guard.as_ref().and_then(|saved| {
+        saved
+            .written
+            .iter()
+            .any(|value| value == loopback)
+            .then(|| {
+                saved
+                    .written
+                    .iter()
+                    .filter(|value| *value != &loopback)
+                    .cloned()
+                    .collect()
+            })
+    });
+    if !servers.iter().any(|value| value == loopback) {
+        return Ok(false);
+    }
+    let mut targets = remaining.unwrap_or_else(|| vec![SYSTEM_DNS_TARGET.to_string()]);
+    if targets.is_empty() {
+        targets.push(SYSTEM_DNS_TARGET.to_string());
+    }
+    let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let search_refs: Vec<&str> = search.iter().map(String::as_str).collect();
+    write_service_dns_within(&service, &refs, &search_refs, deadline)?;
+    let (_, after, _) = read_service_dns_within(&service, deadline)?;
+    if !refs.iter().all(|target| after.iter().any(|value| value == target)) {
+        return Err(format!(
+            "兜底改写后回读不一致：期望 {refs:?}，实际 {after:?}"
+        ));
+    }
+    if let Some(saved) = guard.as_mut() {
+        saved.written.retain(|value| value != loopback);
+    }
+    drop(guard);
+    if !external_commands_are_simulated() && !deadline_passed(deadline) {
+        let _ = super::flush_system_dns_within(deadline);
+    }
+    eprintln!("veyl-helper: 转发器不在，已把系统 DNS 从回环改回 {refs:?}");
+    Ok(true)
 }
 
 /// 连接期复核：系统主解析器里是否仍然有我们写进去的地址。
@@ -515,7 +667,7 @@ pub(super) fn restore_or_clear(
         let mut report = RestoreReport {
             service: Some(service.clone()),
             before: Some(servers.clone()),
-            target: Some(peer.to_string()),
+            target: Some(vec![peer.to_string()]),
             branch: "sweep",
             ..RestoreReport::default()
         };
@@ -853,7 +1005,9 @@ fn apply_restore(
     // 救援时**不能**把我们自己写进去的地址当结果：全局 DNS 键此刻就是从我们的键
     // 派生的，读回来只有 223.5.5.5 时若照抄，等于「还原」成自己，用户的 DHCP /
     // 自定义 DNS 永远回不来。旧设计的对端同理。
-    let exclude = [saved.written.as_str(), LEGACY_PEER];
+    let mut exclude_owned: Vec<String> = saved.written.clone();
+    exclude_owned.push(LEGACY_PEER.to_string());
+    let exclude: Vec<&str> = exclude_owned.iter().map(String::as_str).collect();
     match restore_action(&current, saved) {
         RestoreAction::Nothing => {
             report.branch = "nothing";
@@ -979,9 +1133,13 @@ pub(super) fn legacy_peer_from_config(path: &std::path::Path) -> Option<String> 
 }
 
 fn primary_service() -> Result<String, String> {
+    primary_service_within(None)
+}
+
+fn primary_service_within(deadline: Option<Instant>) -> Result<String, String> {
     // 必须用 `show`：`get` 只把值读进会话里的 `d` 字典，**不打印任何东西**，
     // 用 `get` 时解析永远是空，表现就是「读不到当前网络服务」。
-    let text = scutil_script("open\nshow State:/Network/Global/IPv4\n")?;
+    let text = scutil_script_within("open\nshow State:/Network/Global/IPv4\n", deadline)?;
     let dict = parse_show(&text);
     let service = dict.scalar("PrimaryService").ok_or_else(|| {
         "读不到当前网络服务（State:/Network/Global/IPv4 没有 PrimaryService）".to_string()
@@ -1153,7 +1311,7 @@ fn readback_confirms(servers: &[String], target: &str) -> bool {
 
 fn verify_written(
     service: &str,
-    target: &str,
+    targets: &[String],
     deadline: Option<Instant>,
 ) -> Result<(), String> {
     for _ in 0..VERIFY_ATTEMPTS {
@@ -1161,11 +1319,12 @@ fn verify_written(
             break;
         }
         let (_, servers, _) = read_service_dns_within(service, deadline)?;
-        if readback_confirms(&servers, target) {
+        if targets.iter().all(|target| readback_confirms(&servers, target)) {
+            let primary = targets.first().map(String::as_str).unwrap_or_default();
             let hint = primary_nameserver();
-            if hint.as_deref() != Some(target) {
+            if hint.as_deref() != Some(primary) {
                 eprintln!(
-                    "veyl-helper: 服务级 DNS 已含 {target}，但 resolver #1 是 {hint:?}；按写入成功处理"
+                    "veyl-helper: 服务级 DNS 已含 {targets:?}，但 resolver #1 是 {hint:?}；按写入成功处理"
                 );
                 log_resolver_head();
             }
@@ -1174,7 +1333,7 @@ fn verify_written(
         std::thread::sleep(VERIFY_INTERVAL);
     }
     Err(format!(
-        "写入后回读服务级 DNS 不含 {target}，按失败处理"
+        "写入后回读服务级 DNS 不含 {targets:?}，按失败处理"
     ))
 }
 
@@ -1518,7 +1677,7 @@ mod tests {
         // 快照：用户原来是 10.0.0.53，连接期我们写成了 223.5.5.5。
         *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: Vec::new(),
@@ -1637,7 +1796,7 @@ mod tests {
     fn snapshot_for_test() -> Option<SavedDns> {
         Some(SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: Vec::new(),
@@ -1867,7 +2026,7 @@ mod tests {
     fn restore_writes_back_the_original_values_not_empty() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: vec!["lan".into()],
@@ -1883,12 +2042,139 @@ mod tests {
         );
     }
 
+    /// 转发器模式写两条（回环 + 公网）：整组都还是我们写的才还原快照；
+    /// 用户手动改过其中一条时只摘掉我们的、保留其余。
+    #[test]
+    fn a_two_address_activation_restores_as_a_set() {
+        let forwarder = crate::macos::dns_forwarder::LISTEN_IP.to_string();
+        let saved = SavedDns {
+            service: "ABC".into(),
+            written: vec![forwarder.clone(), SYSTEM_DNS_TARGET.to_string()],
+            had_state: true,
+            servers: vec!["10.0.0.53".into()],
+            search: vec!["lan".into()],
+            global_servers: Vec::new(),
+        };
+        let snapshot = RestoreAction::Write {
+            servers: vec!["10.0.0.53".into()],
+            search: vec!["lan".into()],
+        };
+        assert_eq!(
+            restore_action(&[forwarder.clone(), SYSTEM_DNS_TARGET.to_string()], &saved),
+            snapshot
+        );
+        // 系统可能重排顺序，按集合判定。
+        assert_eq!(
+            restore_action(&[SYSTEM_DNS_TARGET.to_string(), forwarder.clone()], &saved),
+            snapshot
+        );
+        // 用户连接期间手动加了一条：只摘掉我们的两条。
+        assert_eq!(
+            restore_action(
+                &[
+                    forwarder.clone(),
+                    SYSTEM_DNS_TARGET.to_string(),
+                    "8.8.8.8".to_string()
+                ],
+                &saved
+            ),
+            RestoreAction::RemovePeer {
+                remaining: vec!["8.8.8.8".to_string()]
+            }
+        );
+        // 一条都不是我们的：什么都不做，别把用户新配的 DNS 抹掉。
+        assert_eq!(
+            restore_action(&["8.8.8.8".to_string()], &saved),
+            RestoreAction::Nothing
+        );
+    }
+
+    /// 回滚失败不能静默：上报原因里必须带上「回滚也失败了」。
+    #[test]
+    fn a_failed_rollback_is_visible_in_the_reported_reason() {
+        let mut report = RestoreReport::new("write");
+        assert!(join_restore_error("写失败".into(), &report).contains("已回滚"));
+        report.error = Some("scutil 也写不进去".into());
+        let text = join_restore_error("写失败".into(), &report);
+        assert!(text.contains("回滚失败"), "{text}");
+        assert!(text.contains("scutil 也写不进去"), "{text}");
+    }
+
+    fn dns_state_fixture(servers: &[&str]) -> String {
+        let mut text = String::from("<dictionary> {\n  ServerAddresses : <array> {\n");
+        for (index, value) in servers.iter().enumerate() {
+            text.push_str(&format!("    {index} : {value}\n"));
+        }
+        text.push_str("  }\n}");
+        text
+    }
+
+    /// P1：转发器不在、系统 DNS 还指着回环时，必须由我们把 DNS 改回公网，
+    /// 不能把「不断网」押在 mDNSResponder 会回落到次选上。
+    #[test]
+    fn a_dangling_loopback_is_rewritten_to_the_public_target() {
+        let _serial = RESTORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let loopback = crate::macos::dns_forwarder::LISTEN_IP.to_string();
+        *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SavedDns {
+            service: "ABC".into(),
+            written: vec![loopback.clone(), SYSTEM_DNS_TARGET.to_string()],
+            had_state: true,
+            servers: vec!["10.0.0.53".into()],
+            search: vec!["lan".into()],
+            global_servers: Vec::new(),
+        });
+        let state = std::rc::Rc::new(std::cell::RefCell::new(vec![
+            loopback.clone(),
+            SYSTEM_DNS_TARGET.to_string(),
+        ]));
+        let shared = state.clone();
+        install_script_fake(Some(Box::new(move |script: &str| {
+            if script.contains("show State:/Network/Global/IPv4") {
+                return Ok("<dictionary> {\n  PrimaryService : ABC\n}".to_string());
+            }
+            if script.contains("set State:/Network/Service/ABC/DNS") {
+                for line in script.lines() {
+                    if let Some(rest) = line.strip_prefix("d.add ServerAddresses * ") {
+                        *shared.borrow_mut() = rest.split_whitespace().map(str::to_string).collect();
+                    }
+                }
+                return Ok(String::new());
+            }
+            if script.contains("show State:/Network/Service/ABC/DNS") {
+                let servers = shared.borrow();
+                let refs: Vec<&str> = servers.iter().map(String::as_str).collect();
+                return Ok(dns_state_fixture(&refs));
+            }
+            Ok(String::new())
+        })));
+
+        assert_eq!(ensure_no_dangling_loopback(), Ok(true));
+        assert_eq!(*state.borrow(), vec![SYSTEM_DNS_TARGET.to_string()]);
+        let saved = SAVED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("快照还在");
+        assert_eq!(
+            saved.written,
+            vec![SYSTEM_DNS_TARGET.to_string()],
+            "快照也要同步摘掉回环，否则之后的 restore 会判错"
+        );
+        // 幂等：第二次什么都不做。
+        assert_eq!(ensure_no_dangling_loopback(), Ok(false));
+
+        install_script_fake(None);
+        *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// 原本没有服务级 DNS：**不能删键**（删了机器就没 DNS），要用全局快照兜底。
     #[test]
     fn restore_rescues_with_the_global_snapshot_instead_of_removing() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: false,
             servers: Vec::new(),
             search: Vec::new(),
@@ -1913,7 +2199,7 @@ mod tests {
     fn an_empty_key_is_rescued_without_the_snapshot() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: false,
             servers: Vec::new(),
             search: Vec::new(),
@@ -1933,7 +2219,7 @@ mod tests {
     fn a_partial_list_only_drops_our_address() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: Vec::new(),
@@ -2019,7 +2305,7 @@ mod tests {
     fn restore_leaves_a_changed_dns_alone() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["192.168.1.1".into()],
             search: Vec::new(),
@@ -2048,7 +2334,7 @@ mod tests {
     fn removing_our_address_also_drops_the_stale_constant() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: "172.20.0.1".into(),
+            written: vec!["172.20.0.1".to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: vec!["lan".into()],
@@ -2155,6 +2441,33 @@ mod tests {
         assert!(search.is_empty(), "只剩我们的残留时按「本来没有」处理");
     }
 
+    /// 崩溃重启后，系统里可能还留着我们上次写的回环 DNS：把它当「原始值」
+    /// 记下来，断开时又写回去，等于让系统去问一个没人监听的端口。
+    #[test]
+    fn capturing_the_original_drops_a_stale_loopback() {
+        let loopback = crate::macos::dns_forwarder::LISTEN_IP;
+        let targets = vec![loopback.to_string(), SYSTEM_DNS_TARGET.to_string()];
+        // 回环在列表里 = 我们上次写的：公网次选也一并当残留，不能写回成用户原始值。
+        let mut servers = vec![loopback.to_string(), SYSTEM_DNS_TARGET.to_string()];
+        let mut search = vec!["lan".to_string()];
+        assert!(!strip_stale_targets(&mut servers, &mut search, true, &targets));
+        assert!(servers.is_empty());
+        assert!(search.is_empty());
+
+        // 用户自己的地址保留。
+        let mut mixed = vec![loopback.to_string(), "8.8.8.8".to_string()];
+        let mut search = vec!["lan".to_string()];
+        assert!(strip_stale_targets(&mut mixed, &mut search, true, &targets));
+        assert_eq!(mixed, vec!["8.8.8.8".to_string()]);
+        assert_eq!(search, vec!["lan".to_string()]);
+
+        // 没有回环：不是我们的，什么都不动（公网地址可能是用户自己设的）。
+        let mut clean = vec![SYSTEM_DNS_TARGET.to_string()];
+        let mut search = vec!["lan".to_string()];
+        assert!(strip_stale_targets(&mut clean, &mut search, true, &targets));
+        assert_eq!(clean, vec![SYSTEM_DNS_TARGET.to_string()]);
+    }
+
     /// 这次事故的根因就是「写了一个被排除表覆盖的地址」。直接盯住固定排除表：
     /// 以后把目标改成 `100.64.x` / `198.18.x` 也必须让测试红。
     #[test]
@@ -2205,7 +2518,7 @@ mod tests {
         // 模拟「第二次 start」：已经记过原始值，就不能拿当前值（我们设的地址）覆盖它。
         let first = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: Vec::new(),
@@ -2214,7 +2527,7 @@ mod tests {
         let mut slot = Some(first.clone());
         let current = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec![SYSTEM_DNS_TARGET.into()],
             search: Vec::new(),
@@ -2272,7 +2585,7 @@ mod tests {
     fn a_failed_read_drops_the_snapshot() {
         let saved = SavedDns {
             service: "ABC".into(),
-            written: SYSTEM_DNS_TARGET.into(),
+            written: vec![SYSTEM_DNS_TARGET.to_string()],
             had_state: true,
             servers: vec!["10.0.0.53".into()],
             search: Vec::new(),

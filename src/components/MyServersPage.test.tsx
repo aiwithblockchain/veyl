@@ -16,7 +16,6 @@ import { setLanguage } from "../i18n";
 import { MyServersPage } from "./MyServersPage";
 import { MyServersRail } from "./MyServersRail";
 import { MyServerLogin } from "./MyServerLogin";
-import { MyServerTopUp } from "./MyServerTopUp";
 
 const CATALOG: MyServerCatalog = {
   regions: [
@@ -72,6 +71,10 @@ function server(over: Partial<MyServer> = {}): MyServer {
     billing_state: "active",
     grace_ends_at: null,
     transfer_gib: 1000,
+    traffic_used_bytes: 0,
+    traffic_limit_bytes: 0,
+    traffic_reset_at: "",
+    traffic_state: "ok",
     failure: null,
     ...over,
   };
@@ -272,16 +275,6 @@ function Harness({
           onStart={state.loginStart}
           onVerify={state.loginVerify}
           onCancel={state.closeLogin}
-        />
-      ) : null}
-      {state.topupOpen ? (
-        <MyServerTopUp
-          wallet={state.wallet}
-          loading={state.walletLoading}
-          error={state.walletError}
-          onRetry={() => void state.refreshWallet()}
-          onTopUp={state.topup}
-          onClose={state.closeTopUp}
         />
       ) : null}
     </>

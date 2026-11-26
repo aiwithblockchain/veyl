@@ -16,6 +16,7 @@ const PRESETS = [
   "为什么有的软件没走 VPN",
   "为什么个别网站还是打不开",
   "终端里的命令也想走 VPN",
+  "如何在手机上使用",
 ];
 
 function makeSession(over: Partial<Session> = {}): Session {
@@ -37,7 +38,6 @@ function makeSession(over: Partial<Session> = {}): Session {
 function renderPanel(over: {
   session?: Session | null;
   aiReady?: boolean;
-  presetsVisible?: boolean;
   question?: PendingQuestion | null;
   onEmptySend?: (text: string) => void;
   onAnswerFromComposer?: (text: string) => void;
@@ -51,7 +51,6 @@ function renderPanel(over: {
       sessions={session ? [session] : []}
       activeSessionId={session?.id ?? ""}
       aiReady={over.aiReady ?? true}
-      presetsVisible={over.presetsVisible ?? true}
       aiProviderName="DeepSeek"
       hasEverConnected
       hasConfigs
@@ -119,7 +118,7 @@ describe("未配置 AI 的右栏", () => {
 });
 
 describe("对话空态的预制问题", () => {
-  it("空会话一次显示五条原文", () => {
+  it("空会话在任意页面都显示六条预设", () => {
     renderPanel();
     expect(shownPresets()).toEqual(PRESETS);
   });
@@ -149,11 +148,6 @@ describe("对话空态的预制问题", () => {
         messages: [{ id: "m1", role: "user", text: "你好", at: 1 }],
       }),
     });
-    expect(shownPresets()).toEqual([]);
-  });
-
-  it("不在 client / no_nodes 屏时不显示", () => {
-    renderPanel({ presetsVisible: false });
     expect(shownPresets()).toEqual([]);
   });
 

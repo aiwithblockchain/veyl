@@ -38,8 +38,6 @@ interface Props {
   aiProviderName: string | null;
   hasEverConnected: boolean;
   hasConfigs: boolean;
-  /** 只有 client / no_nodes 屏展示预制问题；其它屏不显示。 */
-  presetsVisible?: boolean;
   /** 当前会话待回答的提问；普通提问渲染在消息流末尾。 */
   question?: PendingQuestion | null;
   /** 非空 = 提问不属于当前屏幕：卡片折叠成这一行只读提示。 */
@@ -77,6 +75,7 @@ const PRESET_KEYS = [
   "assistant.preset.appBypass",
   "assistant.preset.siteBlocked",
   "assistant.preset.terminal",
+  "assistant.preset.mobile",
 ] as const;
 
 function relativeTime(at: number): string {
@@ -108,7 +107,6 @@ export function AiPanel({
   aiProviderName,
   hasEverConnected,
   hasConfigs,
-  presetsVisible = true,
   question = null,
   questionAwayText = null,
   questionExpired = false,
@@ -413,7 +411,7 @@ export function AiPanel({
               {!hasEverConnected && !needsFirstConfig ? (
                 <p className="ai-empty__text">{t("assistant.empty.connectHint")}</p>
               ) : null}
-              {aiReady && !question && presetsVisible ? (
+              {aiReady && !question ? (
                 <div
                   className="ai-empty__suggest"
                   role="group"

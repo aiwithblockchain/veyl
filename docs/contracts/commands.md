@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.77.0`
+> 契约版本：`2.83.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -265,7 +265,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 72 | `issue_report_preference` | `{ includeDomains? }` | `{ includeDomains }` | **2.17.0 新增（仅 UI）；省略参数为读取；脱敏开关的唯一写入路径** |
 | 73 | `proxy_recovery_report` | `{}` | `ProxyRecoveryReportData`（`{ recovery }`，无恢复时为 `null`） | **2.21.0 新增（仅 UI）；异常退出后系统代理自动还原的结果，只读** |
 | 74 | `my_server_catalog` | `{ fresh? }` | `MyServerCatalogData`（`{ currency, updated_at, regions, plans }`） | **2.22.0 新增（仅 UI）；控制面公开目录，只读**；`fresh: true` 时控制面回源（打开新建向导），缺省走 5 分钟全局年龄判断 |
-| 75 | `my_server_list` | `{}` | `{ servers: MyServer[] }` | **2.23.0 新增（仅 UI）；我的服务器列表；2.45.4 起成功后对齐残留 owned 节点** |
+| 75 | `my_server_list` | `{}` | `{ servers: MyServer[]; traffic_pool: TrafficPool }` | **2.23.0 新增（仅 UI）；我的服务器列表；2.45.4 起成功后对齐残留 owned 节点**；2.79.0 增账号级 `traffic_pool`（见 §7.15） |
 | 76 | `my_server_get` | `{ serverId }` | `MyServer` | **2.23.0 新增（仅 UI）；详情，含 `node_id`；2.45.2 起点开的是当前节点对应的服务器时，若已被停机销毁（或 404）会先停运行时** |
 | 77 | `my_server_create` | `{ region, plan, idempotencyKey }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；下单（假支付）** |
 | 78 | `my_server_checkout` | `{ orderId }` | `MyServerOrder` | **2.23.0 新增（仅 UI）；2.28.0 起从余额扣费并开通，参数去掉 `channel`；2.29.0 起只扣 1 天（日价），余额由每日 Cron 逐日续扣；2.37.1 起创建门槛为余额 ≥ 日价 × 7；2.39.0 起确认下单不扣费、就绪后结算第 0 天，返回 `MyServerOrder`** |
@@ -280,7 +280,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 87 | `my_server_account` | `{}` | `MyServerAccount`（`{ logged_in, email, account_id, device_id, account_kind, session_expires_at }`） | **2.27.0 新增（仅 UI）；本体只读本地、不联网；2.27.1 增 `account_kind`；2.60.0 增 `session_expires_at`；2.62.0 起最近 60 秒内有传输层失败时返回 `UPSTREAM_ERROR / provider_unavailable`（超时 `TIMEOUT / timeout`）** |
 | 88 | `my_server_logout` | `{}` | `MyServerAccount` | **2.27.0 新增（仅 UI）；服务端解绑设备并清本地令牌** |
 | 89 | `my_server_order_get` | `{ orderId }` | `MyServerOrder` | **2.27.0 新增（仅 UI）；支付与开通轮询** |
-| 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, updated_at }`） | **2.28.0 新增；2.28.1 增 `denominations_cents`；2.73.0 起 AI 工具为 `MyServerWallet`（只读余额，不返回充值档位）** |
+| 90 | `my_server_wallet` | `{}` | `MyServerWallet`（`{ balance_cents, currency, denominations_cents, min_topup_cents?, max_topup_cents?, updated_at }`） | **2.28.0 新增；2.28.1 增 `denominations_cents`；2.73.0 起 AI 工具为 `MyServerWallet`（只读余额，不返回充值档位）；2.75.1 增可选 `min_topup_cents` / `max_topup_cents`** |
 | 91 | `my_server_topup` | `{ denomination }` | `MyServerTopup`（`{ topup_id, checkout_url, denomination_cents }`） | **2.28.0 新增（仅 UI）；创建充值收银台会话；2.40.0 起去掉 `channel` 参数** |
 | 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
@@ -305,6 +305,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 112 | `node_update` | `{ nodeId, name, server?, port?, method?, password? }` | `{ updated: true, was_current, disconnected, params_changed, rebuilt, rebuild_status, message }` | **2.70.0 新增（仅 UI）**；编辑自定义节点：`url` 只改名、`manual` 可改连接参数（密码留空表示不改），`owned` / `seed` 返回 `PRECONDITION_FAILED / node_not_editable`；改的是连接中配置里的节点就按新设置重建运行时；`id` 与 `source_key` 不变；不发 AI 工具（§7.33） |
 | 113 | `mobile_export_save_file` | `{ path }` | `MobileSaveFileData`（`{ state: "saved", path, node_count } \| login_required \| no_ready_server`） | **2.71.0 新增（仅 UI）**；把账户的 sing-box 配置写到用户选择的绝对路径，供 veyl-cli 离线导入；文件含节点凭据，界面提示导入后删除（§7.34） |
 | 114 | `node_upgrade_singbox` | `{ serverId }` | `NodeUpgradeSingboxResult`（`{ installed, target, upgraded }`） | **2.75.0 新增（仅 UI）**；详情页「检查升级」；目标版本由节点用自身令牌现拉，命令不接受版本 / URL / 哈希；180 秒预算；与重置凭据互斥时 `details.reason = "agent_busy"`；失败不销毁机器、不动凭据（§7.35） |
+| 115 | `my_server_billing_ledger` | `{ days? }` | `BillingLedger`（`{ balance_cents, currency, window_days, truncated, totals: { topup_cents, charge_cents }, entries[] }`） | **2.76.0 新增（仅 UI）**；账单页近 N 天流水；`days` 1–30、默认 30、越界由控制面回落；`at` 是 epoch **毫秒**；`totals` 是全量、不随 1000 条截断变化；不注册 AI 工具（§7.36） |
 
 > 「状态」三列含义：**新增** = 2.0 / 2.1 才有；**改** = 名字不变但语义/形状变了；**保留** = 1.2.0 语义不变。
 > `invoke_handler` 是唯一事实来源，文档与它对不上就是文档错。
@@ -1782,6 +1783,10 @@ type MyServer = {
   monthly_usd: number;             // 月估，展示用
   daily_price_cents: number;       // 售价快照（USD 分 / 天），即每天实际扣多少
   transfer_gib: number;            // 每月公网出口流量额度（GiB）快照；建机时从目录写入
+  traffic_used_bytes: number;      // 本周期（UTC 自然月）已用字节；没有上报行 = 0（2.78.0）
+  traffic_limit_bytes: number;     // 本周期已释放额度（字节），控制面按 §4.1 现算，不是快照（2.78.0）
+  traffic_reset_at: string;        // 下个 UTC 月 1 日 00:00 的 ISO 时刻，本周期清零点（2.78.0）
+  traffic_state: "ok" | "unpaid";  // 单台只有两态：unpaid = 因流量超支余额不足已停机；其余 ok（2.82.0 收窄，near/over 属账号级）
   charged_cents: number;           // 这台服务器实际扣过的钱（USD 分）：wallet_ledger 里 ref_type='order' 且 ref_id=该订单、kind='charge' 的行（只统计扣费行）的绝对值合计；没扣过 = 0
   refunded_cents: number;          // 已退回的钱（USD 分）：ref_type='server_refund' 且 ref_id=该服务器的合计；没退过 = 0
   paid_until: string | null;       // 已付到哪个时刻（ISO 8601）；结算前为 null（at_ready 的扫描单在 pending 阶段）
@@ -1789,6 +1794,12 @@ type MyServer = {
   charge_mode: "upfront" | "at_ready";  // 扣费口径：upfront = 下单即扣（存量），at_ready = 就绪后结算
   grace_ends_at: string | null;    // 派生值：paid_until + 7d，**不落库**；仅 past_due/expired 时非空
   failure: { stage: MyServerState; code: string; message: string; retryable: boolean } | null;
+};
+
+// my_server_list 的账号级流量池（2.79.0）：与扣费同源，见 §7.15 正文。
+type TrafficPool = {
+  used_bytes: number;   // 本周期（UTC 自然月）账号已用字节，含列表里看不到的已销毁 / 已 dismiss 机器
+  limit_bytes: number;  // 本周期账号已释放额度（字节），口径同 MyServer.traffic_limit_bytes
 };
 
 type MyServerOrder = {
@@ -1917,14 +1928,16 @@ type MyServerAccount = {
 type MyServerWallet = {
   balance_cents: number;          // USD 分，整数
   currency: "USD";
-  denominations_cents: number[];  // 可充值档位（USD 分，升序），来自控制面面额白名单（TOPUP_DENOMINATIONS_CENTS）
+  denominations_cents: number[];  // UI 快捷档（USD 分，升序），不是支付白名单
+  min_topup_cents?: number;       // 自定义最小金额（USD 分）；缺省时前端按 600 兜底
+  max_topup_cents?: number;       // 自定义最大金额（USD 分）；缺省时前端按 30000 兜底
   updated_at: string;             // Host 读取余额的时刻（本地取）；控制面不提供
 };
 
 type MyServerTopup = {
   topup_id: string;
   checkout_url: string;           // 系统浏览器打开
-  denomination_cents: number;     // 1200 / 2400 / 3600 / 4800（USD 分）
+  denomination_cents: number;     // 实际充值金额（USD 分，整美元，$6–$300）
 };
 
 ```
@@ -1936,8 +1949,8 @@ type MyServerTopup = {
 | `my_server_account {}` | **本体不联网、不刷新令牌**：`logged_in` 依据本地令牌与 `account_kind = email`。但若最近 60 秒内有控制面请求出现传输层失败（DNS / 连接失败 / 超时；**5xx 不算**），返回 `UPSTREAM_ERROR / provider_unavailable`（超时为 `TIMEOUT / timeout`），供界面区分「控制面不可达」与「未登录」；这些失败**不改 `logged_in`、不清本地令牌**。`session_expires_at` 是本地记录的 refresh 到期时间（登录 / 每次刷新成功时由 Host 按响应里的 `refresh_expires_at` 落盘）。`null` **只表示本地没有邮箱会话记录、或记录的时间不可解析**；会话已过期时仍返回到期时间（此时 `logged_in = false`），界面据此区分「已过期」和「从未登录」。**不在这里向控制面核对** |
 | `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出**。服务端明确拒绝（401 `token_invalid`、403 `device_revoked` / `account_blocked`）时清本地令牌与账户标记并返回未登录态——账户被停用时用户也必须能退出去，同时发 `my-server-account-cleared`（`events.md` §4.27） |
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
-| `my_server_wallet {}` | `GET /v1/wallet`；返回余额与可充值档位（`denominations_cents`，USD 分、升序，来自面额白名单）。`updated_at` 是 Host 读取余额的时刻（本地取，控制面不提供），不是余额本身的变化时间。余额与扣费都由 Host 计算，前端不做金额运算 |
-| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Stripe Checkout 充值会话（`price_data`，后台不预建 Product / Price），返回 `checkout_url` 由系统浏览器打开；`fake` 通道已于 2026-11-20 删除，充值只有 Stripe 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id` 与 `checkout_url`，界面据此给「重新打开」和可复制的链接 |
+| `my_server_wallet {}` | `GET /v1/wallet`；返回余额、UI 快捷档（`denominations_cents`，USD 分、升序，**不是支付白名单**）与自定义充值范围（`min_topup_cents` / `max_topup_cents`，USD 分，可选；控制面缺一个就都不返回，前端按 600 / 30000 兜底）。`updated_at` 是 Host 读取余额的时刻（本地取，控制面不提供），不是余额本身的变化时间。余额与扣费都由 Host 计算，前端不做金额运算 |
+| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Stripe Checkout 充值会话（`price_data`，后台不预建 Product / Price），返回 `checkout_url` 由系统浏览器打开；金额由服务端按 **$6–$300 的整美元**校验，不合法 → 409 `invalid_denomination`（`details` 带 `min_cents` / `max_cents` / `whole_dollars`）；同一账号一小时内的活跃充值单超过 5 笔 → 429 `topup_rate_limited`。`fake` 通道已于 2026-11-20 删除，充值只有 Stripe 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id` 与 `checkout_url`，界面据此给「重新打开」和可复制的链接 |
 | `my_server_checkout { orderId }` | **2.39.0 起：确认下单并开始建机，不扣费**，返回 `MyServerOrder`（`state = "provisioning"`）。余额 ≥ 日价 × 7 只是预检；不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不建机、订单保持 `pending_payment`；该档位的 `regions` 不含订单地区 → `plan_unavailable_in_region`。就绪后由控制面在 enroll 回调里扣第 0 天，之后每天由 Cron 扣一天 |
 
 - **计费单位是「天」**（2026-11-16 拍板）：就绪时扣第 0 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。
@@ -1957,7 +1970,9 @@ type MyServerTopup = {
 - **`MyServer` 的计费事实在 §7.15**：`paid_until`（已付到哪一刻）、`daily_price_cents`、`billing_state`、`grace_ends_at`；界面渲染「每天 $X · 本期有效至 …」与宽限剩余天数只用这四个字段。
 - **「本期有效至」的文案规则（2026-11-16 定，2026-11-19 补）**：`billing_state = 'active'` 且 `paid_until > now` → `每天 $X · 本期有效至 <时间>`；`billing_state` 仍是 `active` 但 `paid_until ≤ now`（下一次计费任务还没跑，最长 24h）→ `每天 $X · 本期已过，服务正常`，**不显示那个已过去的时间点，不出现任何时刻或相对时间词（`下一轮` / `今日` 这类会被读成承诺），也不用异常色**。`past_due` / `expired` 的欠费文案单独定义（`login-and-payment.md` §4.11）；「到期」「欠费」「停用」三个词只属于这两种状态，`active` 窗口里不得使用。不用「已付至」（过去时口吻，读起来像「到点就停」），也不用「下次扣费：<具体时间>」（Cron 是批量任务，报具体时刻是不准的承诺）。
 - **`past_due` / `expired` 只保留读取兼容（2.44.0）**：新扣费路径在窗口内扣不动直接停机销毁（`failure_code = "billing_unpaid"`），不再产生这两种状态；恢复路径只在存量行上仍可能写回 `active`，界面照旧能显示老数据。
-- **`MyServer.transfer_gib` 是建机快照，且只有额度、没有已用**：DO 后续改档不回溯影响已建机器，所以随行存一份。**不新增 `transfer_used_gib`**——官方没有可信的「本月已用字节数」接口（只有 Mbps 速率采样，保留期未公布，且 DO 账单是团队级共享池，无法归属到单台）；自计量方案评估过但 M1 不做（`docs/design/my-servers.md` §8.5）。界面只显示「每月 X GB（出站）」；同账户多台时加后缀「（同账户多台共用额度）」。依据见 `docs/design/my-servers.md` §8.4、§13.1。
+- **`MyServer.transfer_gib` 是建机快照**：DO 后续改档不回溯影响已建机器，所以随行存一份。界面只显示「每月 X GB（出站）」；同账户多台时加后缀「（同账户多台共用额度）」。依据见 `docs/design/my-servers.md` §8.4、§13.1。**已用量不再靠 DO 接口**：官方没有可信的「本月已用字节数」（只有 Mbps 速率采样，保留期未公布，且 DO 账单是团队级共享池），自计量在 2.78.0 落地，见下一条。
+- **流量四字段（2.78.0，`traffic-billing.md` §7.3 / §8）**：`traffic_used_bytes` 是本周期（UTC 自然月）已用字节，来自节点 agent 上报的累计，**没有上报行就是 0**（新机首报前、或本周期还没上报过）；`traffic_limit_bytes` 是本周期已释放额度，控制面按 `min(月额度, 日额度 × (本周期存活天数 + 1))` 用 `servers` 表**现算**，**不读** `server_traffic.released_bytes` 快照——那一列只是上次上报时的值，新机首报前是空的；`traffic_reset_at` 是下个 UTC 月 1 日 00:00 的 ISO 时刻；`traffic_state` 只有两态（2.82.0 收窄）：因流量超支余额不足已停机 = `unpaid`，其余一律 `ok`——**单台没有 `near` / `over`**。扣费判据是账号池 `max(0, Σ已用 − Σ已释放)`，单台超自己那份不产生任何扣费，把单台标成「已超出」会让用户以为正在被扣钱、而账号其实没超；`near` / `over` 只属于账号级。`traffic_limit_bytes` **照常返回**：账号池求和、「明天还能涨多少」都依赖它，界面只是不再拿它跟本台已用比大小；额度未知（`transfer_gib = 0`）时它是 0，界面显示「额度未知」而不是「可用 0 GiB」。周期内销毁的机器按 `destroyed_at` 截止计额度，额度继续留在账号池里，不清零。单位：接口一律**字节**；界面按 GB 展示、计算口径是 GiB（§8）。
+- **账号级流量池 `traffic_pool`（2.79.0，`my_server_list` 专属）**：`{ used_bytes, limit_bytes }`，本周期（UTC 自然月）口径，值与扣费用的是同一个控制面聚合（`accountTotals`）。**这是账号级的唯一依据，客户端不得对 `servers[]` 求和**：列表只含未销毁行与未 dismiss 的墓碑，用户主动销毁的机器、已 dismiss 的墓碑不在其中，但它们的已用与已释放额度仍计入扣费——按列表求和会得出「账号没超」而实际已经扣过钱。`my_server_get` / `my_server_rename` 的回包没有账号语义，不带这个字段。
 - **「每台剩余流量」不是合法概念**：额度与超额都按账户池结算，一台上限不存在；界面禁止出现「本台剩余」「本台百分比」。要做用量只能做「账户本月已用 / 额度」+「这台本月已用」。
 - 销毁时未用完的整天退回余额（一条 `adjustment`），由控制面完成，**不新增命令**。
 - **登录门禁**：`my_server_list` / `get` / `create` / `checkout` / `cancel_order` / `destroy` / `rebuild` / `credentials` 在未登录时返回 `UNAUTHENTICATED / auth_required`；UI 先弹登录弹窗，登录后回到原处。
@@ -2091,7 +2106,7 @@ type MobileExportData =
 - **界面按 App 展示**：sing-box 官方 / Shadowrocket / CMFA / Hiddify 四行，格式只做内部映射（技术设计 §3.7.8 / §3.7.12）；Shadowrocket 行取 `shadowrocket`（带规则），`ss` 不外露。
 - `url` 含令牌：**UI 不得渲染为文本 / `alt` / `title`，不得进入事件、日志或 AI 上下文**；命令不落本地库、不写 `secrets.enc`。
 - 错误：`PRECONDITION_FAILED`（`insecure_profile_origin`；控制面返回 `login_required` 时归一为本命令的 `login_required`）、`RATE_LIMITED`（`retryable = true`）、`UPSTREAM_ERROR`、`TIMEOUT`、`INTERNAL`（`qr_encode_failed` / `mobile_token_corrupt`）。
-- 设置目录行 id `account.mobile` 由 `tools.md` §4.50 的行登记表登记；本文件不另维护行 id。
+- 设置目录行 id 由 `tools.md` §4.50 的行登记表登记；本文件不另维护行 id。
 
 ### 7.22 `mobile_export_rotate { confirm: true }` → `MobileExportData`（仅 UI，2.46.0；**2.47.0 随 §7.21 返回 `formats[]`**）
 
@@ -2493,6 +2508,41 @@ type NodeUpgradeSingboxResult = {
 - 与 `rotate_credentials` 共用 busy 锁：另一件写操作在跑时立刻返回 `kind = "retryable"`、`reason = "agent_busy"`。
 - 每次工具调用前，节点会先 best-effort 补报一次 `active`（控制面对已 active 机器是幂等 `already_active`）；补报失败不影响本次调用。
 
+### 7.36 `my_server_billing_ledger { days? }` → `BillingLedger`（仅 UI，2.76.0）
+
+账单页「近 30 天流水」的唯一数据入口。Host 原样转发控制面 `GET /v1/billing/ledger`，只做形状校验：**不换算金额、不排序、不重新分页、不做本地缓存**。
+
+```ts
+type BillingEntryKind = "topup" | "machine_day" | "traffic" | "refund" | "other";
+
+type BillingLedgerEntry = {
+  id: string;
+  kind: BillingEntryKind;   // machine_day 已包含建机第 0 天由 order 写下的那笔
+  amount_cents: number;     // USD 分；扣费为负、入账为正
+  at: number;               // epoch **毫秒**（不是秒），客户端按本地日展示
+  server: { id: string; name: string; plan: string; region: string } | null;
+  note: string | null;
+};
+
+type BillingLedger = {
+  balance_cents: number;    // USD 分，非负
+  currency: string;         // 目前恒为 "USD"
+  window_days: number;      // 实际生效的天数：入参越界时控制面回落为 30
+  truncated: boolean;       // 窗口内超过 1000 笔时列表被截断；totals 仍是全量
+  totals: { topup_cents: number; charge_cents: number };  // 非负
+  entries: BillingLedgerEntry[];  // created_at 倒序，最多 1000 条
+};
+```
+
+- 入参 `days` 可省略（默认 30）。1–30 之外**不报错**，由控制面回落为 30；Host 与界面都以返回的 `window_days` 为准，不自己再算一次。
+- 窗口是半开区间 `(now − days×86400 秒, now]`；`at` 取流水行的 `created_at`（不是计费 bucket），本地日由客户端换算。
+- `kind` 五类固定：`topup`（充值）/ `machine_day`（机器费，含第 0 天的 `order`）/ `traffic`（流量超支）/ `refund`（退款）/ `other`（认不出的 ref_type）。控制面**不丢行**，解析不出机器时 `server` 为 `null`（充值、`other` 常见）。
+- `totals` 是**全量**：列表被 `truncated` 截断时，合计仍覆盖整个窗口，**不能用 `entries` 求和去校验它**。
+- 空账本返回空 `entries`，不是错误；未登录 / 设备被停用沿用 §7.18 的 `UNAUTHENTICATED` / `PERMISSION_DENIED`；控制面响应形状不对 → `UPSTREAM_ERROR / invalid_response`。
+- Host 侧：顶层形状不对（余额 / 窗口天数 / `totals` / `entries` 不是数组）→ `UPSTREAM_ERROR / invalid_response`；**单条流水**解析失败（缺 `id` / `amount_cents` / `at` 等）只丢那一条，其余照常返回——`totals` 是独立聚合，不受丢行影响。
+- 界面归一化（Host 之后、渲染之前）：坏条目（缺 `id`、`at` 不是整数毫秒或小于 `1e12`（秒级时间戳会被渲染成 1970 年）、`amount_cents` 不是整数、`server` 对象缺字段）**整条丢弃**；认不出的 `kind` 归 `other`，**不丢行**；`server` 为 `null` 合法。
+- 不注册 AI 工具：账单是账户私有数据，只由用户在账单页显式打开（`docs/design/traffic-billing.md` §8.1）。
+
 ---
 
 ## 8. 种子（官方默认配置，C 组）
@@ -2665,10 +2715,10 @@ type UiContext = {
 | `onboarding` | `onboarding.connect` / `onboarding.other_provider` / `onboarding.get_key` | button |
 | `client` | `client.primary`（启动 / 断开 / 重新连接同一个 id） / `client.node_pick` / `client.ask_ai` / `client.probe`（节点卡副行的「测速」文字入口） | button / choice / button / button |
 | `no_nodes` | `no_nodes.trial` / `no_nodes.new_node` | button |
-| `new_node` | `new_node.region` / `new_node.plan` / `new_node.create` / `new_node.ask_ai` | choice / choice / button / button |
+| `new_node` | `new_node.region` / `new_node.plan` / `new_node.create` | choice / choice / button |
 | `servers` | `servers.item` / `servers.destroy` / `servers.ai_locate` | row / button / button |
 | `trial_expired` | `trial_expired.new_node` | button |
-| `settings` | `settings.ai` / `settings.connection` / `settings.account` / `settings.advanced` | button |
+| `settings` | `settings.ai` / `settings.connection` / `settings.advanced` | button |
 
 **Host 必须按固定模板把 `context` 送进模型**，不得把前端传来的字符串直接拼进系统提示词：
 
@@ -3029,7 +3079,7 @@ type RulesStatus = {
 
 > **只作废 invoke 命令，不作废 AI 工具。** 聊天通道里的工具（`VpnConnect` 等）继续存在，见 `tools.md`。两条通道最终落到同一份 Host 实现，差别只在「谁发起」。
 >
-> 工具名以 `tools.md` §3 为准（当前 3.32.0）；本表不再写死版本，每片落地后以该文件的 §3 为准。
+> 工具名以 `tools.md` §3 为准；本表不再写死版本，每片落地后以该文件的 §3 为准。
 
 ---
 
@@ -3161,13 +3211,13 @@ type RulesStatus = {
 | `my_server_register_device` | **无**（UI 专用，见 §7.16；身份恢复只能由用户触发） | — |
 | `my_server_identity` | **无**（UI 专用，见 §7.17；只读本地身份状态） | — |
 
-> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`app_language_get` / `app_language_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_topup`、`node_forget`、`node_remove`、`node_update`、`mobile_export_save_file`、`node_probe_reachability`、`trial_status`、`quit_decision`、`ui_log`、`my_server_events`、`llm_provider_save` / `llm_provider_delete` / `llm_provider_activate`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
+> **没有 AI 工具的 UI 专用命令**：`core_info` / `core_check_updates` / `core_cancel_upgrade` / `core_rollback`、`tun_helper_info` / `tun_helper_restart`、`node_probe_all` / `node_probe_cancel` / `node_probe_snapshot`、`proxy_port_get` / `proxy_port_set`、`app_language_get` / `app_language_set`、`proxy_recovery_report`、`my_server_catalog`、`my_server_create` / `my_server_checkout` / `my_server_cancel_order` / `my_server_destroy` / `my_server_rebuild` / `my_server_credentials` / `my_server_rename`、`my_server_register_device`、`my_server_identity`、`my_server_login_start` / `my_server_login_verify` / `my_server_account` / `my_server_logout` / `my_server_order_get`、`my_server_topup`、`node_forget`、`node_remove`、`node_update`、`mobile_export_save_file`、`node_probe_reachability`、`trial_status`、`quit_decision`、`ui_log`、`my_server_events`、`llm_provider_save` / `llm_provider_delete` / `llm_provider_activate`、`my_server_billing_ledger`。`core_upgrade` 是唯一例外，只能经 `CoreUpgrade` 工具且必须确认。`core_list_versions` 是唯一保留的只读工具（查已安装/可安装版本），它不下载、不安装，也看不到用户没点过「检查更新」的远端清单。
 
 > **`LlmProviders` 与 DeepSeek 的关系**：`llm_provider_list` / `llm_provider_test` 自 2.74.0 起映射到它；`deepseek_key_status` / `deepseek_save_key` 维持现状，`DeepseekSetupKey` / `DeepseekSaveKey` 仍只覆盖 DeepSeek。`LlmProviders` 只读：不保存、不删除、不切换，也不返回任何 Key。
 
 「共用实现」的含义：命令层只做参数搬运，业务在 `VpnToolServices`。禁止在命令层写一套、在工具层再写一套。
 
-上表的工具名以 `tools.md` §3 为准（当前 3.32.0），不再写死版本（§0.2）。
+上表的工具名以 `tools.md` §3 为准，不再写死版本（§0.2）。
 
 ---
 
@@ -3233,10 +3283,10 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.75.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** + **节点升级改为按需：`MyServer.singbox_version`、`node_upgrade_singbox` 命令与 agent 工具 `upgrade_singbox`（2.75.0）** |
-| `contracts/events.md` | **2.25.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** + **`node-list-changed` 增 `node_updated`（2.25.0）** |
+| `contracts/commands.md` | **2.83.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** + **节点升级改为按需：`MyServer.singbox_version`、`node_upgrade_singbox` 命令与 agent 工具 `upgrade_singbox`（2.75.0）** + **自定义充值范围：`my_server_wallet` 增可选 `min_topup_cents` / `max_topup_cents`（2.75.1）** + **账单流水：`my_server_billing_ledger`（仅 UI，2.76.0）** + **移除 `new_node.ask_ai` 控件（2.77.0）** + **`MyServer` 流量四字段：`traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state`（2.78.0）** + **`my_server_list` 增账号级 `traffic_pool`（2.79.0）** + **`settings` 控件集移除 `settings.account`（2.80.0）** + **`node_create` / `node_update` 的 `method` 白名单摘掉 `none`、2022 系列校验 PSK（2.81.0）** + **单台 `traffic_state` 收窄为 `ok` / `unpaid`，near/over 上移账号级（2.82.0）** + **订阅导入支持 Clash 配置的 `proxies:` 子集（2.83.0）** |
+| `contracts/events.md` | **2.26.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** + **`node-list-changed` 增 `node_updated`（2.25.0）** + **`settings-point` 的 `section` 收窄为 `ai` / `connection` / `advanced`，账户移出设置（2.26.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
-| `contracts/tools.md` | **3.32.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐、`NodeImportText`（两者已于 3.28.0 并入 `NodeImport`） + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions`（3.29.0 改名 `ServerOptions`）建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`（3.29.0 改名 `ServerOptionsData`）、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** + **节点写入三工具合并为 `NodeImport`，总数 40 → 38（3.28.0）** + **`CatalogOptions` 改名 `ServerOptions`，总数仍 38（3.29.0）** + **删除 `RuntimeStart` / `RuntimeStop`，`ConfigUpdate` 去掉 `routing_mode`，总数 38 → 36（3.30.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0）** + **新增只读工具 `LlmProviders`（列出服务商 + 可选单测，永不返回 Key），总数 37 → 38（3.32.0）** |
+| `contracts/tools.md` | **3.36.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐、`NodeImportText`（两者已于 3.28.0 并入 `NodeImport`） + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions`（3.29.0 改名 `ServerOptions`）建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`（3.29.0 改名 `ServerOptionsData`）、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** + **节点写入三工具合并为 `NodeImport`，总数 40 → 38（3.28.0）** + **`CatalogOptions` 改名 `ServerOptions`，总数仍 38（3.29.0）** + **删除 `RuntimeStart` / `RuntimeStop`，`ConfigUpdate` 去掉 `routing_mode`，总数 38 → 36（3.30.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0）** + **新增只读工具 `LlmProviders`（列出服务商 + 可选单测，永不返回 Key），总数 37 → 38（3.32.0）** + **`OpenSettings` 行登记表移除 `account.mobile`（该行随账号浮层删除），登记表 12 → 11 项（3.33.0）** + **`MyServers` 补 `paid_until` / `billing_state` 两个计费字段（3.34.0）** + **`LlmProviders` 的 `content` 每行带 service provider id（3.35.0）** + **3.36.0 收口 `OpenSettings`（账户移出设置，`section` 枚举与行登记收缩）** |
 | `data-model.md` | **9** | 批 0 + 批 3 表 + 种子排除表 + `settings.proxy_port` + `current_node_id` 允许为 `NULL`（seed 预选不写库） |
 | `contracts/routing.md` | **1.5.0** | 批 3 设计依据 + `dns.strategy` 两个平台统一 `ipv4_only` + 地区判定统一与未知地区不回落 + 控制通道直连（route 与 DNS 各一条，1.5.0） |
 | `contracts/tun-backend.md` | **1.7.0** | TUN 特权后端（`TunBackend` / 错误码分层 / 超时 / 残余风险）+ helper 构建字段与 `restart` 协商 + TUN 显式 `stack` / `mtu` / `dns_mode` + 连接期系统 DNS（fail-open、`dns_hijack` / `system_dns`、指向公网 `223.5.5.5`、双向复核、还原写回可用值、整组恰好才清扫、命令时限）+ `start` 冷启动 90 s 与超时后核对 + 还原后用系统解析验证并在不可用时退公网兜底 |
@@ -3252,19 +3302,62 @@ type RulesStatus = {
 
 ## 16. 变更记录
 
-### 2.77.0（未发布，2026-11-26：订阅支持 Clash 配置的 `proxies:` 子集）
+### 2.83.0（未发布，2026-11-26：订阅支持 Clash 配置的 `proxies:` 子集）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件版本升到 `2.77.0`；§4.1 / §4.1.1 / §4.1.2 的「支持的格式」新增 Clash 配置的块状 `proxies:` 子集：只取 `type: ss` 条目（`name` / `server` / `port` / `cipher` / `password`），其它类型按 `unsupported_scheme` 跳过，plugin、flow 写法、锚点 / 别名按 `malformed` 跳过；method 与 2022 PSK 规则沿用 §4.2 | 能力扩展 | 2026-11-26：免费节点生态里 Clash YAML 占比高；手写解析不引 YAML 依赖，也避开别名展开 |
+| 1 | 本文件版本升到 `2.83.0`；§4.1 / §4.1.1 / §4.1.2 的「支持的格式」新增 Clash 配置的块状 `proxies:` 子集：只取 `type: ss` 条目（`name` / `server` / `port` / `cipher` / `password`），其它类型按 `unsupported_scheme` 跳过，plugin、flow 写法、锚点 / 别名按 `malformed` 跳过；method 与 2022 PSK 规则沿用 §4.2 | 能力扩展 | 2026-11-26：免费节点生态里 Clash YAML 占比高；手写解析不引 YAML 依赖，也避开别名展开 |
 | 2 | 错误原因区分：`not_subscription` = 认出 Clash 但里面没有可用的 Shadowsocks 节点；`not_node_text` = 内容压根不是节点列表。§4.1 的错误原因表补 `not_node_text`；**§4.1.1 / §4.1.2（粘贴、文件）也按同一 reason 透传，不再一律折叠成 `not_node_text`**。界面据此分别给出格式说明，不再回落到「检查地址」 | 语义澄清 | 同上；此前两种情况共用 `not_subscription`，界面只剩一句误导的兜底 |
 
-### 2.76.0（未发布，2026-11-26：method 白名单摘掉 `none`，2022 系列校验 PSK）
+### 2.82.0（未发布，2026-11-26：单台流量状态收窄为 `ok` / `unpaid`）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
-| 1 | 本文件版本升到 `2.76.0`；§4.2 `node_create` / `node_update` 的 `method` 白名单从 12 项减到 11 项，摘掉 `none`（明文隧道等于没有加密）；`2022-blake3-*` 的 `password` 必须是 base64 的 PSK（aes-128 16 字节，aes-256 / chacha20 32 字节），否则 `INVALID_ARGUMENT / unsupported_method`，订阅导入按 `unsupported_method` 跳过该行 | 约束收紧 | 2026-11-26 评审：修复白名单后 `none` 真能明文连；2022 系列用普通密码会让 sing-box 拒绝整份配置 |
+| 1 | 本文件版本升到 `2.82.0`；§7.15 `MyServer.traffic_state` 由 `"ok" \| "near" \| "over" \| "unpaid"` 收窄为 `"ok" \| "unpaid"`，§7.15 正文改写口径：单台只回答「这台用了多少」，`near` / `over` 属账号级；`traffic_limit_bytes` 照常返回（账号池求和与「明天还能涨多少」依赖它），界面不再拿它跟本台已用比大小 | 口径收窄 | 扣费判据是账号池 `max(0, Σ已用 − Σ已释放)`（`docs/design/traffic-billing.md` §7.3 / §8）：单台超自己那份不产生扣费，标成 `over` 是假承诺。用户拍板 2026-11-26 |
+
+### 2.81.0（未发布，2026-11-26：method 白名单摘掉 `none`，2022 系列校验 PSK）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.81.0`；§4.2 `node_create` / `node_update` 的 `method` 白名单从 12 项减到 11 项，摘掉 `none`（明文隧道等于没有加密）；`2022-blake3-*` 的 `password` 必须是 base64 的 PSK（aes-128 16 字节，aes-256 / chacha20 32 字节），否则 `INVALID_ARGUMENT / unsupported_method`，订阅导入按 `unsupported_method` 跳过该行 | 约束收紧 | 2026-11-26 评审：修复白名单后 `none` 真能明文连；2022 系列用普通密码会让 sing-box 拒绝整份配置 |
 | 2 | 运行时保护：配置里已存在的不可用节点（旧 `none`、密钥不合法的 2022）不再进 Clash selector，也不参与批量测速，拖不垮其它节点；当前节点本身不可用时 `runtime_start` 报 `UNSUPPORTED / unsupported_method` | 语义澄清 | 同上：一个成员建不出来，不得让整份配置失败 |
+
+### 2.80.0（未发布，2026-11-26：`settings.account` 控件移除）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.80.0`；§9.1.1 的 `settings` 控件集去掉 `settings.account`（账户已独立成左下角头像打开的弹层，设置只剩 AI / 连接 / 高级），静态登记表 21 → 20 项（`src/ui/controlIds.ts` 与 `src-tauri/src/agent/ui_context.rs` 的 `STATIC_CONTROLS` 同步） | 控件移除 | 账户已独立成弹层（2026-11-26） |
+
+### 2.79.0（未发布，2026-11-26：账号级流量池 `traffic_pool`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.79.0`；`my_server_list` 响应增 `traffic_pool: { used_bytes, limit_bytes }`（账号本周期，与扣费同一个聚合），并写明「账号级唯一依据，客户端不得对 `servers[]` 求和」；`my_server_get` / `my_server_rename` 不带该字段 | 字段扩展 | 控制面 `accountTotals`（`traffic.ts` / `traffic_pool.ts`）；`docs/design/traffic-billing.md` §8.2 口径修正：列表只含未销毁行，销毁机器仍计入扣费 |
+
+### 2.78.0（未发布，2026-11-26：`MyServer` 流量四字段）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.78.0`；§7.15 `MyServer` 增 `traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state` 四字段，既有字段不变、`transfer_gib` 保留；已释放额度按 §4.1 现算而不是读上报快照，`unpaid` 优先于 `over`/`near` | 字段扩展 | 控制面 `serverView`（`GET /v1/servers`、`GET /v1/servers/{id}`、`my_server_rename` 回包）；`docs/design/traffic-billing.md` §7.3 / §8 |
+
+### 2.77.0（未发布，2026-11-26：移除 `new_node.ask_ai` 控件）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.77.0`；§9.1.1 的 `new_node` 控件集去掉 `new_node.ask_ai`（建机向导不再提供「让 AI 帮我选」，入口整个移除），静态登记表 22 → 21 项 | 控件移除 | 产品决定 2026-11-26；`ui_context.rs` `STATIC_CONTROLS` |
+
+### 2.76.0（未发布，2026-11-26：近 30 天账单流水）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.76.0`；§2 新增 115 `my_server_billing_ledger { days? }` → `BillingLedger`，详解见 §7.36；§13 列入「没有 AI 工具的 UI 专用命令」 | 新增命令 | 控制面 `GET /v1/billing/ledger`（`4e375c6`）；`docs/design/traffic-billing.md` §8.1 |
+| 2 | §7.36 定义数据口径：`at` 是 epoch 毫秒；`kind` 五类且 `machine_day` 已含第 0 天的 `order`；`totals` 是全量、列表最多 1000 条被 `truncated` 截断；`days` 越界由控制面回落 30，以 `window_days` 为准；`server` 为 null 合法；Host 顶层形状坏才报错、单条流水坏只跳过那一条，界面丢弃坏条目、认不出的 `kind` 归 `other` | 新增类型 | 同上；任务要求「不做金额换算、不从 entries 求和校验 totals」；2026-11-26 评审 P2（整页报错 → 单条跳过） |
+
+### 2.75.1（未发布，2026-11-26：自定义充值范围）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.75.1`；`MyServerWallet` 增可选 `min_topup_cents` / `max_topup_cents`（USD 分）。两者必须同时出现；缺一个按都未提供处理，前端按 600 / 30000 兜底。`denominations_cents` 明确为「UI 快捷档，不是支付白名单」；`my_server_topup` 形状不变，金额由服务端按整美元 + 范围校验 | 字段扩展 | `docs/design/payment-tiers.md` §4–§6 |
 
 ### 2.75.0（未发布，2026-11-26：sing-box 升级改为按需触发）
 

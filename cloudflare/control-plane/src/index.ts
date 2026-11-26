@@ -4,6 +4,7 @@ import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { runBilling } from "./billing";
 import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
+import { handleBillingLedger } from "./billing_report";
 import { handleServers } from "./servers";
 import { handleTraffic } from "./traffic";
 import { handleMobile } from "./mobile";
@@ -40,8 +41,11 @@ export interface Env {
   STRIPE_WEBHOOK_SECRET?: string;
   /** 日价表（USD 分/天）：{"s-1vcpu-1gb":"30"}；唯一售价真源，月价由它派生。 */
   PLAN_DAILY_PRICE_CENTS?: string;
-  /** 可充值面额（美分）的 JSON 数组；唯一真源。 */
+  /** UI 快捷充值档（USD 分）；不是支付白名单。 */
   TOPUP_DENOMINATIONS_CENTS?: string;
+  /** 自定义充值范围（USD 分）；两者都是必需配置。 */
+  MIN_TOPUP_CENTS?: string;
+  MAX_TOPUP_CENTS?: string;
   APP_PAYMENT_RETURN_URL?: string;
   /** 官网站点地址：问题墙帖子链接与允许的跨域来源。 */
   PUBLIC_SITE_URL?: string;
@@ -51,8 +55,10 @@ export interface Env {
 
 const SERVICE = "veyl-control-plane";
 const VERSION = "0.0.0";
-// 入口模块只能导出 handler：导出非函数值会让 workerd 在启动时抛
-// `Incorrect type for map entry 'USER_AGENT'`。
+// 入口模块导出字符串会让 workerd 启动失败：`Incorrect type for map entry
+// 'USER_AGENT': the provided value is not of type 'function or ExportedHandler'`。
+// 数组导出不受影响（2026-11-26 实测：`export const TEST_ARRAY` 与现存的 `PLAN_SLUGS`
+// 都能正常启动；对象未单独验证），所以这条只针对原始值，不要据此删改其它导出。
 const USER_AGENT = "veyl-control-plane/0.0.0";
 const DO_API = "https://api.digitalocean.com/v2";
 /** 回源超时必须短于目录租约（15 秒），否则租约过期前请求还在挂。 */
@@ -469,6 +475,10 @@ ${check}
   // 钱包与充值（login-and-payment.md §4.2–§4.3）。
   const topupResponse = await handleTopups(request, env);
   if (topupResponse) return topupResponse;
+
+  // 账单流水：账户级只读，给 App 账单页（与 /v1/wallet 是两个接口，互不影响）。
+  const ledgerResponse = await handleBillingLedger(request, env);
+  if (ledgerResponse) return ledgerResponse;
 
   // 订单：下单与假支付（§19.5）。实例开通在建机链路里跟进。
   const orderResponse = await handleOrders(request, env);

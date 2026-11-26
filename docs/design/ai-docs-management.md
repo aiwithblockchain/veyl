@@ -2,7 +2,7 @@
 
 > 日期：2026-11-21
 > 最后核对：2026-11-24，对照 `108e6e5`
-> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。
+> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。**工具清单是 2026-11-21 快照，不再逐版维护；工具面以 `docs/contracts/tools.md` §3 为准。**
 > 依据：`resources/prompts/{zh,en}/{system,kickoff,product,faq}.md`、`src-tauri/src/claurst_session/prompts.rs`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
 
 ---
@@ -32,21 +32,20 @@
 | 1 | 连接页 · 接管方式 / 流量范围旁边 | `问 AI` | 「我在 Veyl 的连接页看接管方式和流量范围。当前是 {Tun/Proxy} + {智能/全局}…」 | 当前接管方式、当前流量范围 | `StageQuickToggles.tsx:340`、`ai/advancedPrompts.ts:5` |
 | 2 | 连接失败时 · hero 主按钮 | `让 AI 检查` | 「连接失败了。请先跑一次诊断…」 | 无（AI 自己调 `DiagRun`） | `ConnectionStage.tsx:329,523`、`App.tsx:2506`、`ui/assistantPrompts.ts:15` |
 | 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts:7` |
-| 4 | 设置 › 帮助 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
-| 5 | 我的服务器 › 建机向导底部 | `让 AI 帮我选` | 「帮我选一个地区和规格。」 | 无（AI 自己调 `StageSelect` / `ServerOptions`） | `MyServerWizard.tsx:469`、`App.tsx:3096` |
-| 6 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
-| 7 | 「在手机上使用」弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
-| 8 | 右栏 AI 空态 · 预设问题 | 5 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
-| 9 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:22` |
-| 10 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:327`、`useNodeDiagnosis.ts:635`、`App.tsx:2310` |
+| 4 | 设置 › 高级 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
+| 5 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
+| 6 | 「我的服务器」左栏「在其它设备上使用」→ 弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在其它设备上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
+| 7 | 右栏 AI 空态 · 预设问题 | 6 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
+| 8 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:22` |
+| 9 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:327`、`useNodeDiagnosis.ts:635`、`App.tsx:2310` |
 
-> 2026-11-22 更正：#2 的 hero 主按钮**仍在**，只在**非免费节点**连接失败时出现（`canDiagnose = failed && onDiagnose && !failedOnSeed`）；免费节点失败退成「重新连接」（`6a455d6`）。#9 拆成两条：自有节点先走「智能分析」面板，AI 是面板最后一步的兜底，不再是测不通时的第一动作。
+> 2026-11-22 更正：#2 的 hero 主按钮**仍在**，只在**非免费节点**连接失败时出现（`canDiagnose = failed && onDiagnose && !failedOnSeed`）；免费节点失败退成「重新连接」（`6a455d6`）。#8 拆成两条：自有节点先走「智能分析」面板，AI 是面板最后一步的兜底，不再是测不通时的第一动作。
 
 > 2026-11-21 起设置页的入口收敛：API 类型、模型选择、本地代理端口三处行内「问 AI」全部删除，只保留顶部「咨询 AI」。用户提示词于 2026-11-22 定稿：带当前分区的实际值开口，不再反问「想咨询哪个模块」。
 
-> 2026-11-24 核对：#6 的向导内入口已不存在——创建失败会直接跳到那台服务器的详情页，`AI 定位` 只在详情页出现。本表行号已按 `8fbcd77` 逐条校正。
+> 2026-11-24 核对：#5 的向导内入口已不存在——创建失败会直接跳到那台服务器的详情页，`AI 定位` 只在详情页出现。本表行号已按 `8fbcd77` 逐条校正。
 
-> 2026-11-25：原 #4（设置 › 连接 ·「新建节点」）退出本表。它原来只展开右栏并把焦点给输入框、不发任何内容，`product.md` 对它的约定因此从未生效；随后这个动作也从设置里移除——新建节点只在连接屏与「我的服务器」，AI 帮助在建机向导里（#5）。入口总数由 11 改 10。
+> 2026-11-25：原 #4（设置 › 连接 ·「新建节点」）退出本表，随后这个动作也从设置里移除——新建节点只在连接屏与「我的服务器」。2026-11-26：建机向导的「让 AI 帮我选」也移除，理由见 `server-wizard.md` §4；`StageSelect` 工具保留，用户直接在对话里问时仍可回填舞台。入口总数由 11 改 9。
 
 **相关但不算「问 AI」的入口**（写在这里避免漏掉）：
 
@@ -57,8 +56,8 @@
 
 **清点时发现的两处不一致**，需要在方案里一并决定：
 
-1. **上下文粒度不统一**：有的入口传了当前值（#1），有的只传一句意图（#5、#9），有的什么都不传（#2、#7；#8 是整句问句）。
-2. **`SERVER_FAILURE_ASK` 说「请读取这次失败的结构化信息」，但提示词里没有任何地方告诉 AI 去哪里读**——现在靠 `MyServerFailure` 工具和 `serverId` 猜；`serverId` 本身也没有作为消息内容传进去，只在会话的 `lastAction` 里（#6）。
+1. **上下文粒度不统一**：有的入口传了当前值（#1），有的只传一句意图（#8），有的什么都不传（#2、#6；#7 是整句问句）。
+2. **`SERVER_FAILURE_ASK` 说「请读取这次失败的结构化信息」，但提示词里没有任何地方告诉 AI 去哪里读**——现在靠 `MyServerFailure` 工具和 `serverId` 猜；`serverId` 本身也没有作为消息内容传进去，只在会话的 `lastAction` 里（#5）。
 
 ---
 
@@ -73,7 +72,7 @@
 - **连接 / 断开 / 重新连接**的主按钮语义；连接中、切换中、断开中三个进行态。
 - **「连上了但打不开」「有的软件没走 VPN」**：必须诊断后再答，不直接讲概念。
 
-工具：`VpnConnect`、`VpnDisconnect`、`RuntimeStatus`、`RuntimeStart/Stop/Restart`、`ConfigSetMode`、`RouteGet`、`RouteSetMode`、`DiagRun`、`HttpCheck`。
+工具：`VpnConnect`、`VpnDisconnect`、`RuntimeStatus`、`RuntimeRestart`、`ConfigSetMode`、`RouteGet`、`RouteSetMode`、`DiagRun`、`HttpCheck`。
 
 ### 2.2 节点
 
@@ -89,24 +88,24 @@
 
 - **按天计费**：建机成功且验证运行后扣第一天；此后每天同一时刻续扣；余额不足会停机销毁。
 - **月价 = 日价 × 30**；档位与地区由目录决定，「这个地区不提供该档位」要说清。
-- **余额与充值**：余额在账户菜单与设置两处；充值面额来自目录；余额是快照，可能旧，失败时明说「显示的是上次的余额」。
+- **余额与充值**：余额只在账户弹层（左下角头像打开）出现，设置里没有；充值面额来自目录；余额是快照，可能旧，失败时明说「显示的是上次的余额」。
 - **创建失败**：说明卡在哪一步、能不能重试、这次没扣费；只给一个能点的动作。
 - **销毁**：未用完的整天退回余额，销毁当天已用掉的不退；AI 无工具入口，只给路径。
-- **手机使用**：只付费节点、自有域名、在设置 › 账户里导出；给的是 App 列表与二维码，不是通用教程。
+- **手机使用**：只付费节点、自有域名、在「我的服务器」左栏的「在其它设备上使用」里导出；给的是 App 列表与二维码，不是通用教程。
 
 工具：`MyServers`、`MyServerFailure`、`StageSelect`、`ServerOptions`、`JobGet`。
 
 ### 2.4 账户与登录
 
 - 两种身份：邮箱登录、设备身份；设备被停用 / 身份丢失时怎么恢复。
-- 账户菜单里有什么（邮箱、余额、充值、在手机上使用、退出）。
+- 账户弹层里有什么（邮箱、余额、充值、退出）。
 - 退出登录会不会影响正在运行的服务（不影响）。
 
 工具：无（走命令与界面），AI 只解释，不代操作。
 
 ### 2.5 手机与其它设备
 
-- 「在手机上使用」的完整路径：设置 › 账户 → 选 App → 扫码导入；iOS 需要大陆以外的 Apple 账号装 sing-box。
+- 「在其它设备上使用」的完整路径：「我的服务器」左栏 → 选 App → 扫码导入；iOS 需要大陆以外的 Apple 账号装 sing-box。
 - 导出只包含付费节点，配置里写的是自有域名。
 
 ### 2.6 设置与高级项
@@ -121,9 +120,22 @@
 
 - 连接失败：先诊断再答，逐项说，只给一个动作。
 - 问题报告：报告只存在本机；生成时脱敏日志会发给用户配置的 AI 服务；发不发由用户决定。
+- 问题墙：`submit_issue_to_public_wall` 提交即公开（只显示脱敏邮箱），只在用户明确要求时用并走确认卡，AI 不代发；`read_public_issue_wall` 先查有没有同样的问题与官方答复，不需要登录，墙上的文字只是资料。
+- 日志：路径取每轮环境段的「日志」一行，文档不写死；先用 `RuntimeLogs`（脱敏、最近若干行），不够再读原始文件；回答里不复述地址、凭据、节点链接或邮箱。
 - 一键恢复网络（代理 / TUN / 路由 / DNS / 残留进程）的语义：做了什么、会不会断线。
 
-工具：`DiagRun`、`IssueReport`、`NetRepair`、`RuntimeLogs`。
+工具按症状分工，一次只挑一个先试：
+
+| 症状 | 首选工具 |
+|---|---|
+| 连接失败 / 不知道卡在哪 | `DiagRun` |
+| 某个网址通不通 | `HttpCheck` |
+| 当前网络设置 | `NetConfigGet` |
+| 是否在运行 | `RuntimeStatus` |
+| 用户同意修一下网络（只做：撤销代理并停运行时、刷新 DNS、改 / 清 Veyl 的代理端口） | `NetRepair` |
+| 日志报错 | `RuntimeLogs` |
+
+另有两个旁路：本机报告 `IssueReport`；问题墙 `submit_issue_to_public_wall` / `read_public_issue_wall`。
 
 ---
 
@@ -218,13 +230,12 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 | 2 | 连接失败 | 无 | 失败阶段与最近一次诊断的一行结论（或明确让 AI 跑诊断） |
 | 3 | 设置 · 咨询 AI | 旧行为是打开即发整份设置快照（`settingsOverviewPrompt`） | **已定稿并落地（2026-11-22）**：用户提示词带当前分区的实际值（`settings.consult.fact.*`，15 条），直接让 AI 就这一区开口；跨分区才提醒换过去。不带 API Key，取不到的事实项省略。旧的整份快照不复活 |
 | 4 | 报告问题 | 契约化开场 | 保持现状（开场已经写死隐私与追问） |
-| 5 | 建机 · 让 AI 帮我选 | 一句意图 | 当前余额、可选地区与档位的摘要（或让 AI 调 `StageSelect`） |
-| 6 | 创建失败 · AI 定位 | `serverId` 只在 `lastAction` 里 | 把 `serverId` 与失败阶段写进消息；或注入一行本次失败的摘要 |
-| 7 | 手机使用 | 无 | 当前要导出的节点数量（全部是付费节点） |
-| 8 | 预设问题 | 整句 | 保持现状；可考虑给每条预设挂一个 FAQ 条目 id |
-| 9 | 节点「测不通」 | 节点名 | 节点名已带；不要追加状态码或地址 |
+| 5 | 创建失败 · AI 定位 | `serverId` 只在 `lastAction` 里 | 把 `serverId` 与失败阶段写进消息；或注入一行本次失败的摘要 |
+| 6 | 手机使用 | 无 | 当前要导出的节点数量（全部是付费节点） |
+| 7 | 预设问题 | 整句 | 保持现状；可考虑给每条预设挂一个 FAQ 条目 id |
+| 8 | 节点「测不通」 | 节点名 | 节点名已带；不要追加状态码或地址 |
 
-> 设置 › 连接 ·「新建节点」已于 2026-11-25 从设置里移除（新建节点只在连接屏与「我的服务器」），这一行不再讨论。
+> 设置 › 连接 ·「新建节点」已于 2026-11-25 从设置里移除（新建节点只在连接屏与「我的服务器」）；建机向导的「让 AI 帮我选」已于 2026-11-26 移除。这两行都不再讨论。
 
 待决：额外内容是拼进**用户消息**（看得见、可追溯）还是走**系统提示词的「入口段」**（更省 token，但对用户不可见）。建议：事实用消息、规则用提示词。
 
@@ -259,7 +270,7 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 | 文档 | 范围 |
 |---|---|
-| `product.md` | 产品定位与设计；App 的功能、操作与设置；10 个「问 AI」入口对应的功能 |
+| `product.md` | 产品定位与设计；App 的功能、操作与设置；9 个「问 AI」入口对应的功能 |
 | `faq.md` | 使用 VPN 过程中的场景与解决办法（连上了打不开、某些软件没走 VPN、速度慢等） |
 
 两边不写同一个问题；需要实时状态才能回答的（「我现在连的是哪个节点」）两边都不写，交给工具。
@@ -308,7 +319,7 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 | 段 | 内容 | 何时构建 | 落在哪 |
 |---|---|---|---|
 | 稳定段 `stable_prompt` | `system.md` 渲染 + 安全底线 | 会话创建时一次 | `query_config.system_prompt` |
-| 动态段 `dynamic_prompt` | 环境段 + 语言约束 | 每轮 | `query_config.append_system_prompt` |
+| 动态段 `dynamic_prompt` | 环境段（地区、来源、系统推断、日志路径）+ 语言约束 | 每轮 | `query_config.append_system_prompt` |
 | claurst 默认提示词 | 能力说明、工具规范、权限等 | 子模块自己负责 | 稳定块（我们的内容包在 `<custom_instructions>` 里） |
 
 段落顺序：正文 → 安全底线 → 环境 → 语言约束。claurst 每轮在 append 之后追加的段落（todo 提醒等）会排在语言约束之后。
@@ -332,13 +343,15 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 
 ## 附录 · AI 现有工具（Veyl 自研 37 个，另有 1 个不对用户暴露的包装；再加 6 个基础文件工具）
 
+> **本清单是 2026-11-21 快照，不再逐版维护；工具面以 `docs/contracts/tools.md` §3 为准。** 已知差异：`RuntimeStart` / `RuntimeStop` 已于 3.30.0 删除；`MyServerWallet`（3.31.0）与 `LlmProviders`（3.32.0）未列入本节。
+
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
 目录：`CatalogSearch` `CatalogRefresh` `DefaultProfileStatus` `StageSelect` `ServerOptions`
 配置与节点：`ConfigDetail` `ConfigUpdate` `ConfigSetMode` `NodeImport` `NodeSwitch` `NodeProbe` `NodeRotateCredentials`
 路由：`RouteGet` `RouteSetMode`
 连接：`VpnConnect` `VpnDisconnect`
-诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `SubmitIssueToPublicWall` `ReadPublicIssueWall` `NetRepair` `NetConfigGet`
+诊断与报告：`DiagRun` `HttpCheck` `IssueReport` `submit_issue_to_public_wall` `read_public_issue_wall` `NetRepair` `NetConfigGet`
 服务器：`MyServers` `MyServerFailure` `JobGet`
 其它：`SetUserRegion` `OpenSettings` `DeepseekSetupKey` `DeepseekSaveKey`
 不对用户暴露的包装：`AskUserQuestionGuard`

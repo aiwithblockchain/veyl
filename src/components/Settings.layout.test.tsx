@@ -145,7 +145,7 @@ const PROVIDERS: LlmProvider[] = [
 
 function renderSection(
   bridge: AgentBridge,
-  section: "ai" | "network" | "account" | "advanced",
+  section: "ai" | "network" | "advanced",
 ) {
   return render(
     <Settings

@@ -4,7 +4,7 @@
 import { authenticate, isResponse, type MaybeAuthEnv } from "./auth";
 import { randomId } from "./lib/crypto";
 import { apiError, json } from "./lib/http";
-import { paymentReturnUrl, readTopupDenominations } from "./lib/config";
+import { paymentReturnUrl, readTopupDenominations, readTopupRange } from "./lib/config";
 import { idempotencyKey, requestHashOf, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { createCheckoutSession, stripeCheckoutProblem, type StripeEnv } from "./payments/stripe";
 import { balanceCents } from "./wallet";
@@ -17,6 +17,7 @@ export type TopupStart =
       ok: false;
       reason:
         | "invalid_denomination"
+        | "rate_limited"
         | "unavailable"
         | "no_return_url"
         | "no_api_key"
@@ -26,15 +27,22 @@ export type TopupStart =
       detail?: string;
     };
 
-/** 开一笔充值：白名单面额 → Stripe Checkout 会话。只有这一条路径。 */
+/** 开一笔充值：范围内的整美元金额 → Stripe Checkout 会话。只有这一条路径。 */
 export async function startTopupSession(
   env: TopupEnv,
   input: { accountId: string; email: string; cents: number },
-  allowed: number[],
+  minCents: number,
+  maxCents: number,
+  maxActive: number,
 ): Promise<TopupStart> {
   const db = env.DB;
   if (!db) return { ok: false, reason: "unavailable" };
-  if (!allowed.includes(input.cents)) {
+  if (
+    !Number.isInteger(input.cents) ||
+    input.cents % 100 !== 0 ||
+    input.cents < minCents ||
+    input.cents > maxCents
+  ) {
     return { ok: false, reason: "invalid_denomination" };
   }
 
@@ -54,13 +62,25 @@ export async function startTopupSession(
   const now = Date.now();
 
   // 先落 pending 行再开收银台：webhook 可能比建会话的响应先到，先有行才匹配得上。
-  await db
+  // 计数与写入在同一条语句里，D1 串行执行，并发请求不会同时读到 4 再各插一笔。
+  const inserted = await db
     .prepare(
       "INSERT INTO topups (id, account_id, denomination_cents, product_id, status, created_at) " +
-        "VALUES (?, ?, ?, ?, 'pending', ?)",
+        "SELECT ?, ?, ?, NULL, 'pending', ? " +
+        "WHERE (SELECT COUNT(*) FROM topups " +
+        "WHERE account_id = ? AND created_at >= ? AND status IN ('pending','paid')) < ?",
     )
-    .bind(topupId, input.accountId, input.cents, null, now)
+    .bind(
+      topupId,
+      input.accountId,
+      input.cents,
+      now,
+      input.accountId,
+      now - 60 * 60 * 1000,
+      maxActive,
+    )
     .run();
+  if (!inserted.meta.changes) return { ok: false, reason: "rate_limited" };
 
   const session = await createCheckoutSession(env, {
     cents: input.cents,
@@ -98,16 +118,26 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
   if (isWallet && request.method !== "GET") return apiError("PRECONDITION_FAILED", "方法不允许", { status: 405 });
   if (isTopup && request.method !== "POST") return apiError("PRECONDITION_FAILED", "方法不允许", { status: 405 });
   if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+  const db = env.DB;
 
-  const config = readTopupDenominations(env);
-  if (config.problem) {
+  const range = readTopupRange(env);
+  if (range.problem) {
     return apiError("INTERNAL", "充值暂未开放", {
       retryable: false,
       status: 503,
       reason: "topup_config_unavailable",
     });
   }
-  const denominations = config.cents;
+  // 快捷档只用于 wallet 展示；配置坏了不阻断自定义充值。
+  const config = readTopupDenominations(env);
+  const denominations = config.cents.filter(
+    (cents) => cents % 100 === 0 && cents >= range.minCents && cents <= range.maxCents,
+  );
+  if (denominations.length !== config.cents.length) {
+    console.warn(
+      `[topup] 快捷档过滤 count=${config.cents.length - denominations.length} min=${range.minCents} max=${range.maxCents}`,
+    );
+  }
 
   const identity = await authenticate(request, env);
   if (isResponse(identity)) return identity;
@@ -117,6 +147,8 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
       balance_cents: await balanceCents(env, identity.accountId),
       currency: "USD",
       denominations_cents: denominations,
+      min_topup_cents: range.minCents,
+      max_topup_cents: range.maxCents,
     });
   }
 
@@ -124,16 +156,40 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
     return apiError("UNAUTHENTICATED", "登录后才能充值", { retryable: true, reason: "auth_required" });
   }
 
-  let body: { denomination_cents?: unknown };
+  const invalidAmount = () =>
+    apiError("PRECONDITION_FAILED", "充值金额无效", {
+      reason: "invalid_denomination",
+      details: {
+        min_cents: range.minCents,
+        max_cents: range.maxCents,
+        whole_dollars: true,
+      },
+    });
+  const invalidAmountStored = async (): Promise<StoredResponse> => {
+    const response = invalidAmount();
+    return { status: response.status, body: await response.json() };
+  };
+
+  let parsed: unknown;
   try {
-    body = (await request.json()) as typeof body;
+    parsed = await request.json();
   } catch {
-    return apiError("PRECONDITION_FAILED", "请求体不是合法 JSON", { reason: "invalid_denomination" });
+    return invalidAmount();
   }
-  const cents = Number(body.denomination_cents);
-  if (!Number.isInteger(cents) || !denominations.includes(cents)) {
-    return apiError("PRECONDITION_FAILED", "没有这个充值面额", { reason: "invalid_denomination" });
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return invalidAmount();
   }
+  const raw = (parsed as { denomination_cents?: unknown }).denomination_cents;
+  if (
+    typeof raw !== "number" ||
+    !Number.isInteger(raw) ||
+    raw % 100 !== 0 ||
+    raw < range.minCents ||
+    raw > range.maxCents
+  ) {
+    return invalidAmount();
+  }
+  const cents = raw;
 
   const account = await env.DB.prepare("SELECT email FROM accounts WHERE id = ?")
     .bind(identity.accountId)
@@ -151,19 +207,27 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
         email: account.email as string,
         cents,
       },
-      denominations,
+      range.minCents,
+      range.maxCents,
+      5,
     );
+    if (!started.ok && started.reason === "rate_limited") {
+      const response = apiError("RATE_LIMITED", "充值太频繁，稍后再试", {
+        status: 429,
+        retryable: true,
+        reason: "topup_rate_limited",
+      });
+      return { status: response.status, body: await response.json() };
+    }
     if (!started.ok) {
+      if (started.reason === "invalid_denomination") return invalidAmountStored();
       return {
         status: 502,
         body: {
           code: "UPSTREAM_ERROR",
           message: "充值暂时不可用",
           retryable: true,
-          details: {
-            reason:
-              started.reason === "invalid_denomination" ? "invalid_denomination" : "checkout_unavailable",
-          },
+          details: { reason: "checkout_unavailable" },
         },
       };
     }
@@ -182,5 +246,5 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
     const stored = await create();
     return json(stored.body, stored.status);
   }
-  return withIdempotency(env.DB, identity.accountId, "topups.create", key, await requestHashOf({ cents }), create);
+  return withIdempotency(db, identity.accountId, "topups.create", key, await requestHashOf({ cents }), create);
 }

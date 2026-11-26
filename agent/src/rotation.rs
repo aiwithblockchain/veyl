@@ -19,7 +19,7 @@ use crate::control::{ControlApi, ControlError, DesiredState, ReportRequest, Stag
 use crate::identity::Identity;
 use crate::logging::{redact_sensitive, truncate};
 use crate::singbox::{ApplyError, ApplyErrorKind, SingBox};
-use crate::state::{AgentState, StateStore, StoredDesired};
+use crate::state::{AgentState, PendingRotationReport, StateStore, StoredDesired};
 
 /// Retry an apply once in-process before reporting `failed` (the control plane
 /// destroys the machine on `failed`, so transient errors must not reach it).
@@ -208,6 +208,17 @@ pub fn generate_password(rng: &mut impl RngCore) -> String {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes);
     crate::cert::hex(&bytes)
+}
+
+/// The control plane answered and refused this request, so nothing was
+/// committed. Timeouts and rate limits are answers too, but they say nothing
+/// about whether the write happened.
+fn explicitly_rejected(e: &ControlError) -> bool {
+    matches!(
+        e,
+        ControlError::Status { status, .. }
+            if (400..500).contains(status) && *status != 408 && *status != 429
+    )
 }
 
 pub struct RotationEngine {
@@ -406,37 +417,69 @@ impl RotationEngine {
         }
 
         // The control plane updates node_port and re-seals the credential on
-        // `rotated`. Only a 200 means the rotation is committed; anything else
-        // rolls back to the pre-rotation config, so we never leave a half state.
+        // `rotated`. The report is frozen on disk *before* it leaves: if the
+        // response is lost the control plane may already have committed these
+        // credentials, and only a resend of this exact pair can heal that.
+        let frozen = PendingRotationReport {
+            port,
+            password: password.clone(),
+            control_port,
+            singbox_version: version.clone(),
+            at_unix: crate::auth::now_unix(),
+        };
+        // A previous rotation may still be unconfirmed. Its config is what
+        // `old_config` holds, so a rejection below must put its freeze back
+        // instead of dropping both records.
+        let previous = self.freeze_rotation_report(&frozen);
+
         let rotated = self
             .report(Stage::Rotated, port, control_port)
             .with_singbox_version(version.clone())
             .with_password(password.clone());
-        if let Err(e) = self.control.report(&rotated).await {
-            let status = match &e {
-                ControlError::Status { status, .. } => Some(*status),
-                _ => None,
-            };
-            tracing::warn!(
-                from = ?current_port,
-                to = port,
-                stage = "rotated",
-                status = ?status,
-                error = %e,
-                "control plane rejected the rotation; rolling back"
-            );
-            match self.singbox.restore(old_config).await {
-                Ok(()) => tracing::info!(
-                    port = current_port.unwrap_or(0),
-                    "rolled back to the previous config"
-                ),
-                Err(rollback) => {
-                    tracing::error!(error = %rollback, "rollback after rejected rotation failed")
+        match self.control.report(&rotated).await {
+            Ok(()) => {}
+            Err(e) if explicitly_rejected(&e) => {
+                // The control plane answered and refused: nothing was
+                // committed, so the node goes back to the config it served.
+                tracing::warn!(
+                    from = ?current_port,
+                    to = port,
+                    stage = "rotated",
+                    error = %e,
+                    "control plane rejected the rotation; rolling back"
+                );
+                self.roll_back_freeze(&frozen, previous);
+                match self.singbox.restore(old_config).await {
+                    Ok(()) => tracing::info!(
+                        port = current_port.unwrap_or(0),
+                        "rolled back to the previous config"
+                    ),
+                    Err(rollback) => {
+                        tracing::error!(error = %rollback, "rollback after rejected rotation failed")
+                    }
                 }
+                return Err(RotateError::fatal(format!(
+                    "rotation rejected by the control plane: {e}"
+                )));
             }
-            return Err(RotateError::fatal(format!(
-                "rotation rejected by the control plane: {e}"
-            )));
+            Err(e) => {
+                // No answer (transport error / timeout) or a 5xx: whether the
+                // control plane committed is unknown. Rolling back here is how
+                // both sides end up on different credentials — the node keeps
+                // the new config and the frozen report is resent as-is on the
+                // next call.
+                tracing::warn!(
+                    from = ?current_port,
+                    to = port,
+                    stage = "rotated",
+                    error = %e,
+                    "rotation report was not confirmed; keeping the new credentials and the frozen report"
+                );
+                return Err(RotateError::retryable(format!(
+                    "rotation applied locally, but the control plane did not confirm it ({e}); \
+                     the same credentials will be reported again on the next call"
+                )));
+            }
         }
         tracing::info!(
             from = ?current_port,
@@ -446,35 +489,185 @@ impl RotationEngine {
             "control plane accepted the rotation"
         );
 
+        self.accept_rotation_report(&frozen);
+        tracing::info!(from = ?current_port, to = port, "rotation complete");
+        Ok(port)
+    }
+
+    /// Freeze the report that is about to be sent, returning the freeze it
+    /// replaces (if any). A disk error is logged but never blocks the rotation:
+    /// the in-memory copy still covers this process.
+    fn freeze_rotation_report(
+        &self,
+        report: &PendingRotationReport,
+    ) -> Option<PendingRotationReport> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let previous = state.pending_rotation_report.replace(report.clone());
+        if let Err(e) = self.store.save(&state) {
+            tracing::error!(error = %e, "failed to persist the frozen rotation report");
+        }
+        previous
+    }
+
+    /// The control plane refused `rejected`, so the node is rolled back to the
+    /// config its predecessor froze: that freeze becomes the pending record
+    /// again, because it is exactly what the rollback serves.
+    fn roll_back_freeze(
+        &self,
+        rejected: &PendingRotationReport,
+        previous: Option<PendingRotationReport>,
+    ) {
+        let mut state = self.state.lock().expect("state poisoned");
+        if state.pending_rotation_report.as_ref() != Some(rejected) {
+            return;
+        }
+        state.pending_rotation_report = previous;
+        if let Err(e) = self.store.save(&state) {
+            tracing::error!(error = %e, "failed to restore the previous rotation freeze");
+        }
+    }
+
+    /// The control plane accepted `report`: it becomes the acknowledged state
+    /// and the freeze is cleared.
+    fn accept_rotation_report(&self, report: &PendingRotationReport) {
         let now = crate::auth::now_unix();
         let mut state = self.state.lock().expect("state poisoned");
-        state.remember_port(port, self.cfg.recent_ports_keep);
+        state.remember_port(report.port, self.cfg.recent_ports_keep);
         let stored = state
             .last_desired
             .clone()
             .map(|mut d| {
-                d.port = port;
-                d.password = password.clone();
+                d.port = report.port;
+                d.password = report.password.clone();
+                d.singbox_version = report.singbox_version.clone();
                 d.at_unix = now;
                 d
             })
             .unwrap_or_else(|| StoredDesired {
-                port,
-                password: password.clone(),
-                control_port,
-                singbox_version: version.clone(),
+                port: report.port,
+                password: report.password.clone(),
+                control_port: report.control_port,
+                singbox_version: report.singbox_version.clone(),
                 singbox_sha256: String::new(),
                 singbox_url: String::new(),
                 at_unix: now,
             });
         state.last_desired = Some(stored);
-        if let Err(e) = self.store.save(&state) {
-            tracing::error!(error = %e, "failed to persist port history");
+        if state.pending_rotation_report.as_ref() == Some(report) {
+            state.pending_rotation_report = None;
         }
-        drop(state);
+        if let Err(e) = self.store.save(&state) {
+            tracing::error!(error = %e, "failed to persist the accepted rotation");
+        }
+    }
 
-        tracing::info!(from = ?current_port, to = port, "rotation complete");
-        Ok(port)
+    fn clear_pending_rotation(&self, report: &PendingRotationReport) {
+        let mut state = self.state.lock().expect("state poisoned");
+        if state.pending_rotation_report.as_ref() == Some(report) {
+            state.pending_rotation_report = None;
+            if let Err(e) = self.store.save(&state) {
+                tracing::error!(error = %e, "failed to clear the frozen rotation report");
+            }
+        }
+    }
+
+    /// Resend a `rotated` report whose response was lost. Best effort once per
+    /// call and on the metering tick, never a timer of its own: the credentials
+    /// were already applied and verified locally, so the only missing piece is
+    /// the control plane's copy. With nothing frozen it makes no request at all.
+    pub(crate) async fn flush_pending_rotation(&self) {
+        // Rotation / upgrade / apply hold this lock while they change the
+        // credentials; a concurrent flush could report a pair that is about to
+        // be replaced.
+        let Ok(_guard) = self.busy.try_lock() else {
+            return;
+        };
+        let Some(pending) = self
+            .state
+            .lock()
+            .expect("state poisoned")
+            .pending_rotation_report
+            .clone()
+        else {
+            return;
+        };
+
+        // Never report credentials the node does not serve: a restart may have
+        // re-applied the control plane's desired state, which makes the freeze
+        // stale rather than pending. A read error says nothing about the node,
+        // so the freeze stays.
+        let applied = match self.singbox.applied().await {
+            Ok(applied) => applied,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "cannot read the running config; keeping the frozen rotation report"
+                );
+                return;
+            }
+        };
+        let serving = applied
+            .as_ref()
+            .map(|a| a.port == pending.port && a.password == pending.password)
+            .unwrap_or(false);
+        if !serving {
+            tracing::warn!(
+                port = pending.port,
+                "dropping a frozen rotation report the node no longer serves"
+            );
+            self.clear_pending_rotation(&pending);
+            return;
+        }
+
+        let body = self
+            .report(Stage::Rotated, pending.port, pending.control_port)
+            .with_singbox_version(pending.singbox_version.clone())
+            .with_password(pending.password.clone());
+        match self.control.report(&body).await {
+            Ok(()) => {
+                tracing::info!(
+                    port = pending.port,
+                    "the frozen rotation report was accepted on resend"
+                );
+                self.accept_rotation_report(&pending);
+            }
+            Err(e) if explicitly_rejected(&e) => {
+                // Refused after all: put the last acknowledged credentials back
+                // so both sides hold the same, older pair.
+                tracing::error!(
+                    port = pending.port,
+                    error = %e,
+                    "the control plane rejected the frozen rotation; restoring the acknowledged config"
+                );
+                self.clear_pending_rotation(&pending);
+                self.restore_acknowledged().await;
+            }
+            Err(e) => tracing::warn!(
+                port = pending.port,
+                error = %e,
+                "the frozen rotation report is still unconfirmed; retrying on the next call"
+            ),
+        }
+    }
+
+    /// Apply the last acknowledged credentials. Only used when the control
+    /// plane explicitly refuses the frozen rotation.
+    async fn restore_acknowledged(&self) {
+        let Some(desired) = self.last_desired() else {
+            tracing::error!("no acknowledged credentials to restore after the rejection");
+            return;
+        };
+        match self.singbox.apply(desired.port, &desired.password).await {
+            Ok(()) => tracing::info!(
+                port = desired.port,
+                "restored the acknowledged credentials"
+            ),
+            Err(e) => tracing::error!(
+                port = desired.port,
+                error = %e.message,
+                "restoring the acknowledged credentials failed"
+            ),
+        }
     }
 
     /// Refresh the registration fields (cert fingerprint, CA PEM) without
@@ -500,7 +693,12 @@ impl RotationEngine {
     /// would then keep the machine in installing/verifying and sweep it. The
     /// endpoint is idempotent for an already-active machine (`already_active`),
     /// and a failure here never fails the caller.
+    ///
+    /// A frozen `rotated` report is resent first: once it lands, the resumed
+    /// credentials become the acknowledged state, which is what makes the
+    /// `active` announcement below match the running config again.
     pub async fn reannounce_active(&self) {
+        self.flush_pending_rotation().await;
         self.announce_active(None).await;
     }
 
@@ -1014,6 +1212,7 @@ mod tests {
         desired: Mutex<DesiredState>,
         fail_report: Mutex<bool>,
         reject_rotated: Mutex<bool>,
+        lose_rotated: Mutex<bool>,
     }
 
     #[async_trait]
@@ -1028,6 +1227,10 @@ mod tests {
                     status: 409,
                     body: r#"{"reason":"port_taken"}"#.into(),
                 });
+            }
+            // The request arrived, the response never came back.
+            if body.stage == Stage::Rotated && *self.lose_rotated.lock().unwrap() {
+                return Err(ControlError::Transport("response lost".into()));
             }
             Ok(())
         }
@@ -1152,6 +1355,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine_with(&dir, host, control.clone(), Arc::new(cfg));
 
@@ -1175,6 +1379,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host.clone(), control.clone());
         let port = engine.rotate(Some("user".into())).await.unwrap();
@@ -1200,6 +1405,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(true),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         let old = crate::singbox::render_config(30412, "old-password", "aes-256-gcm");
@@ -1221,8 +1427,271 @@ mod tests {
             stages,
             vec![Stage::Installing, Stage::Verifying, Stage::Rotated]
         );
-        // A rejected rotation must not persist the new port history.
-        assert!(!cfg.state_path().exists());
+        // A rejected rotation must not persist the new port history, and the
+        // freeze has to be gone: the node and the control plane both keep the
+        // old pair.
+        let state = StateStore::new(cfg.state_path()).load().unwrap();
+        assert_eq!(state.pending_rotation_report, None);
+        assert_eq!(state.applied_port, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_lost_rotated_response_keeps_the_frozen_credentials() {
+        let dir = tmpdir("rotated-lost");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(true),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+
+        let err = engine.rotate(None).await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Retryable);
+
+        let frozen = engine
+            .state_handle()
+            .lock()
+            .unwrap()
+            .pending_rotation_report
+            .clone()
+            .expect("the report is frozen before it is sent");
+        let sent = control.reports.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(sent.stage, Stage::Rotated);
+        assert_eq!(sent.port, frozen.port);
+        assert_eq!(sent.password.as_deref(), Some(frozen.password.as_str()));
+
+        // The node keeps serving the new pair; rolling back here is what leaves
+        // the control plane and the node holding different credentials.
+        let applied = engine.singbox.applied().await.unwrap().unwrap();
+        assert_eq!(applied.port, frozen.port);
+        assert_eq!(applied.password, frozen.password);
+
+        // Frozen on disk too, so a restart resends the same pair.
+        let on_disk = StateStore::new(cfg.state_path()).load().unwrap();
+        assert_eq!(on_disk.pending_rotation_report, Some(frozen));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_resend_carries_the_exact_same_credentials() {
+        let dir = tmpdir("rotated-resend");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(true),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        engine.rotate(None).await.unwrap_err();
+        let frozen = engine
+            .state_handle()
+            .lock()
+            .unwrap()
+            .pending_rotation_report
+            .clone()
+            .expect("frozen");
+
+        // The control plane is reachable again; the next call resends.
+        *control.lose_rotated.lock().unwrap() = false;
+        engine.reannounce_active().await;
+
+        let reports = control.reports.lock().unwrap().clone();
+        let rotated: Vec<&ReportRequest> = reports
+            .iter()
+            .filter(|r| r.stage == Stage::Rotated)
+            .collect();
+        assert_eq!(rotated.len(), 2, "the retry resends, it does not rotate again");
+        for resent in rotated {
+            assert_eq!(resent.port, frozen.port);
+            assert_eq!(resent.password.as_deref(), Some(frozen.password.as_str()));
+        }
+        drop(reports);
+
+        let state = engine.state_handle().lock().unwrap().clone();
+        assert_eq!(state.pending_rotation_report, None);
+        let stored = state.last_desired.expect("acknowledged after the resend");
+        assert_eq!(stored.port, frozen.port);
+        assert_eq!(stored.password, frozen.password);
+        let on_disk = StateStore::new(cfg.state_path()).load().unwrap();
+        assert_eq!(on_disk.pending_rotation_report, None);
+        assert_eq!(on_disk.last_desired.map(|d| d.port), Some(frozen.port));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_stale_freeze_is_dropped_when_the_node_serves_other_credentials() {
+        let dir = tmpdir("rotated-stale");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        // A restart re-applied the control plane's desired state: the freeze is
+        // stale, and resending it would report credentials nobody serves.
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "from-control-plane", "aes-256-gcm").into_bytes(),
+        );
+        *engine.state_handle().lock().unwrap() = AgentState {
+            last_desired: Some(StoredDesired::from_desired(&desired(30412, "1.14.4"), 0)),
+            pending_rotation_report: Some(PendingRotationReport {
+                port: 30555,
+                password: "frozen-but-not-served".into(),
+                control_port: 32100,
+                singbox_version: "1.14.4".into(),
+                at_unix: 0,
+            }),
+            ..Default::default()
+        };
+
+        engine.reannounce_active().await;
+
+        let reports = control.reports.lock().unwrap();
+        assert!(!reports.iter().any(|r| r.stage == Stage::Rotated));
+        drop(reports);
+        let state = engine.state_handle().lock().unwrap().clone();
+        assert_eq!(state.pending_rotation_report, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_flush_without_a_freeze_makes_no_request() {
+        let dir = tmpdir("flush-idle");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
+        });
+        let (engine, _cfg) = engine(&dir, host, control.clone());
+
+        engine.flush_pending_rotation().await;
+
+        assert!(control.reports.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_accepted_rotation_clears_the_freeze() {
+        let dir = tmpdir("rotated-accepted");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+
+        let port = engine.rotate(None).await.unwrap();
+
+        let state = engine.state_handle().lock().unwrap().clone();
+        assert_eq!(state.pending_rotation_report, None);
+        let stored = state.last_desired.expect("acknowledged state");
+        assert_eq!(stored.port, port);
+        let sent = control.reports.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(sent.password.as_deref(), Some(stored.password.as_str()));
+        let on_disk = StateStore::new(cfg.state_path()).load().unwrap();
+        assert_eq!(on_disk.pending_rotation_report, None);
+        assert_eq!(on_disk.last_desired.map(|d| d.port), Some(port));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_resend_the_control_plane_rejects_restores_the_acknowledged_pair() {
+        let dir = tmpdir("rotated-resend-reject");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(true),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+        host.put_file(
+            &cfg.singbox.config_path,
+            crate::singbox::render_config(30412, "from-control-plane", "aes-256-gcm").into_bytes(),
+        );
+        *engine.state_handle().lock().unwrap() = AgentState {
+            last_desired: Some(StoredDesired::from_desired(&desired(30412, "1.14.4"), 0)),
+            ..Default::default()
+        };
+
+        engine.rotate(None).await.unwrap_err();
+        assert!(engine
+            .state_handle()
+            .lock()
+            .unwrap()
+            .pending_rotation_report
+            .is_some());
+
+        // The retry gets an explicit refusal: both sides go back to the pair
+        // the control plane still holds.
+        *control.lose_rotated.lock().unwrap() = false;
+        *control.reject_rotated.lock().unwrap() = true;
+        engine.reannounce_active().await;
+
+        let applied = engine.singbox.applied().await.unwrap().unwrap();
+        assert_eq!(applied.port, 30412);
+        assert_eq!(applied.password, "from-control-plane");
+        let state = engine.state_handle().lock().unwrap().clone();
+        assert_eq!(state.pending_rotation_report, None);
+        assert_eq!(state.last_desired.map(|d| d.port), Some(30412));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_rotation_keeps_the_unconfirmed_freeze_it_rolled_back_to() {
+        let dir = tmpdir("rotated-chain");
+        let host = Arc::new(FakeHost::new());
+        let control = Arc::new(FakeControl {
+            reports: Mutex::new(vec![]),
+            desired: Mutex::new(desired(30412, "1.14.4")),
+            fail_report: Mutex::new(false),
+            reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(true),
+        });
+        let (engine, cfg) = engine(&dir, host.clone(), control.clone());
+
+        // Rotation A: applied locally, its response was lost.
+        engine.rotate(None).await.unwrap_err();
+        let a = engine
+            .state_handle()
+            .lock()
+            .unwrap()
+            .pending_rotation_report
+            .clone()
+            .expect("A is frozen");
+
+        // Rotation B: the control plane refuses it, so the node rolls back to
+        // A's config — and A's freeze must come back with it, or the node ends
+        // up serving credentials nobody has a pending record of.
+        *control.lose_rotated.lock().unwrap() = false;
+        *control.reject_rotated.lock().unwrap() = true;
+        let err = engine.rotate(None).await.unwrap_err();
+        assert_eq!(err.kind, RotateErrorKind::Fatal);
+
+        let state = engine.state_handle().lock().unwrap().clone();
+        assert_eq!(state.pending_rotation_report, Some(a.clone()));
+        let applied = engine.singbox.applied().await.unwrap().unwrap();
+        assert_eq!(applied.port, a.port);
+        assert_eq!(applied.password, a.password);
+        let on_disk = StateStore::new(cfg.state_path()).load().unwrap();
+        assert_eq!(on_disk.pending_rotation_report, Some(a));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1235,6 +1704,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host.clone(), control.clone());
         host.set_command_output("/usr/local/bin/sing-box", 1, "", "bad config");
@@ -1262,6 +1732,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host.clone(), control.clone());
         // Attempt 1: daemon-reload/enable ok, restart fails, rollback restart ok.
@@ -1307,6 +1778,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host.clone(), control.clone());
         host.queue_command_outputs(
@@ -1348,6 +1820,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host, control);
         let guard = engine.busy().try_lock_owned().unwrap();
@@ -1417,6 +1890,7 @@ mod tests {
             desired: Mutex::new(d.clone()),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1452,6 +1926,7 @@ mod tests {
             desired: Mutex::new(d.clone()),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1485,6 +1960,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1543,6 +2019,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.14.4")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1579,6 +2056,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, _cfg) = engine(&dir, host, control);
         let guard = engine.busy().try_lock_owned().unwrap();
@@ -1599,6 +2077,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1684,6 +2163,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1803,6 +2283,7 @@ mod tests {
             desired: Mutex::new(d.clone()),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         host.put_file(
@@ -1833,6 +2314,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control);
         let backup = cfg.singbox.binary_path.with_extension("bak");
@@ -1890,6 +2372,7 @@ mod tests {
             desired: Mutex::new(desired(30412, "1.15.0")),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control);
         host.put_file(
@@ -1930,6 +2413,7 @@ mod tests {
             desired: Mutex::new(d.clone()),
             fail_report: Mutex::new(false),
             reject_rotated: Mutex::new(false),
+            lose_rotated: Mutex::new(false),
         });
         let (engine, cfg) = engine(&dir, host.clone(), control.clone());
         *engine.state_handle().lock().unwrap() = AgentState {

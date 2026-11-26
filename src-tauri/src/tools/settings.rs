@@ -14,28 +14,24 @@ use super::turn_guard;
 use crate::claurst_session::events::{self, EV_SETTINGS_POINT};
 
 /// 行 id 白名单（`tools.md` §4.50；与 `commands.md` §9.1.1 的 controls 同源）。
-pub const SETTINGS_ROWS: [&str; 12] = [
+pub const SETTINGS_ROWS: [&str; 9] = [
     "connection.mode",
     "connection.scope",
     "connection.port",
     "ai.provider",
     "ai.other",
-    "account.login",
-    "account.balance",
-    "account.mobile",
     "advanced.core",
     "advanced.helper",
     "advanced.logs",
     "advanced.reset",
 ];
 
-const SECTIONS: [&str; 4] = ["ai", "connection", "account", "advanced"];
+const SECTIONS: [&str; 3] = ["ai", "connection", "advanced"];
 
 fn section_label(section: &str) -> &'static str {
     match section {
         "ai" => "AI",
         "connection" => "连接",
-        "account" => "账户",
         "advanced" => "高级",
         _ => "设置",
     }
@@ -65,10 +61,17 @@ fn parse_input(input: &Value) -> Result<Request, AivpnError> {
         .get("section")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("invalid_section", "缺少 section"))?;
+    if section == "account" {
+        // 账户已独立成弹层（2026-11-26），不再是设置的一段。
+        return Err(invalid(
+            "account_not_in_settings",
+            "账户不在设置里了：请让用户点左下角的头像打开账户弹层。",
+        ));
+    }
     if !SECTIONS.contains(&section) {
         return Err(invalid(
             "invalid_section",
-            "section 只能是 AI、连接、账户、高级之一",
+            "section 只能是 AI、连接、高级之一",
         ));
     }
 
@@ -122,8 +125,8 @@ impl Tool for OpenSettingsTool {
     fn description(&self) -> &str {
         "只在用户问「这个设置在哪里 / 怎么改」，或需要边指边解释某个设置项时调用。\
          只打开设置并指向对应位置，不改任何值；一轮对话最多一次，用户没问设置时不要调用。\n\
-         段只能是 ai / connection / account / advanced；row 是可选的具体行。\
-         说「AI」「连接」「账户」「高级」，不出现内部 id。"
+         段只能是 ai / connection / advanced；账户不在设置里，它由左下角头像打开独立弹层，不要用这个工具指路。\
+         row 是可选的具体行。说「AI」「连接」「高级」，不出现内部 id。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -134,7 +137,7 @@ impl Tool for OpenSettingsTool {
         json!({
             "type": "object",
             "properties": {
-                "section": { "enum": ["ai", "connection", "account", "advanced"] },
+                "section": { "enum": ["ai", "connection", "advanced"] },
                 "row": { "type": "string", "minLength": 1, "maxLength": 40 }
             },
             "required": ["section"],
@@ -245,6 +248,12 @@ mod tests {
     }
 
     #[test]
+    fn sections_are_three_and_exclude_account() {
+        assert_eq!(SECTIONS, ["ai", "connection", "advanced"]);
+        assert!(SETTINGS_ROWS.iter().all(|row| !row.starts_with("account.")));
+    }
+
+    #[test]
     fn unknown_section_and_extra_arguments_are_rejected() {
         assert_eq!(
             parse_input(&json!({ "section": "system" }))
@@ -258,6 +267,16 @@ mod tests {
                 .code,
             "INVALID_ARGUMENT"
         );
+    }
+
+    #[test]
+    fn account_is_rejected_with_a_readable_reason() {
+        let error = parse_input(&json!({ "section": "account" })).unwrap_err();
+        assert_eq!(error.code, "INVALID_ARGUMENT");
+        assert_eq!(error.details.unwrap()["reason"], "account_not_in_settings");
+        let message = error.message;
+        assert!(message.contains("账户"), "{message}");
+        assert!(message.contains("头像"), "{message}");
     }
 
     #[tokio::test]
@@ -281,7 +300,7 @@ mod tests {
         // 下一轮可以再打开一次。
         let next_turn = context(&session, 8);
         let third = tool
-            .execute(json!({ "section": "account" }), &next_turn)
+            .execute(json!({ "section": "advanced" }), &next_turn)
             .await;
         assert!(!third.is_error, "{}", third.content);
         assert_eq!(events.lock().unwrap().len(), 2);

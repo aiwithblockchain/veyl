@@ -102,10 +102,46 @@ export class FakeD1 {
     });
   }
 
+  /** 可清理的已销毁服务器：超龄且订单不处于 paid / provisioning（P2-2 守卫）。 */
+  private prunableServerIds(cutoff: number): Set<string> {
+    return new Set(
+      this.tables.servers
+        .filter(
+          (row) =>
+            row.state === "destroyed" &&
+            row.destroyed_at != null &&
+            Number(row.destroyed_at) < cutoff &&
+            !this.tables.orders.some(
+              (order) =>
+                order.id === row.order_id &&
+                (order.state === "paid" || order.state === "provisioning"),
+            ),
+        )
+        .map((row) => String(row.id)),
+    );
+  }
+
   exec(statement: Stmt): Row | null {
     const sql = normalise(statement.sql);
     const a = statement.args;
     if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
+
+    if (sql.startsWith("select coalesce(sum(case when ref_type in")) {
+      // 账单合计：与列表同条件、不受 LIMIT 影响。
+      const [accountId, cutoff, now] = a;
+      let topup = 0;
+      let charge = 0;
+      for (const row of this.tables.wallet_ledger) {
+        if (row.account_id !== accountId || row.ref_type === "snapshot") continue;
+        if (!(Number(row.created_at) > Number(cutoff))) continue;
+        if (!(Number(row.created_at) <= Number(now))) continue;
+        const amount = Number(row.amount_cents);
+        const refType = String(row.ref_type);
+        if (refType === "stripe_payment" || refType === "dodo_payment") topup += amount;
+        if (amount < 0) charge -= amount;
+      }
+      return { topup_cents: topup, charge_cents: charge };
+    }
 
     if (sql.startsWith("insert or replace into webhook_samples")) {
       this.beforeWebhookSample?.();
@@ -298,6 +334,58 @@ export class FakeD1 {
       if (row && this.tables.wallet_ledger.some((w) => w.id === ledgerId)) {
         row.charged_cents = Number(row.charged_cents) + Number(pay);
       }
+      return null;
+    }
+    if (sql.startsWith("delete from server_traffic where (server_id, cycle_id) in")) {
+      // 保留清理：非当前周期 + 超龄 + 小于该 server 历史最大 seq（最大 seq 行永远保留）。
+      // fake 按插入顺序截取前 N 条；真实 SQL 的 LIMIT 不带 ORDER BY 时顺序不保证，测试不依赖顺序。
+      const [cycle, cutoff, limit] = a;
+      const maxSeq = new Map<string, number>();
+      for (const row of this.tables.server_traffic) {
+        const id = String(row.server_id);
+        maxSeq.set(id, Math.max(maxSeq.get(id) ?? Number.NEGATIVE_INFINITY, Number(row.last_seq ?? 0)));
+      }
+      const victims = this.tables.server_traffic
+        .filter(
+          (row) =>
+            row.cycle_id !== cycle &&
+            Number(row.updated_at ?? 0) < Number(cutoff) &&
+            Number(row.last_seq ?? 0) <
+              (maxSeq.get(String(row.server_id)) ?? Number.NEGATIVE_INFINITY),
+        )
+        .slice(0, Number(limit));
+      const keys = new Set(victims.map((row) => `${row.server_id}:${row.cycle_id}`));
+      this.tables.server_traffic = this.tables.server_traffic.filter(
+        (row) => !keys.has(`${row.server_id}:${row.cycle_id}`),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from server_traffic where server_id in")) {
+      // servers 行被清理时同批删掉它的全部计量行（token 已没了，last_seq 不再有去重意义）。
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.server_traffic = this.tables.server_traffic.filter(
+        (row) => !(ids.has(String(row.server_id)) && eligible.has(String(row.server_id))),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from credentials where server_id in")) {
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.credentials = this.tables.credentials.filter(
+        (row) => !(ids.has(String(row.server_id)) && eligible.has(String(row.server_id))),
+      );
+      return null;
+    }
+    if (sql.startsWith("delete from servers where id in")) {
+      const ids = new Set(a.slice(0, -1).map(String));
+      const cutoff = Number(a[a.length - 1]);
+      const eligible = this.prunableServerIds(cutoff);
+      this.tables.servers = this.tables.servers.filter(
+        (row) => !(ids.has(String(row.id)) && eligible.has(String(row.id))),
+      );
       return null;
     }
     if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from servers")) {
@@ -1497,6 +1585,33 @@ export class FakeD1 {
       const row = this.tables.accounts.find((x) => x.id === a[0]);
       return row ? { balance_cents: row.balance_cents } : null;
     }
+    if (
+      sql.startsWith("insert into topups") &&
+      sql.includes("select ?, ?, ?, null, 'pending', ?")
+    ) {
+      // 条件 INSERT：计数和写入在同一条语句里，超限时 0 行。
+      const [id, accountId, cents, createdAt, , since, maxActive] = a;
+      const active = this.tables.topups.filter(
+        (row) =>
+          row.account_id === accountId &&
+          Number(row.created_at) >= Number(since) &&
+          (row.status === "pending" || row.status === "paid"),
+      ).length;
+      if (active < Number(maxActive)) {
+        this.tables.topups.push({
+          id,
+          account_id: accountId,
+          denomination_cents: cents,
+          product_id: null,
+          checkout_session_id: null,
+          checkout_url: null,
+          status: "pending",
+          created_at: createdAt,
+          paid_at: null,
+        });
+      }
+      return null;
+    }
     if (sql.startsWith("insert into topups")) {
       // 建单只带面额与 product_id，收银台会话随后 UPDATE 补上。
       this.tables.topups.push({
@@ -1609,6 +1724,74 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select t.server_id as server_id, t.bytes as bytes from server_traffic t")) {
+      // 本周期每台机器的已用字节（MyServer 流量四字段）。
+      const [accountId, cycleId] = a;
+      const serverIds = new Set(
+        this.tables.servers
+          .filter((server) => server.account_id === accountId)
+          .map((server) => server.id),
+      );
+      return this.tables.server_traffic
+        .filter((row) => serverIds.has(row.server_id) && row.cycle_id === cycleId)
+        .map((row) => ({ server_id: row.server_id, bytes: row.bytes ?? 0 }));
+    }
+    if (sql.startsWith("select w.id as id, w.ref_type as ref_type")) {
+      const [accountId, cutoff, now, limit] = a;
+      const servers = this.tables.servers;
+      const findServer = (id: string) => servers.find((row) => row.id === id);
+      return this.tables.wallet_ledger
+        .filter(
+          (row) =>
+            row.account_id === accountId &&
+            row.ref_type !== "snapshot" &&
+            Number(row.created_at) > Number(cutoff) &&
+            Number(row.created_at) <= Number(now),
+        )
+        .sort((left, right) => {
+          const byTime = Number(right.created_at) - Number(left.created_at);
+          if (byTime !== 0) return byTime;
+          const leftId = String(left.id);
+          const rightId = String(right.id);
+          return leftId < rightId ? 1 : leftId > rightId ? -1 : 0;
+        })
+        .slice(0, Number(limit))
+        .map((row) => {
+          const refType = String(row.ref_type);
+          let server: Row | undefined;
+          if (refType === "order") {
+            const order = this.tables.orders.find((entry) => entry.id === row.ref_id);
+            server = order ? servers.find((entry) => entry.order_id === order.id) : undefined;
+          } else if (
+            refType === "server_day" ||
+            refType === "server_traffic" ||
+            refType === "server_refund"
+          ) {
+            server = findServer(String(row.ref_id).split(":")[0]);
+          }
+          return {
+            id: row.id,
+            ref_type: refType,
+            ref_id: row.ref_id,
+            amount_cents: row.amount_cents,
+            created_at: row.created_at,
+            note: row.note ?? null,
+            server_id: server ? server.id : null,
+            server_name: server ? server.name : null,
+            server_plan: server ? server.plan : null,
+            server_region: server ? server.region : null,
+          };
+        });
+    }
+    if (sql.startsWith("select id from servers where state = 'destroyed' and destroyed_at is not null")) {
+      const [cutoff, limit] = a;
+      const eligible = this.prunableServerIds(Number(cutoff));
+      return this.tables.servers
+        .filter((row) => eligible.has(String(row.id)))
+        .sort((left, right) => Number(left.destroyed_at) - Number(right.destroyed_at))
+        .slice(0, Number(limit))
+        .map((row) => ({ id: row.id }));
+    }
     if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at from servers")) {
       // 额度池现算：账号下每台机器（含已销毁行，由 releasedBytes 按 destroyed_at 截止）。
       return this.tables.servers
@@ -2227,6 +2410,37 @@ export class FakeStatement {
         );
       if (row) row.created_at = now;
       return { success: true, meta: { changes: row ? 1 : 0 } };
+    } else if (
+      sql.startsWith("insert into topups") &&
+      sql.includes("select ?, ?, ?, null, 'pending', ?")
+    ) {
+      const [, accountId, , , , since, maxActive] = this.statement.args;
+      const active = this.db
+        .rows("topups")
+        .filter(
+          (row) =>
+            row.account_id === accountId &&
+            Number(row.created_at) >= Number(since) &&
+            (row.status === "pending" || row.status === "paid"),
+        ).length;
+      changes = active < Number(maxActive) ? 1 : 0;
+    } else if (sql.startsWith("delete from server_traffic where (server_id, cycle_id) in")) {
+      const before = this.db.rows("server_traffic").length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: before - this.db.rows("server_traffic").length } };
+    } else if (
+      sql.startsWith("delete from server_traffic where server_id in") ||
+      sql.startsWith("delete from credentials where server_id in") ||
+      sql.startsWith("delete from servers where id in")
+    ) {
+      const table = sql.includes("server_traffic")
+        ? "server_traffic"
+        : sql.includes("credentials")
+          ? "credentials"
+          : "servers";
+      const before = this.db.rows(table).length;
+      this.db.exec(this.statement);
+      return { success: true, meta: { changes: before - this.db.rows(table).length } };
     } else if (sql.startsWith("insert into server_traffic")) {
       const [serverId, cycleId, , , seq] = this.statement.args;
       const row = this.db

@@ -421,16 +421,20 @@ pub async fn my_server_catalog(
 
 #[tauri::command]
 pub async fn my_server_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    match crate::control_plane::servers::list().await {
-        Ok(servers) => {
-            log::debug!("我的服务器：列表成功 count={}", servers.len());
+    match crate::control_plane::servers::list_with_pool().await {
+        Ok(list) => {
+            log::debug!(
+                "我的服务器：列表成功 count={} pool={}",
+                list.servers.len(),
+                if list.traffic_pool.is_some() { "yes" } else { "no" }
+            );
             // 列表对齐后顺手收敛「服务器没了、节点还在」的残留（正常情况下零请求）。
             super::server_watch::reconcile_orphan_owned_nodes(
                 Arc::clone(&state.services),
-                &servers,
+                &list.servers,
             )
             .await;
-            Ok(json!({ "servers": servers }))
+            Ok(serde_json::to_value(list).unwrap_or(Value::Null))
         }
         Err(error) => {
             log::warn!(
@@ -527,6 +531,32 @@ pub async fn my_server_wallet() -> Result<Value, Value> {
     match crate::control_plane::servers::wallet().await {
         Ok(wallet) => Ok(json!(wallet)),
         Err(error) => Err(error.envelope()),
+    }
+}
+
+/// 近 N 天账单流水（仅 UI，2.76.0）。
+#[tauri::command]
+pub async fn my_server_billing_ledger(days: Option<i64>) -> Result<Value, Value> {
+    match crate::control_plane::billing::ledger(days).await {
+        Ok(ledger) => {
+            log::debug!(
+                "我的服务器：账单流水 window_days={} entries={} truncated={}",
+                ledger.window_days,
+                ledger.entries.len(),
+                ledger.truncated
+            );
+            Ok(json!(ledger))
+        }
+        Err(error) => {
+            log::warn!(
+                "我的服务器：账单流水失败 code={} reason={} retryable={} message={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable,
+                error.message
+            );
+            Err(error.envelope())
+        }
     }
 }
 

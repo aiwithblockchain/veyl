@@ -655,6 +655,26 @@ export type MyServerState =
   | "destroyed"
   | "gone";
 
+/**
+ * 本周期流量状态（契约 2.78.0；口径已收窄）：单台只有两种。
+ * `unpaid` = 因流量超支余额不足已停机。`near` / `over` 是**账号池**的判定，
+ * 不再出现在单台上；旧控制面还在发的 near / over 在归一化时降级为 `ok`。
+ */
+export type MyServerTrafficState = "ok" | "unpaid";
+
+/** 账号级流量池（契约 2.79.0）；旧控制面不返回。 */
+export interface TrafficPool {
+  usedBytes: number;
+  limitBytes: number;
+}
+
+/** `my_server_list` 的返回。 */
+export interface MyServerList {
+  servers: MyServer[];
+  /** 账号池；控制面没给时缺省，不按 0 处理。 */
+  traffic_pool?: TrafficPool;
+}
+
 export interface MyServerFailure {
   stage: MyServerState;
   code: string;
@@ -732,6 +752,14 @@ export interface MyServer {
   grace_ends_at: string | null;
   /** 每月公网出口流量额度（GiB）快照；0 = 未知。 */
   transfer_gib: number;
+  /** 本周期（UTC 自然月）已用字节；没有上报行 = 0。 */
+  traffic_used_bytes: number;
+  /** 本周期已释放额度（字节）；0 = 额度未知（`transfer_gib = 0`）。 */
+  traffic_limit_bytes: number;
+  /** 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面为空串。 */
+  traffic_reset_at: string;
+  /** 额度未知时恒为 `ok`：不知道额度就不能断言超支。 */
+  traffic_state: MyServerTrafficState;
   /** 建行失败时的扣费快照（USD 分）；后端未给按 0。 */
   charged_cents?: number;
   /** 建行失败时已退回的金额（USD 分）；后端未给按 0。 */
@@ -887,6 +915,9 @@ export interface MyServerWallet {
   balance_cents: number;
   currency: string;
   denominations_cents: number[];
+  /** 自定义充值范围（USD 分）；旧后端缺省时前端按 600 / 30000 兜底。 */
+  min_topup_cents?: number;
+  max_topup_cents?: number;
   updated_at: string;
 }
 
@@ -895,6 +926,46 @@ export interface MyServerTopup {
   topup_id: string;
   checkout_url: string | null;
   denomination_cents: number;
+}
+
+/** 账单流水类别（2.76.0）；`machine_day` 已包含建机第 0 天由 `order` 写下的那笔。 */
+export type BillingEntryKind =
+  | "topup"
+  | "machine_day"
+  | "traffic"
+  | "refund"
+  | "other";
+
+/** 账单里出现过的机器摘要；解析不出机器时条目里的 `server` 为 null。 */
+export interface BillingLedgerServer {
+  id: string;
+  name: string;
+  plan: string;
+  region: string;
+}
+
+/** 一笔流水（`commands.md` §7.36）。 */
+export interface BillingLedgerEntry {
+  id: string;
+  kind: BillingEntryKind;
+  /** USD 分：扣费为负、入账为正。 */
+  amount_cents: number;
+  /** epoch **毫秒**（不是秒），客户端按本地日展示。 */
+  at: number;
+  server: BillingLedgerServer | null;
+  note: string | null;
+}
+
+/** 近 N 天账单（2.76.0，仅 UI）。 */
+export interface BillingLedger {
+  balance_cents: number;
+  currency: string;
+  /** 实际生效的天数：入参越界时控制面回落为 30。 */
+  window_days: number;
+  /** 列表被 1000 条上限截断；`totals` 仍是全量。 */
+  truncated: boolean;
+  totals: { topup_cents: number; charge_cents: number };
+  entries: BillingLedgerEntry[];
 }
 
 /** 手机端导出（commands.md §7.21 / §7.22，2.48.0 起含 Shadowrocket 配置）。 */
@@ -1137,7 +1208,7 @@ export interface AgentBridge {
   /** 「我的服务器」：可售地区 / 套餐 / 价格（本期只读展示）。 */
   /** `fresh` = 回源取 DigitalOcean 当下可用性；只给新建向导用，别处保持缓存。 */
   myServerCatalog(fresh?: boolean): Promise<MyServerCatalog>;
-  myServerList(): Promise<{ servers: MyServer[] }>;
+  myServerList(): Promise<MyServerList>;
   /** 批量同步节点配置：拉列表 + 逐台取凭据落库；单台失败不影响整批。 */
   myServerSync(): Promise<ServerSyncData>;
   /** 读取同步间隔；缺失或非法时 Host 按 30 返回。 */
@@ -1189,6 +1260,8 @@ export interface AgentBridge {
   myServerLogout(): Promise<MyServerAccount>;
   /** 余额与充值档位（2.28.1）；前端不做金额运算。 */
   myServerWallet(): Promise<MyServerWallet>;
+  /** 近 N 天账单流水（2.76.0，仅 UI）；`days` 缺省 30，越界由控制面回落。 */
+  myServerBillingLedger(days?: number): Promise<BillingLedger>;
   /** 创建充值收银台会话；Host 负责用系统浏览器打开。 */
   myServerTopup(denominationCents: number): Promise<MyServerTopup>;
   /** 手机端导出（2.46.0）；Host 未接入时不实现，界面按生成失败处理。 */

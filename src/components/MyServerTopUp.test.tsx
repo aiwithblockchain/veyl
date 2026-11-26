@@ -2,12 +2,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
+import { BridgeError } from "../agent/errors";
 import { MyServerTopUp } from "./MyServerTopUp";
 
 const WALLET: MyServerWallet = {
   balance_cents: 100,
   currency: "USD",
-  denominations_cents: [1000, 2000],
+  denominations_cents: [600, 1000, 2500, 5000, 10000],
   updated_at: new Date(0).toISOString(),
 };
 
@@ -19,53 +20,57 @@ const TOPUP: MyServerTopup = {
 
 afterEach(cleanup);
 
-function renderTopUp(
+function renderPanel(
   onTopUp: (cents: number) => Promise<MyServerTopup> = async () => TOPUP,
-  onRetry: () => void = () => {},
-  onClose: () => void = () => {},
+  onCheckoutOpened: () => void = () => {},
+  wallet: MyServerWallet | null = WALLET,
 ) {
   const { container } = render(
     <MyServerTopUp
-      wallet={WALLET}
-      loading={false}
-      error={null}
-      onRetry={onRetry}
+      wallet={wallet}
       onTopUp={onTopUp}
-      onClose={onClose}
+      onCheckoutOpened={onCheckoutOpened}
     />,
   );
   return container;
 }
 
-describe("充值弹层", () => {
-  it("成功打开收银台后直接关闭弹窗，不显示「已打开支付页面」", async () => {
-    const onClose = vi.fn();
-    renderTopUp(async () => TOPUP, () => {}, onClose);
-
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
-
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText(/已打开支付页面/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "刷新余额" })).toBeNull();
+describe("充值面板（账户弹层内嵌）", () => {
+  it("5 个价格档位都在，档位是整美元", () => {
+    renderPanel();
+    for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
+      expect(screen.getByRole("button", { name }), name).toBeTruthy();
+    }
   });
 
-  it("checkout_url 为空：保留直接到账提示，不关闭弹窗", async () => {
-    const onClose = vi.fn();
-    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
-      topup_id: "top_1",
-      checkout_url: null,
-      denomination_cents: 1000,
-    }));
-    renderTopUp(onTopUp, () => {}, onClose);
+  it("打开收银台：交给外层关面板，不进入等待态", async () => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(async () => TOPUP, onCheckoutOpened);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
 
+    await waitFor(() => expect(onCheckoutOpened).toHaveBeenCalledTimes(1));
+    expect(
+      (screen.getByRole("button", { name: "$10" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.queryByText(/已在浏览器打开收款页/)).toBeNull();
+  });
+
+  it("checkout_url 为空：保留直接到账提示", async () => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(
+      async () => ({ ...TOPUP, checkout_url: null }),
+      onCheckoutOpened,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText("已充值 $10.00。")).toBeTruthy();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
   it("收银台打不开：不说已打开，给重新打开与可复制链接", async () => {
-    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => {
+    const onCheckoutOpened = vi.fn();
+    renderPanel(async () => {
       throw {
         code: "INTERNAL",
         message: "收银台打不开。",
@@ -75,17 +80,14 @@ describe("充值弹层", () => {
         },
         retryable: true,
       };
-    });
-    renderTopUp(onTopUp);
+    }, onCheckoutOpened);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText(/收银台暂时打不开/)).toBeTruthy();
-    expect(screen.queryByText(/已打开支付页面/)).toBeNull();
     expect(screen.getByRole("button", { name: "重新打开支付页面" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制链接" })).toBeTruthy();
-    expect(
-      screen.getByText("https://pay.example.com/session/abc"),
-    ).toBeTruthy();
+    expect(screen.getByText("https://pay.example.com/session/abc")).toBeTruthy();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
   it("没有链接时只给重试", async () => {
@@ -97,9 +99,9 @@ describe("充值弹层", () => {
         retryable: true,
       };
     });
-    renderTopUp(onTopUp);
+    renderPanel(onTopUp);
 
-    fireEvent.click(await screen.findByRole("button", { name: "$10.00" }));
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByRole("button", { name: "重试" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重新打开支付页面" })).toBeNull();
 
@@ -107,15 +109,152 @@ describe("充值弹层", () => {
     await waitFor(() => expect(onTopUp).toHaveBeenCalledTimes(2));
   });
 
-  it("焦点陷阱：Tab 在弹层内循环", async () => {
-    const container = renderTopUp();
-    const dialog = container.querySelector(".myservers-topup") as HTMLElement;
-    const buttons = Array.from(dialog.querySelectorAll("button"));
-    expect(buttons.length).toBeGreaterThan(1);
+  it("自定义金额：合法时按整美元发起充值", async () => {
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
+    const onCheckoutOpened = vi.fn();
+    renderPanel(onTopUp, onCheckoutOpened);
 
-    const last = buttons[buttons.length - 1];
-    last.focus();
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(document.activeElement).toBe(buttons[0]);
+    fireEvent.change(screen.getByLabelText("自定义金额"), {
+      target: { value: "36" },
+    });
+    const submit = screen.getByRole("button", {
+      name: "充值 $36",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(3600));
+    expect(onCheckoutOpened).toHaveBeenCalledTimes(1);
+  });
+
+  it("空输入：按钮写「充值」且禁用", () => {
+    renderPanel();
+
+    const submit = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByText("$6–$300，整美元")).toBeTruthy();
+  });
+
+  it("非法输入：输入时不报错，失焦后才提示并置 aria-invalid", () => {
+    renderPanel();
+    const input = screen.getByLabelText("自定义金额");
+
+    fireEvent.change(input, { target: { value: "3" } });
+    expect(screen.queryByText("请输入 $6–$300 的整美元金额")).toBeNull();
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+
+    fireEvent.blur(input);
+    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+
+    // 清空后回到中性提示。
+    fireEvent.change(input, { target: { value: "" } });
+    expect(screen.getByText("$6–$300，整美元")).toBeTruthy();
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it("自定义金额：wallet 的 min/max 生效", async () => {
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
+    renderPanel(onTopUp, () => {}, {
+      ...WALLET,
+      min_topup_cents: 1000,
+      max_topup_cents: 2000,
+    });
+
+    const input = screen.getByLabelText("自定义金额");
+    fireEvent.change(input, { target: { value: "6" } });
+    const invalid = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
+    expect(invalid.disabled).toBe(false);
+    fireEvent.click(invalid);
+    expect(onTopUp).not.toHaveBeenCalled();
+    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: "10" } });
+    const submit = screen.getByRole("button", {
+      name: "充值 $10",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(1000));
+  });
+
+  it("自定义金额：默认范围下 6/300 可提交，300.01/5 被拦", async () => {
+    // 不走收银台（checkout_url=null），成功也不会关面板。
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
+      ...TOPUP,
+      checkout_url: null,
+    }));
+    renderPanel(onTopUp);
+    const input = screen.getByLabelText("自定义金额");
+    const submit = () => screen.getByRole("button", { name: /^充值/ }) as HTMLButtonElement;
+
+    for (const [value, cents] of [
+      ["6", 600],
+      ["300", 30000],
+    ] as const) {
+      fireEvent.change(input, { target: { value } });
+      const button = submit();
+      expect(button.disabled, value).toBe(false);
+      fireEvent.click(button);
+      await waitFor(() => expect(onTopUp).toHaveBeenLastCalledWith(cents));
+    }
+
+    for (const value of ["5", "300.01"]) {
+      fireEvent.change(input, { target: { value } });
+      const button = submit();
+      expect(button.disabled, value).toBe(false);
+      fireEvent.click(button);
+      expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+    }
+    expect(onTopUp).toHaveBeenCalledTimes(2);
+  });
+
+  it("自定义金额：前导零 06 视为 6", async () => {
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
+    renderPanel(onTopUp);
+
+    fireEvent.change(screen.getByLabelText("自定义金额"), {
+      target: { value: "06" },
+    });
+    const submit = screen.getByRole("button", {
+      name: "充值 $6",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(600));
+  });
+
+  it("自定义金额：超长数字提交被拦", () => {
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
+    renderPanel(onTopUp);
+    fireEvent.change(screen.getByLabelText("自定义金额"), {
+      target: { value: "999999999999999999999" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /^充值/ }) as HTMLButtonElement,
+    );
+    expect(onTopUp).not.toHaveBeenCalled();
+    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+  });
+
+  it("速率限制显示专用文案", async () => {
+    const onTopUp = vi.fn(async (): Promise<MyServerTopup> => {
+      throw new BridgeError(
+        "RATE_LIMITED",
+        "",
+        { reason: "topup_rate_limited" },
+        true,
+      );
+    });
+    renderPanel(onTopUp);
+
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    expect(await screen.findByText("充值太频繁，请一小时后再试。")).toBeTruthy();
+  });
+
+  it("没有钱包时不渲染档位，只看自定义输入", () => {
+    renderPanel(async () => TOPUP, () => {}, null);
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(screen.getByLabelText("自定义金额")).toBeTruthy();
   });
 });

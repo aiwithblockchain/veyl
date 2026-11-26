@@ -8,6 +8,10 @@ import type {
   AgentBridge,
   AppLanguage,
   AppLanguageState,
+  BillingEntryKind,
+  BillingLedger,
+  BillingLedgerEntry,
+  BillingLedgerServer,
   ChatHistory,
   ConfigActivateResult,
   ConfigCreateInput,
@@ -45,6 +49,9 @@ import type {
   MyServerEvent,
   MyServerEventCode,
   MyServerEvents,
+  MyServerList,
+  MyServerTrafficState,
+  TrafficPool,
   MyServerFailure,
   MyServerIdentity,
   MyServerLoginTicket,
@@ -763,6 +770,18 @@ const MY_SERVER_STATES = new Set<MyServerState>([
   "gone",
 ]);
 
+const MY_SERVER_TRAFFIC_STATES = new Set<MyServerTrafficState>([
+  "ok",
+  "unpaid",
+]);
+
+/** 字节字段宽松兜底：缺失、负数、非数值都按 0，绝不让这一条被丢掉。 */
+function readBytes(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : 0;
+}
+
 const MY_SERVER_ORDER_STATES = new Set<MyServerOrderState>([
   "pending_payment",
   "paid",
@@ -902,6 +921,16 @@ function normalizeServerSyncFailures(value: unknown): ServerSyncFailure[] {
   });
 }
 
+/** 账号池宽松解析：不是对象就当没给；对象内缺字段按 0（与 Rust 侧一致）。 */
+function normalizeTrafficPool(value: unknown): TrafficPool | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    usedBytes: readBytes(raw.used_bytes),
+    limitBytes: readBytes(raw.limit_bytes),
+  };
+}
+
 function normalizeMyServer(raw: unknown): MyServer | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
@@ -972,6 +1001,15 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     billing_state: billingState,
     grace_ends_at: grace as string | null,
     transfer_gib: transfer as number,
+    traffic_used_bytes: readBytes(value.traffic_used_bytes),
+    traffic_limit_bytes: readBytes(value.traffic_limit_bytes),
+    traffic_reset_at:
+      typeof value.traffic_reset_at === "string" ? value.traffic_reset_at : "",
+    traffic_state:
+      typeof value.traffic_state === "string" &&
+      MY_SERVER_TRAFFIC_STATES.has(value.traffic_state as MyServerTrafficState)
+        ? (value.traffic_state as MyServerTrafficState)
+        : "ok",
     charged_cents: readCents(value.charged_cents) ?? undefined,
     refunded_cents: readCents(value.refunded_cents) ?? undefined,
     failure: normalizeMyServerFailure(value.failure),
@@ -1059,6 +1097,99 @@ function normalizeMyServerLoginTicket(raw: unknown): MyServerLoginTicket | null 
     sent: value.sent,
     cooldown_seconds: Math.max(0, cooldown),
     ...(retry === undefined ? {} : { retry_after_seconds: Math.max(0, retry) }),
+  };
+}
+
+const BILLING_ENTRY_KINDS: readonly BillingEntryKind[] = [
+  "topup",
+  "machine_day",
+  "traffic",
+  "refund",
+  "other",
+];
+
+/** 毫秒时间戳的下界：秒级时间戳（约 1.7e9）会被渲染成 1970 年，按坏字段丢掉。 */
+const MIN_BILLING_AT_MS = 1_000_000_000_000;
+
+/** 金额与时间戳必须是整数：小数不能被 `Math.trunc` 悄悄收下。 */
+function readInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+function isBillingEntryKind(value: unknown): value is BillingEntryKind {
+  return (
+    typeof value === "string" &&
+    (BILLING_ENTRY_KINDS as readonly string[]).includes(value)
+  );
+}
+
+function normalizeBillingLedgerEntry(raw: unknown): BillingLedgerEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || value.id === "") return null;
+  const amount = readInteger(value.amount_cents);
+  const at = readInteger(value.at);
+  if (amount === null || at === null || at < MIN_BILLING_AT_MS) return null;
+
+  let server: BillingLedgerServer | null = null;
+  if (value.server !== null && value.server !== undefined) {
+    if (typeof value.server !== "object") return null;
+    const brief = value.server as Record<string, unknown>;
+    // server 对象缺字段说明上游形状坏了：整条丢弃，不拿空串补。
+    if (
+      typeof brief.id !== "string" ||
+      brief.id === "" ||
+      typeof brief.name !== "string" ||
+      typeof brief.plan !== "string" ||
+      typeof brief.region !== "string"
+    ) {
+      return null;
+    }
+    server = {
+      id: brief.id,
+      name: brief.name,
+      plan: brief.plan,
+      region: brief.region,
+    };
+  }
+
+  return {
+    id: value.id,
+    // 认不出的类别归 other：钱照样在明细里，不丢行。
+    kind: isBillingEntryKind(value.kind) ? value.kind : "other",
+    amount_cents: amount,
+    at,
+    server,
+    note: typeof value.note === "string" ? value.note : null,
+  };
+}
+
+function normalizeBillingLedger(raw: unknown): BillingLedger | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const balance = readInteger(value.balance_cents);
+  const windowDays = readInteger(value.window_days);
+  if (balance === null || balance < 0) return null;
+  if (windowDays === null || windowDays < 1 || windowDays > 30) return null;
+  if (!value.totals || typeof value.totals !== "object") return null;
+  const totals = value.totals as Record<string, unknown>;
+  const topup = readInteger(totals.topup_cents);
+  const charge = readInteger(totals.charge_cents);
+  if (topup === null || charge === null || topup < 0 || charge < 0) return null;
+  if (!Array.isArray(value.entries)) return null;
+
+  return {
+    balance_cents: balance,
+    currency:
+      typeof value.currency === "string" && value.currency.trim() !== ""
+        ? value.currency
+        : "USD",
+    window_days: windowDays,
+    truncated: value.truncated === true,
+    totals: { topup_cents: topup, charge_cents: charge },
+    entries: value.entries
+      .map((entry) => normalizeBillingLedgerEntry(entry))
+      .filter((entry): entry is BillingLedgerEntry => entry !== null),
   };
 }
 
@@ -1592,13 +1723,17 @@ export class TauriAgentBridge implements AgentBridge {
     );
   }
 
-  async myServerList(): Promise<{ servers: MyServer[] }> {
-    const raw = await call<{ servers?: unknown }>("my_server_list");
+  async myServerList(): Promise<MyServerList> {
+    const raw = await call<{ servers?: unknown; traffic_pool?: unknown }>(
+      "my_server_list",
+    );
     if (!Array.isArray(raw?.servers)) serverDataError();
     const servers = raw.servers
       .map((value) => normalizeMyServer(value))
       .filter((server): server is MyServer => server !== null);
-    return { servers };
+    // 账号池是可选字段：控制面没给时整条缺省，不按 0 处理。
+    const pool = normalizeTrafficPool(raw.traffic_pool);
+    return pool ? { servers, traffic_pool: pool } : { servers };
   }
 
   async myServerSync(): Promise<ServerSyncData> {
@@ -1853,6 +1988,17 @@ export class TauriAgentBridge implements AgentBridge {
     );
     if (!wallet) serverDataError();
     return wallet;
+  }
+
+  async myServerBillingLedger(days?: number): Promise<BillingLedger> {
+    const ledger = normalizeBillingLedger(
+      await call<unknown>(
+        "my_server_billing_ledger",
+        days === undefined ? {} : { days },
+      ),
+    );
+    if (!ledger) serverDataError();
+    return ledger;
   }
 
   async myServerTopup(denominationCents: number): Promise<MyServerTopup> {

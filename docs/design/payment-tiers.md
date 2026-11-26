@@ -18,7 +18,7 @@
 | 6 | 数据模型 | **`topups` 表一行不改**；没有迁移、没有新字段 |
 | 7 | 风控 | 邮箱验证；每账号 5 单/小时；新客户 / 大额 3DS；最低测试成本 $6 |
 
-一句话：**充值弹层给 5 个快捷金额，再加一个 $6–$300 的整美元输入框；任何通过校验的金额都能建 Stripe Checkout，现有入账链路不动。**
+一句话：**账户弹层里的充值块给 5 个快捷金额，再加一个 $6–$300 的整美元输入框；任何通过校验的金额都能建 Stripe Checkout，现有入账链路不动。**
 
 ---
 
@@ -126,24 +126,28 @@
 
 ## 5. UI
 
-- 充值弹层显示：
-  - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`；
-  - 一个自定义金额输入框：`$6–$300`，整美元；
-  - 提交按钮：`充值 $X`。
+- 层级：充值已就地并进账户弹层——余额 20 mono + `刷新` 文字链接，充值块常驻在余额下方（5 档 + 自定义 + 单一实心 CTA），档位上方不写指令文案；退出登录 danger-ghost 固定在 footer。
+- 档位：一行 5 等分（高 44、gap 8）；窄窗（视口 <620px）退成 3 列，单档不低于 44 高；金额 16 mono/500，hover/focus 只换边框（`--hair-strong` / `--ink`），不做实心填充。
+- 充值块显示：
+  - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`（整美元，不带 `.00`）；
+  - 一个自定义金额输入框：`$6–$300`，整美元，占位符 `36`；
+  - 提交按钮：空输入时为 `充值`（禁用）；合法时为 `充值 $X`（整额不带 `.00`）。
 - 没有分组、没有套餐 tab、没有划线价、没有「约一年」或天数文案。
 - 自定义输入校验：
   - 只允许整数美元（`^\d+$`，不接受小数点、负号、空值）；
   - `6 <= 金额 <= 300`；
-  - 不合法时按钮禁用并显示「$6–$300，整美元」；不发起请求。
-- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开，弹层立即关闭（沿用现有行为）。
-- 支付成功后账号菜单打开自动刷新余额；没有新手档卡片、没有年度组、没有「首次专享」。
+  - 输入过程中不报错；失焦后或点过提交且值非法才显示「请输入 $6–$300 的整美元金额」并置 `aria-invalid`；清空回到中性 hint；不发起请求。
+- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开后**关闭整个账户弹层**并给 toast（`account.checkoutOpened`：已在浏览器打开收付款页。付款完成后余额会自动更新。）——不保留面板、不把金额格置灰。
+- 回到 App 时（窗口 focus 或重新可见，先到先算）强制刷新一次余额，不受 30 秒门禁限制；余额已直接到账（没有 `checkout_url`）时留在面板里给 `topup.charged`；收银台打不开时面板不关，给错误与「重新打开支付页面 / 复制链接 / 重试」。
 - 旧客户端只显示 5 个快捷按钮，仍可正常充值；新客户端多一个自定义输入框。
 - 文案 key（中英同批）：
   - `topup.custom.label`：自定义金额 / Custom amount
-  - `topup.custom.placeholder`：6–300 / 6–300
+  - `topup.custom.placeholder`：36 / 36
   - `topup.custom.hint`：$6–$300，整美元 / $6–$300, whole dollars
   - `topup.custom.invalid`：请输入 $6–$300 的整美元金额 / Enter a whole-dollar amount from $6 to $300
   - `topup.custom.submit`：充值 {amount} / Top up {amount}
+  - `topup.submit`：充值 / Top up
+  - `account.checkoutOpened`：已在浏览器打开收付款页。付款完成后余额会自动更新。/ Checkout is open in your browser. Your balance will update after payment.
 - Checkout 侧：`product_data.name = "Veyl Service Credits"`，description 用现有的 `Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.`
 
 ---

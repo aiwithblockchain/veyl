@@ -445,7 +445,7 @@ node_import_file { path, configId? } → NodeImportResult
 - 读文件（≤1 MiB，按 UTF-8 解码、非法字节替换，不做编码猜测），把文本交给与 `node_import_text` **同一个解析实现**；行为、返回形状、错误码、事件与 `commands.md` §4.1.1 一致。
 - `path` 只用于读取，**不返回、不落日志**；回显的只有节点摘要，不含密码与文件内容。
 - 错误：`invalid_path`（空 / 非绝对）、`file_unreadable`、`file_too_large`、`not_node_text`；其余沿用 `NOT_FOUND` / `SECRET_STORE` / `INTERNAL`。
-- **不按扩展名过滤**；与 `node_import_text` 同一套解析：`ss://` 列表（含 base64 整段）或 Clash 配置的 `proxies:` 子集（2.77.0 起）；都不命中才落到 `not_node_text`。
+- **不按扩展名过滤**；与 `node_import_text` 同一套解析：`ss://` 列表（含 base64 整段）或 Clash 配置的 `proxies:` 子集（2.83.0 起）；都不命中才落到 `not_node_text`。
 - 命令编号 #69，`commands.md` 版本 `2.16.14`，完整条目见 §4.1.2。
 - 前端行为：系统对话框选文件 → 显示文件名并确认 → 调命令。**不把文件内容填进文本框**（需要前端读文件或命令回显全文，两者都不做）。
 - **窗口拖放不接这条命令**（2026-11-11 决议）：拖入的只可能是种子文件，格式与逐行 `ss://` 不同，继续走 `import_seed_file`。拖入非 `.json` 时的提示要指向本页的「添加节点」，不能只说「请换一个文件」。

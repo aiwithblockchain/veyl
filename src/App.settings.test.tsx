@@ -372,14 +372,12 @@ describe("settings-point（AI 指路）", () => {
     });
   }, 15_000);
 
-  it("row 为 null 时只打开对应段，不高亮任何行", async () => {
+  it("指向账户时打开账户弹层，不打开设置，也不高亮任何行", async () => {
     await readyApp();
     point("account", null);
 
-    await screen.findByRole("dialog", { name: "设置" });
-    expect(
-      screen.getByRole("tab", { name: "账户" }).getAttribute("aria-selected"),
-    ).toBe("true");
+    await screen.findByRole("dialog", { name: "账户" });
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
     expect(document.querySelector('[data-pointed="true"]')).toBeNull();
   }, 15_000);
 
@@ -430,21 +428,57 @@ describe("余额刷新的门禁（App 接线）", () => {
     });
   }
 
-  it("设置里 AI ↔ 账户来回切：30 秒内只发一次；「刷新」不受门禁", async () => {
+  it("账户弹层打开即刷新：30 秒内重开只发一次；「刷新」不受门禁", async () => {
     const wallet = prepareWallet();
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
-    const dialog = await screen.findByRole("dialog", { name: "设置" });
 
-    fireEvent.click(within(dialog).getByRole("tab", { name: "账户" }));
+    const avatar = await screen.findByRole("button", { name: /^账户，/ });
+    fireEvent.click(avatar);
+    await screen.findByRole("dialog", { name: "账户" });
     await waitFor(() => expect(wallet.mock.calls.length).toBe(1));
 
-    fireEvent.click(within(dialog).getByRole("tab", { name: "AI" }));
-    fireEvent.click(within(dialog).getByRole("tab", { name: "账户" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^账户，/ }));
+    await screen.findByRole("dialog", { name: "账户" });
     expect(wallet.mock.calls.length).toBe(1);
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "刷新" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     await waitFor(() => expect(wallet.mock.calls.length).toBe(2));
+  });
+
+  it("收银台打开后：关闭账户层、给 toast，回窗口时补刷一次余额", async () => {
+    const wallet = prepareWallet();
+    vi.spyOn(bridge, "myServerTopup").mockResolvedValue({
+      topup_id: "top_1",
+      checkout_url: "https://pay.example.com/session/abc",
+      denomination_cents: 1000,
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^账户，/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "$10" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
+    );
+    expect(
+      await screen.findByText("已在浏览器打开收付款页。付款完成后余额会自动更新。"),
+    ).toBeTruthy();
+
+    const before = wallet.mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(wallet.mock.calls.length).toBe(before + 1));
+
+    // 一次性：再回窗口不再补刷。
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(wallet.mock.calls.length).toBe(before + 1);
   });
 
 });

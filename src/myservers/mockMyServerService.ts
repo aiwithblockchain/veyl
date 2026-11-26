@@ -1,4 +1,6 @@
 import type {
+  BillingLedger,
+  BillingLedgerEntry,
   MyServer,
   MyServerAccount,
   MyServerCatalog,
@@ -9,6 +11,7 @@ import type {
   MyServerEvents,
   MyServerFailure,
   MyServerLoginTicket,
+  MyServerList,
   MyServerOrder,
   MyServerPlan,
   MyServerRebuildResult,
@@ -16,6 +19,7 @@ import type {
   MyServerSshCredentials,
   MyServerState,
   MyServerTopup,
+  MyServerTrafficState,
   MyServerWallet,
 } from "../agent/bridge";
 
@@ -178,7 +182,7 @@ function readStore(): Store {
       const parsed = JSON.parse(raw) as Partial<Store>;
       if (Array.isArray(parsed.servers) && Array.isArray(parsed.orders)) {
         return {
-          servers: parsed.servers as StoredServer[],
+          servers: (parsed.servers as StoredServer[]).map(withTrafficDefaults),
           orders: parsed.orders as MyServerOrder[],
           next_id: typeof parsed.next_id === "number" ? parsed.next_id : 1,
           balance_cents:
@@ -205,6 +209,119 @@ function writeStore(store: Store): void {
 function copyServer(server: StoredServer): MyServer {
   const { started_at: _started, idempotency_key: _key, ...rest } = server;
   return { ...rest, failure: rest.failure ? { ...rest.failure } : null };
+}
+
+const GIB = 1024 ** 3;
+
+/** 本周期清零点：下个 UTC 月 1 日 00:00（契约 2.78.0）。 */
+function nextTrafficResetAt(now = Date.now()): string {
+  const date = new Date(now);
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+  ).toISOString();
+}
+
+/** 释放窗口的天数：与控制面 `traffic_cycle.ts` 的 `RELEASE_DAYS` 一致（§4.1）。 */
+const RELEASE_DAYS = 28;
+
+/** 当天释放的额度（字节）：`min(月额度, 月额度 / 28)`，与控制面同口径。 */
+function releasedBytes(transferGib: number): number {
+  const monthly = Math.round(Math.max(0, transferGib) * GIB);
+  if (monthly <= 0) return 0;
+  return Math.min(monthly, Math.floor(monthly / RELEASE_DAYS));
+}
+
+/**
+ * demo 用流量样例：单台只有 `ok` / `unpaid`（near / over 是账号池的判定），
+ * 另有一台额度未知、一台流量超支停机的墓碑，以及一台**用户主动销毁**的机器
+ * ——它不在列表里，但已用与已释放仍留在账号池，这是 `traffic_pool` 存在的理由。
+ *
+ * 列表里五台的合计刻意落在「已用 ≈ 已释放的 85.4%」：账户弹层能直接看到琥珀
+ * 提示，而单台一律是 ok / unpaid，不会自相矛盾。
+ */
+const TRAFFIC_SAMPLES: Array<{
+  server_id: string;
+  name: string;
+  region: string;
+  /** 月额度（GiB）；0 = 额度未知。 */
+  transfer_gib: number;
+  used: number;
+  state: MyServerTrafficState;
+  /** 流量超支停机：列表里以墓碑行保留。 */
+  tombstone?: { code: string; message: string };
+  /** 用户主动销毁：不在列表里，但额度与已用计入账号池。 */
+  user_destroyed?: boolean;
+}> = [
+  {
+    server_id: "srv_traffic_ok_a",
+    name: "新加坡 1 · DigitalOcean",
+    region: "sgp1",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 20 * GIB,
+    state: "ok",
+  },
+  {
+    server_id: "srv_traffic_ok_b",
+    name: "纽约 1 · DigitalOcean",
+    region: "nyc1",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 27 * GIB,
+    state: "ok",
+  },
+  {
+    server_id: "srv_traffic_ok_c",
+    name: "旧金山 2 · DigitalOcean",
+    region: "sfo2",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 32 * GIB,
+    state: "ok",
+  },
+  {
+    server_id: "srv_traffic_unknown",
+    name: "班加罗尔 1 · DigitalOcean",
+    region: "blr1",
+    transfer_gib: 0,
+    used: 512 * 1024 ** 2,
+    state: "ok",
+  },
+  {
+    server_id: "srv_traffic_unpaid",
+    name: "旧金山 3 · DigitalOcean",
+    region: "sfo3",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 42 * GIB,
+    state: "unpaid",
+    tombstone: { code: "traffic_overage", message: "流量超支，余额不足已停机" },
+  },
+  {
+    server_id: "srv_traffic_deleted",
+    name: "多伦多 1 · DigitalOcean",
+    region: "tor1",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 31 * GIB,
+    state: "ok",
+    user_destroyed: true,
+  },
+];
+
+/** 控制面保留的两类停机墓碑（与 servers.ts 的列表过滤一致）。 */
+const TOMBSTONE_CODES = new Set(["billing_unpaid", "traffic_overage"]);
+
+/** 旧存档没有四个流量字段：补齐默认值，界面与账号池都拿不到 undefined。 */
+function withTrafficDefaults(server: StoredServer): StoredServer {
+  return {
+    ...server,
+    traffic_used_bytes: Number.isFinite(server.traffic_used_bytes)
+      ? server.traffic_used_bytes
+      : 0,
+    traffic_limit_bytes: Number.isFinite(server.traffic_limit_bytes)
+      ? server.traffic_limit_bytes
+      : 0,
+    traffic_reset_at:
+      typeof server.traffic_reset_at === "string" ? server.traffic_reset_at : "",
+    // 旧存档里可能还有 near / over：单台只认 unpaid，其余一律 ok。
+    traffic_state: server.traffic_state === "unpaid" ? "unpaid" : "ok",
+  };
 }
 
 function failStage(): string | null {
@@ -314,20 +431,86 @@ export class MockMyServerService {
     };
   }
 
-  list(): { servers: MyServer[] } {
+  list(): MyServerList {
     if (readFlag(DOWN_KEY) === "1") providerDown();
     const store = readStore();
     advance(store);
+    const servers = store.servers
+      // 控制面只保留两种停机墓碑；手动销毁的行不再出现。
+      .filter(
+        (server) =>
+          server.state !== "destroyed" ||
+          (server.failure !== null &&
+            TOMBSTONE_CODES.has(server.failure.code)),
+      )
+      .map(copyServer);
     return {
-      servers: store.servers
-        // 控制面只保留「余额不足停机」的墓碑行；手动销毁的行不再出现。
-        .filter(
-          (server) =>
-            server.state !== "destroyed" ||
-            server.failure?.code === "billing_unpaid",
-        )
-        .map(copyServer),
+      servers,
+      // 账号池（2.79.0）：对列表推导之前的全量机器求和——手动销毁的行也在
+      // 这个周期里占着已释放额度，池子必须包含列表里看不到的那些。
+      traffic_pool: {
+        usedBytes: store.servers.reduce(
+          (sum, server) => sum + server.traffic_used_bytes,
+          0,
+        ),
+        limitBytes: store.servers.reduce(
+          (sum, server) => sum + server.traffic_limit_bytes,
+          0,
+        ),
+      },
     };
+  }
+
+  /**
+   * demo：造六台流量样例（三台 ok / 额度未知 / 流量超支停机 / 用户主动销毁）。
+   * 列表里只出现前五台；最后那台只进账号池。
+   * 验收：控制台 `window.dispatchEvent(new Event("veyl:seed-traffic"))` 后刷新。
+   */
+  seedTrafficDemo(): MyServer[] {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    const store = readStore();
+    const now = Date.now();
+    TRAFFIC_SAMPLES.forEach((sample, index) => {
+      if (store.servers.some((server) => server.server_id === sample.server_id)) {
+        return;
+      }
+      const destroyed =
+        sample.tombstone !== undefined || sample.user_destroyed === true;
+      store.servers.push({
+        server_id: sample.server_id,
+        name: sample.name,
+        region: sample.region,
+        plan: DEFAULT_PLAN.id,
+        state: destroyed ? "destroyed" : "healthy",
+        created_at: new Date(now - 12 * 3_600_000).toISOString(),
+        ip: `203.0.113.${20 + index}`,
+        port: destroyed ? null : 8388,
+        node_id: `nd_${sample.server_id}`,
+        local_node_id: null,
+        hourly_usd: DEFAULT_PLAN.hourly_usd,
+        monthly_usd: DEFAULT_PLAN.monthly_usd,
+        daily_price_cents: DEFAULT_PLAN.daily_price_cents,
+        transfer_gib: sample.transfer_gib,
+        traffic_used_bytes: sample.used,
+        traffic_limit_bytes: releasedBytes(sample.transfer_gib),
+        traffic_reset_at: nextTrafficResetAt(now),
+        traffic_state: sample.state,
+        paid_until: new Date(destroyed ? now : now + 86_400_000).toISOString(),
+        billing_state: destroyed ? "expired" : "active",
+        grace_ends_at: null,
+        failure: sample.tombstone
+          ? {
+              stage: "active",
+              code: sample.tombstone.code,
+              message: sample.tombstone.message,
+              retryable: false,
+            }
+          : null,
+        started_at: now,
+      });
+    });
+    writeStore(store);
+    return this.list().servers;
   }
 
   /**
@@ -355,6 +538,10 @@ export class MockMyServerService {
       billing_state: "expired",
       grace_ends_at: null,
       transfer_gib: DEFAULT_PLAN.transfer_gib,
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: releasedBytes(DEFAULT_PLAN.transfer_gib),
+      traffic_reset_at: nextTrafficResetAt(now),
+      traffic_state: "ok",
       failure: {
         stage: "active",
         code: "billing_unpaid",
@@ -578,6 +765,10 @@ export class MockMyServerService {
       monthly_usd: plan.monthly_usd,
       daily_price_cents: plan.daily_price_cents,
       transfer_gib: plan.transfer_gib,
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: releasedBytes(plan.transfer_gib),
+      traffic_reset_at: nextTrafficResetAt(),
+      traffic_state: "ok",
       paid_until: null,
       billing_state: "pending",
       grace_ends_at: null,
@@ -635,6 +826,96 @@ export class MockMyServerService {
       currency: "USD",
       denominations_cents: [...TOPUP_CENTS],
       updated_at: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * 近 N 天账单样例：20 笔、覆盖五类，既有 null 机器也有正负金额。
+   * `totals` 与控制面同一口径（充值只算 topup、扣费算所有负数），所以与逐行求和一致；
+   * 样例 20 笔，`truncated` 恒为 false。
+   */
+  billingLedger(days?: number): BillingLedger {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    if (!readAccount().logged_in) {
+      loginError("UNAUTHENTICATED", "需要先登录。", "auth_required", true);
+    }
+    // 越界与省略都落到 30：控制面也是这么回落的。
+    const windowDays =
+      days !== undefined && Number.isInteger(days) && days >= 1 && days <= 30
+        ? days
+        : 30;
+    const now = Date.now();
+    const sgp = {
+      id: "srv_mock_sgp",
+      name: "新加坡 1",
+      plan: "s-1vcpu-1gb",
+      region: "sgp1",
+    };
+    const nyc = {
+      id: "srv_mock_nyc",
+      name: "纽约 1",
+      plan: "s-1vcpu-512mb-10gb",
+      region: "nyc1",
+    };
+    const sfo = {
+      id: "srv_mock_sfo",
+      name: "旧金山 2",
+      plan: "s-1vcpu-2gb",
+      region: "sfo2",
+    };
+    const rows: Array<
+      [
+        BillingLedgerEntry["kind"],
+        number,
+        BillingLedgerEntry["server"],
+        string | null,
+      ]
+    > = [
+      ["topup", 1200, null, "充值"],
+      ["machine_day", -20, sgp, null],
+      ["machine_day", -20, sgp, null],
+      ["traffic", -15, sgp, null],
+      ["machine_day", -20, nyc, null],
+      ["machine_day", -20, nyc, null],
+      ["traffic", -45, nyc, null],
+      ["refund", 200, nyc, "流量超支退回"],
+      ["machine_day", -30, sfo, null],
+      ["machine_day", -30, sfo, null],
+      ["traffic", -120, sfo, null],
+      ["other", 300, null, "活动赠额"],
+      ["topup", 2400, null, "充值"],
+      ["machine_day", -20, sgp, null],
+      ["machine_day", -20, sgp, null],
+      ["traffic", -10, sgp, null],
+      ["machine_day", -20, nyc, null],
+      ["refund", 50, sgp, "重复扣费退回"],
+      ["other", -80, null, "人工调账"],
+      ["machine_day", -20, nyc, null],
+    ];
+    const entries: BillingLedgerEntry[] = rows.map(
+      ([kind, amount, server, note], index) => ({
+        id: `wl_mock_${String(index + 1).padStart(2, "0")}`,
+        kind,
+        amount_cents: amount,
+        at: now - index * 3_600_000,
+        server,
+        note,
+      }),
+    );
+    return {
+      balance_cents: readStore().balance_cents,
+      currency: "USD",
+      window_days: windowDays,
+      truncated: false,
+      totals: {
+        topup_cents: entries
+          .filter((entry) => entry.kind === "topup")
+          .reduce((sum, entry) => sum + entry.amount_cents, 0),
+        charge_cents: entries
+          .filter((entry) => entry.amount_cents < 0)
+          .reduce((sum, entry) => sum - entry.amount_cents, 0),
+      },
+      entries,
     };
   }
 

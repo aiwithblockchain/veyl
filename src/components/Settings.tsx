@@ -10,7 +10,6 @@ import type {
   LlmProvider,
   LlmProviderInput,
   MyServerAccount,
-  MyServerWallet,
   NetworkForceResetResult,
   NetworkForceResetStep,
   SyncIntervalMinutes,
@@ -25,9 +24,7 @@ import { toBridgeError } from "../agent/errors";
 import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import type { MessageKey } from "../i18n";
-import { formatUsdCents } from "../myservers/labels";
 import { isSignedIn } from "../myservers/useMyServers";
-import type { WalletTrigger } from "../myservers/useMyServers";
 import { settingsConsultPrompt } from "../ai/settingsConsult";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
@@ -82,27 +79,10 @@ interface Props {
   onSectionChange?: (section: SectionId) => void;
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
   point?: { section: SectionId; row: string | null; nonce: number } | null;
+  /** 只用于「连接」里的配置同步：未登录 / 账号未读回时不发账户命令。 */
   account?: MyServerAccount | null;
-  /** 余额与账号菜单共用同一份 wallet 状态；未接线时按「—」显示。 */
-  wallet?: MyServerWallet | null;
-  walletLoading?: boolean;
-  /** 已有值时的刷新在途：余额行入口写「刷新中」，旧值不动。 */
-  walletRefreshing?: boolean;
-  walletError?: string | null;
-  /** 刷新失败但手上还有旧值：显示旧值并注明「显示的是上次的余额」。 */
-  walletStale?: boolean;
-  /** 余额读取失败时的重试 / 打开账户段时的刷新：走 30 秒门禁。 */
-  onRefreshWallet?: (trigger: WalletTrigger) => void;
-  /** 设置里的「刷新」文字链接：强制刷新，不受 30 秒门禁限制。 */
-  onForceRefresh?: () => void;
-  onLogin?: () => void;
-  onTopUp?: () => void;
-  onViewBills?: () => void;
-  /** 「在其它设备上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
-  mobileExportOpen?: boolean;
   /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
   trapPaused?: boolean;
-  onOpenMobileExport?: (trigger: HTMLElement) => void;
   /** 节点配置同步：间隔档位与手动触发都由 App 持有并落库。 */
   syncInterval?: SyncIntervalMinutes;
   onSyncIntervalChange?: (minutes: SyncIntervalMinutes) => void;
@@ -117,13 +97,12 @@ interface Props {
   lastSyncedAt?: number | null;
 }
 
-type SectionId = "ai" | "network" | "account" | "advanced";
+type SectionId = "ai" | "network" | "advanced";
 
 /** 咨询提示词里用的分区名，与页签同一套文案。 */
 const SECTION_NAMES: Record<SectionId, MessageKey> = {
   ai: "controls.ai",
   network: "settings.tab.connection",
-  account: "controls.account",
   advanced: "controls.advanced",
 };
 
@@ -140,6 +119,16 @@ interface ProviderForm {
 type TestState = { state: "idle" | "running" | "ok" | "error"; text: string };
 
 type ResetPhase = "idle" | "confirm" | "running" | "result";
+
+/** 后端预算 15 秒，前端留 3 秒余量；到点就不再等，界面转入可关闭的结果态。 */
+const RESET_TIMEOUT_MS = 18_000;
+const RESET_TIMEOUT_SECONDS = RESET_TIMEOUT_MS / 1000;
+
+type ResetErrorState = {
+  /** notStarted = 命令直接失败；timeout = 18 秒没回结果，后台可能还在跑。 */
+  kind: "notStarted" | "timeout";
+  text: string;
+};
 
 type ResetStepKey =
   | "stop_runtime"
@@ -583,7 +572,6 @@ function SeedRefreshRow({
 const SECTIONS: Array<{ id: SectionId; label: MessageKey }> = [
   { id: "ai", label: "controls.ai" },
   { id: "network", label: "settings.tab.connection" },
-  { id: "account", label: "controls.account" },
   { id: "advanced", label: "controls.advanced" },
 ];
 
@@ -693,18 +681,7 @@ export function Settings({
   onSectionChange,
   point = null,
   account = null,
-  wallet = null,
-  walletLoading = false,
-  walletRefreshing = false,
-  walletError = null,
-  walletStale = false,
-  onRefreshWallet,
-  onForceRefresh,
-  onLogin,
-  onTopUp,
-  mobileExportOpen = false,
   trapPaused = false,
-  onOpenMobileExport,
   syncInterval = 30,
   onSyncIntervalChange,
   onSyncNow,
@@ -725,14 +702,6 @@ export function Settings({
   const showCleanupProxy =
     !runtimeActive && (connectMode === "system_proxy" || runtime.system_proxy_enabled);
   const [section, setSection] = useState<SectionId>("ai");
-  // 打开设置›账户：触发一次刷新（30 秒节流在 refreshWallet 里）。
-  const refreshWalletRef = useRef(onRefreshWallet);
-  refreshWalletRef.current = onRefreshWallet;
-  useEffect(() => {
-    // 未登录不发：登出时停在这页也不会打余额接口。
-    if (!open || section !== "account" || account?.logged_in !== true) return;
-    refreshWalletRef.current?.("open_settings");
-  }, [open, section, account?.logged_in]);
   /** 咨询 AI：设置缩左、助手并排。 */
   const [consulting, setConsulting] = useState(false);
   /** AI 指路高亮的行 id；2 秒后自动清掉。 */
@@ -792,7 +761,10 @@ export function Settings({
   const [domainError, setDomainError] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
   const [resetResult, setResetResult] = useState<NetworkForceResetResult | null>(null);
-  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<ResetErrorState | null>(null);
+  const [resetElapsed, setResetElapsed] = useState(0);
+  /** 每次重置的编号；关闭弹层或重新发起后加一，晚到的结果据此丢弃。 */
+  const resetRunRef = useRef(0);
   const [lastReset, setLastReset] = useState<{
     at: number;
     total: number;
@@ -822,12 +794,21 @@ export function Settings({
   const resetCloseRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
+
+  // 运行中每秒更新已用时间：用户看得到等待在往前走，不是一句静止的「正在重置…」。
+  useEffect(() => {
+    if (resetPhase !== "running") return;
+    const started = Date.now();
+    setResetElapsed(0);
+    const timer = window.setInterval(
+      () => setResetElapsed(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [resetPhase]);
+
   useFocusTrap(
-    open &&
-      !consulting &&
-      resetPhase === "idle" &&
-      !mobileExportOpen &&
-      !trapPaused,
+    open && !consulting && resetPhase === "idle" && !trapPaused,
     dialogRef,
   );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
@@ -965,7 +946,9 @@ export function Settings({
     setListTest(null);
     setPendingDelete(null);
     setDiagnosticNotice(null);
+    resetRunRef.current += 1;
     setResetPhase("idle");
+    setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
     setLastReset(null);
@@ -981,14 +964,17 @@ export function Settings({
   }, [defaultProfile]);
 
   const closeReset = useCallback(() => {
-    if (resetPhase === "running") return;
+    // 18 秒后即使命令还没回来也放行：在途结果按编号丢弃，别把用户锁死在弹层里。
+    if (resetPhase === "running" && resetElapsed < RESET_TIMEOUT_SECONDS) return;
+    resetRunRef.current += 1;
     returnFocusRef.current = true;
     setResetPhase("idle");
+    setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
     setResetCopy("idle");
     setRouteCopy("idle");
-  }, [resetPhase]);
+  }, [resetPhase, resetElapsed]);
 
   const closeSettings = useCallback(() => {
     setConsulting(false);
@@ -1071,24 +1057,6 @@ export function Settings({
                 : translate("settings.sync.hours", { count: syncInterval / 60 }),
         }),
       );
-    } else if (sectionId === "account") {
-      if (!account?.logged_in) {
-        parts.push(translate("settings.consult.fact.signedOut"));
-      } else {
-        const identity =
-          account.email ??
-          (account.account_kind === "device"
-            ? translate("settings.consult.fact.identityDevice")
-            : translate("settings.account.signedIn"));
-        parts.push(translate("settings.consult.fact.identity", { identity }));
-        if (wallet) {
-          parts.push(
-            translate("settings.consult.fact.balance", {
-              amount: formatUsdCents(wallet.balance_cents),
-            }),
-          );
-        }
-      }
     } else {
       parts.push(translate("settings.consult.fact.seed", { summary: seedSummary(seedInfo) }));
       if (runtime.upstream_version) {
@@ -1226,11 +1194,9 @@ export function Settings({
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
-      // 「在其它设备上使用」弹层在上层：Esc 归它，不关设置。
-      if (mobileExportOpen) return;
-      // 重置弹层在上层：先关它，运行中则完全忽略。
+      // 重置弹层在上层：先关它。18 秒内运行中是否放行由 closeReset 自己判断。
       if (resetPhase !== "idle") {
-        if (resetPhase !== "running") closeReset();
+        closeReset();
         return;
       }
       // 端口编辑态先拦下 Esc：只退编辑，不关设置。
@@ -1242,7 +1208,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, mobileExportOpen, trapPaused]);
+  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -1618,23 +1584,37 @@ export function Settings({
 
   const runNetworkReset = async () => {
     if (resetPhase === "running") return;
+    const runId = ++resetRunRef.current;
     setResetResult(null);
     setResetError(null);
     setResetCopy("idle");
     setRouteCopy("idle");
     setResetPhase("running");
+    let timer: number | null = null;
+    // 后端自己按 15 秒兜底；这里只兜「命令永远不回」，到点转成可关闭的结果态。
+    const timedOut = new Promise<null>((resolve) => {
+      timer = window.setTimeout(() => resolve(null), RESET_TIMEOUT_MS);
+    });
     try {
-      const result = await bridge.networkForceReset();
-      setResetResult(result);
-      setLastReset({
-        at: Date.now(),
-        total: result.steps.length,
-        failed: result.steps.filter((step) => resetStepStatus(step) !== "ok").length,
-      });
+      const result = await Promise.race([bridge.networkForceReset(), timedOut]);
+      // 弹层已被关闭或已重新发起：这次的结果在后台丢弃，不再碰界面。
+      if (resetRunRef.current !== runId) return;
+      if (result === null) {
+        setResetError({ kind: "timeout", text: t("settings.reset.timeoutSub") });
+      } else {
+        setResetResult(result);
+        setLastReset({
+          at: Date.now(),
+          total: result.steps.length,
+          failed: result.steps.filter((step) => resetStepStatus(step) !== "ok").length,
+        });
+      }
     } catch (error) {
-      setResetError(describeResetError(error));
+      if (resetRunRef.current !== runId) return;
+      setResetError({ kind: "notStarted", text: describeResetError(error) });
     } finally {
-      setResetPhase("result");
+      if (timer !== null) window.clearTimeout(timer);
+      if (resetRunRef.current === runId) setResetPhase("result");
     }
   };
 
@@ -1650,7 +1630,7 @@ export function Settings({
             exitIp: resetResult.exitIp,
             steps: resetResult.steps,
           }
-        : { error: resetError },
+        : { error: resetError?.text ?? null },
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
@@ -1670,7 +1650,15 @@ export function Settings({
   };
 
   const outcome = resetError
-    ? { kind: "failed" as const, title: t("settings.reset.notStarted"), sub: resetError }
+    ? {
+        kind: "failed" as const,
+        title: t(
+          resetError.kind === "timeout"
+            ? "settings.reset.timeoutTitle"
+            : "settings.reset.notStarted",
+        ),
+        sub: resetError.text,
+      }
     : resetResult
       ? resetOutcome(resetResult)
       : null;
@@ -2652,117 +2640,6 @@ export function Settings({
           </section>
         ) : null}
 
-        {section === "account" ? (
-          <section
-            className="settings-section"
-            role="tabpanel"
-            id="settings-panel-account"
-            aria-labelledby="settings-tab-account"
-          >
-            {account?.logged_in ? (
-              <>
-                <div className="settings-row" {...pointAttrs("account.login")}>
-                  <div className="settings-account__identity">
-                    <div className="settings-row__label">{t("settings.account.email")}</div>
-                    <div
-                      className="settings-account__email"
-                      title={account.email ?? undefined}
-                    >
-                      {account.email ?? t("settings.account.signedIn")}
-                    </div>
-                  </div>
-                </div>
-                <div className="settings-row" {...pointAttrs("account.balance")}>
-                  <div>
-                    <div className="settings-row__label">{t("settings.account.balance")}</div>
-                    {walletError ? (
-                      <p className="settings-account__error">
-                        {t("account.walletError")}
-                        <button
-                          type="button"
-                          className="settings-link"
-                          onClick={() => onRefreshWallet?.("retry")}
-                          disabled={!onRefreshWallet}
-                        >
-                          {t("account.retry")}
-                        </button>
-                      </p>
-                    ) : (
-                      <div className="settings-account__amount num">
-                        {walletLoading
-                          ? t("settings.account.loading")
-                          : wallet
-                            ? formatUsdCents(wallet.balance_cents)
-                            : "—"}
-                      </div>
-                    )}
-                    <p className="settings-note">
-                      {t("settings.account.billingNote")}
-                    </p>
-                    {walletStale && wallet && !walletError ? (
-                      <p className="settings-note">
-                        {t("account.stale")}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="settings-row__aside">
-                    {walletError ? null : (
-                      <button
-                        type="button"
-                        className="settings-link"
-                        onClick={onForceRefresh}
-                        disabled={!onForceRefresh || walletRefreshing}
-                      >
-                        {walletRefreshing ? t("settings.account.refreshing") : t("settings.account.refresh")}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={onTopUp}
-                      disabled={!onTopUp}
-                    >
-                      {t("account.topUp")}
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="settings-row" {...pointAttrs("account.login")}>
-                <div>
-                  <div className="settings-row__label">{t("settings.account.signedOut")}</div>
-                  <p className="settings-note">{t("settings.account.signedOutNote")}</p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={onLogin}
-                  disabled={!onLogin}
-                >
-                  {t("serversPage.login")}
-                </button>
-              </div>
-            )}
-            <div className="settings-row" {...pointAttrs("account.mobile")}>
-              <div>
-                <div className="settings-row__label">{t("settings.account.mobile")}</div>
-                <p className="settings-note">
-                  {t("settings.account.mobileNote")}
-                </p>
-              </div>
-              <div className="settings-row__aside">
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={(event) => onOpenMobileExport?.(event.currentTarget)}
-                  disabled={!onOpenMobileExport}
-                >
-                  {t("settings.account.view")}
-                </button>
-              </div>
-            </div>
-          </section>
-        ) : null}
         </div>
         </div>
       </div>
@@ -2834,8 +2711,14 @@ export function Settings({
             ) : null}
 
             {resetPhase === "running" ? (
-              <div className="reset-running" role="status" aria-live="polite">
-                <p className="reset-running__text">{t("settings.reset.runningNote")}</p>
+              <div className="reset-running">
+                <p className="reset-running__text" role="status" aria-live="polite">
+                  {t("settings.reset.runningNote")}
+                </p>
+                {/* 每秒计时的行不进 live region：否则读屏每秒念一遍。 */}
+                <p className="reset-running__text" aria-hidden="true">
+                  {t("settings.reset.runningElapsed", { seconds: resetElapsed })}
+                </p>
                 <div
                   className="reset-progress"
                   role="progressbar"

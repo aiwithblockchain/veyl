@@ -215,6 +215,7 @@ sing-box://import-remote-profile?url=<urlEncodedURL>#<urlEncodedName>
 
 - 桌面命令：生成 / 吊销手机端配置（如 `mobile_export_create` / `mobile_export_revoke`）；
 - 设置目录 row id：`account.mobile`（`commands.md` §9.1.1），让 AI 能指到这一行；**本轮加入，版本号由架构师随批维护**；
+  - 2026-11-26：该行已随左下角账号浮层删除（`设置 › 账户` 不再有「在其它设备上使用」），`OpenSettings` 行登记表同步移除 `account.mobile`（`tools.md` 3.33.0）；移动导出入口只在左栏「我的服务器」。
 - 控制面端点：`GET /v1/mobile/profile`（返回 sing-box JSON，带认证）；
 - 事件：链接生成 / 吊销后的状态变化（是否需要，由前端实现方式决定）；
 - 存储：导出令牌（哪张表、是否新表）由数据模型文档更新。

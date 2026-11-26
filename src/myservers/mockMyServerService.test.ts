@@ -79,6 +79,145 @@ describe("mock 默认数据", () => {
   });
 });
 
+describe("流量样例（第三段验界面）", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("seedTrafficDemo 只有 ok / unpaid，账号池合计落在 85% 附近", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    const { servers, traffic_pool } = service.list();
+
+    expect(servers).toHaveLength(5);
+    expect(servers.map((server) => server.traffic_state)).toEqual([
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "unpaid",
+    ]);
+
+    const byId = new Map(servers.map((server) => [server.server_id, server]));
+    const okA = byId.get("srv_traffic_ok_a")!;
+    const okB = byId.get("srv_traffic_ok_b")!;
+    const okC = byId.get("srv_traffic_ok_c")!;
+    const unknown = byId.get("srv_traffic_unknown")!;
+    const unpaid = byId.get("srv_traffic_unpaid")!;
+
+    // 额度按 §4.1：1000 GiB 月额度 / 28 天。
+    const limit = Math.floor((1000 * 1024 ** 3) / 28);
+    for (const server of [okA, okB, okC]) {
+      expect(server.traffic_limit_bytes).toBe(limit);
+      // 单台不再有 over：ok 的已用不超过自己的已释放额度。
+      expect(server.traffic_used_bytes).toBeLessThanOrEqual(limit);
+    }
+    // 三台 ok 的已用量各不相同，界面一眼能分辨。
+    expect(
+      new Set([okA.traffic_used_bytes, okB.traffic_used_bytes, okC.traffic_used_bytes])
+        .size,
+    ).toBe(3);
+
+    // 额度未知：limit = 0，状态必须是 ok（不知道额度就不能断言超支）。
+    expect(unknown.traffic_limit_bytes).toBe(0);
+    expect(unknown.traffic_state).toBe("ok");
+    expect(unknown.traffic_used_bytes).toBeGreaterThan(0);
+
+    // 流量超支停机：destroyed 墓碑 + traffic_overage，已用超过已释放。
+    expect(unpaid.state).toBe("destroyed");
+    expect(unpaid.failure).toMatchObject({
+      code: "traffic_overage",
+      retryable: false,
+    });
+    expect(unpaid.traffic_used_bytes).toBeGreaterThan(unpaid.traffic_limit_bytes);
+
+    // 账号池：已用 ≈ 已释放的 85.4%（含列表里看不到的那台用户销毁机器），
+    // 账户弹层能直接看到琥珀提示。
+    const ratio = traffic_pool!.usedBytes / traffic_pool!.limitBytes;
+    expect(ratio).toBeGreaterThanOrEqual(0.853);
+    expect(ratio).toBeLessThanOrEqual(0.855);
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_traffic_deleted",
+    );
+
+    for (const server of servers) {
+      expect(server.traffic_used_bytes).toBeGreaterThan(0);
+      if (server.traffic_limit_bytes > 0) {
+        expect(server.traffic_reset_at).toMatch(/^\d{4}-\d{2}-01T00:00:00\.000Z$/);
+      }
+    }
+  });
+
+  it("用户主动销毁的机器不在列表里，但已用与已释放计入账号池", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    const key = "veyl.mock.myServers";
+    const store = JSON.parse(localStorage.getItem(key) ?? "{}") as {
+      servers: Array<Record<string, unknown>>;
+    };
+    const deleted = store.servers.find(
+      (server) => server.server_id === "srv_traffic_deleted",
+    );
+    expect(deleted).toBeDefined();
+    expect(deleted?.state).toBe("destroyed");
+    expect(deleted?.failure).toBeNull();
+    expect(deleted?.traffic_used_bytes as number).toBeGreaterThan(0);
+
+    const { servers, traffic_pool } = service.list();
+    expect(servers).toHaveLength(5);
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_traffic_deleted",
+    );
+    expect(traffic_pool?.usedBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_used_bytes as number),
+        0,
+      ),
+    );
+    expect(traffic_pool?.limitBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_limit_bytes as number),
+        0,
+      ),
+    );
+  });
+
+  it("账号池对全量机器求和，包含列表里看不到的手动销毁行", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    const key = "veyl.mock.myServers";
+    const store = JSON.parse(localStorage.getItem(key) ?? "{}") as {
+      servers: Array<Record<string, unknown>>;
+    };
+    store.servers.push({
+      ...store.servers[0],
+      server_id: "srv_gone_manual",
+      state: "destroyed",
+      failure: null,
+      traffic_used_bytes: 3_221_225_472,
+    });
+    localStorage.setItem(key, JSON.stringify(store));
+
+    const { servers, traffic_pool } = service.list();
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_gone_manual",
+    );
+    expect(traffic_pool?.usedBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_used_bytes as number),
+        0,
+      ),
+    );
+  });
+
+  it("重复 seed 不重复加行", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    service.seedTrafficDemo();
+    expect(service.list().servers).toHaveLength(5);
+  });
+});
+
 describe("首次取凭据才落本地节点行", () => {
   const STORE_KEY = "veyl.mock.myServers";
 
@@ -126,6 +265,77 @@ describe("首次取凭据才落本地节点行", () => {
 
     expect(service.credentials("srv_1").node_id).toBe("local_srv_1");
     expect(service.list().servers[0].local_node_id).toBe("local_srv_1");
+  });
+});
+
+describe("账单流水样例", () => {
+  const STORE_KEY = "veyl.mock.myServers";
+  const ACCOUNT_KEY = "veyl.mock.account";
+
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem(
+      ACCOUNT_KEY,
+      JSON.stringify({ logged_in: true, email: "a@b.co" }),
+    );
+    localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({
+        servers: [],
+        orders: [],
+        next_id: 1,
+        balance_cents: 420,
+      }),
+    );
+  });
+
+  it("20 笔、五类齐全，totals 与逐行求和一致", () => {
+    const ledger = new MockMyServerService().billingLedger();
+
+    expect(ledger.entries).toHaveLength(20);
+    expect(new Set(ledger.entries.map((entry) => entry.kind))).toEqual(
+      new Set(["topup", "machine_day", "traffic", "refund", "other"]),
+    );
+    expect(ledger.entries.some((entry) => entry.server === null)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.server !== null)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.amount_cents > 0)).toBe(true);
+    expect(ledger.entries.some((entry) => entry.amount_cents < 0)).toBe(true);
+    // other 类也要一正一负：否则界面里认不出的类别永远测不到正负号。
+    const other = ledger.entries.filter((entry) => entry.kind === "other");
+    expect(other.some((entry) => entry.amount_cents > 0)).toBe(true);
+    expect(other.some((entry) => entry.amount_cents < 0)).toBe(true);
+    expect(ledger.truncated).toBe(false);
+    // totals 与控制面同口径：充值只合计 topup，扣费合计所有负数。
+    expect(ledger.totals.topup_cents).toBe(
+      ledger.entries
+        .filter((entry) => entry.kind === "topup")
+        .reduce((sum, entry) => sum + entry.amount_cents, 0),
+    );
+    expect(ledger.totals.charge_cents).toBe(
+      -ledger.entries
+        .filter((entry) => entry.amount_cents < 0)
+        .reduce((sum, entry) => sum + entry.amount_cents, 0),
+    );
+    // 倒序：第一条最新；时间都是毫秒且落在窗口内。
+    expect(ledger.entries[0].at).toBeGreaterThan(ledger.entries[19].at);
+    expect(ledger.entries[0].at).toBeGreaterThan(Date.now() - 86_400_000);
+    expect(ledger.balance_cents).toBe(420);
+  });
+
+  it("days 合法就用它，越界与省略都回落 30", () => {
+    const service = new MockMyServerService();
+    expect(service.billingLedger(7).window_days).toBe(7);
+    expect(service.billingLedger(100).window_days).toBe(30);
+    expect(service.billingLedger(0).window_days).toBe(30);
+    expect(service.billingLedger().window_days).toBe(30);
+  });
+
+  it("未登录不返回样例", () => {
+    localStorage.setItem(
+      ACCOUNT_KEY,
+      JSON.stringify({ logged_in: false, email: null }),
+    );
+    expect(() => new MockMyServerService().billingLedger()).toThrow();
   });
 });
 

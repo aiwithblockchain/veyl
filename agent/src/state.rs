@@ -9,6 +9,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::DesiredState;
 
+/// A `rotated` report frozen on disk *before* it is sent. If the response is
+/// lost, the control plane may already have committed these credentials; the
+/// retry has to resend this exact pair, because generating a new port/password
+/// would leave both sides holding different ones.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRotationReport {
+    pub port: u16,
+    pub password: String,
+    pub control_port: u16,
+    pub singbox_version: String,
+    pub at_unix: u64,
+}
+
+impl fmt::Debug for PendingRotationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingRotationReport")
+            .field("port", &self.port)
+            .field("password", &"***")
+            .field("control_port", &self.control_port)
+            .field("singbox_version", &self.singbox_version)
+            .field("at_unix", &self.at_unix)
+            .finish()
+    }
+}
+
 /// Last desired state the control plane handed out. Persisted (0600) because the
 /// password appears only in the enroll response and the latest desired-state
 /// fetch; keeping it lets a restart survive a control-plane outage. Never logged.
@@ -73,6 +98,7 @@ impl fmt::Debug for AgentState {
             .field("cert_fingerprint", &self.cert_fingerprint)
             .field("agent_token_public_key", &self.agent_token_public_key)
             .field("last_desired", &self.last_desired)
+            .field("pending_rotation_report", &self.pending_rotation_report)
             .finish()
     }
 }
@@ -96,6 +122,10 @@ pub struct AgentState {
     /// Last applied credentials, including the password (0600 file).
     #[serde(default)]
     pub last_desired: Option<StoredDesired>,
+    /// A `rotated` report whose response never came back. It is resent as-is on
+    /// the next call; holds the password, never logged.
+    #[serde(default)]
+    pub pending_rotation_report: Option<PendingRotationReport>,
 }
 
 impl AgentState {
@@ -302,5 +332,31 @@ mod tests {
         let json = serde_json::to_string(&stored).unwrap();
         let back: StoredDesired = serde_json::from_str(&json).unwrap();
         assert_eq!(back, stored);
+    }
+
+    #[test]
+    fn pending_rotation_report_roundtrips_without_leaking_in_debug() {
+        let report = PendingRotationReport {
+            port: 30412,
+            password: "hunter2".into(),
+            control_port: 32100,
+            singbox_version: "1.14.4".into(),
+            at_unix: 7,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: PendingRotationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
+        let debug = format!("{report:?}");
+        assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("30412"));
+
+        let state = AgentState {
+            pending_rotation_report: Some(report.clone()),
+            ..Default::default()
+        };
+        assert!(!format!("{state:?}").contains("hunter2"));
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AgentState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pending_rotation_report, Some(report));
     }
 }

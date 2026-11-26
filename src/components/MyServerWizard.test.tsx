@@ -420,7 +420,7 @@ describe("返回控件", () => {
 
     const head = document.querySelector(".myservers__wizard-head");
     const back = screen.getByRole("button", { name: "返回" });
-    // 标题区左边是「返回 + 标题」两行；右上角留给「让 AI 帮我选」。
+    // 标题区左边是「返回 + 标题」两行。
     const heading = head?.querySelector(".myservers__wizard-heading");
     expect(heading?.firstElementChild).toBe(back);
     expect(back.nextElementSibling?.tagName).toBe("H4");
@@ -860,8 +860,8 @@ describe("打开向导时回源目录", () => {
   });
 });
 
-describe("摘要、风险说明与 AI 入口", () => {
-  function renderPlain(over: { onAskAi?: () => void } = {}) {
+describe("摘要与风险说明", () => {
+  function renderPlain() {
     return render(
       <MyServerWizard
         bridge={makeBridge()}
@@ -869,7 +869,6 @@ describe("摘要、风险说明与 AI 入口", () => {
         onOrdered={() => {}}
         onEnsureIdentity={async () => true}
         onTopUp={() => {}}
-        {...over}
       />,
     );
   }
@@ -918,20 +917,6 @@ describe("摘要、风险说明与 AI 入口", () => {
     expect(summary?.getAttribute("aria-label")).toBe("创建摘要");
     expect(summary?.querySelector(".wizard-summary__actions")).not.toBeNull();
     expect(document.querySelectorAll(".btn--primary")).toHaveLength(1);
-  });
-
-  it("AI 入口：给了 onAskAi 才出现，是标题区右上角的 ghost 按钮", () => {
-    const onAskAi = vi.fn();
-    const view = renderPlain({ onAskAi });
-    const ask = screen.getByRole("button", { name: "让 AI 帮我选" });
-    expect(ask.className).toContain("btn--ghost");
-    expect(ask.closest(".myservers__wizard-head")).toBeTruthy();
-    fireEvent.click(ask);
-    expect(onAskAi).toHaveBeenCalledTimes(1);
-    view.unmount();
-
-    renderPlain();
-    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   });
 });
 
