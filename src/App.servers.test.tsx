@@ -838,7 +838,7 @@ describe("设备 / 账户被停用的出路", () => {
       await screen.findByRole("button", { name: "账户，me@example.com" }),
     );
     expect(
-      await screen.findByRole("dialog", { name: "设置" }),
+      await screen.findByRole("dialog", { name: "账户" }),
     ).toBeTruthy();
 
     act(() => {
@@ -853,9 +853,9 @@ describe("设备 / 账户被停用的出路", () => {
     expect(
       await screen.findByRole("button", { name: "账户，未登录" }),
     ).toBeTruthy();
-    const settings = screen.getByRole("dialog", { name: "设置" });
-    expect(await within(settings).findByRole("button", { name: "登录" })).toBeTruthy();
-    expect(within(settings).queryByText("me@example.com")).toBeNull();
+    const surface = screen.getByRole("dialog", { name: "账户" });
+    expect(await within(surface).findByRole("button", { name: "登录" })).toBeTruthy();
+    expect(within(surface).queryByText("me@example.com")).toBeNull();
   }, 15_000);
 
   it("account_blocked 优先于身份丢失", async () => {

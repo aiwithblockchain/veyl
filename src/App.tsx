@@ -39,6 +39,7 @@ import { MyServersPage } from "./components/MyServersPage";
 import { MyServersRail } from "./components/MyServersRail";
 import { MyServerLogin } from "./components/MyServerLogin";
 import { MyServerTopUp } from "./components/MyServerTopUp";
+import { AccountSurface, type AccountPoint } from "./components/AccountSurface";
 import { NodeImportDialog } from "./components/NodeImportDialog";
 import { MobileExport, hasReadyServer } from "./components/MobileExport";
 import { useMyServers } from "./myservers/useMyServers";
@@ -108,7 +109,7 @@ const AI_EVENTS = new Set<AgentEvent["name"]>([
   AGENT_EVENTS.requestEnd,
 ]);
 
-type SettingsSection = "ai" | "network" | "account" | "advanced";
+type SettingsSection = "ai" | "network" | "advanced";
 
 /** 外壳只有两个 destination：连接（舞台）与我的服务器（列表 + 详情）。 */
 type Destination = "client" | "servers";
@@ -367,6 +368,9 @@ export default function App() {
   // 只存一份，和改动前单实例 Composer 的行为一致（切会话也保留）。
   const [composerDraft, setComposerDraft] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 账户是独立弹层：头像、AI 指路、充值入口都开这一层。 */
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountPoint, setAccountPoint] = useState<AccountPoint | null>(null);
   /** 「在其它设备上使用」弹层：设置行与左栏行共用这一份开关。 */
   const [mobileExportOpen, setMobileExportOpen] = useState(false);
   /** 节点导入 / 手动填写弹层：入口在控制台节点卡。 */
@@ -850,9 +854,16 @@ export default function App() {
   }
   // 不带分区时沿用上次记住的 tab（问 AI 返回靠它）；诊断、导入、AI 未配置会显式指定。
   const openSettings = (section?: SettingsSection) => {
+    setAccountOpen(false);
     if (section) setSettingsSection(section);
     setSettingsConsulting(false);
     setSettingsOpen(true);
+  };
+
+  const openAccount = () => {
+    setSettingsOpen(false);
+    setAccountPoint(null);
+    setAccountOpen(true);
   };
 
   const refreshSnapshot = useCallback(() => {
@@ -1110,12 +1121,20 @@ export default function App() {
       }
       if (event.name === AGENT_EVENTS.settingsPoint) {
         const { section, row } = event.payload;
-        // 契约里叫 connection，界面内部叫 network。
-        const target: SettingsSection = section === "connection" ? "network" : section;
-        setSettingsSection(target);
-        setSettingsConsulting(false);
-        setSettingsPoint({ section: target, row: row ?? null, nonce: Date.now() });
-        setSettingsOpen(true);
+        if (section === "account") {
+          // 账户已不是设置的一段：只留一层，先关设置再开账户。
+          setSettingsConsulting(false);
+          setSettingsOpen(false);
+          setAccountPoint({ row: row ?? null, nonce: Date.now() });
+          setAccountOpen(true);
+        } else {
+          // 契约里叫 connection，界面内部叫 network。
+          const target: SettingsSection = section === "connection" ? "network" : section;
+          setSettingsSection(target);
+          setSettingsConsulting(false);
+          setSettingsPoint({ section: target, row: row ?? null, nonce: Date.now() });
+          setSettingsOpen(true);
+        }
       }
       if (event.name === AGENT_EVENTS.nodeListChanged) {
         // 两边都用本地节点 id（nd_…）；拿 server_id 比会永远不命中。
@@ -2624,7 +2643,8 @@ export default function App() {
   const handleSwitchAccount = async () => {
     const ok = await myServers.reRegister();
     if (ok) {
-      // 登录弹窗要看得见：设置不能让它在下面。
+      // 登录弹窗要看得见：账户与设置都不能把它压在下面。
+      setAccountOpen(false);
       closeSettings();
       myServers.openLogin();
     }
@@ -3007,7 +3027,7 @@ export default function App() {
                 myServers.openLogin();
                 return;
               }
-              openSettings("account");
+              openAccount();
             }}
           >
             <AccountAvatar
@@ -3273,6 +3293,35 @@ export default function App() {
         />
       ) : null}
 
+      {accountOpen ? (
+        <AccountSurface
+          open
+          bridge={bridge}
+          account={myServers.account}
+          wallet={myServers.wallet}
+          walletLoading={myServers.walletLoading}
+          walletRefreshing={myServers.walletRefreshing}
+          walletError={myServers.walletError}
+          walletStale={myServers.walletStale}
+          onRefreshWallet={(trigger) => void myServers.refreshWallet({ trigger })}
+          onForceRefresh={() =>
+            void myServers.refreshWallet({ force: true, trigger: "manual" })
+          }
+          onTopUp={() => myServers.openTopUp()}
+          onLogin={() => {
+            setAccountOpen(false);
+            myServers.openLogin();
+          }}
+          identityProblem={myServers.identityProblem}
+          onReRegister={() => myServers.identityAction()}
+          onSwitchAccount={handleSwitchAccount}
+          onLogout={handleAccountLogout}
+          onClose={() => setAccountOpen(false)}
+          trapPaused={myServers.topupOpen || aiRequiredOpen}
+          point={accountPoint}
+        />
+      ) : null}
+
       {myServers.topupOpen ? (
         <MyServerTopUp
           wallet={myServers.wallet}
@@ -3284,7 +3333,7 @@ export default function App() {
           onRefreshBalance={() =>
             void myServers.refreshWallet({ force: true, trigger: "manual" })
           }
-          nested={settingsOpen}
+          nested={settingsOpen || accountOpen}
         />
       ) : null}
 
@@ -3369,25 +3418,7 @@ export default function App() {
         }}
         point={settingsPoint}
         account={myServers.account}
-        wallet={myServers.wallet}
-        walletLoading={myServers.walletLoading}
-        walletRefreshing={myServers.walletRefreshing}
-        walletError={myServers.walletError}
-        walletStale={myServers.walletStale}
-        onRefreshWallet={(trigger) => void myServers.refreshWallet({ trigger })}
-        onForceRefresh={() =>
-          void myServers.refreshWallet({ force: true, trigger: "manual" })
-        }
-        onLogin={() => {
-          closeSettings();
-          myServers.openLogin();
-        }}
-        onTopUp={() => myServers.openTopUp()}
-        identityProblem={myServers.identityProblem}
-        onReRegister={() => myServers.identityAction()}
-        onSwitchAccount={handleSwitchAccount}
-        onLogout={handleAccountLogout}
-        trapPaused={aiRequiredOpen || myServers.topupOpen}
+        trapPaused={aiRequiredOpen}
         syncInterval={syncInterval ?? 240}
         syncIntervalUnsaved={syncIntervalUnsaved}
         onSyncIntervalChange={changeSyncInterval}

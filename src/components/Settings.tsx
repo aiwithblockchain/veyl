@@ -10,7 +10,6 @@ import type {
   LlmProvider,
   LlmProviderInput,
   MyServerAccount,
-  MyServerWallet,
   NetworkForceResetResult,
   NetworkForceResetStep,
   SyncIntervalMinutes,
@@ -22,18 +21,15 @@ import type {
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
-import { getLanguage, setLanguage, t as translate, useLanguage, useT } from "../i18n";
+import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import type { MessageKey } from "../i18n";
-import { formatUsdCents } from "../myservers/labels";
 import { isSignedIn } from "../myservers/useMyServers";
-import type { WalletTrigger } from "../myservers/useMyServers";
 import { settingsConsultPrompt } from "../ai/settingsConsult";
 import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
 import { copyText } from "../ui/clipboard";
 import { IconClose } from "./icons";
-import { BillingLedgerDialog } from "./BillingLedgerDialog";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
@@ -83,29 +79,8 @@ interface Props {
   onSectionChange?: (section: SectionId) => void;
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
   point?: { section: SectionId; row: string | null; nonce: number } | null;
+  /** 只用于「连接」里的配置同步：未登录 / 账号未读回时不发账户命令。 */
   account?: MyServerAccount | null;
-  /** 设置 › 账户与账号入口共用同一份 wallet 状态；未接线时按「—」显示。 */
-  wallet?: MyServerWallet | null;
-  walletLoading?: boolean;
-  /** 已有值时的刷新在途：余额行入口写「刷新中」，旧值不动。 */
-  walletRefreshing?: boolean;
-  walletError?: string | null;
-  /** 刷新失败但手上还有旧值：显示旧值并注明「显示的是上次的余额」。 */
-  walletStale?: boolean;
-  /** 余额读取失败时的重试 / 打开账户段时的刷新：走 30 秒门禁。 */
-  onRefreshWallet?: (trigger: WalletTrigger) => void;
-  /** 设置里的「刷新」文字链接：强制刷新，不受 30 秒门禁限制。 */
-  onForceRefresh?: () => void;
-  onLogin?: () => void;
-  onTopUp?: () => void;
-  /** 设备/账户的永久状态：在账户页顶部给明确出路，不说「稍后再试」。 */
-  identityProblem?: "lost" | "device_revoked" | "account_blocked" | null;
-  /** 重新注册设备；返回是否恢复成功。 */
-  onReRegister?: () => Promise<boolean>;
-  /** 账户停用：换一个账户（重新注册设备后再登录）。 */
-  onSwitchAccount?: () => Promise<boolean>;
-  /** 退出登录：成功后关闭设置，由 App 给 toast。 */
-  onLogout?: () => Promise<{ ok: boolean; message?: string }>;
   /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
   trapPaused?: boolean;
   /** 节点配置同步：间隔档位与手动触发都由 App 持有并落库。 */
@@ -122,13 +97,12 @@ interface Props {
   lastSyncedAt?: number | null;
 }
 
-type SectionId = "ai" | "network" | "account" | "advanced";
+type SectionId = "ai" | "network" | "advanced";
 
 /** 咨询提示词里用的分区名，与页签同一套文案。 */
 const SECTION_NAMES: Record<SectionId, MessageKey> = {
   ai: "controls.ai",
   network: "settings.tab.connection",
-  account: "controls.account",
   advanced: "controls.advanced",
 };
 
@@ -598,7 +572,6 @@ function SeedRefreshRow({
 const SECTIONS: Array<{ id: SectionId; label: MessageKey }> = [
   { id: "ai", label: "controls.ai" },
   { id: "network", label: "settings.tab.connection" },
-  { id: "account", label: "controls.account" },
   { id: "advanced", label: "controls.advanced" },
 ];
 
@@ -708,19 +681,6 @@ export function Settings({
   onSectionChange,
   point = null,
   account = null,
-  wallet = null,
-  walletLoading = false,
-  walletRefreshing = false,
-  walletError = null,
-  walletStale = false,
-  onRefreshWallet,
-  onForceRefresh,
-  onLogin,
-  onTopUp,
-  identityProblem = null,
-  onReRegister,
-  onSwitchAccount,
-  onLogout,
   trapPaused = false,
   syncInterval = 30,
   onSyncIntervalChange,
@@ -732,7 +692,6 @@ export function Settings({
   lastSyncedAt = null,
 }: Props) {
   const t = useT();
-  const language = useLanguage();
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
     runtime.state === "running" ||
@@ -743,14 +702,6 @@ export function Settings({
   const showCleanupProxy =
     !runtimeActive && (connectMode === "system_proxy" || runtime.system_proxy_enabled);
   const [section, setSection] = useState<SectionId>("ai");
-  // 打开设置›账户：触发一次刷新（30 秒节流在 refreshWallet 里）。
-  const refreshWalletRef = useRef(onRefreshWallet);
-  refreshWalletRef.current = onRefreshWallet;
-  useEffect(() => {
-    // 未登录不发：登出时停在这页也不会打余额接口。
-    if (!open || section !== "account" || account?.logged_in !== true) return;
-    refreshWalletRef.current?.("open_settings");
-  }, [open, section, account?.logged_in]);
   /** 咨询 AI：设置缩左、助手并排。 */
   const [consulting, setConsulting] = useState(false);
   /** AI 指路高亮的行 id；2 秒后自动清掉。 */
@@ -814,9 +765,6 @@ export function Settings({
   const [resetElapsed, setResetElapsed] = useState(0);
   /** 每次重置的编号；关闭弹层或重新发起后加一，晚到的结果据此丢弃。 */
   const resetRunRef = useRef(0);
-  const [billsOpen, setBillsOpen] = useState(false);
-  const billsTriggerRef = useRef<HTMLButtonElement>(null);
-  const returnBillsFocusRef = useRef(false);
   const [lastReset, setLastReset] = useState<{
     at: number;
     total: number;
@@ -860,16 +808,12 @@ export function Settings({
   }, [resetPhase]);
 
   useFocusTrap(
-    open &&
-      !consulting &&
-      resetPhase === "idle" &&
-      !billsOpen &&
-      !trapPaused,
+    open && !consulting && resetPhase === "idle" && !trapPaused,
     dialogRef,
   );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
   useFocusTrap(
-    open && consulting && resetPhase === "idle" && !billsOpen && !trapPaused,
+    open && consulting && resetPhase === "idle" && !trapPaused,
     backdropRef,
   );
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
@@ -1004,8 +948,6 @@ export function Settings({
     setDiagnosticNotice(null);
     resetRunRef.current += 1;
     setResetPhase("idle");
-    setBillsOpen(false);
-    returnBillsFocusRef.current = false;
     setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
@@ -1014,21 +956,12 @@ export function Settings({
     setRouteCopy("idle");
     setProxyCopy("idle");
     setLanguageError(null);
-    setBillsOpen(false);
-    setLogoutError(null);
-    setRecoverError(null);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
 
   useEffect(() => {
     setSeedInfo(defaultProfile);
   }, [defaultProfile]);
-
-  const [loggingOut, setLoggingOut] = useState(false);
-  const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [reRegistering, setReRegistering] = useState(false);
-  const [switching, setSwitching] = useState(false);
-  const [recoverError, setRecoverError] = useState<string | null>(null);
 
   const closeReset = useCallback(() => {
     // 18 秒后即使命令还没回来也放行：在途结果按编号丢弃，别把用户锁死在弹层里。
@@ -1043,78 +976,12 @@ export function Settings({
     setRouteCopy("idle");
   }, [resetPhase, resetElapsed]);
 
-  const closeBills = useCallback(() => {
-    returnBillsFocusRef.current = true;
-    setBillsOpen(false);
-  }, []);
-
-  // 关闭账单弹层后焦点回到「查看账单」，键盘用户不用从头 Tab。
-  useEffect(() => {
-    if (billsOpen || !returnBillsFocusRef.current) return;
-    returnBillsFocusRef.current = false;
-    billsTriggerRef.current?.focus();
-  }, [billsOpen]);
-
   const closeSettings = useCallback(() => {
     setConsulting(false);
     setPendingMode(null);
     onConsultingChange?.(false);
     onClose();
   }, [onClose, onConsultingChange]);
-
-  const blockedIdentity =
-    identityProblem === "device_revoked" || identityProblem === "account_blocked";
-  const recovery =
-    identityProblem === "lost"
-      ? {
-          kind: "register" as const,
-          text: t("account.identity.lost"),
-          label: t("account.identity.lostLabel"),
-        }
-      : identityProblem === "device_revoked"
-        ? {
-            kind: "logout" as const,
-            text: t("account.identity.revoked"),
-            label: t("account.identity.revokedLabel"),
-          }
-        : identityProblem === "account_blocked"
-          ? {
-              kind: "switch" as const,
-              text: t("account.identity.blocked"),
-              label: t("account.identity.blockedLabel"),
-            }
-          : null;
-  // 换账户、重新注册、退出三件事互斥：任一件在途，另一件的按钮也不能点。
-  const identityBusy = loggingOut || switching || reRegistering;
-
-  const logout = async () => {
-    if (loggingOut || !onLogout) return;
-    setLoggingOut(true);
-    setLogoutError(null);
-    const result = await onLogout();
-    setLoggingOut(false);
-    if (result.ok) {
-      closeSettings();
-      return;
-    }
-    setLogoutError(result.message ?? t("account.logoutFailed"));
-  };
-
-  const recoverIdentity = async () => {
-    if (!recovery || identityBusy) return;
-    if (recovery.kind === "logout") {
-      await logout();
-      return;
-    }
-    const run = recovery.kind === "switch" ? onSwitchAccount : onReRegister;
-    if (!run) return;
-    const setBusy = recovery.kind === "switch" ? setSwitching : setReRegistering;
-    setBusy(true);
-    setRecoverError(null);
-    const ok = await run();
-    setBusy(false);
-    if (!ok) setRecoverError(t("account.recoverFailed"));
-  };
 
   const selectSection = (next: SectionId) => {
     setSection(next);
@@ -1190,24 +1057,6 @@ export function Settings({
                 : translate("settings.sync.hours", { count: syncInterval / 60 }),
         }),
       );
-    } else if (sectionId === "account") {
-      if (!account?.logged_in) {
-        parts.push(translate("settings.consult.fact.signedOut"));
-      } else {
-        const identity =
-          account.email ??
-          (account.account_kind === "device"
-            ? translate("settings.consult.fact.identityDevice")
-            : translate("settings.account.signedIn"));
-        parts.push(translate("settings.consult.fact.identity", { identity }));
-        if (wallet) {
-          parts.push(
-            translate("settings.consult.fact.balance", {
-              amount: formatUsdCents(wallet.balance_cents),
-            }),
-          );
-        }
-      }
     } else {
       parts.push(translate("settings.consult.fact.seed", { summary: seedSummary(seedInfo) }));
       if (runtime.upstream_version) {
@@ -1350,11 +1199,6 @@ export function Settings({
         closeReset();
         return;
       }
-      // 账单弹层次之：Esc 只关它，不关设置。
-      if (billsOpen) {
-        closeBills();
-        return;
-      }
       // 端口编辑态先拦下 Esc：只退编辑，不关设置。
       if (portEditing) {
         cancelProxyPortEdit();
@@ -1364,7 +1208,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused, billsOpen, closeBills]);
+  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -1897,8 +1741,8 @@ export function Settings({
           role="dialog"
           aria-modal={consulting ? undefined : true}
           aria-labelledby="settings-title"
-          aria-hidden={resetPhase !== "idle" || billsOpen ? true : undefined}
-          inert={resetPhase !== "idle" || billsOpen}
+          aria-hidden={resetPhase !== "idle" ? true : undefined}
+          inert={resetPhase !== "idle"}
           onMouseDown={(event) => event.stopPropagation()}
         >
         <header className="modal__head settings-head">
@@ -2796,221 +2640,6 @@ export function Settings({
           </section>
         ) : null}
 
-        {section === "account" ? (
-          <section
-            className="settings-section"
-            role="tabpanel"
-            id="settings-panel-account"
-            aria-labelledby="settings-tab-account"
-          >
-            {recovery ? (
-                  <div className="settings-row settings-row--stack">
-                    <p className="settings-note">{recovery.text}</p>
-                    {recoverError ? (
-                      <p className="settings-feedback settings-feedback--error" role="alert">
-                        {recoverError}
-                      </p>
-                    ) : null}
-                    {logoutError && recovery.kind !== "register" ? (
-                      <p className="settings-feedback settings-feedback--error" role="alert">
-                        {logoutError}{" "}
-                        <button
-                          type="button"
-                          className="settings-link"
-                          disabled={loggingOut}
-                          onClick={() => void logout()}
-                        >
-                          {t("account.retry")}
-                        </button>
-                      </p>
-                    ) : null}
-                    <div className="settings-actions">
-                      <button
-                        type="button"
-                        className="btn btn--primary"
-                        disabled={identityBusy || !(recovery.kind === "logout" ? onLogout : recovery.kind === "switch" ? onSwitchAccount : onReRegister)}
-                        aria-busy={
-                          (recovery.kind === "logout"
-                            ? loggingOut
-                            : recovery.kind === "switch"
-                              ? switching
-                              : reRegistering) || undefined
-                        }
-                        onClick={() => void recoverIdentity()}
-                      >
-                        {recovery.kind === "logout"
-                          ? loggingOut
-                            ? t("account.loggingOut")
-                            : recovery.label
-                          : recovery.kind === "switch"
-                            ? switching
-                              ? t("account.switching")
-                              : recovery.label
-                            : reRegistering
-                              ? t("account.working")
-                              : recovery.label}
-                      </button>
-                      {recovery.kind === "switch" ? (
-                        <button
-                          type="button"
-                          className="btn btn--danger-ghost"
-                          disabled={identityBusy || !onLogout}
-                          aria-busy={loggingOut || undefined}
-                          onClick={() => void logout()}
-                        >
-                          {loggingOut ? t("account.loggingOut") : t("account.logoutDevice")}
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-            ) : null}
-
-            {account?.logged_in ? (
-              <>
-                <div className="settings-row" {...pointAttrs("account.login")}>
-                  <div className="settings-account__identity">
-                    <div className="settings-row__label">{t("settings.account.email")}</div>
-                    <div
-                      className="settings-account__email"
-                      title={account.email ?? undefined}
-                    >
-                      {account.email ?? t("settings.account.signedIn")}
-                    </div>
-                  </div>
-                </div>
-
-                {blockedIdentity ? null : (
-                <div className="settings-row" {...pointAttrs("account.balance")}>
-                    <div>
-                      <div className="settings-row__label">{t("settings.account.balance")}</div>
-                      {walletError ? (
-                        <p className="settings-account__error">
-                          {t("account.walletError")}
-                          <button
-                            type="button"
-                            className="settings-link"
-                            onClick={() => onRefreshWallet?.("retry")}
-                            disabled={!onRefreshWallet}
-                          >
-                            {t("account.retry")}
-                          </button>
-                        </p>
-                      ) : (
-                        <div className="settings-account__amount num">
-                          {walletLoading
-                            ? t("settings.account.loading")
-                            : wallet
-                              ? formatUsdCents(wallet.balance_cents)
-                              : "—"}
-                        </div>
-                      )}
-                      <p className="settings-note">
-                        {t("settings.account.billingNote")}
-                      </p>
-                      {walletStale && wallet && !walletError ? (
-                        <p className="settings-note">
-                          {t("account.stale")}
-                        </p>
-                      ) : null}
-                    </div>
-                    <div className="settings-row__aside">
-                      {walletError ? null : (
-                        <button
-                          type="button"
-                          className="settings-link"
-                          onClick={onForceRefresh}
-                          disabled={!onForceRefresh || walletRefreshing}
-                        >
-                          {walletRefreshing ? t("settings.account.refreshing") : t("settings.account.refresh")}
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="btn btn--primary"
-                        onClick={onTopUp}
-                        disabled={!onTopUp}
-                      >
-                        {t("account.topUp")}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {blockedIdentity ? null : (
-                <div
-                  className="settings-row settings-row--stack"
-                  {...pointAttrs("account.bills")}
-                >
-                  <div className="settings-row__main">
-                    <div className="settings-row__label">
-                      {t("settings.account.bills")}
-                    </div>
-                  </div>
-                  <div className="settings-row__aside">
-                    <button
-                      ref={billsTriggerRef}
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => setBillsOpen(true)}
-                    >
-                      {t("settings.account.viewBills")}
-                    </button>
-                  </div>
-                </div>
-                )}
-
-                {blockedIdentity ? null : (
-                <div className="settings-row settings-row--stack">
-                    <div className="settings-row__main">
-                      {logoutError ? (
-                        <p
-                          className="settings-feedback settings-feedback--error"
-                          role="alert"
-                        >
-                          {logoutError}{" "}
-                          <button
-                            type="button"
-                            className="settings-link"
-                            disabled={loggingOut}
-                            onClick={() => void logout()}
-                          >
-                            {t("account.retry")}
-                          </button>
-                        </p>
-                      ) : null}
-                    </div>
-                    <div className="settings-row__aside">
-                      <button
-                        type="button"
-                        className="btn btn--danger-ghost"
-                        disabled={loggingOut || !onLogout}
-                        aria-busy={loggingOut || undefined}
-                        onClick={() => void logout()}
-                      >
-                        {loggingOut ? t("account.loggingOut") : t("account.logout")}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="settings-row" {...pointAttrs("account.login")}>
-                <div>
-                  <div className="settings-row__label">{t("settings.account.signedOut")}</div>
-                  <p className="settings-note">{t("settings.account.signedOutNote")}</p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={onLogin}
-                  disabled={!onLogin}
-                >
-                  {t("serversPage.login")}
-                </button>
-              </div>
-            )}
-          </section>
-        ) : null}
         </div>
         </div>
       </div>
@@ -3207,14 +2836,6 @@ export function Settings({
             ) : null}
           </div>
         </div>
-      ) : null}
-
-      {billsOpen ? (
-        <BillingLedgerDialog
-          bridge={bridge}
-          language={language}
-          onClose={closeBills}
-        />
       ) : null}
     </>
   );

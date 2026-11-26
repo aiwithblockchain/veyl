@@ -1725,13 +1725,52 @@ body[data-resizing] {
   word-break: break-all;
 }
 
-/* 设置 › 账户：邮箱整行省略，金额与账户页同一格式。 */
-.settings-account__identity {
+/* 账户弹层：720 宽、单层单滚动；标签 12，金额 20 mono。 */
+.account-surface {
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(86vh, 780px);
+}
+
+.account-surface__body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px 20px;
+}
+
+.account-surface__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.account-surface__row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.account-surface__row > .btn {
+  flex: 0 0 auto;
+}
+
+.account-surface__main {
+  min-width: 0;
+}
+
+.account-surface__identity {
   flex: 1;
   min-width: 0;
 }
 
-.settings-account__email {
+.account-surface__label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.account-surface__email {
   margin-top: 2px;
   font-size: 15px;
   color: var(--ink);
@@ -1740,30 +1779,44 @@ body[data-resizing] {
   text-overflow: ellipsis;
 }
 
-.settings-account__amount {
-  margin: 2px 0 0;
+.account-surface__amount {
+  margin-top: 2px;
   font-size: 20px;
   line-height: 1.2;
-  letter-spacing: 0;
   color: var(--ink);
 }
 
-.settings-account__amount + .settings-note {
+.account-surface__amount + .settings-note {
   margin-top: 4px;
 }
 
-.settings-account__error {
+.account-surface__error {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin: 2px 0 0;
+  margin-top: 2px;
   font-size: 12px;
   line-height: 1.45;
   color: var(--amber);
 }
 
-.settings-account__error + .settings-note {
+.account-surface__error + .settings-note {
   margin-top: 4px;
+}
+
+.account-surface__aside {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.account-surface__recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
 }
 
 .settings-row__aside {

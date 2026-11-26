@@ -1151,7 +1151,7 @@ describe("三区外壳与连接舞台", () => {
     );
   }, 15_000);
 
-  it("导航账户图标打开设置 › 账户，不跳转我的服务器", async () => {
+  it("导航账户图标打开账户弹层，不跳转我的服务器", async () => {
     localStorage.setItem(
       "veyl.mock.account",
       JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
@@ -1174,12 +1174,9 @@ describe("三区外壳与连接舞台", () => {
 
     await renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
-    const settings = await screen.findByRole("dialog", { name: "设置" });
-    expect(
-      within(settings).getByRole("tab", { name: "账户" }).getAttribute("aria-selected"),
-    ).toBe("true");
-    expect(await within(settings).findByText("$12.30")).toBeTruthy();
-    // 账户是设置里的覆盖层，不切 destination。
+    const surface = await screen.findByRole("dialog", { name: "账户" });
+    expect(await within(surface).findByText("$12.30")).toBeTruthy();
+    // 账户是独立覆盖层，不切 destination。
     expect(
       screen.queryByRole("complementary", { name: "服务器列表" }),
     ).toBeNull();
@@ -1217,9 +1214,9 @@ describe("三区外壳与连接舞台", () => {
 
     await renderApp();
     fireEvent.click(await screen.findByRole("button", { name: /账户/ }));
-    const settings = await screen.findByRole("dialog", { name: "设置" });
+    const surface = await screen.findByRole("dialog", { name: "账户" });
     fireEvent.click(
-      await within(settings).findByRole("button", { name: "退出登录" }),
+      await within(surface).findByRole("button", { name: "退出登录" }),
     );
 
     expect(await screen.findByText("已退出登录")).toBeTruthy();
