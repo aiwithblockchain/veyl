@@ -78,23 +78,53 @@ function makeBridge(load: () => Promise<BillingLedger>): AgentBridge {
 }
 
 function renderTable(bridge: AgentBridge, language: "zh" | "en" = "zh") {
-  render(<BillingLedgerTable bridge={bridge} language={language} />);
+  const view = render(<BillingLedgerTable bridge={bridge} language={language} />);
+  return view;
 }
 
-describe("近 30 天账单表格", () => {
-  it("顶部汇总只用 totals，不按 entries 求和", async () => {
+function expand() {
+  fireEvent.click(screen.getByRole("button", { name: /明细/ }));
+}
+
+describe("近 30 天账单", () => {
+  it("默认折叠：摘要可见，详情容器在 DOM 里但 hidden", async () => {
     renderTable(makeBridge(async () => ledger()));
 
-    const summary = await screen.findByText(/余额 \$118\.06/);
-    expect(summary.textContent).toContain("充值 $120.00");
-    expect(summary.textContent).toContain("扣费 $2.94");
-    // entries 求和会得到 $122.00 / $1.45，界面不能显示这两个数。
-    expect(summary.textContent).not.toContain("$122.00");
-    expect(summary.textContent).not.toContain("$1.45");
+    const toggle = await screen.findByRole("button", { name: /明细/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    const details = document.getElementById("account-billing-details") as HTMLElement;
+    expect(details).toBeTruthy();
+    expect(details.hasAttribute("hidden")).toBe(true);
+    expect(toggle.getAttribute("aria-controls")).toBe(
+      "account-billing-details",
+    );
+
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("button", { name: /明细/ }).getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(details.hasAttribute("hidden")).toBe(false);
+    expect(screen.getByRole("table")).toBeTruthy();
+    expect(screen.getByText("+$120.00")).toBeTruthy();
   });
 
-  it("五种类别都有中文标签；机器费 / 流量超支 / 退款补机器标识，充值与 other 不补", async () => {
+  it("摘要只用 totals，且不重复余额", async () => {
     renderTable(makeBridge(async () => ledger()));
+
+    const toggle = await screen.findByRole("button", { name: /明细/ });
+    const summary = toggle.textContent ?? "";
+    expect(summary).toContain("近 30 天：充值 $120.00 · 扣费 $2.94");
+    // entries 求和会得到 $122.00 / $1.45；余额在上方余额行，摘要里不再出现。
+    expect(summary).not.toContain("$122.00");
+    expect(summary).not.toContain("$1.45");
+    expect(summary).not.toContain("余额");
+    expect(summary).not.toContain("$118.06");
+  });
+
+  it("展开后五种类别都有中文标签；机器费 / 流量超支 / 退款补机器标识", async () => {
+    renderTable(makeBridge(async () => ledger()));
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
 
     await screen.findByText("机器费");
     expect(screen.getByText("充值")).toBeTruthy();
@@ -108,8 +138,10 @@ describe("近 30 天账单表格", () => {
 
   it("四列表头；充值行机器格留空，机器行有机器名", async () => {
     renderTable(makeBridge(async () => ledger()));
-    await screen.findByText("机器费");
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
 
+    await screen.findByText("机器费");
     expect(
       screen.getAllByRole("columnheader").map((head) => head.textContent),
     ).toEqual(["类别", "机器", "日期", "金额"]);
@@ -125,6 +157,8 @@ describe("近 30 天账单表格", () => {
 
   it("金额带正负号、固定两位小数；零金额不带号", async () => {
     renderTable(makeBridge(async () => ledger()));
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
     await screen.findByText("+$120.00");
 
     expect(screen.getByText("−$0.20")).toBeTruthy();
@@ -149,6 +183,8 @@ describe("近 30 天账单表格", () => {
         }),
       ),
     );
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
     expect(await screen.findByText("$0.00")).toBeTruthy();
     expect(screen.queryByText("+$0.00")).toBeNull();
     expect(screen.queryByText("−$0.00")).toBeNull();
@@ -156,37 +192,66 @@ describe("近 30 天账单表格", () => {
 
   it("日期按本地日显示，毫秒当毫秒用", async () => {
     renderTable(makeBridge(async () => ledger()));
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
     await screen.findByText("11月5日");
     expect(screen.getByText("11月4日")).toBeTruthy();
     expect(formatBillingDay(AT, "en")).toMatch(/^Nov\s+5$/);
   });
 
-  it("空账本显示空态，汇总照常显示", async () => {
+  it("空账本：摘要 + 空态，不给箭头也不可展开", async () => {
     renderTable(makeBridge(async () => ledger({ entries: [] })));
-    await screen.findByText("最近 30 天没有消费");
-    expect(screen.getByText(/余额 \$118\.06/)).toBeTruthy();
+
+    expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
+    expect(screen.getByText(/近 30 天：充值 \$120\.00/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 
-  it("被截断时列表底部有一行脚注", async () => {
+  it("被截断时表格底部有一行脚注", async () => {
     renderTable(makeBridge(async () => ledger({ truncated: true })));
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
     await screen.findByText("只显示最近 1000 笔");
   });
 
-  it("失败态给三段式文案，点重试重新读取", async () => {
+  it("显示更多每次 +100，焦点落到新出现的第一行", async () => {
+    const entries = Array.from({ length: 150 }, (_, index) => ({
+      id: `e${index + 1}`,
+      kind: "machine_day" as const,
+      amount_cents: -20,
+      at: AT - index * DAY,
+      server: SERVER,
+      note: null,
+    }));
+    renderTable(makeBridge(async () => ledger({ entries })));
+    await screen.findByRole("button", { name: /明细/ });
+    expand();
+
+    const rows = () => screen.getAllByRole("row").slice(1);
+    expect(rows()).toHaveLength(40);
+
+    fireEvent.click(screen.getByRole("button", { name: "显示更多" }));
+    expect(rows()).toHaveLength(140);
+    expect(document.activeElement?.getAttribute("data-entry-id")).toBe("e41");
+
+    fireEvent.click(screen.getByRole("button", { name: "显示更多" }));
+    expect(rows()).toHaveLength(150);
+    expect(screen.queryByRole("button", { name: "显示更多" })).toBeNull();
+  });
+
+  it("失败态：一行短错误 + 独立重试，点重试重新读取", async () => {
     const load = vi
       .fn()
       .mockRejectedValueOnce({ code: "TIMEOUT", message: "" })
       .mockResolvedValueOnce(ledger());
     renderTable(makeBridge(load as unknown as () => Promise<BillingLedger>));
 
-    await screen.findByText("账单没有加载出来");
-    expect(screen.getByText("账单服务没有按时返回。")).toBeTruthy();
-    expect(
-      screen.getByText("点「重试」；还是不行就稍后再来看。"),
-    ).toBeTruthy();
+    expect(await screen.findByText("账单服务没有按时返回。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
     expect(load).toHaveBeenCalledTimes(2);
   });
 
@@ -233,9 +298,10 @@ describe("近 30 天账单表格", () => {
     await screen.findByText("账单数据不完整。");
   });
 
-  it("读取中显示占位，不显示空态", () => {
+  it("读取中只有一行状态，不可展开", () => {
     renderTable(makeBridge(() => new Promise<BillingLedger>(() => {})));
-    expect(screen.getByText("正在读取账单…")).toBeTruthy();
-    expect(screen.queryByText("最近 30 天没有消费")).toBeNull();
+    expect(screen.getByText("读取中…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
   });
 });

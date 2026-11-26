@@ -105,7 +105,7 @@ describe("账户弹层", () => {
     for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
     }
-    expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
   });
 
   it("打开就刷新一次余额（走门禁），未登录不发", () => {
@@ -194,11 +194,15 @@ describe("账户弹层", () => {
     expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
-  it("账单在弹层里就地显示：合计与行，不再弹第二层", async () => {
+  it("账单默认折叠；展开后就地显示合计与行，不再弹第二层", async () => {
     renderSurface();
 
-    const summary = await screen.findByText(/余额 \$118\.06/);
-    expect(summary.textContent).toContain("充值 $120.00");
+    const toggle = await screen.findByRole("button", { name: /明细/ });
+    expect(toggle.textContent).toContain("近 30 天：充值 $120.00");
+    expect(toggle.textContent).not.toContain("余额");
+    expect(screen.queryByRole("table")).toBeNull();
+
+    fireEvent.click(toggle);
     expect(screen.getByText("+$120.00")).toBeTruthy();
     // 金额固定两位小数、负号用 −：列宽再紧也不能只剩一位。
     expect(screen.getByText("−$0.20")).toBeTruthy();
@@ -206,14 +210,15 @@ describe("账户弹层", () => {
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
   });
 
-  it("账单空时仍显示汇总与空态", async () => {
+  it("账单空时摘要与空态都在，且不可展开", async () => {
     renderSurface({
       bridge: makeBridge({
         myServerBillingLedger: vi.fn(async () => ({ ...LEDGER, entries: [] })),
       }),
     });
     expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
-    expect(screen.getByText(/余额 \$118\.06/)).toBeTruthy();
+    expect(screen.getByText(/近 30 天：充值 \$120\.00/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
   });
 
   it("账单失败就在块内给原因与重试", async () => {
@@ -223,9 +228,26 @@ describe("账户弹层", () => {
       .mockResolvedValueOnce(LEDGER);
     renderSurface({ bridge: makeBridge({ myServerBillingLedger: load }) });
 
-    expect(await screen.findByText("账单没有加载出来")).toBeTruthy();
+    expect(await screen.findByText("账单服务没有按时返回。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
+  });
+
+  it("退出登录固定在 footer，正文是唯一滚动容器", async () => {
+    const { container } = renderSurface();
+
+    const body = container.querySelector(".account-surface__body") as HTMLElement;
+    const footer = container.querySelector(".account-surface__footer") as HTMLElement;
+    expect(body).toBeTruthy();
+    expect(footer).toBeTruthy();
+    const logout = screen.getByRole("button", { name: "退出登录" });
+    expect(body.contains(logout)).toBe(false);
+    expect(footer.contains(logout)).toBe(true);
+
+    fireEvent.click(await screen.findByRole("button", { name: /明细/ }));
+    expect(container.querySelector(".billing-details table")).toBeTruthy();
+    // 表体没有自己的滚动容器：只有账户 body 在滚。
+    expect(container.querySelector(".billing-body")).toBeNull();
   });
 
   it("退出登录：成功后关闭账户层；失败原位给错误与重试", async () => {

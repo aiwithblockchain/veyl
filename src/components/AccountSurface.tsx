@@ -397,40 +397,6 @@ export function AccountSurface({
                   <BillingLedgerTable bridge={bridge} language={getLanguage()} />
                 </section>
               )}
-
-              {blockedIdentity ? null : (
-                <div className="account-surface__row account-surface__row--last">
-                  <div className="account-surface__main">
-                    {logoutError ? (
-                      <p
-                        className="settings-feedback settings-feedback--error"
-                        role="alert"
-                      >
-                        {logoutError}{" "}
-                        <button
-                          type="button"
-                          className="settings-link"
-                          disabled={loggingOut}
-                          onClick={() => void logout()}
-                        >
-                          {tr("account.retry")}
-                        </button>
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="account-surface__aside">
-                    <button
-                      type="button"
-                      className="btn btn--danger-ghost"
-                      disabled={loggingOut || !onLogout}
-                      aria-busy={loggingOut || undefined}
-                      onClick={() => void logout()}
-                    >
-                      {loggingOut ? tr("account.loggingOut") : tr("account.logout")}
-                    </button>
-                  </div>
-                </div>
-              )}
             </>
           ) : (
             <div className="account-surface__row" {...pointAttrs("account.login")}>
@@ -451,6 +417,36 @@ export function AccountSurface({
             </div>
           )}
         </div>
+
+        {/* 退出登录固定在 footer：不随正文滚走。 */}
+        {account?.logged_in && !blockedIdentity ? (
+          <footer className="account-surface__footer">
+            <div className="account-surface__footer-main">
+              {logoutError ? (
+                <p className="settings-feedback settings-feedback--error" role="alert">
+                  {logoutError}{" "}
+                  <button
+                    type="button"
+                    className="settings-link"
+                    disabled={loggingOut}
+                    onClick={() => void logout()}
+                  >
+                    {tr("account.retry")}
+                  </button>
+                </p>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="btn btn--danger-ghost"
+              disabled={loggingOut || !onLogout}
+              aria-busy={loggingOut || undefined}
+              onClick={() => void logout()}
+            >
+              {loggingOut ? tr("account.loggingOut") : tr("account.logout")}
+            </button>
+          </footer>
+        ) : null}
       </div>
     </div>
   );
