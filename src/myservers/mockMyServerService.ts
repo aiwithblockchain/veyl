@@ -221,56 +221,77 @@ function nextTrafficResetAt(now = Date.now()): string {
   ).toISOString();
 }
 
-/** 一等额度（字节）：第一天释放当天份额，界面不会显示成「0 / 未知」。 */
+/** 释放窗口的天数：与控制面 `traffic_cycle.ts` 的 `RELEASE_DAYS` 一致（§4.1）。 */
+const RELEASE_DAYS = 28;
+
+/** 当天释放的额度（字节）：`min(月额度, 月额度 / 28)`，与控制面同口径。 */
 function releasedBytes(transferGib: number): number {
-  return transferGib > 0 ? Math.round((transferGib * GIB) / 30) : 0;
+  const monthly = Math.round(Math.max(0, transferGib) * GIB);
+  if (monthly <= 0) return 0;
+  return Math.min(monthly, Math.floor(monthly / RELEASE_DAYS));
 }
 
 /**
- * demo 用流量样例：ok / near / over / 额度未知各一台。
- * 第三段（界面）照这四台验渲染，不必自己造数。
+ * demo 用流量样例：ok / near / over / 额度未知 / 流量超支停机各一台。
+ * 第三段（界面）照这五台验渲染，不必自己造数；`state` 与 `used`、`limit`
+ * 按 §8 的口径自洽（near ≥ 80%、over 严格超出、unpaid 是已停机墓碑）。
  */
 const TRAFFIC_SAMPLES: Array<{
   server_id: string;
   name: string;
   region: string;
+  /** 月额度（GiB）；0 = 额度未知。 */
+  transfer_gib: number;
   used: number;
-  limit: number;
   state: MyServerTrafficState;
+  /** 流量超支停机：列表里以墓碑行保留。 */
+  tombstone?: { code: string; message: string };
 }> = [
   {
     server_id: "srv_traffic_ok",
     name: "流量充足 · 新加坡 1",
     region: "sgp1",
-    used: 4 * GIB,
-    limit: 30 * GIB,
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 6 * GIB,
     state: "ok",
   },
   {
     server_id: "srv_traffic_near",
     name: "接近额度 · 纽约 1",
     region: "nyc1",
-    used: 26 * GIB,
-    limit: 30 * GIB,
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 29 * GIB,
     state: "near",
   },
   {
     server_id: "srv_traffic_over",
     name: "已超额度 · 旧金山 2",
     region: "sfo2",
-    used: 34 * GIB,
-    limit: 30 * GIB,
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 37 * GIB,
     state: "over",
   },
   {
     server_id: "srv_traffic_unknown",
     name: "额度未知 · 班加罗尔 1",
     region: "blr1",
+    transfer_gib: 0,
     used: 512 * 1024 ** 2,
-    limit: 0,
     state: "ok",
   },
+  {
+    server_id: "srv_traffic_unpaid",
+    name: "流量超支停机 · 旧金山 3",
+    region: "sfo3",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 42 * GIB,
+    state: "unpaid",
+    tombstone: { code: "traffic_overage", message: "流量超支，余额不足已停机" },
+  },
 ];
+
+/** 控制面保留的两类停机墓碑（与 servers.ts 的列表过滤一致）。 */
+const TOMBSTONE_CODES = new Set(["billing_unpaid", "traffic_overage"]);
 
 /** 旧存档没有四个流量字段：补齐默认值，界面与账号池都拿不到 undefined。 */
 function withTrafficDefaults(server: StoredServer): StoredServer {
@@ -400,18 +421,24 @@ export class MockMyServerService {
     const store = readStore();
     advance(store);
     const servers = store.servers
-      // 控制面只保留「余额不足停机」的墓碑行；手动销毁的行不再出现。
+      // 控制面只保留两种停机墓碑；手动销毁的行不再出现。
       .filter(
         (server) =>
-          server.state !== "destroyed" || server.failure?.code === "billing_unpaid",
+          server.state !== "destroyed" ||
+          (server.failure !== null &&
+            TOMBSTONE_CODES.has(server.failure.code)),
       )
       .map(copyServer);
     return {
       servers,
-      // 账号池（2.79.0）演示口径：按各台已释放额度求和；真实控制面按存在秒数池化。
+      // 账号池（2.79.0）：对列表推导之前的全量机器求和——手动销毁的行也在
+      // 这个周期里占着已释放额度，池子必须包含列表里看不到的那些。
       traffic_pool: {
-        usedBytes: servers.reduce((sum, server) => sum + server.traffic_used_bytes, 0),
-        limitBytes: servers.reduce(
+        usedBytes: store.servers.reduce(
+          (sum, server) => sum + server.traffic_used_bytes,
+          0,
+        ),
+        limitBytes: store.servers.reduce(
           (sum, server) => sum + server.traffic_limit_bytes,
           0,
         ),
@@ -420,7 +447,7 @@ export class MockMyServerService {
   }
 
   /**
-   * demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。
+   * demo：造五台流量样例（ok / near / over / 额度未知 / 流量超支停机）。
    * 验收：控制台 `window.dispatchEvent(new Event("veyl:seed-traffic"))` 后刷新。
    */
   seedTrafficDemo(): MyServer[] {
@@ -431,29 +458,37 @@ export class MockMyServerService {
       if (store.servers.some((server) => server.server_id === sample.server_id)) {
         return;
       }
+      const destroyed = sample.tombstone !== undefined;
       store.servers.push({
         server_id: sample.server_id,
         name: sample.name,
         region: sample.region,
         plan: DEFAULT_PLAN.id,
-        state: "healthy",
+        state: destroyed ? "destroyed" : "healthy",
         created_at: new Date(now - 12 * 3_600_000).toISOString(),
         ip: `203.0.113.${20 + index}`,
-        port: 8388,
+        port: destroyed ? null : 8388,
         node_id: `nd_${sample.server_id}`,
         local_node_id: null,
         hourly_usd: DEFAULT_PLAN.hourly_usd,
         monthly_usd: DEFAULT_PLAN.monthly_usd,
         daily_price_cents: DEFAULT_PLAN.daily_price_cents,
-        transfer_gib: DEFAULT_PLAN.transfer_gib,
+        transfer_gib: sample.transfer_gib,
         traffic_used_bytes: sample.used,
-        traffic_limit_bytes: sample.limit,
+        traffic_limit_bytes: releasedBytes(sample.transfer_gib),
         traffic_reset_at: nextTrafficResetAt(now),
         traffic_state: sample.state,
-        paid_until: new Date(now + 86_400_000).toISOString(),
-        billing_state: "active",
+        paid_until: new Date(destroyed ? now : now + 86_400_000).toISOString(),
+        billing_state: destroyed ? "expired" : "active",
         grace_ends_at: null,
-        failure: null,
+        failure: sample.tombstone
+          ? {
+              stage: "active",
+              code: sample.tombstone.code,
+              message: sample.tombstone.message,
+              retryable: false,
+            }
+          : null,
         started_at: now,
       });
     });

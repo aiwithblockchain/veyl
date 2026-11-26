@@ -84,33 +84,81 @@ describe("流量样例（第三段验界面）", () => {
     localStorage.clear();
   });
 
-  it("seedTrafficDemo 给出 ok / near / over / 额度未知各一台，账号池按各台求和", () => {
+  it("seedTrafficDemo 给出五态样例，state 与 used/limit 自洽", () => {
     const service = new MockMyServerService();
     service.seedTrafficDemo();
-    const { servers, traffic_pool } = service.list();
+    const { servers } = service.list();
 
-    expect(servers).toHaveLength(4);
+    expect(servers).toHaveLength(5);
     expect(servers.map((server) => server.traffic_state)).toEqual([
       "ok",
       "near",
       "over",
       "ok",
+      "unpaid",
     ]);
-    const unknown = servers.find((server) => server.traffic_limit_bytes === 0);
-    expect(unknown).toBeDefined();
-    expect(unknown?.traffic_state).toBe("ok");
-    expect(unknown?.traffic_used_bytes).toBeGreaterThan(0);
+
+    const byId = new Map(servers.map((server) => [server.server_id, server]));
+    const ok = byId.get("srv_traffic_ok")!;
+    const near = byId.get("srv_traffic_near")!;
+    const over = byId.get("srv_traffic_over")!;
+    const unknown = byId.get("srv_traffic_unknown")!;
+    const unpaid = byId.get("srv_traffic_unpaid")!;
+
+    // 额度按 §4.1：1000 GiB 月额度 / 28 天。
+    const limit = Math.floor((1000 * 1024 ** 3) / 28);
+    expect(near.traffic_limit_bytes).toBe(limit);
+    expect(ok.traffic_used_bytes * 5).toBeLessThan(limit * 4);
+    expect(near.traffic_used_bytes).toBeGreaterThanOrEqual(Math.ceil((limit * 4) / 5));
+    expect(near.traffic_used_bytes).toBeLessThanOrEqual(limit);
+    expect(over.traffic_used_bytes).toBeGreaterThan(limit);
+
+    // 额度未知：limit = 0，状态必须是 ok（不知道额度就不能断言超支）。
+    expect(unknown.traffic_limit_bytes).toBe(0);
+    expect(unknown.traffic_state).toBe("ok");
+    expect(unknown.traffic_used_bytes).toBeGreaterThan(0);
+
+    // 流量超支停机：destroyed 墓碑 + traffic_overage，已用超过已释放。
+    expect(unpaid.state).toBe("destroyed");
+    expect(unpaid.failure).toMatchObject({
+      code: "traffic_overage",
+      retryable: false,
+    });
+    expect(unpaid.traffic_used_bytes).toBeGreaterThan(unpaid.traffic_limit_bytes);
+
     for (const server of servers) {
       expect(server.traffic_used_bytes).toBeGreaterThan(0);
       if (server.traffic_limit_bytes > 0) {
         expect(server.traffic_reset_at).toMatch(/^\d{4}-\d{2}-01T00:00:00\.000Z$/);
       }
     }
-    expect(traffic_pool?.usedBytes).toBe(
-      servers.reduce((sum, server) => sum + server.traffic_used_bytes, 0),
+  });
+
+  it("账号池对全量机器求和，包含列表里看不到的手动销毁行", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    const key = "veyl.mock.myServers";
+    const store = JSON.parse(localStorage.getItem(key) ?? "{}") as {
+      servers: Array<Record<string, unknown>>;
+    };
+    store.servers.push({
+      ...store.servers[0],
+      server_id: "srv_gone_manual",
+      state: "destroyed",
+      failure: null,
+      traffic_used_bytes: 3_221_225_472,
+    });
+    localStorage.setItem(key, JSON.stringify(store));
+
+    const { servers, traffic_pool } = service.list();
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_gone_manual",
     );
-    expect(traffic_pool?.limitBytes).toBe(
-      servers.reduce((sum, server) => sum + server.traffic_limit_bytes, 0),
+    expect(traffic_pool?.usedBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_used_bytes as number),
+        0,
+      ),
     );
   });
 
@@ -118,7 +166,7 @@ describe("流量样例（第三段验界面）", () => {
     const service = new MockMyServerService();
     service.seedTrafficDemo();
     service.seedTrafficDemo();
-    expect(service.list().servers).toHaveLength(4);
+    expect(service.list().servers).toHaveLength(5);
   });
 });
 

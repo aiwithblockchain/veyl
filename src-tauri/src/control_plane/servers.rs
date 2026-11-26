@@ -679,13 +679,18 @@ fn parse_server_list(raw: &Value) -> Result<ServerList, CpError> {
     })
 }
 
-/// `traffic_pool` 整体缺失或不是对象时视为「控制面没给」；对象内的字段缺失按 0。
+/// `traffic_pool` 整体缺失或不是对象时视为「控制面没给」；对象内的字段缺失按 0，
+/// 但两个键都认不出来时也按没给——空对象不等于「额度 0」。
 fn parse_traffic_pool(value: Option<&Value>) -> Option<TrafficPool> {
     let pool = value?.as_object()?;
-    let bytes = |key: &str| pool.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let used = pool.get("used_bytes").and_then(Value::as_u64);
+    let limit = pool.get("limit_bytes").and_then(Value::as_u64);
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
     Some(TrafficPool {
-        used_bytes: bytes("used_bytes"),
-        limit_bytes: bytes("limit_bytes"),
+        used_bytes: used.unwrap_or(0),
+        limit_bytes: limit.unwrap_or(0),
     })
 }
 
@@ -1739,6 +1744,8 @@ mod tests {
             })
         );
         let raw = json!({ "servers": [], "traffic_pool": "nope" });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
+        let raw = json!({ "servers": [], "traffic_pool": {} });
         assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
         let raw = json!({ "servers": [] });
         assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
