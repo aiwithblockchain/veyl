@@ -341,7 +341,7 @@ Authorization: Bearer <server_token>
 - 归属周期 = 控制面收到请求时的 UTC 年月，agent 不传周期。
 - 接受 delta 后分两步，**不是同一个事务**：
   1. `server_traffic.bytes += delta` 与 `last_seq` 推进是**一条原子写入**（`ON CONFLICT … WHERE last_seq < excluded.last_seq`，并发时后到的那条 `changes = 0`，按重复处理）；
-  2. 再按 §5.1 算超支并扣费，扣费在 `recordLedgerEntry` 的 `db.batch` 里原子完成——账本行、`accounts.balance_cents`、`server_traffic.charged_cents` 三者同批。
+  2. 再按 §5.1 算超支并扣费，扣费在 `recordLedgerEntry` 的 `db.batch` 里原子完成——账本行、`accounts.balance_cents`、`server_traffic.charged_cents` 三者同批。「算」本身在批外：先读 `accountTotals`，再在 batch 的 guard 里复核「账号已扣额未变」，变了就这笔不写（并发时由另一笔负责）。
 - 两步之间进程中断也不会永久错账：下一次上报按 `应付 − 已扣` 补算。
 
 ### 7.3 客户端契约（`commands.md` 2.75.0，**未实现**）
