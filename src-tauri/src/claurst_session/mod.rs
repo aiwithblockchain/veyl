@@ -155,10 +155,11 @@ fn dynamic_prompt(
     region: &crate::rules::Region,
     source: crate::rules::RegionSource,
     system_region: &crate::rules::Region,
+    logs: &LogDirs,
 ) -> String {
     format!(
         "{}\n\n{}",
-        environment_section(lang, region, source, system_region),
+        environment_section(lang, region, source, system_region, logs),
         language_constraint(lang)
     )
 }
@@ -170,8 +171,9 @@ fn apply_turn_prompt(
     region: &crate::rules::Region,
     source: crate::rules::RegionSource,
     system_region: &crate::rules::Region,
+    logs: &LogDirs,
 ) {
-    cfg.append_system_prompt = Some(dynamic_prompt(lang, region, source, system_region));
+    cfg.append_system_prompt = Some(dynamic_prompt(lang, region, source, system_region, logs));
 }
 
 /// 完整提示词：稳定段 + 动态段。只给测试用，运行时两段分开下发。
@@ -182,11 +184,12 @@ fn compose_system_prompt(
     region: &crate::rules::Region,
     source: crate::rules::RegionSource,
     system_region: &crate::rules::Region,
+    logs: &LogDirs,
 ) -> String {
     format!(
         "{}\n\n{}",
         stable_prompt(prompt_dir, lang),
-        dynamic_prompt(lang, region, source, system_region)
+        dynamic_prompt(lang, region, source, system_region, logs)
     )
 }
 
@@ -203,6 +206,28 @@ fn current_language() -> &'static str {
     crate::i18n::resolve(selected)
 }
 
+/// 运行时实际使用的日志目录。
+///
+/// debug 构建的应用日志在仓库根的 `logs/`，代理看门狗仍写数据目录，
+/// 只有 release 才重合；三条都按运行时解析结果注入，不写死。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogDirs {
+    app: std::path::PathBuf,
+    proxy: std::path::PathBuf,
+    helper: std::path::PathBuf,
+}
+
+impl LogDirs {
+    fn detect() -> Self {
+        let data_dir = crate::runtime::default_app_data_dir();
+        Self {
+            app: crate::logging::resolve_log_dir(&data_dir),
+            proxy: crate::veyl_paths::proxy_logs_dir(&data_dir),
+            helper: crate::veyl_paths::helper_logs_dir(&data_dir),
+        }
+    }
+}
+
 /// 每轮都要用到、几乎不变的上下文，走系统提示词，不做成工具。
 /// 生效值来自 AI 写入时，不能再说成「系统推断」；系统原始推断单独给一行，
 /// 让模型知道两者的差别，也禁止为了确认地区追问（设计 §9.3）。
@@ -211,11 +236,26 @@ fn environment_section(
     region: &crate::rules::Region,
     source: crate::rules::RegionSource,
     system_region: &crate::rules::Region,
+    logs: &LogDirs,
 ) -> String {
     if lang == "en" {
         let source_label = match source {
             crate::rules::RegionSource::System => "system inference",
             crate::rules::RegionSource::Ai => "written by the AI earlier",
+        };
+        let log_line = if logs.app == logs.proxy {
+            format!(
+                "Logs: app, proxy and background component {}; install service and sing-box {}.",
+                logs.app.display(),
+                logs.helper.display()
+            )
+        } else {
+            format!(
+                "Logs: app {}; proxy and background component {}; install service and sing-box {}.",
+                logs.app.display(),
+                logs.proxy.display(),
+                logs.helper.display()
+            )
         };
         return format!(
             "\
@@ -228,7 +268,8 @@ otherwise use the current effective value (the AI-written one first, then the sy
 if the system can't determine it either, treat it as unknown (all traffic goes through the VPN).
 Don't question the user just to confirm the region.
 Only call SetUserRegion to write it when you are confident about the value; once written it stays fixed
-and no longer follows system time-zone changes. If unsure, don't write; keep using the system inference.",
+and no longer follows system time-zone changes. If unsure, don't write; keep using the system inference.
+{log_line}",
             effective = region.label_en(),
             system = system_region.label_en(),
         );
@@ -236,6 +277,20 @@ and no longer follows system time-zone changes. If unsure, don't write; keep usi
     let source_label = match source {
         crate::rules::RegionSource::System => "系统推断",
         crate::rules::RegionSource::Ai => "AI 先前写入",
+    };
+    let log_line = if logs.app == logs.proxy {
+        format!(
+            "日志：应用、代理与后台组件 {}；安装服务与 sing-box {}。",
+            logs.app.display(),
+            logs.helper.display()
+        )
+    } else {
+        format!(
+            "日志：应用 {}；代理与后台组件 {}；安装服务与 sing-box {}。",
+            logs.app.display(),
+            logs.proxy.display(),
+            logs.helper.display()
+        )
     };
     format!(
         "\
@@ -248,7 +303,8 @@ and no longer follows system time-zone changes. If unsure, don't write; keep usi
 系统也判不出就按未知处理（全部走 VPN）。
 不要为了确认地区而追问用户。
 只有对这个值有把握时才调用 SetUserRegion 写入；写入后会固定下来，
-不再跟随系统时区变化。没把握就不写，继续用系统推断。",
+不再跟随系统时区变化。没把握就不写，继续用系统推断。
+{log_line}",
         effective = region.label(),
         system = system_region.label(),
     )
@@ -400,12 +456,14 @@ impl AivpnSession {
         let (region, region_source) = crate::rules::effective_region_now();
         // 稳定段只在创建时算一次；环境与语言约束走动态段，每轮重算。
         query_config.system_prompt = Some(stable_prompt(&prompt_dir, lang));
+        let logs = LogDirs::detect();
         apply_turn_prompt(
             &mut query_config,
             lang,
             &region,
             region_source,
             &crate::rules::detect_region(),
+            &logs,
         );
         query_config.effort_level = Some(EffortLevel::Medium);
         query_config.working_directory = Some(working_dir.to_string_lossy().to_string());
@@ -511,12 +569,14 @@ impl AivpnSession {
         // 语言不重取：会话创建时定下来的那一档，老会话不跟设置变。
         // 只重设动态段；稳定段（正文 + 安全底线）保持创建时那一份。
         let (region, region_source) = crate::rules::effective_region_now();
+        let logs = LogDirs::detect();
         apply_turn_prompt(
             &mut query_config,
             self.lang,
             &region,
             region_source,
             &crate::rules::detect_region(),
+            &logs,
         );
 
         // 工具审计要把调用记到当前请求上（工具自己拿不到 request_id）。
@@ -1592,6 +1652,28 @@ mod prompt_tests {
         PathBuf::from("/tmp/veyl-prompts/zh")
     }
 
+    /// 环境段要带日志目录；用可注入的临时路径，不把真实 home 写进断言。
+    /// debug 形态：应用日志与代理日志不同目录。
+    fn log_dirs_split() -> LogDirs {
+        let root = std::env::temp_dir().join("veyl-prompt-test");
+        LogDirs {
+            app: root.join("app-logs"),
+            proxy: root.join("proxy-logs"),
+            helper: root.join("helper-logs"),
+        }
+    }
+
+    /// release 形态：应用日志与代理日志是同一个数据目录。
+    fn log_dirs_merged() -> LogDirs {
+        let root = std::env::temp_dir().join("veyl-prompt-test");
+        let shared = root.join("data-logs");
+        LogDirs {
+            app: shared.clone(),
+            proxy: shared,
+            helper: root.join("helper-logs"),
+        }
+    }
+
     /// 中国 + 系统推断，只关心正文。
     fn render() -> String {
         render_system_prompt(&prompt_dir(), "zh")
@@ -1605,6 +1687,7 @@ mod prompt_tests {
             &crate::rules::Region::Cn,
             crate::rules::RegionSource::System,
             &crate::rules::Region::Cn,
+            &log_dirs_merged(),
         )
     }
 
@@ -1698,11 +1781,26 @@ mod prompt_tests {
     }
 
     /// 动态段以环境开头、以语言约束收尾：最后一句始终是语言。
+    /// 日志行按实际目录注入：debug 应用与代理不同，release 相同则合并。
     #[test]
     fn the_dynamic_prompt_runs_from_environment_to_language_constraint() {
         let cn = crate::rules::Region::Cn;
-        let zh = dynamic_prompt("zh", &cn, crate::rules::RegionSource::System, &cn);
+
+        // debug 形态：三条路径分列。
+        let split = log_dirs_split();
+        let (app, proxy, helper) = (
+            split.app.display().to_string(),
+            split.proxy.display().to_string(),
+            split.helper.display().to_string(),
+        );
+        let zh = dynamic_prompt("zh", &cn, crate::rules::RegionSource::System, &cn, &split);
         assert!(zh.starts_with("# 环境"), "{zh}");
+        assert!(
+            zh.contains(&format!(
+                "日志：应用 {app}；代理与后台组件 {proxy}；安装服务与 sing-box {helper}。"
+            )),
+            "{zh}"
+        );
         assert!(
             zh.trim_end()
                 .ends_with("始终使用中文回答，思考过程也用中文。"),
@@ -1710,12 +1808,47 @@ mod prompt_tests {
         );
         assert!(!zh.contains("# 安全底线"), "动态段不该重复安全底线");
 
-        let en = dynamic_prompt("en", &cn, crate::rules::RegionSource::System, &cn);
+        let en = dynamic_prompt("en", &cn, crate::rules::RegionSource::System, &cn, &split);
         assert!(en.starts_with("# Environment"), "{en}");
+        assert!(
+            en.contains(&format!(
+                "Logs: app {app}; proxy and background component {proxy}; install service and sing-box {helper}."
+            )),
+            "{en}"
+        );
         assert!(
             en.trim_end()
                 .ends_with("Always answer in English, and think in English too."),
             "{en}"
+        );
+
+        // release 形态：应用与代理同一个目录，合并成一句、不重复列路径。
+        let merged = log_dirs_merged();
+        let shared = merged.app.display().to_string();
+        let helper = merged.helper.display().to_string();
+        let zh = dynamic_prompt("zh", &cn, crate::rules::RegionSource::System, &cn, &merged);
+        assert!(
+            zh.contains(&format!(
+                "日志：应用、代理与后台组件 {shared}；安装服务与 sing-box {helper}。"
+            )),
+            "{zh}"
+        );
+        assert_eq!(
+            zh.matches(shared.as_str()).count(),
+            1,
+            "同一路径只出现一次：{zh}"
+        );
+        let en = dynamic_prompt("en", &cn, crate::rules::RegionSource::System, &cn, &merged);
+        assert!(
+            en.contains(&format!(
+                "Logs: app, proxy and background component {shared}; install service and sing-box {helper}."
+            )),
+            "{en}"
+        );
+        assert_eq!(
+            en.matches(shared.as_str()).count(),
+            1,
+            "同一路径只出现一次：{en}"
         );
     }
 
@@ -1727,7 +1860,15 @@ mod prompt_tests {
         cfg.system_prompt = Some("STABLE".into());
 
         let cn = crate::rules::Region::Cn;
-        apply_turn_prompt(&mut cfg, "zh", &cn, crate::rules::RegionSource::System, &cn);
+        let logs = log_dirs_merged();
+        apply_turn_prompt(
+            &mut cfg,
+            "zh",
+            &cn,
+            crate::rules::RegionSource::System,
+            &cn,
+            &logs,
+        );
 
         assert_eq!(cfg.system_prompt.as_deref(), Some("STABLE"));
         let append = cfg.append_system_prompt.as_deref().expect("应写入动态段");
@@ -1929,22 +2070,34 @@ mod prompt_tests {
     #[test]
     fn the_environment_section_carries_the_effective_region_and_source() {
         let system_cn = crate::rules::Region::Cn;
+        let logs = log_dirs_split();
         let cn = dynamic_prompt(
             "zh",
             &system_cn,
             crate::rules::RegionSource::System,
             &system_cn,
+            &logs,
         );
         assert!(cn.contains("# 环境"));
         assert!(cn.contains("用户所在/常用地区：中国大陆（来源：系统推断）"));
         assert!(cn.contains("系统原始推断：中国大陆"));
         assert!(cn.contains("不要为了确认地区而追问用户"));
+        assert!(
+            cn.contains(&format!(
+                "日志：应用 {}；代理与后台组件 {}；安装服务与 sing-box {}。",
+                logs.app.display(),
+                logs.proxy.display(),
+                logs.helper.display()
+            )),
+            "{cn}"
+        );
 
         let unknown = dynamic_prompt(
             "zh",
             &crate::rules::Region::Unknown,
             crate::rules::RegionSource::System,
             &crate::rules::Region::Unknown,
+            &logs,
         );
         assert!(unknown.contains("用户所在/常用地区：未知（来源：系统推断）"));
         assert!(unknown.contains("系统原始推断：未知"));
@@ -1958,6 +2111,7 @@ mod prompt_tests {
             &jp,
             crate::rules::RegionSource::Ai,
             &system_cn,
+            &logs,
         );
         assert!(ai.contains("用户所在/常用地区：日本（来源：AI 先前写入）"), "{ai}");
         assert!(ai.contains("系统原始推断：中国大陆"));
