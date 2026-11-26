@@ -373,6 +373,10 @@ export interface NodeDiagnosis {
   cancelReset: () => void;
   /** connection 档：结论后可以再测一次（node_probe）；其它情况为 null。 */
   retestProbe: (() => void) | null;
+  /** 结论出来后的次要出口：把本次清单原样交给 AI，不改变主按钮。 */
+  askAi: () => void;
+  /** 主按钮已经是「去问 AI」时不重复给；还没开始跑时也不给。 */
+  canAskAi: boolean;
 }
 
 interface Collected {
@@ -1815,21 +1819,39 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
         }
       : null;
 
+  const action = isConnectionProfile()
+    ? connectionActionFor(connRef.current.final, phase)
+    : deriveAction(
+        steps,
+        phase,
+        configAttemptsRef.current,
+        postRotateRetestsRef.current,
+      );
+  // 有可执行动作就顺手给一个次要出口：主按钮选什么，不应该决定能不能问 AI。
+  // 没有动作（比如代理可用、只剩关闭）时不出现——那种情况下没什么要问的。
+  const canAskAi =
+    steps.length > 0 &&
+    action !== null &&
+    action !== "askAi" &&
+    action !== "start" &&
+    phase !== "running" &&
+    phase !== "confirming";
+
+  const askAi = () => {
+    if (isConnectionProfile()) handOffConnectionToAi();
+    else handOffToAi();
+  };
+
   return {
     steps,
     phase,
-    action: isConnectionProfile()
-      ? connectionActionFor(connRef.current.final, phase)
-      : deriveAction(
-          steps,
-          phase,
-          configAttemptsRef.current,
-          postRotateRetestsRef.current,
-        ),
+    action,
     context: buildContext(depsRef.current.facts, collectedRef.current),
     run,
     confirmReset,
     cancelReset,
     retestProbe,
+    askAi,
+    canAskAi,
   };
 }

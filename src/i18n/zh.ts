@@ -1786,6 +1786,8 @@ export const zh = {
   "diagnosis.action.resetPort": "更换连接密码",
   "diagnosis.action.retest": "重新测一次",
   "diagnosis.action.askAi": "去问 AI",
+  // 动作按钮旁的次要出口，与主按钮的「去问 AI」区分开。
+  "diagnosis.action.askAiSecondary": "问 AI",
   "diagnosis.action.goServers": "去销毁并重建",
   "diagnosis.action.openSettings": "打开设置",
   "diagnosis.action.changeNode": "换一个节点",

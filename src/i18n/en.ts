@@ -1868,6 +1868,8 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.action.resetPort": "Change connection password",
   "diagnosis.action.retest": "Re-test",
   "diagnosis.action.askAi": "Ask AI",
+  // 动作按钮旁的次要出口，与主按钮的「去问 AI」区分开。
+  "diagnosis.action.askAiSecondary": "Ask AI about this",
   "diagnosis.action.goServers": "Destroy and rebuild",
   "diagnosis.action.openSettings": "Open settings",
   "diagnosis.action.changeNode": "Change node",

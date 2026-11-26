@@ -372,6 +372,15 @@ export function DiagnosisPanel({
                           {t("diagnosis.action.retest")}
                         </button>
                       ) : null}
+                      {diagnosis.canAskAi ? (
+                        <button
+                          type="button"
+                          className="btn btn--ghost quit-dialog__btn"
+                          onClick={diagnosis.askAi}
+                        >
+                          {t("diagnosis.action.askAiSecondary")}
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

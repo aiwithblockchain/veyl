@@ -106,6 +106,38 @@ describe("节点诊断面板", () => {
     expect(onGoToServers).toHaveBeenCalledTimes(1);
   });
 
+  it("整机不可达：销毁之外还有一个「问 AI」，点了就把清单交给 AI", async () => {
+    const openAi = vi.fn();
+    const deps = makeDeps({
+      probeReachability: vi.fn(async () => silent),
+      openAi,
+    });
+    open(deps);
+
+    await start();
+
+    expect(await screen.findByText("这台机器整机不可达")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "去销毁并重建" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "问 AI" }));
+    expect(openAi).toHaveBeenCalledTimes(1);
+  });
+
+  it("主按钮已经是「去问 AI」时，动作旁不再重复一个「问 AI」", async () => {
+    const deps = makeDeps({
+      facts: facts({ controlPlaneError: "control_plane_unreachable" }),
+      probeReachability: vi.fn(async () => silent),
+    });
+    open(deps);
+
+    await start();
+
+    expect(await screen.findByText("本机网络可能不通")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "去问 AI" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "问 AI" })).toBeNull();
+  });
+
   it("控制面请求也失败：结论是本机网络可能不通，不给销毁", async () => {
     const deps = makeDeps({
       facts: facts({ controlPlaneError: "control_plane_unreachable" }),

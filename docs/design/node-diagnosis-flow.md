@@ -198,7 +198,7 @@
 ### 10.4 AI 兜底条件（只用现有数据判定）
 
 - 判定输入是最后一步的 `DiagnosisStep.conclusion.kind`（`useNodeDiagnosis.ts:154-196` 的判别联合），**不引入 `remediation` 字段**。
-- **可执行结论集合 A** = `{ local-network, runtime-helper-blocked, config-node-missing, config-invalid, server-unreachable, service-down, probe-untested, probe-ok }`（8 个）；`probe-untested` 只有 reason ∈ `{node_not_in_config, node_not_in_running_config, connection_busy, clash_unavailable, no_credentials}` 时才属于 A，命中 A 一定给动作、**永不出现 `askAi`**。
+- **可执行结论集合 A** = `{ local-network, runtime-helper-blocked, config-node-missing, config-invalid, server-unreachable, service-down, probe-untested, probe-ok }`（8 个）；`probe-untested` 只有 reason ∈ `{node_not_in_config, node_not_in_running_config, connection_busy, clash_unavailable, no_credentials}` 时才属于 A，命中 A 时主按钮一定是可执行动作、**不是 `askAi`**。动作按钮旁另有一个「问 AI」次要出口：跑出结论后就能点，把本次清单交给 AI，不改变主按钮（2026-11-26 改：原来只在给不出结论时才有，用户反馈「整机不可达」这种最常见的情况反而没有入口）。
 - **`askAi` 判定**：`kind ∈ { runtime-error, probe-error, connection-undetermined }`，**或** `kind = probe-untested` 且 reason ∈ `{runtime_missing, runtime_failed, runtime_timeout}`；等价于 `action === "askAi"`。
 - 「多个疑似原因」不触发 AI：按 10.3 优先级取第一个可执行动作，其余异常原样作为事实进提示词。
 - 离线时命中 `local-network` ∈ A，**永不判 `askAi`**——离线用户不会被送进必然失败的远程请求。
