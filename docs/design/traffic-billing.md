@@ -1,7 +1,7 @@
 # 流量额度与计费
 
 > 日期：2026-11-25
-> 状态：已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10
+> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。客户端字段（§7.3）、账单归集与余额预警（§5.4、§8.1）**尚未实现**，随第 3 / 第 5 步落地。
 > 上游：`billing-notes.md`（支付与日价）、`servers-list-detail.md`（详情页事实区）、`node-agent-mcp.md`（agent 通道）
 > 事实来源：DigitalOcean 带宽文档 <https://docs.digitalocean.com/platform/billing/bandwidth/>（2026-11-25 核实）
 
@@ -207,7 +207,7 @@ table inet veyl_meter {
 本地状态（**原子写**：临时文件 + rename）：
 
 ```
-{ counter_last, pending_bytes, last_saved_at, last_ok_at, seq }
+{ counter_last, pending_bytes, last_saved_at, last_ok_at, seq, pending_attempt? }
 ```
 
 每 30 秒读一次计数器，**落盘每 5 分钟一次**，上报按事件触发：
@@ -217,10 +217,15 @@ cur     = nft_bytes()
 delta   = if cur < counter_last { cur } else { cur - counter_last }   // 负增量=计数器归零
 pending += delta; counter_last = cur
 if now - last_saved_at >= 5 分钟: save()
-if pending >= 256 MB || now - last_ok_at >= 30 分钟:
-    POST /v1/agent/traffic { seq, delta_bytes: pending }
-    2xx → pending = 0; seq += 1; last_ok_at = now; save()
+if pending_attempt 还在:                       // 上一批没收到 2xx
+    原样重发 pending_attempt 里的 (seq, bytes)，不重算
+elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
+    pending_attempt = { seq, delta_bytes: pending }; save()   // 先冻结并落盘
+    POST /v1/agent/traffic
+    2xx → pending -= pending_attempt.bytes; seq += 1; last_ok_at = now; pending_attempt = None; save()
 ```
+
+- **先冻结再发**：请求发出前把这一批的 `(seq, bytes)` 落盘，失败时只重发这一批的原值。否则响应丢失后的重试会带上期间新增的字节，而控制面按 `seq` 去重会把新增的那部分永久丢掉（少算）。
 
 - **agent 不知道计费周期**，报文里不带周期；归属由控制面按收到时间决定（§6.5）。
 - 上报失败不清 `pending`，下个窗口重发；控制面按 `(server_id, seq)` 去重，只接受递增序列。
@@ -332,7 +337,9 @@ Authorization: Bearer <server_token>
 - 归属周期 = 控制面收到请求时的 UTC 年月，agent 不传周期。
 - 接受 delta 后：`bytes += delta`，并按 §5.1 在同一事务里算并扣超支。
 
-### 7.3 客户端契约（`commands.md` 2.75.0）
+### 7.3 客户端契约（`commands.md` 2.75.0，**未实现**）
+
+> 下面四个字段截至 2026-11-26 在控制面 `serverView` / `toMyServer`、`commands.md` 与 `src/agent/bridge.ts` 里都还不存在，比例的计量链路（§7.1 / §7.2）晚一步。落地时同时改这三处并升契约版本。
 
 `MyServer` 增：
 
