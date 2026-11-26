@@ -36,7 +36,11 @@ function makeBridge() {
 }
 
 function renderDialog(
-  over: { bridge?: AgentBridge; editing?: NodeSummary | null } = {},
+  over: {
+    bridge?: AgentBridge;
+    editing?: NodeSummary | null;
+    connected?: boolean;
+  } = {},
 ) {
   const bridge = over.bridge ?? makeBridge();
   const onClose = vi.fn();
@@ -46,6 +50,7 @@ function renderDialog(
     <NodeImportDialog
       open={open}
       bridge={bridge}
+      connected={over.connected ?? false}
       editing={over.editing ?? null}
       onSaved={onSaved}
       onClose={onClose}
@@ -132,6 +137,24 @@ describe("链接 / 订阅段", () => {
     );
     expect(within(dialog).getByText("旧节点：已有同名节点")).toBeTruthy();
     expect(within(dialog).queryByText("duplicate")).toBeNull();
+  });
+
+  it("已连接时导入提示要重新连接后才能测速", async () => {
+    const bridge = makeBridge();
+    const { onNotice } = renderDialog({ bridge, connected: true });
+    const dialog = screen.getByRole("dialog", { name: "添加节点" });
+    fireEvent.change(
+      within(dialog).getByRole("textbox", { name: "节点链接或订阅地址" }),
+      { target: { value: "ss://abc" } },
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加" }));
+
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith({
+        level: "info",
+        text: "已添加 1 个节点；重新连接后才能测速",
+      }),
+    );
   });
 
   it("https 订阅走 node_import_url", async () => {
@@ -341,7 +364,7 @@ describe("手动填写段", () => {
       name: "加密方式",
     }) as HTMLSelectElement;
     expect(select.value).toBe("aes-256-gcm");
-    expect(select.options).toHaveLength(12);
+    expect(select.options).toHaveLength(11);
 
     const password = screen.getByPlaceholderText("连接密码") as HTMLInputElement;
     expect(password.type).toBe("password");
@@ -587,6 +610,46 @@ describe("切段与改输入：旧结果不残留", () => {
     expect(host.length).toBeGreaterThan(0);
     expect(Array.from(select.options).map((option) => option.value)).toEqual(host);
   });
+
+  it("2022 加密方式填普通密码时贴着密码栏报错，不发命令", () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ password: "secret" });
+    fireEvent.change(screen.getByRole("combobox", { name: "加密方式" }), {
+      target: { value: "2022-blake3-aes-128-gcm" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    expect(
+      screen.getByText(
+        "这个加密方式要填 base64 密钥：aes-128 为 16 字节，aes-256 与 chacha20 为 32 字节。",
+      ),
+    ).toBeTruthy();
+    expect(bridge.nodeCreate).not.toHaveBeenCalled();
+  });
+
+  it("2022 加密方式填 16 字节 base64 密钥可以提交", async () => {
+    const bridge = makeBridge();
+    renderDialog({ bridge });
+
+    openManual();
+    fillManual({ password: btoa("0123456789abcdef") });
+    fireEvent.change(screen.getByRole("combobox", { name: "加密方式" }), {
+      target: { value: "2022-blake3-aes-128-gcm" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+
+    await waitFor(() =>
+      expect(bridge.nodeCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "2022-blake3-aes-128-gcm",
+          password: btoa("0123456789abcdef"),
+        }),
+      ),
+    );
+  });
 });
 
 describe("编辑态", () => {
@@ -650,6 +713,30 @@ describe("编辑态", () => {
     expect(onNotice).toHaveBeenCalledWith({ level: "info", text: "已保存" });
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("编辑时改到 2022 又不填密码：后端拒绝时错误落在密码栏", async () => {
+    const bridge = makeBridge();
+    (bridge as unknown as { nodeUpdate: ReturnType<typeof vi.fn> }).nodeUpdate =
+      vi.fn(async () => {
+        throw {
+          code: "INVALID_ARGUMENT",
+          message: "unsupported",
+          details: { reason: "unsupported_method" },
+        };
+      });
+    renderDialog({ bridge, editing: MANUAL });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "加密方式" }), {
+      target: { value: "2022-blake3-aes-128-gcm" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(
+      await screen.findByText(
+        "这个加密方式要填 base64 密钥：aes-128 为 16 字节，aes-256 与 chacha20 为 32 字节。",
+      ),
+    ).toBeTruthy();
   });
 
   it("订阅节点：连接参数四栏禁用，只改名能保存", async () => {

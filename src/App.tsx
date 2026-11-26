@@ -3258,6 +3258,7 @@ export default function App() {
           onAnalyzeNode={handleAnalyzeNode}
           trialSummary={trialFlow?.summary ?? null}
           trialExpiresAt={trial?.expires_at ?? null}
+          trialState={trial?.state ?? null}
           pendingServerNodes={pendingServerNodes}
           preselect={trialPreselect}
           onPreselectApplied={(nonce) =>
@@ -3514,6 +3515,9 @@ export default function App() {
       <NodeImportDialog
         open={nodeImportOpen}
         bridge={bridge}
+        connected={
+          vpn.connection === "connected" || vpn.connection === "starting"
+        }
         editing={editingNode}
         onSaved={(result) => {
           if (result.paramsChanged && editingNode) {

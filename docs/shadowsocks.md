@@ -1,7 +1,7 @@
 # Shadowsocks 支持（N-03）
 
-> 版本：v1.1
-> 日期：2026-11-02
+> 版本：v1.2
+> 日期：2026-11-26
 > 契约：1.0.10
 > 状态：已实施
 
@@ -12,7 +12,7 @@
 | 项 | 结论 |
 |---|---|
 | 协议 | `NodeProtocol` 增加 `shadowsocks`，wire 值为 `"shadowsocks"` |
-| method | P1 **只支持 `aes-256-gcm`**，其余返回 `UNSUPPORTED`，**不静默降级** |
+| method | 白名单以 `nodes.rs` 的 `SUPPORTED_METHODS` 为准（当前 11 项），**不收 `none`**；`2022-blake3-*` 的密码必须是 base64 PSK（16 / 32 字节）。不在白名单或密钥不合法的，**不静默降级**，写入即拒绝 |
 | 凭据 | `password` 与 uuid 同级，属凭据：列表接口不返回、不进 SQLite 明文、不进日志、不进模型上下文 |
 | 导入通道 | **当前**：窗口级拖放调 `import_seed_file({ path })`（只收种子 `.json`，是它唯一的 UI 调用方）；设置页「添加节点」走文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`，文件命令契约见 `commands.md` §4.1.2）。**目标**：种子分发退场后拖放才迁到 `node_import_file`（§5.2） |
 | UI | 设置页加一个「选择文件」按钮；窗口接受拖放。profile 列表的协议标签可选 |
@@ -75,18 +75,29 @@ pub enum Credentials {
 
 ## 3. method 白名单
 
-**P1 只接受 `aes-256-gcm`。**
+以 `src-tauri/src/nodes.rs` 的 `SUPPORTED_METHODS` 为准（当前 11 项，`commands.md` §4.2）：
 
 ```rust
-const SUPPORTED_METHODS: &[&str] = &["aes-256-gcm"];
+pub const SUPPORTED_METHODS: &[&str] = &[
+    "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
+    "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+    "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+];
 ```
 
-其它 method（`chacha20-ietf-poly1305`、`aes-128-gcm`、`rc4-md5`…）：
+两条硬约束：
 
-- 导入阶段拒绝：`UNSUPPORTED`，`details = { "method": "<原值>", "supported": ["aes-256-gcm"] }`
+- **不收 `none`。** 明文隧道等于没有加密，用户却以为在走 VPN。任何入口（手动添加、订阅解析、文件导入、编辑）都拒绝；旧数据里已存在的 `none` 节点在运行时被剔除出 selector，不参与连接与测速。
+- **`2022-blake3-*` 的密码是 base64 的 PSK**：aes-128 为 16 字节，aes-256 与 chacha20 为 32 字节。普通密码会让 sing-box 的 `check` 直接失败（`decode key: illegal base64 data`），而配置生成是整份一起做的，一个坏节点会让**所有节点**都连不上，所以写入阶段就拒绝，导入按 `unsupported_method` 跳过该行。
+
+其它 method（`rc4-md5`、`salsa20`…）：
+
+- 导入阶段拒绝：`unsupported_method` 跳过该行，不整批作废。
+- 手动添加 / 编辑：`INVALID_ARGUMENT`，`details.reason = "unsupported_method"`。
 - **不降级、不猜测、不尝试**。降级会在用户不知情的情况下改变加密强度，比直接失败更糟。
 
-为什么只支持一种：sing-box 的 shadowsocks 出站支持更多 method，但我们**没有测试覆盖**。声明支持一个没测过的加密方式，等于把「能不能连上」交给运气。
+白名单里的每一项都按 sing-box 1.14 的真实行为核对过；新增 method 前先在 `check` 上实测，再同步 `nodes.rs`、手动表单下拉与 `commands.md`。
 
 ---
 
@@ -247,7 +258,7 @@ ProtocolConfig::Shadowsocks { server, server_port, method, password }
 | `INVALID_ARGUMENT` | `file_unreadable` | 无法读取这个文件 |
 | `INVALID_ARGUMENT` | `invalid_json` | 这个文件不是有效的节点文件 |
 | `INVALID_ARGUMENT` | `no_importable_nodes` | 文件里没有支持的节点（已跳过 M 个） |
-| `UNSUPPORTED` | — | 不支持加密方式 `<method>`，目前只支持 aes-256-gcm |
+| `UNSUPPORTED` | — | 不支持加密方式 `<method>`，或 `2022-blake3-*` 的密钥不是规定长度的 base64 |
 | `SECRET_STORE` | — | 凭据保存失败，请重试 |
 
 **任何情况下都不显示 password，也不回显文件内容。**

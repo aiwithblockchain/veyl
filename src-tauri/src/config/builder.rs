@@ -445,12 +445,15 @@ fn node_outbound(node: &NodeDescriptor, tag: &str) -> RuntimeResult<Value> {
         ProtocolConfig::Shadowsocks { password, method } => {
             require(password, "password")?;
             require(method, "method")?;
-            if !crate::catalog::SUPPORTED_METHODS.contains(&method.as_str()) {
+            // 配置里既有控制面下发的节点，也有用户自建 / 订阅导入的节点：
+            // 后者在写入时按 `nodes::SUPPORTED_METHODS` 放行（commands.md §4.2），
+            // 这里必须用同一份白名单，否则一个 chacha20 节点会让整份配置建不出来。
+            if !crate::nodes::SUPPORTED_METHODS.contains(&method.as_str()) {
                 return Err(RuntimeError::Unsupported {
                     message: format!("shadowsocks method {method} is not supported"),
                     details: serde_json::json!({
                         "method": method,
-                        "supported": crate::catalog::SUPPORTED_METHODS,
+                        "supported": crate::nodes::SUPPORTED_METHODS,
                     }),
                 });
             }
@@ -608,6 +611,25 @@ mod tests {
         assert_eq!(config["outbounds"][0]["password"], "p@ss");
         // shadowsocks 没有 TLS 块。
         assert!(config["outbounds"][0].get("tls").is_none());
+    }
+
+    /// 本地自建 / 订阅节点用的是 `nodes::SUPPORTED_METHODS`（commands.md §4.2），
+    /// 这里若查控制面那份只含 aes-256-gcm 的白名单，整份配置会建不出来：
+    /// 加过一个 chacha20 节点后，连免费节点也会报 UNSUPPORTED。
+    #[test]
+    fn a_locally_supported_shadowsocks_method_is_accepted() {
+        let node = NodeDescriptor {
+            id: "custom-01".into(),
+            name: "自建 01".into(),
+            server: "198.51.100.10".into(),
+            server_port: 8388,
+            protocol: ProtocolConfig::Shadowsocks {
+                password: "p@ss".into(),
+                method: "chacha20-ietf-poly1305".into(),
+            },
+        };
+        let config = build(&input(node)).unwrap();
+        assert_eq!(config["outbounds"][0]["method"], "chacha20-ietf-poly1305");
     }
 
     #[test]

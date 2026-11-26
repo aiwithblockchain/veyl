@@ -12,7 +12,10 @@ import { ConnectionStage, type PendingServerNode } from "./ConnectionStage";
 
 vi.mock("../log/uiLog", () => ({ uiLog: vi.fn() }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.removeItem("veyl.ui.trialExpiredDismissed.v1");
+});
 
 const CONFIG: ConfigDetail = {
   config_id: "cfg_1",
@@ -165,6 +168,7 @@ interface StageOverrides {
   } | null;
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   trialExpiresAt?: string | null;
+  trialState?: "available" | "active" | "expired" | null;
   danglingNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
   onAddNode?: () => void;
@@ -213,6 +217,7 @@ function stageElement(over: StageOverrides = {}) {
       preselect={over.preselect ?? null}
       trialSummary={over.trialSummary ?? null}
       trialExpiresAt={over.trialExpiresAt ?? null}
+      trialState={over.trialState ?? null}
       danglingNodeIds={over.danglingNodeIds}
       onProbe={over.onProbe}
       onAddNode={over.onAddNode}
@@ -848,6 +853,11 @@ describe("连接舞台", () => {
     });
 
     expect(await screen.findByText("这次都没测通。")).toBeTruthy();
+    expect(
+      document
+        .querySelector(".stage-card__probe-note")
+        ?.classList.contains("stage-card__probe-note--error"),
+    ).toBe(true);
     expect(
       await screen.findByRole("button", { name: "再试一次" }),
     ).toBeTruthy();
@@ -1615,44 +1625,43 @@ describe("混池节点卡：试用 + 自建", () => {
   it("卡片标题固定为节点，不再用配置名", () => {
     renderStage({ config: configWith([OWNED, FREE]) });
 
-    const card = document.querySelector(".stage-card");
+    const card = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    );
     expect(card?.getAttribute("aria-label")).toBe("节点");
     expect(screen.getByRole("heading", { name: "节点" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "免费节点" })).toBeNull();
   });
 
-  it("两类同池：标签按服务器在前、免费在后，默认只看当前节点所在组", () => {
+  it("免费节点独立成卡：标签只装服务器与自定义，免费卡常驻", () => {
     renderStage({ config: configWith([FREE, OWNED]) });
 
     const tabs = screen.getAllByRole("tab");
     expect(
       tabs.map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器1", "自定义节点0", "免费节点1"]);
-    expect(tabs[2].getAttribute("aria-selected")).toBe("true");
+    ).toEqual(["我的服务器1", "自定义节点0"]);
+    // 当前节点在免费卡里，节点卡默认落在第一个非空标签。
+    expect(tabs[0].getAttribute("aria-selected")).toBe("true");
 
-    // 当前节点是免费节点：只渲染免费组，自建组的行不在 DOM 里。
+    const freeCard = document.querySelector(".stage-card--free") as HTMLElement;
+    expect(freeCard).toBeTruthy();
     expect(
-      within(screen.getByRole("group", { name: "免费节点" })).getByText(
-        "洛杉矶 02",
-      ),
+      within(freeCard).getByRole("heading", { name: "免费试用节点" }),
     ).toBeTruthy();
-    expect(screen.queryByText("东京 1 号")).toBeNull();
+    expect(within(freeCard).getByText("洛杉矶 02")).toBeTruthy();
+    expect(within(freeCard).getByText("1 个节点")).toBeTruthy();
+    expect(within(freeCard).getByText("7 天试用 · 每人一次")).toBeTruthy();
 
-    fireEvent.click(tabs[0]);
+    // 节点卡里不出现免费行。
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
     expect(
       within(screen.getByRole("group", { name: "我的服务器" })).getByText(
         "东京 1 号",
       ),
     ).toBeTruthy();
-    // 当前节点行始终保留免费节点的名字，但本组列表里没有它。
-    expect(
-      within(screen.getByRole("group", { name: "我的服务器" })).queryByText(
-        "洛杉矶 02",
-      ),
-    ).toBeNull();
-
-    expect(screen.getByText("2 个节点")).toBeTruthy();
-    expect(screen.queryByText(/7 天试用/)).toBeNull();
+    expect(within(nodeCard).getByText("1 个节点")).toBeTruthy();
   });
 
   it("切换来源标签只改视图：不切换节点、不发连接命令", () => {
@@ -1668,9 +1677,9 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(onStart).not.toHaveBeenCalled();
 
-    // 方向键在标签之间移动：免费 → 右 → 回到我的服务器。
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
-    fireEvent.keyDown(screen.getByRole("tab", { name: /免费节点/ }), {
+    // 方向键在标签之间移动：自定义 → 右 → 回到我的服务器。
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    fireEvent.keyDown(screen.getByRole("tab", { name: /自定义节点/ }), {
       key: "ArrowRight",
     });
     expect(
@@ -1681,16 +1690,16 @@ describe("混池节点卡：试用 + 自建", () => {
   });
 
   it("当前节点显示在状态行：切到别的组仍显示，点它回到所在组", () => {
-    renderStage({ config: configWith([OWNED, FREE]) });
+    renderStage({ config: configWith([OWNED, CUSTOM]) });
 
     const heroNode = screen.getByRole("button", {
       name: /当前节点.*东京 1 号/,
     });
     expect(heroNode.closest(".stage-band")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
     expect(
-      within(screen.getByRole("group", { name: "免费节点" })).queryByText(
+      within(screen.getByRole("group", { name: "自定义节点" })).queryByText(
         "东京 1 号",
       ),
     ).toBeNull();
@@ -1712,24 +1721,25 @@ describe("混池节点卡：试用 + 自建", () => {
     ).toBeTruthy();
   });
 
-  it("只有一类节点时三个来源仍常驻，空组显示 0", () => {
+  it("只有免费节点时：节点卡两个 0 标签 + 独立免费卡", () => {
     const { rerender } = renderStage();
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器0", "自定义节点0", "免费节点2"]);
+    ).toEqual(["我的服务器0", "自定义节点0"]);
+
+    const freeCard = document.querySelector(".stage-card--free") as HTMLElement;
     expect(
-      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
-    ).toEqual(["免费节点"]);
-    expect(screen.getByText("2 个节点 · 7 天试用")).toBeTruthy();
-    expect(screen.queryByText("试用中")).toBeNull();
+      within(freeCard).getByRole("heading", { name: "免费试用节点" }),
+    ).toBeTruthy();
+    expect(within(freeCard).getByText("2 个节点")).toBeTruthy();
+    expect(within(freeCard).getByText("7 天试用 · 每人一次")).toBeTruthy();
+    expect(within(freeCard).getByText("试用中")).toBeTruthy();
 
     rerender(stageElement({ config: configWith([OWNED]) }));
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器1", "自定义节点0", "免费节点0"]);
-    expect(
-      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
-    ).toEqual(["我的服务器"]);
+    ).toEqual(["我的服务器1", "自定义节点0"]);
+    expect(document.querySelector(".stage-card--free")).toBeNull();
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
@@ -1741,7 +1751,10 @@ describe("混池节点卡：试用 + 自建", () => {
     fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
     const empty = document.querySelector(".stage-group-empty") as HTMLElement;
     expect(within(empty).getByText("还没有添加自己的节点")).toBeTruthy();
-    expect(screen.queryByRole("group")).toBeNull();
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
+    expect(within(nodeCard).queryByRole("group")).toBeNull();
 
     fireEvent.click(within(empty).getByRole("button", { name: "添加节点" }));
     expect(onAddNode).toHaveBeenCalledTimes(1);
@@ -1762,12 +1775,12 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(within(groups[0]).getByText("自定义")).toBeTruthy();
   });
 
-  it("三类同池：标签按服务器 → 自己的节点 → 免费，行内小标只属于自定义组", () => {
+  it("三类节点：两个标签 + 独立免费卡，行内小标只属于自定义组", () => {
     renderStage({ config: configWith([FREE, CUSTOM, OWNED]) });
 
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器1", "自定义节点1", "免费节点1"]);
+    ).toEqual(["我的服务器1", "自定义节点1"]);
 
     fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
     const owned = screen.getByRole("group", { name: "我的服务器" });
@@ -1779,7 +1792,6 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(within(custom).getByText("自建 03")).toBeTruthy();
     expect(within(custom).getByText("自定义")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
     const free = screen.getByRole("group", { name: "免费节点" });
     expect(within(free).getByText("洛杉矶 02")).toBeTruthy();
     expect(within(free).queryByText("自定义")).toBeNull();
@@ -1803,19 +1815,18 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getAllByText("待接入机器")).toHaveLength(1);
   });
 
-  it("免费组节点被清理后只剩自建：免费标签计数归零", () => {
+  it("免费组节点被清理后：独立免费卡一并消失", () => {
     const { rerender } = renderStage({ config: configWith([OWNED, FREE]) });
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器1", "自定义节点0", "免费节点1"]);
+    ).toEqual(["我的服务器1", "自定义节点0"]);
+    expect(document.querySelector(".stage-card--free")).toBeTruthy();
 
     rerender(stageElement({ config: configWith([OWNED]) }));
     expect(
       screen.getAllByRole("tab").map((tab) => tab.textContent?.replace(/\s+/g, "")),
-    ).toEqual(["我的服务器1", "自定义节点0", "免费节点0"]);
-    expect(
-      screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")),
-    ).toEqual(["我的服务器"]);
+    ).toEqual(["我的服务器1", "自定义节点0"]);
+    expect(document.querySelector(".stage-card--free")).toBeNull();
     expect(screen.queryByText("试用中")).toBeNull();
     expect(
       within(screen.getByRole("group", { name: "我的服务器" })).getByText(
@@ -1825,19 +1836,18 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getByText("1 个节点")).toBeTruthy();
   });
 
-  it("免费组标题接线共用口径：倒计时 / 试用中 / 已到期三态互斥", () => {
+  it("免费试用卡接线共用口径：倒计时 / 试用中 / 到期提醒", () => {
     const inDays = (days: number) =>
       new Date(Date.now() + days * 86_400_000).toISOString();
     const hintText = () =>
-      document.querySelector(".stage-node-group__hint")?.textContent;
+      document.querySelector(".stage-trial-note__hint")?.textContent;
 
-    // 取整与边界由 labels.test.ts 统一钉住，这里只验证组标题确实读那份口径。
+    // 取整与边界由 labels.test.ts 统一钉住，这里只验证卡头确实读那份口径。
     const { rerender } = renderStage({
       config: configWith([OWNED, FREE]),
       trialExpiresAt: inDays(3.2),
     });
-    // 试用口径只属于免费组：切到免费标签才出现。
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    // 倒计时常驻在免费试用卡上，不随节点标签切换。
     expect(hintText()).toBe("3 天后到期");
     expect(hintText()).not.toBe("试用中");
     expect(hintText()).not.toBe("已到期");
@@ -1862,8 +1872,10 @@ describe("混池节点卡：试用 + 自建", () => {
         trialExpiresAt: inDays(-0.1),
       }),
     );
-    expect(hintText()).toBe("已到期");
-    expect(hintText()).not.toContain("天后到期");
+    // 到期后卡头不再有倒计时，整卡换成提醒。
+    expect(hintText()).toBeUndefined();
+    expect(screen.getByText("试用已到期")).toBeTruthy();
+    expect(screen.getByText("免费节点已不可用。")).toBeTruthy();
   });
 
   it("最快标记仍在免费组的行内，不进组标题", () => {
@@ -1961,6 +1973,22 @@ describe("混池节点卡：试用 + 自建", () => {
     expect(screen.getAllByText(/线路不通很常见/)).toHaveLength(1);
   });
 
+  it("线路提示只属于「我的服务器」栏目", () => {
+    renderStage({
+      config: configWith([OWNED, CUSTOM]),
+      nodeProbes: probes({ results: { o1: failedProbe("o1") } }),
+    });
+
+    // 当前选中的是托管节点：提示落在这条栏目里。
+    expect(screen.getByText(/线路不通很常见/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    expect(screen.getByText(/线路不通很常见/)).toBeTruthy();
+  });
+
   it("单组超过 12 个节点才出现搜索；搜索只过滤当前组", () => {
     const many = Array.from({ length: 13 }, (_, index) => ({
       ...OWNED,
@@ -2003,7 +2031,9 @@ describe("混池节点卡：试用 + 自建", () => {
     const primary = screen.getByRole("button", { name: "连接节点" });
     expect(hero.contains(primary)).toBe(true);
 
-    const card = document.querySelector(".stage-card") as HTMLElement;
+    const card = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
     expect(
       primary.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
@@ -2042,7 +2072,7 @@ describe("免费节点到期后就地拒绝", () => {
   const inHours = (hours: number) =>
     new Date(Date.now() + hours * 3_600_000).toISOString();
 
-  it("过期 seed 行禁用、副行写已到期，点了不发任何请求", () => {
+  it("试用到期：免费卡变成提醒，确认后整卡消失", () => {
     const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
     const onStart = vi.fn();
     renderStage({
@@ -2052,14 +2082,14 @@ describe("免费节点到期后就地拒绝", () => {
       onStart,
     });
 
-    const freeRow = within(
-      screen.getByRole("group", { name: "免费节点" }),
-    ).getByRole("option") as HTMLElement;
-    expect(freeRow.getAttribute("aria-disabled")).toBe("true");
-    expect(freeRow.classList.contains("is-expired")).toBe(true);
-    expect(freeRow.querySelector(".stage-node__sub")?.textContent).toBe("已到期");
+    expect(screen.getByText("试用已到期")).toBeTruthy();
+    expect(screen.getByText("免费节点已不可用。")).toBeTruthy();
+    // 到期后不再列可点行，整张卡只剩提醒。
+    expect(document.querySelector(".stage-card--free .stage-node")).toBeNull();
 
-    fireEvent.click(freeRow);
+    fireEvent.click(screen.getByRole("button", { name: "知道了" }));
+    expect(document.querySelector(".stage-card--free")).toBeNull();
+    expect(localStorage.getItem("veyl.ui.trialExpiredDismissed.v1")).toBe("1");
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(onStart).not.toHaveBeenCalled();
   });
@@ -2096,7 +2126,7 @@ describe("免费节点到期后就地拒绝", () => {
     ).toBe(false);
   });
 
-  it("已连接时自建节点照旧可切换，断开按钮不受影响", () => {
+  it("已连接时自建节点照旧可切换，到期免费卡只留提醒", () => {
     const onSwitchNode = vi.fn(async () => ({ ok: true as const }));
     renderStage({
       config: configWith([OWNED, FREE], OWNED.node_id),
@@ -2118,12 +2148,9 @@ describe("免费节点到期后就地拒绝", () => {
       screen.getByRole("group", { name: "我的服务器" }),
     ).getByRole("option");
     expect(ownedRow.getAttribute("aria-disabled")).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
-    const freeRow = within(
-      screen.getByRole("group", { name: "免费节点" }),
-    ).getByRole("option");
-    expect(freeRow.getAttribute("aria-disabled")).toBe("true");
-    fireEvent.click(freeRow);
+    // 到期的免费节点不再列成可选行，免费卡只剩提醒。
+    expect(screen.getByText("试用已到期")).toBeTruthy();
+    expect(document.querySelector(".stage-card--free .stage-node")).toBeNull();
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(
       (screen.getByRole("button", { name: "断开连接" }) as HTMLButtonElement)
@@ -2183,7 +2210,6 @@ describe("免费节点到期后就地拒绝", () => {
       onSwitchNode,
     });
 
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
     const freeRow = within(
       screen.getByRole("group", { name: "免费节点" }),
     ).getByRole("option") as HTMLElement;
@@ -2256,8 +2282,16 @@ describe("待接入的服务器节点", () => {
     // 排在可用节点后面。
     const rows = within(ownedGroup).getAllByRole("option");
     expect(rows[rows.length - 1]).toBe(pendingRow);
-    // 计数只算可用节点，待接入不计入。
-    expect(screen.getByText("2 个节点")).toBeTruthy();
+    // 计数只算可用节点，待接入不计入；免费节点在独立卡片里单独计数。
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
+    expect(within(nodeCard).getByText("1 个节点")).toBeTruthy();
+    expect(
+      within(screen.getByRole("group", { name: "免费节点" })).getByText(
+        "洛杉矶 02",
+      ),
+    ).toBeTruthy();
 
     fireEvent.click(pendingRow);
     expect(onSwitchNode).not.toHaveBeenCalled();
@@ -2279,9 +2313,12 @@ describe("待接入的服务器节点", () => {
     expect(screen.getAllByText("同一台服务器")).toHaveLength(1);
     // 去重后只剩一条待接入行。
     expect(screen.getAllByText("重新连接后可用")).toHaveLength(1);
-    // 本组：1 个可用节点 + 1 个待接入行；免费节点在另一个标签里。
-    expect(screen.getAllByRole("option")).toHaveLength(2);
-    expect(screen.getByRole("tab", { name: /免费节点/ })).toBeTruthy();
+    // 本组：1 个可用节点 + 1 个待接入行；免费节点在独立卡片里。
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
+    expect(within(nodeCard).getAllByRole("option")).toHaveLength(2);
+    expect(document.querySelector(".stage-card--free")).toBeTruthy();
   });
 });
 
@@ -2599,7 +2636,9 @@ describe("测不通时的智能诊断入口", () => {
       onSwitchNode,
     });
 
-    const rows = screen.getAllByRole("option");
+    const rows = within(
+      screen.getByRole("group", { name: "我的服务器" }),
+    ).getAllByRole("option");
     expect(within(rows[0]).queryByRole("button", { name: /问 AI/ })).toBeNull();
     const analyze = within(rows[0]).getByRole("button", {
       name: "对悉尼0.2u进行智能诊断",
@@ -2614,10 +2653,10 @@ describe("测不通时的智能诊断入口", () => {
     expect(onSwitchNode).not.toHaveBeenCalled();
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
 
-    // 免费节点在另一个标签里：切过去也不给智能诊断。
-    fireEvent.click(screen.getByRole("tab", { name: /免费节点/ }));
+    // 免费节点在独立卡片里：那里也不给智能诊断。
+    const freeGroup = screen.getByRole("group", { name: "免费节点" });
     expect(
-      screen.queryByRole("button", { name: /智能诊断/ }),
+      within(freeGroup).queryByRole("button", { name: /智能诊断/ }),
     ).toBeNull();
   });
 
@@ -2639,6 +2678,8 @@ describe("测不通时的智能诊断入口", () => {
 
     expect(screen.queryByRole("button", { name: /智能诊断/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /咨询 AI/ })).toBeNull();
+    // 自定义节点不归我们修：不出现「销毁重建」那条托管线路提示。
+    expect(screen.queryByText(/线路不通很常见/)).toBeNull();
     expect(onAskAi).not.toHaveBeenCalled();
   });
 
@@ -2835,14 +2876,35 @@ describe("自定义节点移除", () => {
     ],
   };
 
-  it("只有 url / manual 节点有「更多」入口", () => {
+  it("只有 url / manual 节点有「更多」入口，且 ⋯ 在时延左侧", () => {
     renderStage({ config: CUSTOM_CONFIG, onRemoveNode: vi.fn() });
 
-    expect(
-      screen.getByRole("button", { name: "更多操作：美国 01" }),
-    ).toBeTruthy();
+    const more = screen.getByRole("button", { name: "更多操作：美国 01" });
+    expect(more).toBeTruthy();
     expect(screen.queryByRole("button", { name: "更多操作：托管 01" })).toBeNull();
     expect(screen.queryByRole("button", { name: "更多操作：东京 01" })).toBeNull();
+
+    const row = more.closest(".stage-node") as HTMLElement;
+    const tail = row.querySelector(".stage-node__tail") as HTMLElement;
+    expect([...tail.children][0].className).toContain("stage-node__more-wrap");
+    expect([...tail.children][1].className).toContain("stage-node__ms");
+  });
+
+  it("自定义坏行：⋯ 在「测不通」左侧，测不通用报错红", () => {
+    renderStage({
+      config: CUSTOM_CONFIG,
+      onRemoveNode: vi.fn(),
+      nodeProbes: probes({ results: { n3: failedProbe("n3") } }),
+    });
+
+    const row = within(
+      screen.getByRole("group", { name: "自定义节点" }),
+    ).getByRole("option");
+    const tail = row.querySelector(".stage-node__tail") as HTMLElement;
+    const kids = [...tail.children];
+    expect(kids[0].className).toContain("stage-node__more-wrap");
+    expect(kids[1].className).toContain("stage-node__ms");
+    expect(kids[1].classList.contains("is-bad")).toBe(true);
   });
 
   it("传了编辑回调时菜单先给「编辑节点」，点了把节点交给调用方", () => {
@@ -2886,7 +2948,9 @@ describe("自定义节点移除", () => {
       onRemoveNode: vi.fn(),
       onEditNode: vi.fn(),
     });
-    const card = document.querySelector(".stage-card") as HTMLElement;
+    const card = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(0, 400));
     const tight = screen.getByRole("button", { name: "更多操作：美国 01" });
     vi.spyOn(tight, "getBoundingClientRect").mockReturnValue(rect(380, 420));
@@ -2901,7 +2965,9 @@ describe("自定义节点移除", () => {
       onRemoveNode: vi.fn(),
       onEditNode: vi.fn(),
     });
-    const tallCard = document.querySelector(".stage-card") as HTMLElement;
+    const tallCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
     vi.spyOn(tallCard, "getBoundingClientRect").mockReturnValue(rect(0, 900));
     const roomy = screen.getByRole("button", { name: "更多操作：美国 01" });
     vi.spyOn(roomy, "getBoundingClientRect").mockReturnValue(rect(380, 420));
@@ -2914,14 +2980,86 @@ describe("自定义节点移除", () => {
   it("测速只测当前标签里的节点，切标签后范围跟着换", () => {
     const onProbe = vi.fn();
     renderStage({ config: CUSTOM_CONFIG, onProbe });
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
 
     // 当前选中在自定义组的 n3（美国 01）。
-    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    fireEvent.click(within(nodeCard).getByRole("button", { name: "测速" }));
     expect(onProbe).toHaveBeenLastCalledWith(["n3"]);
 
     fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
-    fireEvent.click(screen.getByRole("button", { name: "测速" }));
+    fireEvent.click(within(nodeCard).getByRole("button", { name: "测速" }));
     expect(onProbe).toHaveBeenLastCalledWith(["n2"]);
+  });
+
+  it("免费试用卡的测速只测免费节点", () => {
+    const onProbe = vi.fn();
+    renderStage({ config: CUSTOM_CONFIG, onProbe });
+    const freeCard = document.querySelector(".stage-card--free") as HTMLElement;
+
+    fireEvent.click(within(freeCard).getByRole("button", { name: "测速" }));
+    expect(onProbe).toHaveBeenLastCalledWith(["n1"]);
+  });
+
+  it("测速反馈跟着栏目走：切标签不带走上一栏的结论", () => {
+    const onProbe = vi.fn();
+    renderStage({
+      config: CUSTOM_CONFIG,
+      onProbe,
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 3, total: 3 }),
+        results: {
+          n1: failedProbe("n1"),
+          n2: failedProbe("n2"),
+          n3: failedProbe("n3"),
+        },
+      }),
+    });
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
+
+    // 当前在自定义组：自动批次的结论落在这里。
+    expect(within(nodeCard).getByText("这次都没测通。")).toBeTruthy();
+    // 手动测一次，把结论绑定到自定义栏目。
+    fireEvent.click(within(nodeCard).getByRole("button", { name: "再试一次" }));
+
+    fireEvent.click(screen.getByRole("tab", { name: /我的服务器/ }));
+    expect(within(nodeCard).queryByText("这次都没测通。")).toBeNull();
+    expect(
+      within(nodeCard).getByRole("button", { name: "测速" }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    expect(within(nodeCard).getByText("这次都没测通。")).toBeTruthy();
+  });
+
+  it("测速反馈跟着卡片走：免费卡的结论不落进节点卡", () => {
+    const onProbe = vi.fn();
+    renderStage({
+      config: CUSTOM_CONFIG,
+      onProbe,
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 3, total: 3 }),
+        results: {
+          n1: failedProbe("n1"),
+          n2: failedProbe("n2"),
+          n3: failedProbe("n3"),
+        },
+      }),
+    });
+    const nodeCard = document.querySelector(
+      ".stage-card:not(.stage-card--free)",
+    ) as HTMLElement;
+    const freeCard = document.querySelector(".stage-card--free") as HTMLElement;
+
+    expect(within(nodeCard).getByText("这次都没测通。")).toBeTruthy();
+    expect(within(freeCard).queryByText("这次都没测通。")).toBeNull();
+
+    fireEvent.click(within(freeCard).getByRole("button", { name: "测速" }));
+    expect(within(freeCard).getByText("这次都没测通。")).toBeTruthy();
+    expect(within(nodeCard).queryByText("这次都没测通。")).toBeNull();
   });
 
   it("菜单 → 就地确认 → 移除成功", async () => {

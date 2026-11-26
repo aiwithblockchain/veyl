@@ -62,6 +62,8 @@ interface Props {
   trialSummary?: { configId: string; count: number; fastestMs: number | null } | null;
   /** 试用截止时间（ISO）：免费组标题右侧按剩余天数写到期文案。 */
   trialExpiresAt?: string | null;
+  /** 试用状态：expired 立即可判到期，不必等时间字段。 */
+  trialState?: "available" | "active" | "expired" | null;
   /** 试用步骤流完成时的一次性预选；之后任何测速都不重新推导。 */
   preselect?: {
     configId: string;
@@ -111,6 +113,11 @@ export type { PendingServerNode };
 
 /** 节点来源三分：我的服务器 / 自定义节点 / 免费节点。 */
 type NodeSourceGroup = "owned" | "custom" | "free";
+/** 标签只覆盖前两类；免费试用是独立卡片，不参与切换。 */
+type TabSource = "owned" | "custom";
+
+/** 到期提醒点过「知道了」就记住，避免每次启动都再弹一次。 */
+const TRIAL_EXPIRED_DISMISSED_KEY = "veyl.ui.trialExpiredDismissed.v1";
 
 /**
  * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
@@ -138,6 +145,7 @@ export function ConnectionStage({
   danglingNodeIds = new Set<string>(),
   trialSummary = null,
   trialExpiresAt = null,
+  trialState = null,
   preselect = null,
   onPreselectApplied,
   onProbe,
@@ -169,9 +177,19 @@ export function ConnectionStage({
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removedNotice, setRemovedNotice] = useState<string | null>(null);
   /** 用户手动选的来源标签；null 跟随当前节点所在的组。 */
-  const [pickedSource, setPickedSource] = useState<NodeSourceGroup | null>(null);
+  const [pickedSource, setPickedSource] = useState<TabSource | null>(null);
   const [nodeQuery, setNodeQuery] = useState("");
+  /** 最近一次手动测速来自哪个栏目：反馈只落在发起的那一栏。 */
+  const [probeScope, setProbeScope] = useState<TabSource | "free" | null>(null);
+  const [trialExpiredDismissed, setTrialExpiredDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(TRIAL_EXPIRED_DISMISSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const nodeListRef = useRef<HTMLDivElement | null>(null);
+  const freeListRef = useRef<HTMLDivElement | null>(null);
   const menuWrapRef = useRef<HTMLSpanElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const removedTimerRef = useRef<number | null>(null);
@@ -183,6 +201,7 @@ export function ConnectionStage({
   // 换配置等于换一批节点：来源标签与搜索都回到「跟随当前节点」。
   useEffect(() => {
     setPickedSource(null);
+    setProbeScope(null);
     setNodeQuery("");
   }, [config?.config_id]);
 
@@ -314,6 +333,20 @@ export function ConnectionStage({
     probeFinishedForConfig.method !== "none" &&
     probeUntestedCount > 0 &&
     !probeAllFailed;
+  /** 一批测速的收尾结论：落在发起测速的那张卡上，另一张卡不重复。 */
+  const probeBatchNote = probeAllFailed ? (
+    <p className="stage-card__probe-note stage-card__probe-note--error">
+      {t("console.probe.allFailed")}
+    </p>
+  ) : probeAllUntested ? (
+    <p className="stage-card__probe-note stage-card__probe-note--error">
+      {t("console.probe.allUntested")}
+    </p>
+  ) : probeMixedUntested ? (
+    <p className="stage-card__probe-note stage-card__probe-note--error">
+      {t("console.probe.mixed", { count: probeUntestedCount })}
+    </p>
+  ) : null;
   const canProbe =
     Boolean(onProbe) &&
     nodes.length > 0 &&
@@ -636,12 +669,10 @@ export function ConnectionStage({
     }
     return result;
   }, [config?.nodes, pendingServerNodes]);
-  const allSeed = nodes.length > 0 && freeEntries.length === nodes.length;
-
-  const trialEnded = trialPhase(null, trialExpiresAt, now).kind === "ended";
+  const trialEnded = trialPhase(trialState, trialExpiresAt, now).kind === "ended";
 
   /** 免费组标题右侧：与「我的服务器」空态共用同一条取整规则；已过期与无时间分开说。 */
-  const trialHint = trialGroupHint(null, trialExpiresAt, now);
+  const trialHint = trialGroupHint(trialState, trialExpiresAt, now);
 
   /** 试用到期但 Host 还没清池（最多约 5 分钟）：免费行就地拒绝，避免先连上再被断开。 */
   const isExpiredSeed = (node: { source: string }) =>
@@ -684,7 +715,7 @@ export function ConnectionStage({
         ? "free"
         : "custom";
 
-  /** 三组按「付费在前、免费垫底」；三个来源常驻，空组显示 0 与空态。 */
+  /** 节点卡只装「我的服务器 / 自定义节点」；免费试用是下面一张独立卡片。 */
   const sourceGroups = [
     {
       key: "owned" as const,
@@ -698,34 +729,48 @@ export function ConnectionStage({
       nodes: customEntries,
       pending: [] as PendingServerNode[],
     },
-    {
-      key: "free" as const,
-      label: groupLabel("free"),
-      nodes: freeEntries,
-      pending: [] as PendingServerNode[],
-    },
   ];
 
   const selectedSource = selectedNode ? sourceOfNode(selectedNode) : null;
+  /** 当前节点在免费试用卡里时，标签仍停在上一张卡（不跟着跳）。 */
+  const selectedTabSource: TabSource | null =
+    selectedSource === "owned" || selectedSource === "custom"
+      ? selectedSource
+      : null;
   const firstNonEmpty =
     sourceGroups.find(
       (group) => group.nodes.length + group.pending.length > 0,
     )?.key ?? "owned";
-  const activeSource: NodeSourceGroup =
-    pickedSource ?? selectedSource ?? firstNonEmpty;
+  const activeSource: TabSource =
+    pickedSource ?? selectedTabSource ?? firstNonEmpty;
   const activeGroup =
-    sourceGroups.find((group) => group.key === activeSource) ?? null;
+    sourceGroups.find((group) => group.key === activeSource) ?? sourceGroups[0];
   /** 测速只覆盖当前标签里的节点：看到什么就测什么。 */
   const activeNodeIds = (activeGroup?.nodes ?? []).map(
     (entry) => entry.node.node_id,
   );
+  const freeNodeIds = freeEntries.map((entry) => entry.node.node_id);
+  /** 到期后即使 Host 已清空免费节点，也留一张提醒卡，确认后再消失。 */
+  const showFreeCard = trialEnded
+    ? !trialExpiredDismissed
+    : freeEntries.length > 0;
 
   /** 当前组超过 12 个节点才值得给搜索；否则搜索框只是噪音。 */
   const activeRowCount =
     (activeGroup?.nodes.length ?? 0) + (activeGroup?.pending.length ?? 0);
-  const nonEmptyGroupCount = sourceGroups.filter(
-    (group) => group.nodes.length + group.pending.length > 0,
-  ).length;
+  /**
+   * 测速反馈归属：手动测速落在发起的那一栏；自动测速没有栏目，
+   * 落在有可见行的卡片上（标签优先，其次免费卡）。
+   */
+  const noteHome: TabSource | "free" | null =
+    probeScope ??
+    (activeRowCount > 0
+      ? activeSource
+      : freeEntries.length > 0
+        ? "free"
+        : null);
+  const tabProbeNote = noteHome === activeSource ? probeBatchNote : null;
+  const freeProbeNote = noteHome === "free" ? probeBatchNote : null;
   const searchable = activeRowCount > 12;
   const normalizedQuery = nodeQuery.trim().toLocaleLowerCase();
   const matchesQuery = (name: string) =>
@@ -747,15 +792,13 @@ export function ConnectionStage({
     visibleNodes.length === 0 &&
     visiblePending.length === 0;
   const hasAnyNode = nodes.length > 0 || pendingEntries.length > 0;
-  /** 空组：标签仍显示（让三个来源的边界稳定），列表里给一句空态。 */
+  /** 空组：标签仍显示（让两个来源的边界稳定），列表里给一句空态。 */
   const emptyGroup =
     hasAnyNode && activeRowCount === 0 && normalizedQuery === "";
-  const emptyGroupText = (key: NodeSourceGroup): string =>
+  const emptyGroupText = (key: TabSource): string =>
     key === "owned"
       ? t("console.group.empty.owned")
-      : key === "custom"
-        ? t("console.group.empty.custom")
-        : t("console.group.empty.free");
+      : t("console.group.empty.custom");
 
   const selectedIndex = selectedNode
     ? nodes.findIndex((node) => node.node_id === selectedNode.node_id)
@@ -765,22 +808,42 @@ export function ConnectionStage({
       ? (displayNames[selectedIndex] ?? selectedNode.name)
       : null;
 
-  const selectSource = (key: NodeSourceGroup) => {
+  const selectSource = (key: TabSource) => {
     setPickedSource(key);
     setNodeQuery("");
   };
 
-  /** 当前节点行：切回它所在的组并把那一行滚进视野。只做导航，不换节点。 */
+  const dismissTrialExpired = () => {
+    setTrialExpiredDismissed(true);
+    try {
+      localStorage.setItem(TRIAL_EXPIRED_DISMISSED_KEY, "1");
+    } catch {
+      // 存不了就只在本次会话里隐藏。
+    }
+  };
+
+  /** 当前节点：切回它所在的标签，或滚到免费试用卡，把那一行带进视野。 */
   const locateCurrent = () => {
     if (selectedNode === null) return;
-    const key = sourceOfNode(selectedNode);
-    if (key !== activeSource) selectSource(key);
+    const source = sourceOfNode(selectedNode);
+    const scrollToRow = () => {
+      window.requestAnimationFrame(() => {
+        const root =
+          source === "free" ? freeListRef.current : nodeListRef.current;
+        root
+          ?.querySelector<HTMLElement>(
+            `[data-node-id="${selectedNode.node_id}"]`,
+          )
+          ?.scrollIntoView?.({ block: "nearest" });
+      });
+    };
+    if (source === "free") {
+      scrollToRow();
+      return;
+    }
+    if (source !== activeSource) selectSource(source);
     else setNodeQuery("");
-    window.requestAnimationFrame(() => {
-      nodeListRef.current
-        ?.querySelector<HTMLElement>(`[data-node-id="${selectedNode.node_id}"]`)
-        ?.scrollIntoView?.({ block: "nearest" });
-    });
+    scrollToRow();
   };
 
   /** 当前节点名跟着状态词显示；点它回到所在分组。 */
@@ -816,9 +879,10 @@ export function ConnectionStage({
     });
   };
 
+  /** 托管机器的线路提示只属于「我的服务器」；自定义节点不归我们修，不给这句。 */
   const selfOwnedUnreachable =
     selectedNode !== null &&
-    selectedNode.source !== "seed" &&
+    selectedNode.source === "owned" &&
     !danglingNodeIds.has(selectedNode.node_id) &&
     nodeProbes.results[selectedNode.node_id]?.reachable === false;
   /**
@@ -985,7 +1049,7 @@ export function ConnectionStage({
         {canAnalyze ? (
           <span className="stage-node__actions">
             <span
-              className="stage-node__ms is-muted"
+              className="stage-node__ms is-muted is-bad"
               aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
               title={probeError || undefined}
             >
@@ -1012,13 +1076,6 @@ export function ConnectionStage({
           </span>
         ) : canAskInRow ? (
           <span className="stage-node__actions">
-            <span
-              className="stage-node__ms is-muted"
-              aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
-              title={probeError || undefined}
-            >
-              {t("console.node.unreachable")}
-            </span>
             <button
               type="button"
               className="stage-node__ask"
@@ -1040,17 +1097,26 @@ export function ConnectionStage({
               {t("console.node.askAi")}
             </button>
             {renderMore(node, displayNames[index] ?? node.name)}
+            <span
+              className="stage-node__ms is-muted is-bad"
+              aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
+              title={probeError || undefined}
+            >
+              {t("console.node.unreachable")}
+            </span>
           </span>
         ) : dangling ? null : (
           <span className="stage-node__tail">
+            {renderMore(node, displayNames[index] ?? node.name)}
             <span
-              className={`stage-node__ms${msMuted ? " is-muted" : ""}`}
+              className={`stage-node__ms${msMuted ? " is-muted" : ""}${
+                msState === "bad" ? " is-bad" : ""
+              }`}
               aria-label={probeBad ? t("console.node.probeFailedAria") : undefined}
               title={probeError || undefined}
             >
               {msText}
             </span>
-            {renderMore(node, displayNames[index] ?? node.name)}
           </span>
         )}
       </div>
@@ -1205,6 +1271,7 @@ export function ConnectionStage({
           ) : null}
         </div>
 
+        <div className="stage-content">
         <div className="stage-nodes">
           {switchError || summary ? (
             <p
@@ -1233,14 +1300,106 @@ export function ConnectionStage({
             </p>
           ) : null}
 
+          {showFreeCard ? (
+            <section
+              className="stage-card stage-card--free"
+              aria-label={t("console.trial.title")}
+            >
+              {trialEnded ? (
+                <div className="stage-trial-expired">
+                  <div className="stage-trial-expired__text">
+                    <h2 className="stage-trial-expired__title">
+                      {t("trial.expired.title")}
+                    </h2>
+                    <p className="stage-trial-expired__note">
+                      {t("console.trial.expiredNote")}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={dismissTrialExpired}
+                  >
+                    {t("console.trial.expiredConfirm")}
+                  </button>
+                </div>
+              ) : (
+                <>
+              <header className="stage-card__head">
+                <div className="stage-card__titlerow">
+                  <h2 className="stage-card__title">
+                    {t("console.trial.title")}
+                  </h2>
+                  <p className="stage-card__sub">
+                    {t("console.nodes.count", { count: freeEntries.length })}
+                  </p>
+                  <div className="stage-card__actions">
+                    {onProbe && freeNodeIds.length > 0 ? (
+                      <button
+                        type="button"
+                        className="stage-probe"
+                        disabled={!canProbe}
+                        title={probeTitle}
+                        onClick={() => {
+                          if (!canProbe) return;
+                          manualProbeRef.current = true;
+                          setProbeScope("free");
+                          onProbe(freeNodeIds);
+                        }}
+                      >
+                        {probeRunning ? (
+                          <>
+                            <span className="stage-step__dots" aria-hidden="true">
+                              <span />
+                              <span />
+                              <span />
+                            </span>
+                            {t("console.probing")}
+                          </>
+                        ) : noteHome === "free" && probeAllFailed ? (
+                          t("console.probe.again")
+                        ) : (
+                          t("console.probe.action")
+                        )}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <p className="stage-trial-note">
+                  <span>{t("console.trial.note")}</span>
+                  <span className="stage-trial-note__hint">{trialHint}</span>
+                </p>
+              </header>
+              {freeProbeNote ? (
+                <div className="stage-card__probe-row">{freeProbeNote}</div>
+              ) : null}
+              <div
+                className="stage-card__nodes stage-card__nodes--free"
+                role="listbox"
+                aria-label={t("console.trial.title")}
+                ref={freeListRef}
+              >
+                <div
+                  className="stage-node-group"
+                  role="group"
+                  aria-label={t("console.group.free")}
+                >
+                  {freeEntries.map(renderNode)}
+                </div>
+              </div>
+                </>
+              )}
+            </section>
+          ) : null}
+
           <section className="stage-card" aria-label={t("console.aria.nodes")}>
             <header className="stage-card__head">
               <div className="stage-card__titlerow">
                 <h2 className="stage-card__title">{t("console.title.nodes")}</h2>
                 <p className="stage-card__sub">
-                  {allSeed
-                    ? t("console.nodes.countTrial", { count: nodes.length })
-                    : t("console.nodes.count", { count: nodes.length })}
+                  {t("console.nodes.count", {
+                    count: ownedEntries.length + customEntries.length,
+                  })}
                 </p>
                 <div className="stage-card__actions">
                   {onProbe && activeNodeIds.length > 0 ? (
@@ -1252,6 +1411,7 @@ export function ConnectionStage({
                       onClick={() => {
                         if (!canProbe) return;
                         manualProbeRef.current = true;
+                        setProbeScope(activeSource);
                         onProbe(activeNodeIds);
                       }}
                     >
@@ -1264,7 +1424,7 @@ export function ConnectionStage({
                           </span>
                           {t("console.probing")}
                         </>
-                      ) : probeAllFailed ? (
+                      ) : noteHome === activeSource && probeAllFailed ? (
                         t("console.probe.again")
                       ) : (
                         t("console.probe.action")
@@ -1278,24 +1438,6 @@ export function ConnectionStage({
                   ) : null}
                 </div>
               </div>
-              {probeAllFailed ? (
-                <p className="stage-card__probe-note">
-                  {t("console.probe.allFailed")}
-                </p>
-              ) : probeAllUntested ? (
-                <p className="stage-card__probe-note">
-                  {t("console.probe.allUntested")}
-                </p>
-              ) : probeMixedUntested ? (
-                <p className="stage-card__probe-note">
-                  {t("console.probe.mixed", { count: probeUntestedCount })}
-                </p>
-              ) : null}
-              {selfOwnedUnreachable ? (
-                <p className="stage-card__probe-note">
-                  {t("console.selfOwnedUnreachable")}
-                </p>
-              ) : null}
             </header>
 
             {hasAnyNode ? (
@@ -1341,6 +1483,18 @@ export function ConnectionStage({
               </div>
             ) : null}
 
+            {tabProbeNote ? (
+              <div className="stage-card__probe-row">{tabProbeNote}</div>
+            ) : null}
+
+            {activeSource === "owned" && selfOwnedUnreachable ? (
+              <div className="stage-card__probe-row">
+                <p className="stage-card__probe-note">
+                  {t("console.selfOwnedUnreachable")}
+                </p>
+              </div>
+            ) : null}
+
             <div
               className="stage-card__nodes"
               id="stage-node-list"
@@ -1381,14 +1535,6 @@ export function ConnectionStage({
                 >
                   {t("console.search.clear")}
                 </button>
-              </p>
-            ) : null}
-
-            {activeGroup?.key === "free" &&
-            activeRowCount > 0 &&
-            nonEmptyGroupCount > 1 ? (
-              <p className="stage-node-group__hint stage-card__hint">
-                {trialHint}
               </p>
             ) : null}
 
@@ -1484,6 +1630,7 @@ export function ConnectionStage({
               </div>
             </section>
           ))}
+        </div>
         </div>
       </div>
     </main>

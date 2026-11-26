@@ -6020,7 +6020,7 @@ details[open] > .settings-fold__summary::before {
   max-width: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   row-gap: 12px;
 }
 
@@ -6031,20 +6031,29 @@ details[open] > .settings-fold__summary::before {
   min-width: 0;
 }
 
-/* AI 编排区：整列里唯一滚动的一块，内容为空时就是留白。 */
-.stage-flow {
+/* 卡片与 AI 编排区：Hero 下方的唯一滚动区。 */
+.stage-content {
   display: flex;
   flex-direction: column;
+  gap: 12px;
   min-height: 0;
   overflow-y: auto;
 }
 
-/* 节点区固定在底部；提示行与卡片一起贴底。 */
+/* AI 编排区：内容为空时就是留白。 */
+.stage-flow {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 节点卡与免费试用卡：紧贴 Hero 下方。 */
 .stage-nodes {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  flex: none;
 }
 
 .stage-nodes > .stage-note { margin: 0; }
@@ -6204,6 +6213,13 @@ details[open] > .settings-fold__summary::before {
   color: var(--warn-text);
 }
 
+/* 测速收尾结论：贴在自己栏目的列表上方，切栏目就换一条。 */
+.stage-card__probe-row { padding: 0 16px 8px; }
+.stage-card__probe-row .stage-card__probe-note { margin: 0; }
+
+/* 整批失败 / 没测成是错误反馈，用报错红而不是警示琥珀。 */
+.stage-card__probe-note--error { color: var(--err-text); }
+
 /* 当前节点名跟在状态词后：点它只回到所在分组，不换节点。
    字号与字重沿用原「当前节点」行（15 / 500），状态词仍是 13。 */
 .state-line__node {
@@ -6331,7 +6347,58 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
 }
 
-.stage-card__hint { padding: 10px 16px 12px; }
+/* 免费试用卡：说明行 + 倒计时；列表最多 3 行。 */
+.stage-trial-note {
+  margin: 6px 0 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+/* 到期倒计时：绿 = 还有可用天数，用状态色而不是正文灰。 */
+.stage-trial-note__hint {
+  flex: none;
+  color: var(--green);
+}
+
+/* 试用到期：卡片原地变成提醒，确认后整卡消失；按钮在右侧与文案垂直居中。 */
+.stage-trial-expired {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 16px;
+}
+
+.stage-trial-expired__text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stage-trial-expired__title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.stage-trial-expired__note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.stage-trial-expired .btn { flex: none; }
+
+.stage-card__nodes--free { max-height: clamp(96px, 22vh, 192px); }
 
 .stage-card__empty { margin: 0; padding: 0 16px 16px; }
 
@@ -6349,28 +6416,6 @@ details[open] > .settings-fold__summary::before {
   display: flex;
   flex-direction: column;
 }
-
-.stage-node-group__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 24px;
-  margin-top: 4px;
-  padding: 0 16px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ink-3);
-}
-
-.stage-node-group__hint {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--ink-3);
-}
-
-/* 第一组紧接卡片头（那里已有 14px 内边距），不再叠 4px；
-   组间保留 4px —— 这样「标题到本组第一行」的距离两组一致。 */
-.stage-node-group:first-child .stage-node-group__head { margin-top: 0; }
 
 .stage-node {
   position: relative;
@@ -6398,27 +6443,30 @@ details[open] > .settings-fold__summary::before {
 .stage-node:focus-visible { outline-offset: -2px; }
 
 /* 选中行不再用粉色：粉是链接（测速）和聚焦描边的颜色，同一张卡里两处粉会互相抢。
-   选中用中性底 + 墨色竖条 + 500 字重。底色取 12%：与 hover 的 5% 拉开 16 个色阶
-   （深色下约 10 个），8% 只差 5–7 个，悬停另一行时几乎与选中分不开。 */
+   选中主要靠左侧绿点 + 500 字重；底色只做很浅的灰（4%），比 hover 的 5% 还淡，
+   不再用 12% / 8% 的重底。 */
 .stage-node.is-selected {
-  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
   font-weight: 500;
 }
 
 /* 悬停选中行时保持选中底：`.stage-node:hover:not([aria-disabled="true"])` 特异性高于
    `.is-selected`，不写这条，悬停瞬间底色会掉回 hover 的 5%，看着像闪一下。 */
 .stage-node.is-selected:hover:not([aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
 }
 
+/* 选中标记：绿点，颜色与到期提示一致；不再用左侧竖条。 */
 .stage-node.is-selected::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--ink);
+  left: 8px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--green);
 }
 
 .stage-node__name {
@@ -6462,6 +6510,9 @@ details[open] > .settings-fold__summary::before {
   font-size: 12px;
   color: var(--ink-3);
 }
+
+/* 「测不通」是错误状态：红字；「未测」保持灰。 */
+.stage-node__ms.is-bad { color: var(--err-text); }
 
 /* 测不通的问 AI 入口：一段带下划线的文字链接，不是实心按钮。 */
 /* 行内两个动作：智能修复（600）在前，问 AI（500）在后；都是 13px 文字链。 */

@@ -652,6 +652,11 @@ pub async fn start_probe_runtime(
         else {
             continue;
         };
+        // 建不出配置的节点测不了延迟；它不能拖垮整个批次。
+        if crate::nodes::validate_method_password(&member.method, &password).is_err() {
+            log::warn!("节点 {} 的加密方式或密钥不可用，跳过探针配置", member.id);
+            continue;
+        }
         descriptors.push(vpn_config::NodeDescriptor {
             id: member.id.clone(),
             name: member.name.clone(),
@@ -663,11 +668,14 @@ pub async fn start_probe_runtime(
             },
         });
     }
+    // 当前节点本身不可用（旧数据）时退到第一个可用节点：一个坏节点不能把整批测速判死。
     let current_descriptor = descriptors
         .iter()
         .find(|node| node.id == current.id)
+        .or_else(|| descriptors.first())
         .cloned()
         .ok_or(ProbeFailure::Failed)?;
+    let default_node_id = current_descriptor.id.clone();
 
     // 探针在独立槽里跑，必须避开用户设置的代理端口：否则批次中点「启动 VPN」
     // 会被我们自己占掉端口，白白制造一次降级（port-stability.md §7）。
@@ -691,7 +699,7 @@ pub async fn start_probe_runtime(
             secret.clone(),
         ),
         &descriptors,
-        &current.id,
+        &default_node_id,
         &route_plan,
     )
     .map_err(|_| ProbeFailure::Failed)?;
