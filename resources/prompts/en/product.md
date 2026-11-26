@@ -70,13 +70,13 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
-- The account menu holds: email, balance, top-up, sign out. "Use on other devices" is not in this menu — its entry is Settings › Account and the My servers rail.
+- The account menu holds: email, balance, top-up, sign out. "Use on other devices" is not in this menu or under Settings › Account — it is in the My servers rail (§3.5).
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.
 
 ### 3.5 Use on other devices
 
-- Entry: Settings › Account › `Use on other devices`.
+- Entry: the `Use on other devices` row in the My servers rail (`rail.useOnPhone`); it does not appear under device identity.
 - Only **paid nodes** are exported; free and trial nodes are never included.
 - The list has two kinds: **phones** use third-party apps (sing-box and others) and import by scanning a QR code; **computers** use veyl-cli and import by pasting the link. Installing sing-box on iPhone requires an Apple account outside mainland China.
 - Each app has its own code; switching apps means scanning that app's own row — they do not share one code.
@@ -92,7 +92,7 @@ Settings is where the advanced configuration lives: there is normally no reason 
 |---|---|
 | `AI` | Which AI service answers the user, and how to add another |
 | `Connection` | Capture mode, traffic scope, local proxy port, free nodes, importing nodes |
-| `Account` | Sign-in state, balance and top-up, use on other devices |
+| `Account` | Sign-in state, balance and top-up |
 | `Advanced` | Language, repair network, problem report, connection program and logs, diagnostics |
 
 #### AI
@@ -122,7 +122,6 @@ These switches are the same state as the top of the console (§3.1); changing th
 - Signed out: `Not signed in` and a `Sign in` button, with a note that signing in is needed to top up and buy servers. Sign-in itself is in §3.4.
 - Signed in: email, balance, `Top up`, `Refresh`, and the line "Balance is charged daily, per server."
 - The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
-- `Use on other devices`: opens the export page (§3.5); only paid nodes are exported.
 - **There is no `Sign out` here**: it lives in the account menu on the avatar. Signing out does not affect an active connection.
 
 #### Advanced
@@ -161,7 +160,7 @@ The same button means different things depending on where it is. Answer accordin
 | 4 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
 | 5 | My servers wizard · `Have AI choose` | Unsure about region or plan | Ask about use and budget, offer 2–3 candidates and fill the choice into the wizard for confirmation |
 | 6 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
-| 7 | Use on other devices · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
+| 7 | Use on other devices (My servers rail) · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
 | 8 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
 | 9 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
 | 10 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
