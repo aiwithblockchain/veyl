@@ -6808,6 +6808,15 @@ impl VpnToolServices for WiredServices {
             };
             svc_error_with_details("INVALID_ARGUMENT", message, json!({ "reason": reason }))
         })?;
+        crate::nodes::validate_method_password(&parsed.method, &parsed.password).map_err(
+            |error| {
+                svc_error_with_details(
+                    "INVALID_ARGUMENT",
+                    error.to_string(),
+                    json!({ "reason": "unsupported_method" }),
+                )
+            },
+        )?;
         let (added, _) = self.add_parsed_nodes(
             Some(&target.id),
             &[parsed],
@@ -6909,6 +6918,25 @@ impl VpnToolServices for WiredServices {
             };
             svc_error_with_details("INVALID_ARGUMENT", message, json!({ "reason": reason }))
         })?;
+        // 密码留空表示不改：用库里现存的密钥校验，免得把节点改成一个建不出配置的样子。
+        let effective_password = if password_change {
+            Some(password_in.clone())
+        } else {
+            crate::secrets::get_secret(&current.password_ref)
+                .ok()
+                .flatten()
+        };
+        if let Some(password) = effective_password {
+            crate::nodes::validate_method_password(&parsed.method, &password).map_err(
+                |error| {
+                    svc_error_with_details(
+                        "INVALID_ARGUMENT",
+                        error.to_string(),
+                        json!({ "reason": "unsupported_method" }),
+                    )
+                },
+            )?;
+        }
         let params_changed = parsed.server != current.server
             || parsed.port != current.port
             || parsed.method != current.method
@@ -9892,6 +9920,24 @@ impl WiredServices {
                 log::warn!("节点 {} 缺少凭据，跳过 selector", member.id);
                 continue;
             };
+            // 旧版本留下的 none / 密钥格式不对的节点：不能因为一个成员建不出来
+            // 就让整份配置失败（其它节点会一起连不上）。当前节点不可用时如实报错。
+            if let Err(error) =
+                crate::nodes::validate_method_password(&member.method, &member_password)
+            {
+                if member.id == node.id {
+                    return Err(svc_error_with_details(
+                        "UNSUPPORTED",
+                        error.to_string(),
+                        json!({ "reason": "unsupported_method", "method": member.method }),
+                    ));
+                }
+                log::warn!(
+                    "节点 {} 的加密方式或密钥不可用，跳过 selector：{error}",
+                    member.id
+                );
+                continue;
+            }
             descriptors.push(vpn_config::NodeDescriptor {
                 id: member.id.clone(),
                 name: member.name.clone(),
@@ -16029,6 +16075,220 @@ mod main_flow_tests {
         watcher.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 自建节点用 aes-256-gcm 以外的白名单 method 也要能连：
+    /// 写入放行、配置构建就必须放行，否则整份配置建不出来，连免费节点也一起失败。
+    #[tokio::test]
+    async fn a_manual_node_with_a_locally_supported_method_connects() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let created = h
+            .services
+            .config_create(auto_port_input("自建 chacha20"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "自建 01".into(),
+                server: "198.51.100.31".into(),
+                port: 8388,
+                password: "pw-chacha".into(), // secret-scan:allow 测试夹具口令
+                method: "chacha20-ietf-poly1305".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let connected = h.services.runtime_start(Some(config_id)).await.unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        let profile = rendered_profiles(&h.dir);
+        assert!(
+            profile.contains(&format!("node-{node_id}")),
+            "自建节点必须进运行配置：{profile}"
+        );
+        assert!(profile.contains("chacha20-ietf-poly1305"));
+
+        stop_runtime(&h).await;
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 明文加密方式不再放行：手动添加直接拒绝，reason 仍是 unsupported_method。
+    #[tokio::test]
+    async fn creating_a_none_node_is_rejected() {
+        let h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("明文节点"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let error = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "明文".into(),
+                server: "198.51.100.32".into(),
+                port: 8388,
+                password: "pw-plain".into(), // secret-scan:allow 测试夹具口令
+                method: "none".into(),
+            })
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "unsupported_method"
+        );
+    }
+
+    /// 2022 系列要 base64 的 PSK：普通密码建不出来，合法密钥建得出来。
+    #[tokio::test]
+    async fn psk_methods_require_a_valid_key() {
+        let h = harness();
+        let created = h.services.config_create(auto_port_input("PSK")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let error = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "PSK".into(),
+                server: "198.51.100.33".into(),
+                port: 8388,
+                password: "plain-password".into(), // secret-scan:allow 测试夹具口令
+                method: "2022-blake3-aes-128-gcm".into(),
+            })
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "unsupported_method"
+        );
+
+        let key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode([9u8; 16])
+        };
+        h.services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "PSK".into(),
+                server: "198.51.100.33".into(),
+                port: 8388,
+                password: key, // secret-scan:allow 测试用 PSK
+                method: "2022-blake3-aes-128-gcm".into(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 编辑时把方式改成 2022、又不重填密码：旧密钥也得对得上，
+    /// 否则会存进一个建不出配置的节点。
+    #[tokio::test]
+    async fn switching_a_node_to_a_psk_method_needs_a_key() {
+        let h = harness();
+        let created = h
+            .services
+            .config_create(auto_port_input("改方式"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = h
+            .services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id),
+                name: "改方式".into(),
+                server: "198.51.100.35".into(),
+                port: 8388,
+                password: "old-plain".into(), // secret-scan:allow 测试夹具口令
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let error = h
+            .services
+            .node_update(NodeUpdateInput {
+                node_id: node_id.clone(),
+                name: "改方式".into(),
+                server: None,
+                port: None,
+                method: Some("2022-blake3-aes-128-gcm".into()),
+                password: None,
+            })
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "unsupported_method"
+        );
+
+        // 换上合法密钥就改得动。
+        let key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode([5u8; 16])
+        };
+        h.services
+            .node_update(NodeUpdateInput {
+                node_id,
+                name: "改方式".into(),
+                server: None,
+                port: None,
+                method: Some("2022-blake3-aes-128-gcm".into()),
+                password: Some(key), // secret-scan:allow 测试用 PSK
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 老数据里的不可用节点（已下线的 none、密钥不对的 2022）不能拖垮整份配置：
+    /// 连别的节点照常成功；连到它自己才明确报错。
+    #[tokio::test]
+    async fn a_legacy_unusable_node_does_not_block_the_others() {
+        let h = harness();
+        let watcher = spawn_reusable_port_watcher(h.dir.clone());
+        let config_id = create_config_with_node(&h.services, "老节点", "pw-live").await;
+        let legacy = write_legacy_pool_node(&h.services, "旧明文", "198.51.100.34", "none");
+        h.services
+            .node_attach(None, Some(vec![legacy.clone()]), Some(config_id.clone()))
+            .await
+            .unwrap();
+
+        let connected = h
+            .services
+            .runtime_start(Some(config_id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(connected["state"], "running", "{connected}");
+        let profile = rendered_profiles(&h.dir);
+        assert!(
+            !profile.contains(&format!("node-{legacy}")),
+            "不可用节点不能进 selector：{profile}"
+        );
+        stop_runtime(&h).await;
+
+        h.services.node_switch(&config_id, &legacy).await.unwrap();
+        let error = h
+            .services
+            .runtime_start(Some(config_id))
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "UNSUPPORTED");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "unsupported_method"
+        );
+        watcher.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// 到期清理先提交；断连失败不回滚数据库，也不会再次发清理结果。
     #[tokio::test]
     async fn trial_expiry_commits_even_when_disconnect_fails() {
@@ -16262,6 +16522,36 @@ mod main_flow_tests {
                     server,
                     port: 8388,
                     method: "aes-256-gcm",
+                    password_ref: &password_ref,
+                    source: configs::SOURCE_OWNED,
+                    source_key: &id,
+                },
+            )
+            .unwrap();
+        }
+        id
+    }
+
+    /// 绕过写入校验，模拟旧版本留在库里、现在已不可用的节点。
+    fn write_legacy_pool_node(
+        services: &WiredServices,
+        name: &str,
+        server: &str,
+        method: &str,
+    ) -> String {
+        let id = format!("nod_{:016x}", rand::random::<u64>());
+        let password_ref = format!("node:{id}");
+        crate::secrets::set_secret(&password_ref, "pw-legacy").unwrap(); // secret-scan:allow
+        {
+            let conn = services.store.conn();
+            configs::upsert_node(
+                &conn,
+                &configs::NewNode {
+                    id: &id,
+                    name,
+                    server,
+                    port: 8388,
+                    method,
                     password_ref: &password_ref,
                     source: configs::SOURCE_OWNED,
                     source_key: &id,

@@ -49,6 +49,7 @@ Four things set it apart:
   - **Veyl free nodes**: provided by us, work right away, trial only, stability not guaranteed.
   - **Custom nodes**: a share link (`ss://…`), a subscription URL, or address / port / encryption / password entered by hand.
   - **Providers**: preview only in this version; not selectable yet.
+- In the UI, free nodes are a separate “Free trial nodes” card: 7 days, one per person, never mixed into the same tab group as the user's own nodes.
 - Nodes can be measured (real latency) and switched; the current node is shown after the connection state (for example “Connected · New York 01”).
 - When a node is unavailable, say which reason it is: the server was stopped and deleted, or the local route to that region is blocked. You may suggest destroying and creating a new one; **there are no AI tools for destroying or creating servers** — tell the user where to do it in "My servers", never do it for them.
 - To answer "how many nodes" or "which node am I on", read the configuration detail first; the free-node cache does not represent the whole pool.

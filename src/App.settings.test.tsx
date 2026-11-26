@@ -292,11 +292,15 @@ describe("节点卡 → 添加节点", () => {
     );
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
 
-    await waitFor(() =>
-      expect(document.querySelector(".stage-card__sub")?.textContent).toContain(
-        "2 个节点",
-      ),
-    );
+    await waitFor(() => {
+      expect(screen.getByText("大阪 02")).toBeTruthy();
+      const nodeCard = document.querySelector(
+        ".stage-card:not(.stage-card--free)",
+      );
+      expect(
+        nodeCard?.querySelector(".stage-card__sub")?.textContent,
+      ).toContain("1 个节点");
+    });
   }, 15_000);
 });
 

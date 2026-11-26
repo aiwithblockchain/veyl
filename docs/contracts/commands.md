@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.80.0`
+> 契约版本：`2.81.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -808,8 +808,8 @@ type ImportSkipReason =
 | `name` | trim 后非空、≤ 64 字符 |
 | `server` | 主机名或 IP，**不带 scheme、不带端口、不含空白**。手动模式**允许**私网地址（用户可能连自己的内网服务器），与 URL 抓取的 SSRF 限制不冲突 |
 | `port` | 1–65535 |
-| `method` | 白名单内，以 `src-tauri/src/nodes.rs` 的 `SUPPORTED_METHODS` 为准（当前 12 项）：`aes-128-gcm` / `aes-192-gcm` / `aes-256-gcm` / `aes-128-ctr` / `aes-192-ctr` / `aes-256-ctr` / `chacha20-ietf-poly1305` / `xchacha20-ietf-poly1305` / `2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305` / `none` |
-| `password` | 非空、≤ 256 字符。**只进 `secrets.enc`**，不落库、不进日志、不进错误信息 |
+| `method` | 白名单内，以 `src-tauri/src/nodes.rs` 的 `SUPPORTED_METHODS` 为准（当前 11 项）：`aes-128-gcm` / `aes-192-gcm` / `aes-256-gcm` / `aes-128-ctr` / `aes-192-ctr` / `aes-256-ctr` / `chacha20-ietf-poly1305` / `xchacha20-ietf-poly1305` / `2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305`。`none` 不收：明文隧道等于没有加密 |
+| `password` | 非空、≤ 256 字符。`2022-blake3-*` 三项还必须是 base64 的 PSK：aes-128 为 16 字节、aes-256 与 chacha20 为 32 字节；普通密码会让 sing-box 拒绝**整份**配置，所以写入时就拒绝。**只进 `secrets.enc`**，不落库、不进日志、不进错误信息 |
 
 - 写入顺序：先写 `secrets.enc` 的 `node:<新 id>`，再在事务里写 `nodes` + 可选 `config_nodes`。行写入失败 → 删除刚写的密钥，不留孤儿。
 - `configId` 指定时追加到该配置；**省略时绑定全局配置**（2.37.0 起，没有配置时懒创建）。语义与 §4.1 相同。
@@ -819,7 +819,7 @@ type ImportSkipReason =
 
 错误：`INVALID_ARGUMENT`（`invalid_argument`、`unsupported_method`）、`NOT_FOUND`、`INTERNAL`（密钥存储写入失败时 `details.reason = "keychain_failed"`）。
 
-- **具体校验由前端先做**：名字非空/≤64、地址不带 scheme 与端口、端口 1–65535、密码非空/≤256。Host 侧不区分具体原因，一律 `details.reason = "invalid_argument"`；只有 method 不在白名单时是 `unsupported_method`。
+- **具体校验由前端先做**：名字非空/≤64、地址不带 scheme 与端口、端口 1–65535、密码非空/≤256、`2022-blake3-*` 的密钥是 16 / 32 字节 base64。Host 侧不区分具体原因，一律 `details.reason = "invalid_argument"`；method 不在白名单或密钥格式不对时是 `unsupported_method`。
 - **`port` 在 Host 侧是 `u16`**：`70000`、非整数或缺字段会**在反序列化阶段直接失败**，拿不到本契约的结构化错误——前端必须先校验，不要指望 Host 兜住。
 
 ### 4.3 `node_switch { configId, nodeId }` → `NodeSwitchData`
@@ -3299,6 +3299,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.81.0（未发布，2026-11-26：method 白名单摘掉 `none`，2022 系列校验 PSK）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.81.0`；§4.2 `node_create` / `node_update` 的 `method` 白名单从 12 项减到 11 项，摘掉 `none`（明文隧道等于没有加密）；`2022-blake3-*` 的 `password` 必须是 base64 的 PSK（aes-128 16 字节，aes-256 / chacha20 32 字节），否则 `INVALID_ARGUMENT / unsupported_method`，订阅导入按 `unsupported_method` 跳过该行 | 约束收紧 | 2026-11-26 评审：修复白名单后 `none` 真能明文连；2022 系列用普通密码会让 sing-box 拒绝整份配置 |
+| 2 | 运行时保护：配置里已存在的不可用节点（旧 `none`、密钥不合法的 2022）不再进 Clash selector，也不参与批量测速，拖不垮其它节点；当前节点本身不可用时 `runtime_start` 报 `UNSUPPORTED / unsupported_method` | 语义澄清 | 同上：一个成员建不出来，不得让整份配置失败 |
 
 ### 2.80.0（未发布，2026-11-26：`settings.account` 控件移除）
 

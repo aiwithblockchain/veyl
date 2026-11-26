@@ -16,6 +16,7 @@ use crate::public_http;
 const MAX_SUBSCRIPTION_BYTES: usize = 1024 * 1024;
 
 /// sing-box 支持的 Shadowsocks 方法。只做 shadowsocks，不猜其它协议。
+/// 不收 `none`：明文隧道等于没有加密。
 pub const SUPPORTED_METHODS: &[&str] = &[
     "aes-128-gcm",
     "aes-192-gcm",
@@ -28,7 +29,6 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "2022-blake3-aes-128-gcm",
     "2022-blake3-aes-256-gcm",
     "2022-blake3-chacha20-poly1305",
-    "none",
 ];
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -265,11 +265,8 @@ pub fn parse_ss_uri(uri: &str) -> Result<ParsedNode, SkippedNode> {
     if password.is_empty() {
         return Err(SkippedNode::new(SkipReason::Malformed, "缺少密码"));
     }
-    if !SUPPORTED_METHODS.contains(&method.as_str()) {
-        let mut skipped = SkippedNode::new(
-            SkipReason::UnsupportedMethod,
-            format!("不支持的加密方式：{method}"),
-        );
+    if let Err(error) = validate_method_password(&method, password) {
+        let mut skipped = SkippedNode::new(SkipReason::UnsupportedMethod, error.to_string());
         if !fragment.trim().is_empty() {
             skipped.name = Some(fragment.trim().to_string());
         }
@@ -292,6 +289,28 @@ pub fn parse_ss_uri(uri: &str) -> Result<ParsedNode, SkippedNode> {
         method,
         password: password.to_string(),
     })
+}
+
+/// 2022 系列的密码是 base64 编码的 PSK，长度固定；普通密码会让 sing-box
+/// 拒绝整份配置，所以写入与运行时都要先过这一关。
+pub fn validate_method_password(method: &str, password: &str) -> Result<(), ImportError> {
+    if !SUPPORTED_METHODS.contains(&method) {
+        return Err(ImportError::Unsupported(format!("不支持的加密方式：{method}")));
+    }
+    let expected = match method {
+        "2022-blake3-aes-128-gcm" => 16,
+        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => 32,
+        _ => return Ok(()),
+    };
+    let decoded = [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD]
+        .into_iter()
+        .find_map(|engine| engine.decode(password).ok());
+    match decoded {
+        Some(bytes) if bytes.len() == expected => Ok(()),
+        _ => Err(ImportError::Unsupported(format!(
+            "{method} 的密码必须是 {expected} 字节的 base64 密钥"
+        ))),
+    }
 }
 
 /// 手动模式的输入校验。返回的字段已 trim（密码除外）。
@@ -547,6 +566,42 @@ mod tests {
         assert!(validate_manual("n", "203.0.113.10", 0, "pw", "aes-256-gcm").is_err());
         assert!(validate_manual("n", "203.0.113.10", 8388, " ", "aes-256-gcm").is_err());
         assert!(validate_manual("n", "203.0.113.10", 8388, "pw", "rc4-md5").is_err());
+    }
+
+    /// 明文加密方式等于没有加密，任何入口都不再接受。
+    #[test]
+    fn rejects_the_none_method_everywhere() {
+        assert!(validate_manual("n", "203.0.113.10", 8388, "pw", "none").is_err());
+        let skipped = parse_ss_uri("ss://none:pw@example.com:8388").unwrap_err();
+        assert_eq!(skipped.reason, SkipReason::UnsupportedMethod);
+        assert!(validate_method_password("none", "pw").is_err());
+    }
+
+    /// 2022 系列的密码是 base64 的 PSK，长度固定；普通密码会让 sing-box
+    /// 拒绝整份配置，所以要在写入前拦住。
+    #[test]
+    fn psk_methods_need_a_base64_key_of_the_right_length() {
+        let key16 = STANDARD.encode([7u8; 16]);
+        let key32 = STANDARD.encode([7u8; 32]);
+        assert!(validate_method_password("2022-blake3-aes-128-gcm", &key16).is_ok());
+        assert!(validate_method_password("2022-blake3-aes-256-gcm", &key32).is_ok());
+        assert!(validate_method_password("2022-blake3-chacha20-poly1305", &key32).is_ok());
+        assert!(validate_method_password("2022-blake3-aes-128-gcm", "plain-password").is_err());
+        assert!(validate_method_password("2022-blake3-aes-256-gcm", &key16).is_err());
+        // 其它方法的密码就是密码，不按 PSK 校验。
+        assert!(validate_method_password("aes-256-gcm", "pw").is_ok());
+    }
+
+    #[test]
+    fn a_2022_link_needs_a_decodable_key_too() {
+        let plain = parse_ss_uri("ss://2022-blake3-aes-128-gcm:pw@example.com:8388").unwrap_err();
+        assert_eq!(plain.reason, SkipReason::UnsupportedMethod);
+        let good = format!(
+            "ss://2022-blake3-aes-128-gcm:{}@example.com:8388#PSK",
+            STANDARD.encode([3u8; 16])
+        );
+        let node = parse_ss_uri(&good).unwrap();
+        assert_eq!(node.method, "2022-blake3-aes-128-gcm");
     }
 
     #[test]

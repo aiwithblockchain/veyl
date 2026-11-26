@@ -83,8 +83,26 @@ const METHODS = [
   "2022-blake3-aes-128-gcm",
   "2022-blake3-aes-256-gcm",
   "2022-blake3-chacha20-poly1305",
-  "none",
 ];
+
+/** 2022 系列的密码是 base64 的 PSK，长度固定；规则与 `nodes.rs` 同一套。 */
+const PSK_BYTES: Record<string, number> = {
+  "2022-blake3-aes-128-gcm": 16,
+  "2022-blake3-aes-256-gcm": 32,
+  "2022-blake3-chacha20-poly1305": 32,
+};
+
+function pskPasswordOk(method: string, password: string): boolean {
+  const expected = PSK_BYTES[method];
+  if (expected === undefined) return true;
+  const bare = password.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+  const padded = bare + "=".repeat((4 - (bare.length % 4)) % 4);
+  try {
+    return atob(padded).length === expected;
+  } catch {
+    return false;
+  }
+}
 
 type Mode = "link" | "manual";
 type ManualField = "name" | "server" | "port" | "password";
@@ -99,6 +117,8 @@ interface Props {
   editing?: NodeSummary | null;
   /** 编辑保存成功：调用方作废该节点测速并重拉列表（mock 通道不订阅事件）。 */
   onSaved?: (result: NodeUpdateResult) => void;
+  /** 已连接 / 连接中：新导入的节点不在运行配置里，测速要等下次连接。 */
+  connected?: boolean;
 }
 
 export function NodeImportDialog({
@@ -108,6 +128,7 @@ export function NodeImportDialog({
   onNotice,
   editing,
   onSaved,
+  connected = false,
 }: Props) {
   const t = useT();
   const [mode, setMode] = useState<Mode>("link");
@@ -199,7 +220,12 @@ export function NodeImportDialog({
     setImportFile(null);
     onNotice({
       level: "info",
-      text: t("settings.import.added", { count: result.imported }),
+      text: t(
+        connected
+          ? "settings.import.addedNextConnect"
+          : "settings.import.added",
+        { count: result.imported },
+      ),
     });
   };
 
@@ -293,6 +319,8 @@ export function NodeImportDialog({
       if (!editing) errors.password = t("settings.import.manual.passwordRequired");
     } else if (Array.from(password).length > 256) {
       errors.password = t("settings.import.manual.passwordTooLong");
+    } else if (!pskPasswordOk(method, password)) {
+      errors.password = t("settings.import.manual.keyInvalid");
     }
 
     return errors;
@@ -386,7 +414,12 @@ export function NodeImportDialog({
           ? bridgeError.details.reason
           : null;
       if (reason === "unsupported_method") {
-        setManualErrors({ method: t("settings.import.manual.methodUnsupported") });
+        // 2022 系列被拒多半是密钥格式不对，不是方式本身；错误要落在填错的那栏。
+        setManualErrors(
+          PSK_BYTES[method] !== undefined
+            ? { password: t("settings.import.manual.keyInvalid") }
+            : { method: t("settings.import.manual.methodUnsupported") },
+        );
       } else if (bridgeError.code === "INVALID_ARGUMENT" && !editing) {
         setManualError(t("settings.import.addFailed"));
       } else {
