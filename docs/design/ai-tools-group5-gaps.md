@@ -50,7 +50,7 @@
 ### 2.3 节点 / 服务器到期：**不给新工具，扩 `MyServers` 字段**
 
 - 理由：用户问的「到期」其实是三类东西——付费服务器「本期有效至」（`paid_until` + `billing_state`）、免费节点试用到期（已由 2.2 覆盖）、自建 / 导入节点（没有到期概念）。前一类是 `MyServers` 的输出缺字段，不是缺工具。
-- 方案：`MyServers` 的每台服务器补 `paid_until`、`billing_state` 两个字段（`daily_price_cents` 已有；界面显示的就是这组值）；白名单 10 → 12，`tools.md` 的可见字段表同步。
+- 方案（**已落地，3.34.0**）：`MyServers` 的每台服务器补 `paid_until`、`billing_state` 两个字段（`daily_price_cents` 已有；界面显示的就是这组值）；白名单 10 → 12，`tools.md` 的可见字段表与 `content` 要求同步（服务中时追加「本期有效至 …」）。
 - 不做：不给「到期提醒 / 账单预测」这类派生值——产品已拍板不推算「约可运行 N 天」。
 - 权限：不变（`MyServers` 现有级别）。
 

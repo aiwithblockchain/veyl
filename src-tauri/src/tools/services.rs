@@ -6126,6 +6126,9 @@ impl VpnToolServices for WiredServices {
                     "monthly_usd": server.monthly_usd,
                     "daily_price_cents": server.daily_price_cents,
                     "transfer_gib": server.transfer_gib,
+                    // 计费口径原样透出；结算前 pending 时 paid_until 为 null。
+                    "paid_until": server.paid_until,
+                    "billing_state": server.billing_state,
                     "failure": server.failure.map(|failure| json!({
                         "code": failure.code,
                         "message": failure.message,

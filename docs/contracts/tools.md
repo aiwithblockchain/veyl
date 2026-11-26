@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.33.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.33.0 行登记表移除 `account.mobile`，工具数不变）。**第 5 组完成，工具面 38。**
+> 契约版本：`3.34.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段，工具数不变）。**第 5 组完成，工具面 38。**
 >
-> ⚠️ 本文件 3.33.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.34.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -1800,13 +1800,14 @@ type CoreUpgradeData = {
 ```
 
 - `PermissionLevel::ReadOnly`；不访问云厂商 API，只读 Host 已有的服务器列表（与 UI 同一份）。
-- `data`：`{ servers: [{ server_id, name, region, state, ip, node_ready, monthly_usd, daily_price_cents, transfer_gib, failure, destroyed_reason }] }`。
+- `data`：`{ servers: [{ server_id, name, region, state, ip, node_ready, monthly_usd, daily_price_cents, transfer_gib, paid_until, billing_state, failure, destroyed_reason }] }`。
   - `state` 取值见 `commands.md` §7.15；`node_ready` 表示是否已可用来建配置。
   - **`ip` 可以给（3.22.1）**：用户已同意 AI 能说出自己服务器的地址（排障用）。`null` 表示控制面还没给出，如实说未知，不要编造。**端口不给**：界面只显示 IP，AI 说端口会与界面不一致，且对用户没有额外价值。
   - **密码、节点 id、provider id 等内部字段一律不给**；工具按固定白名单重建每一条。
+  - **计费（3.34.0）**：`paid_until` 是本期的有效至（ISO 8601 UTC；结算前 / 从未计费为 `null`），`billing_state` 原样透出控制面的枚举字符串（取值见 `commands.md` §7.18），工具层不翻译也不推算；两个字段都是界面已经显示的值。
   - **已销毁的行带 `destroyed_reason`（3.21.3）**：`failure.code = "billing_unpaid"` → 「因余额不足停机删除」，其余 destroyed → 「已销毁」。同时把内部 `failure` 置 null，**不给模型原始 `failure_code`**。
 - 列表为空是合法结果（`ok: true`，`servers: []`）。
-- **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，可用时追加「可建配置」，已销毁时追加人话原因。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
+- **摘要（模型看到的 `content`）必须逐台列出明细**（2026-11-22 修）：`server_id | 名称 | 地区 | 状态 | 地址 | 每天价格`，服务中时追加「本期有效至 …」（3.34.0），可用时追加「可建配置」，已销毁时追加人话原因。**不给派生值**：不推算「约可运行 N 天」、不给「下次扣费具体时刻」（产品已拍板）。模型只读 `content`，`data` 只进界面——摘要只写「共 N 台」时，模型看不到任何一台是谁，也拿不到 `server_id` 去调用 `NodeRotateCredentials`。`server_id` 仅供工具调用，不要念给用户；`node_id` 仍不出现。
 - 身份未就绪 / 控制面不可用 → 按通用错误上报（`UPSTREAM_ERROR` / `PRECONDITION_FAILED`），不编造数据。
 - **设备身份 / 会话过期（3.26.0）**：`PRECONDITION_FAILED / auth_required`，**不返回服务器数据**；模型应请用户先登录，不能拿空列表演示成「你没有服务器」。
 - `display`：成功 `text`「共 N 台服务器」，`facts` 放「名称 · 地区 · 状态 · IP（· 人话原因）」；失败 `text`「没能读到服务器列表，稍后再试」。
@@ -2440,6 +2441,12 @@ type LlmProvidersData = {
 ---
 
 ## 8. 变更记录
+
+### 3.34.0（未发布，2026-11-26：`MyServers` 补 `paid_until` / `billing_state`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.34.0`；§4.48 `MyServers` 的可见字段补 `paid_until`（string \| null，服务中的本期有效至；结算前 / 从未计费为 `null`）与 `billing_state`（原样透出的枚举字符串）；白名单 10 → 12，`content` 服务中时追加「本期有效至 …」。**不给派生值**：不推算「约可运行 N 天」、不给「下次扣费具体时刻」。工具总数不变（38） | 字段扩展 | 第 5 组决策单 §2.3；产品已拍板不推算派生日数 |
 
 ### 3.33.0（未发布，2026-11-26：`OpenSettings` 行登记表移除 `account.mobile`）
 

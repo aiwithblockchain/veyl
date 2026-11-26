@@ -61,7 +61,7 @@ fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static 
 
 /// 对模型可见的字段白名单：地址可以给（用户已同意 AI 看到自己服务器的 IP）；
 /// 端口、密码、节点 id、provider id 等内部字段一律不出。
-const VISIBLE_FIELDS: [&str; 10] = [
+const VISIBLE_FIELDS: [&str; 12] = [
     "server_id",
     "name",
     "region",
@@ -72,6 +72,9 @@ const VISIBLE_FIELDS: [&str; 10] = [
     "daily_price_cents",
     "transfer_gib",
     "failure",
+    // 计费口径直接透出，不推算「约可运行 N 天」：结算前 pending 时 paid_until 为 null。
+    "paid_until",
+    "billing_state",
 ];
 
 /// 对模型可见的单条：按白名单重建，destroyed 时补人话原因并抹掉内部 failure。
@@ -237,6 +240,13 @@ fn summarise_servers(servers: &[Value]) -> String {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let mut line = format!("- {id} | {name} | {region} | {state} | {ip} | 每天 {:.2} 美元", daily as f64 / 100.0);
+        // 模型只看得到 content：服务中的本期有效至必须写在这里（不推算剩余天数）。
+        if server.get("billing_state").and_then(Value::as_str) == Some("active") {
+            if let Some(paid_until) = server.get("paid_until").and_then(Value::as_str) {
+                let until = friendly_time(paid_until).unwrap_or_else(|| paid_until.to_string());
+                line.push_str(&format!(" | 本期有效至 {until}"));
+            }
+        }
         if ready {
             line.push_str(" | 可建配置");
         }
@@ -447,6 +457,58 @@ mod tests {
                 "内部字段 {hidden} 不能进 AI 上下文：{visible}"
             );
         }
+    }
+
+    /// 计费口径原样透出：结算前 pending 时 `paid_until` 为 null，服务中给 ISO 时刻。
+    /// 不推算「约可运行 N 天」，也不把扣费/宽限派生子带出去。
+    #[test]
+    fn billing_fields_pass_through_without_derivation() {
+        let pending = json!({
+            "server_id": "srv_1",
+            "state": "creating",
+            "paid_until": null,
+            "billing_state": "pending",
+        });
+        let visible = visible_server(&pending);
+        assert!(visible["paid_until"].is_null(), "{visible}");
+        assert_eq!(visible["billing_state"], "pending");
+
+        let active = json!({
+            "server_id": "srv_2",
+            "state": "active",
+            "paid_until": "2026-11-27T10:00:00Z",
+            "billing_state": "active",
+            "charged_cents": 3000,
+            "refunded_cents": 0,
+            "grace_ends_at": "2026-12-04T10:00:00Z",
+        });
+        let visible = visible_server(&active);
+        assert_eq!(visible["paid_until"], "2026-11-27T10:00:00Z");
+        assert_eq!(visible["billing_state"], "active");
+        for hidden in ["charged_cents", "refunded_cents", "grace_ends_at"] {
+            assert!(
+                visible.get(hidden).is_none(),
+                "内部金额或派生值 {hidden} 不能进 AI 上下文：{visible}"
+            );
+        }
+    }
+
+    /// 服务中的本期有效至写进摘要；结算前不给日期，也不给派生日数。
+    #[test]
+    fn a_paid_server_shows_its_period_end_in_the_summary() {
+        let active = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "ip": "203.0.113.1", "node_ready": true, "daily_price_cents": 30,
+            "paid_until": "2026-11-27T10:00:00Z", "billing_state": "active",
+        })]);
+        assert!(active.contains("本期有效至"), "{active}");
+
+        let pending = summarise_servers(&[json!({
+            "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "creating",
+            "paid_until": null, "billing_state": "pending",
+        })]);
+        assert!(!pending.contains("本期有效至"), "{pending}");
+        assert!(!pending.contains("约可运行"), "{pending}");
     }
 
     /// 已销毁的服务器给用户能懂的原因；内部 failure_code 不能交给模型。
