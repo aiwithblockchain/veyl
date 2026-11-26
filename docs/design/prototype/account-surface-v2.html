@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>账户弹层 · 高保真原型</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --card: #FFFFFF;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --hair-strong: rgba(20, 22, 28, 0.18);
+    --link: #C2185B;
+    --amber: #946200;
+    --amber-soft: rgba(148, 98, 0, 0.08);
+    --green: #1B7A4E;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 32px 64px;
+    background: var(--canvas); color: var(--ink);
+    font-family: var(--font); font-size: 14px; line-height: 1.55;
+  }
+  .grid { display: flex; flex-direction: column; gap: 32px; align-items: center; }
+  .frame { width: 720px; flex: none; }
+  .frame > h2 {
+    margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--ink-3);
+  }
+  .modal {
+    background: var(--card); border: 1px solid var(--hair-strong);
+    border-radius: 14px; box-shadow: 0 24px 64px rgba(20,22,28,.16);
+    padding: 22px 28px 24px;
+  }
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+  .head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .head .x { color: var(--ink-3); font-size: 16px; }
+
+  .label { font-size: 12px; color: var(--ink-3); }
+  .hair { height: 1px; background: var(--hair); margin: 22px 0; }
+
+  /* 余额：唯一焦点 */
+  .money { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+  .amount { margin: 6px 0 0; font-family: var(--mono); font-size: 34px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+  .sub { margin: 8px 0 0; font-size: 12px; color: var(--ink-3); }
+  .btn-primary {
+    flex: none; padding: 9px 22px; border: 0; border-radius: 8px;
+    background: var(--ink); color: var(--canvas);
+    font-family: var(--font); font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+
+  /* 流量：仪表 */
+  .meter-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .bar { height: 6px; border-radius: 999px; background: rgba(20, 22, 28, 0.08); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: inherit; background: var(--ink-2); }
+  .bar.near > i { background: var(--amber); }
+  .meter-note { margin: 10px 0 0; font-size: 13px; color: var(--ink-2); }
+  .meter-note .warn { color: var(--amber); }
+
+  /* 折叠行 */
+  .disclosure {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 0; border: 0; background: none;
+    font-family: var(--font); font-size: 13px; color: var(--ink-2); cursor: pointer;
+  }
+  .disclosure .right { color: var(--ink-3); font-size: 12px; }
+
+  /* 充值展开 */
+  .topup { margin-top: 16px; }
+  .denoms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .denom {
+    padding: 12px 0; border: 1px solid var(--hair-strong); border-radius: 10px;
+    background: var(--card); font-family: var(--mono); font-size: 15px; color: var(--ink);
+  }
+  .custom { display: flex; gap: 8px; margin-top: 8px; }
+  .custom input {
+    flex: 1; padding: 10px 12px; border: 1px solid var(--hair-strong);
+    border-radius: 10px; font-family: var(--mono); font-size: 14px; color: var(--ink);
+  }
+  .custom input::placeholder { color: var(--ink-3); }
+  .hint { margin: 8px 0 0; font-size: 12px; color: var(--ink-3); }
+
+  /* 账单展开 */
+  table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+  th { text-align: left; font-weight: 500; font-size: 12px; color: var(--ink-3); padding: 8px 0; border-bottom: 1px solid var(--hair); }
+  th.amt, td.amt { text-align: right; }
+  td { padding: 10px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .srv { display: block; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .footer { display: flex; align-items: center; justify-content: space-between; margin-top: 22px; }
+  .who { font-size: 12px; color: var(--ink-3); }
+  .who b { font-weight: 400; color: var(--ink-2); }
+  .link-btn { border: 0; background: none; padding: 0; font-family: var(--font); font-size: 13px; color: var(--k, #A8382D); cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="grid">
+
+  <!-- 状态一：默认 -->
+  <div class="frame">
+    <h2>① 默认（充值折叠、账单折叠、不加载）</h2>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.60 · 2 台服务器</p>
+        </div>
+        <button class="btn-primary">充值</button>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12 月 1 日重置</span>
+      </div>
+      <div class="bar near"><i style="width:85.4%"></i></div>
+      <p class="meter-note">已用 153 / 共 179 GiB · 明天 +107 GiB <span class="warn">· 流量快用完了</span></p>
+
+      <div class="hair"></div>
+
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态二：充值展开 -->
+  <div class="frame">
+    <h2>② 点「充值」后展开档位</h2>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.60 · 2 台服务器</p>
+        </div>
+        <button class="btn-primary">收起</button>
+      </div>
+
+      <div class="topup">
+        <div class="denoms">
+          <button class="denom">$6</button>
+          <button class="denom">$10</button>
+          <button class="denom">$25</button>
+          <button class="denom">$50</button>
+          <button class="denom">$100</button>
+          <button class="denom">其他</button>
+        </div>
+        <p class="hint">$6–$300，整美元。付款在浏览器里完成，回到这里余额会自动更新。</p>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12 月 1 日重置</span>
+      </div>
+      <div class="bar near"><i style="width:85.4%"></i></div>
+      <p class="meter-note">已用 153 / 共 179 GiB · 明天 +107 GiB <span class="warn">· 流量快用完了</span></p>
+
+      <div class="hair"></div>
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态三：账单展开 -->
+  <div class="frame">
+    <h2>③ 点「明细」后加载并展开</h2>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.60 · 2 台服务器</p>
+        </div>
+        <button class="btn-primary">充值</button>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12 月 1 日重置</span>
+      </div>
+      <div class="bar near"><i style="width:85.4%"></i></div>
+      <p class="meter-note">已用 153 / 共 179 GiB · 明天 +107 GiB <span class="warn">· 流量快用完了</span></p>
+
+      <div class="hair"></div>
+
+      <button class="disclosure"><span>近 30 天账单 · 充值 $52.00 · 扣费 $5.80</span><span class="right">收起 ⌃</span></button>
+
+      <table>
+        <thead><tr><th>类别</th><th>日期</th><th class="amt">金额</th></tr></thead>
+        <tbody>
+          <tr><td>充值</td><td class="num">11 月 26 日</td><td class="amt num">+$6.00</td></tr>
+          <tr><td>机器费<span class="srv">纽约 · s-1vcpu-512mb-10gb / sfo3</span></td><td class="num">11 月 26 日</td><td class="amt num">−$0.30</td></tr>
+          <tr><td>机器费<span class="srv">悉尼 · s-1vcpu-1gb / syd1</span></td><td class="num">11 月 26 日</td><td class="amt num">−$0.40</td></tr>
+          <tr><td>机器费<span class="srv">纽约 · s-1vcpu-512mb-10gb / nyc1</span></td><td class="num">11 月 25 日</td><td class="amt num">−$0.30</td></tr>
+          <tr><td>充值</td><td class="num">11 月 24 日</td><td class="amt num">+$12.00</td></tr>
+        </tbody>
+      </table>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

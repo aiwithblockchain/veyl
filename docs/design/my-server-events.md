@@ -1,7 +1,8 @@
 # 服务器详情页：创建记录（时间线）
 
 > 日期：2026-11-24
-> 状态：**已定稿（2026-11-24）**；四条裁定见 §10。只出文档，不改代码。
+> 状态：**已下线（2026-11-26）**。用户判断创建记录没有用，面板、组件、i18n 与样式全部删除；详情页结构回到三块，建机时刻改由事实区的「创建于」一行承担（`my-server-detail-layout.md` §2）。**本文仅作历史设计记录，不要再据此实现。** 契约 `my_server_events` 与控制面端点暂时保留，命令退休另开批次。
+> 原文状态：已定稿（2026-11-24）；四条裁定见 §10。只出文档，不改代码。
 > 范围：`MyServerDetail` 中间详情页新增一块「创建记录」；左栏、向导、连接页、墓碑视图不动。
 > 依据：`veyl-ui` §2.2（一个事实一个住处）/ §3.1（状态色只用于点与文字）/ §3.2（只用字号阶梯）/ §3.3（4px 网格、边界靠留白）/ §6（错误三段式、按钮动词短语）；`ui-ux-pro-max` 命中 `Feedback · Empty States`（空态要有说明，不能留白）、`Feedback · Loading Indicators`（异步要 `aria-busy`，近即时结果不闪骨架）、`Content · Date Formatting`（用不会歧义的本地化时间）、`Layout · Content Jumping`（异步内容放在稳定容器里，不把下方元素顶走）；「activity timeline / history log」两次检索均无数据库命中，版式按 `veyl-ui` §3.3 留白与 §3.1 状态色处理，**明确标注为 fallback**。事实源：`servers-list-detail.md` §2.2–§2.4、`my-server-detail-layout.md` §1（三块与 48 间距）、`my-server-detail-states.md` §4（危险块永远最后）。
 
