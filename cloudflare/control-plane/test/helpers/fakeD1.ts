@@ -126,6 +126,23 @@ export class FakeD1 {
     const a = statement.args;
     if (/^(insert|update|delete)\b/.test(sql)) assertSqlMatchesSchema(sql, a);
 
+    if (sql.startsWith("select coalesce(sum(case when ref_type in")) {
+      // 账单合计：与列表同条件、不受 LIMIT 影响。
+      const [accountId, cutoff, now] = a;
+      let topup = 0;
+      let charge = 0;
+      for (const row of this.tables.wallet_ledger) {
+        if (row.account_id !== accountId || row.ref_type === "snapshot") continue;
+        if (!(Number(row.created_at) > Number(cutoff))) continue;
+        if (!(Number(row.created_at) <= Number(now))) continue;
+        const amount = Number(row.amount_cents);
+        const refType = String(row.ref_type);
+        if (refType === "stripe_payment" || refType === "dodo_payment") topup += amount;
+        if (amount < 0) charge -= amount;
+      }
+      return { topup_cents: topup, charge_cents: charge };
+    }
+
     if (sql.startsWith("insert or replace into webhook_samples")) {
       this.beforeWebhookSample?.();
       const record = {
@@ -1707,6 +1724,53 @@ export class FakeD1 {
   execAll(statement: Stmt): Row[] {
     const sql = normalise(statement.sql);
     const a = statement.args;
+    if (sql.startsWith("select w.id as id, w.ref_type as ref_type")) {
+      const [accountId, cutoff, now, limit] = a;
+      const servers = this.tables.servers;
+      const findServer = (id: string) => servers.find((row) => row.id === id);
+      return this.tables.wallet_ledger
+        .filter(
+          (row) =>
+            row.account_id === accountId &&
+            row.ref_type !== "snapshot" &&
+            Number(row.created_at) > Number(cutoff) &&
+            Number(row.created_at) <= Number(now),
+        )
+        .sort((left, right) => {
+          const byTime = Number(right.created_at) - Number(left.created_at);
+          if (byTime !== 0) return byTime;
+          const leftId = String(left.id);
+          const rightId = String(right.id);
+          return leftId < rightId ? 1 : leftId > rightId ? -1 : 0;
+        })
+        .slice(0, Number(limit))
+        .map((row) => {
+          const refType = String(row.ref_type);
+          let server: Row | undefined;
+          if (refType === "order") {
+            const order = this.tables.orders.find((entry) => entry.id === row.ref_id);
+            server = order ? servers.find((entry) => entry.order_id === order.id) : undefined;
+          } else if (
+            refType === "server_day" ||
+            refType === "server_traffic" ||
+            refType === "server_refund"
+          ) {
+            server = findServer(String(row.ref_id).split(":")[0]);
+          }
+          return {
+            id: row.id,
+            ref_type: refType,
+            ref_id: row.ref_id,
+            amount_cents: row.amount_cents,
+            created_at: row.created_at,
+            note: row.note ?? null,
+            server_id: server ? server.id : null,
+            server_name: server ? server.name : null,
+            server_plan: server ? server.plan : null,
+            server_region: server ? server.region : null,
+          };
+        });
+    }
     if (sql.startsWith("select id from servers where state = 'destroyed' and destroyed_at is not null")) {
       const [cutoff, limit] = a;
       const eligible = this.prunableServerIds(Number(cutoff));

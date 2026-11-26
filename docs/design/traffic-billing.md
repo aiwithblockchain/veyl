@@ -417,7 +417,10 @@ traffic_state: "ok" | "near" | "over" | "unpaid";
   - **机器标识按 `ref_type` 分派**：`server_day` / `server_traffic` / `server_refund` 取 `ref_id` 前缀里的 server id；`order` 要走 `orders.id → servers.order_id`。解析不出来时退化成只显示类别，但**不要丢行**。
 - 金额符号统一 **`$`**（余额、目录价、现有界面都用美元）。
 - 日期取流水行的 **`created_at`**（不是 bucket，补扣会把多个 bucket 写在同一毫秒）；本地日由**客户端**按 `Intl` 换算——D1 没有 `AT TIME ZONE`，workerd 里 `strftime(...,'localtime')` 返回的仍是 UTC。接口回原始 epoch ms。
-- 30 天窗口严格小于账本保留期（§7.4），因此**不读 `snapshot`，也不读 `server_traffic`**。
+- 30 天窗口严格小于账本保留期（§7.4），所以**不需要读 `snapshot` 行**。整个接口只查 `wallet_ledger` 一张表：流量超支那类来自账本里的扣费流水（`ref_type='server_traffic'`），**不查 `server_traffic` 表**——那张表只记计量明细，账单不依赖它。
+- **接口**：`GET /v1/billing/ledger?days=30`（`days` 1–30，默认 30）。窗口是**半开区间** `(now − days×86400s, now]`；`at` 回 `created_at` 的 epoch ms，本地日由客户端换算。
+- **列表上限 1000 条**，达到上限时返回 `truncated: true`；**顶部合计必须用独立聚合查询**（与列表同条件），不能对截断后的列表求和，否则超过 1000 笔的用户看到的合计会偏小。
+- 响应字段：`balance_cents`、`currency`、`window_days`、`totals{topup_cents, charge_cents}`、`entries[{id, kind, amount_cents, at, server, note}]`、`truncated`。`kind` 取 `topup` / `machine_day` / `traffic` / `refund` / `other`。
 - 界面与入口见 `account-billing-ui.md`（设置 › 账户的「近 30 天账单」弹层）。
 
 ### 8.2 账号级总可用带宽

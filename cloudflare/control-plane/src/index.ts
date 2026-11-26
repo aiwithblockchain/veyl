@@ -4,6 +4,7 @@ import { monthlyUsdFromDaily, planDailyPriceCents } from "./lib/config";
 import { runBilling } from "./billing";
 import { handleOrders } from "./orders";
 import { handleTopups } from "./topups";
+import { handleBillingLedger } from "./billing_report";
 import { handleServers } from "./servers";
 import { handleTraffic } from "./traffic";
 import { handleMobile } from "./mobile";
@@ -474,6 +475,10 @@ ${check}
   // 钱包与充值（login-and-payment.md §4.2–§4.3）。
   const topupResponse = await handleTopups(request, env);
   if (topupResponse) return topupResponse;
+
+  // 账单流水：账户级只读，给 App 账单页（与 /v1/wallet 是两个接口，互不影响）。
+  const ledgerResponse = await handleBillingLedger(request, env);
+  if (ledgerResponse) return ledgerResponse;
 
   // 订单：下单与假支付（§19.5）。实例开通在建机链路里跟进。
   const orderResponse = await handleOrders(request, env);
