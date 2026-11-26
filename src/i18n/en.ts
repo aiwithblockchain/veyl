@@ -828,7 +828,7 @@ export const en: Record<MessageKey, string> = {
   "assistant.prompt.connectDiagnosis":
     "The connection failed. Here is what the local diagnosis collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; don't guess and don't ask me to upload logs.\n{context}",
   "assistant.prompt.nodeUnreachable":
-    "Node \"{name}\" failed its test this time. Run diagnostics first to determine whether the problem is on this machine (runtime, proxy, DNS) or with the node itself, then explain the cause and the next step. You may suggest changing the connection password or rebuilding, but only perform the change after the user explicitly agrees. Don't make up tool results; if tools aren't available, say so honestly.",
+    "Node \"{name}\" failed its test this time. First confirm whether this server is expired or overdue — if so, tell the user to renew before anything else, and ask if you can't tell. Then determine whether the problem is on this machine (runtime, proxy, DNS) or with the node itself. Only after confirming it's a port or password problem should you suggest changing the connection password, and only call the tool when the user explicitly asks — the tool shows a confirmation card first. Don't make up tool results; if tools aren't available, say so honestly.",
 
   // Settings › Advanced › Language
   "settings.language.label": "Language",

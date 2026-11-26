@@ -306,15 +306,17 @@
 | 服务器详情「AI 定位」 | `product.md:159`、`ai-docs-management.md:38` | `MyServerFailure` |
 | 手机使用「不会操作？问 AI」 | `product.md:160`、`ai-docs-management.md:39` | 没有工具（见 G7） |
 | 右栏空态预设问题 | `product.md:161`、`ai-docs-management.md:40` | 没有固定工具 |
-| 节点测不通（自有 / 非自有） | `product.md:162`、`ai-docs-management.md:41` | `DiagRun`；非自有节点的「智能恢复」对应 `NodeRotateCredentials`（未点名） |
+| 节点测不通（只有自有节点有入口） | `product.md:187`、`ai-docs-management.md:39` | 自有可诊断：节点行 `智能诊断` 打开诊断面板，面板由 `myservers/useNodeDiagnosis.ts` 驱动（不是 `DiagRun`，它只是面板里的一项检查）；自有但服务器不可诊断（过期、欠费、出错）时行内「问 AI」；非自有与手动导入没有任何入口。`NodeRotateCredentials` 只在用户明确要求换密码时用 |
 | 诊断面板「去问 AI」 | `product.md:163`、`ai-docs-management.md:42` | `DiagRun` 的输出作为上下文 |
 | 环境段（每轮注入） | `mod.rs:205-206`、`:225-226` | `SetUserRegion` |
 
 只有契约 + 设计文档、没有产品提示词或界面入口点名的工具：
 
 - `submit_issue_to_public_wall`、`read_public_issue_wall`：契约 §4.56 / §4.57；`ai-docs-management.md:306` 只写了错误的大小写形式，产品提示词里没有。
+  - 2026-11-26 更新：`product.md` §3.7 与 `ai-docs-management.md` §2.7 / 附录都已按 snake_case 点名这两个工具。
 - `RouteTargetsSet`、`RulesStatus`：契约 §4.38 / §4.43；`ai-docs-management.md` 附录列了名字，产品提示词里没有；`CategoryList` 只在中文 `product.md:53` 以「分类列表」出现。
 - `CatalogSearch`、`ConfigUpdate`、`HttpCheck`、`JobGet`、`NetConfigGet`、`RuntimeLogs`、`CoreListVersions`、`CoreUpgrade`、`RuntimeStatus` / `Start` / `Stop` / `Restart`、`DeepseekSetupKey` / `DeepseekSaveKey`：只在 `ai-docs-management.md` 的 §2 / 附录里被列名，没有产品提示词或界面入口直接点名。
+  - 2026-11-26 更新：`product.md` §3.7 新增「工具怎么选」表，已点名 `DiagRun` / `HttpCheck` / `NetConfigGet` / `RuntimeStatus` / `NetRepair` / `RuntimeLogs`。
 - `ConfigDetail`、`NodeSwitch`、`NodeProbe`、`DefaultProfileStatus`、`MyServers`：产品文档描述了对应功能（读配置详情、切节点、测速、更新免费节点、我的服务器），但没有写工具名；`ai-docs-management.md` 附录列了名字。
 
 ### 2.13 入参闭集与边界（按域汇总）
