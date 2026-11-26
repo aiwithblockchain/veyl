@@ -163,7 +163,6 @@ function BillingLedgerBody({
   }, [visible]);
 
   const summary = t("billing.summary", {
-    days: ledger.window_days,
     topup: formatUsdCents(ledger.totals.topup_cents),
     charge: formatUsdCents(ledger.totals.charge_cents),
   });

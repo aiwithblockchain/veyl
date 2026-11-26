@@ -113,7 +113,7 @@ describe("近 30 天账单", () => {
 
     const toggle = await screen.findByRole("button", { name: /明细/ });
     const summary = toggle.textContent ?? "";
-    expect(summary).toContain("近 30 天：充值 $120.00 · 扣费 $2.94");
+    expect(summary).toContain("充值 $120.00 · 扣费 $2.94");
     // entries 求和会得到 $122.00 / $1.45；余额在上方余额行，摘要里不再出现。
     expect(summary).not.toContain("$122.00");
     expect(summary).not.toContain("$1.45");
@@ -203,7 +203,7 @@ describe("近 30 天账单", () => {
     renderTable(makeBridge(async () => ledger({ entries: [] })));
 
     expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
-    expect(screen.getByText(/近 30 天：充值 \$120\.00/)).toBeTruthy();
+    expect(screen.getByText(/充值 \$120\.00/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
     expect(screen.queryByRole("table")).toBeNull();
   });

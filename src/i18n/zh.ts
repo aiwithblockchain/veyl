@@ -1558,7 +1558,7 @@ export const zh = {
   "settings.account.bills": "近 30 天账单",
   "settings.account.viewBills": "查看账单",
   "settings.account.billingNote": "余额按天扣费，每台服务器单独计费。",
-  "billing.summary": "近 {days} 天：充值 {topup} · 扣费 {charge}",
+  "billing.summary": "充值 {topup} · 扣费 {charge}",
   "billing.column.kind": "类别",
   "billing.column.server": "机器",
   "billing.column.date": "日期",

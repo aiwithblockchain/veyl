@@ -1638,7 +1638,7 @@ export const en: Record<MessageKey, string> = {
   "settings.account.bills": "Last 30 days",
   "settings.account.viewBills": "View bills",
   "settings.account.billingNote": "Balance is charged per day, separately for each server.",
-  "billing.summary": "Last {days} days: top-up {topup} · charges {charge}",
+  "billing.summary": "Top-up {topup} · charges {charge}",
   "billing.column.kind": "Type",
   "billing.column.server": "Server",
   "billing.column.date": "Date",

@@ -199,7 +199,7 @@ describe("账户弹层", () => {
     renderSurface();
 
     const toggle = await screen.findByRole("button", { name: /明细/ });
-    expect(toggle.textContent).toContain("近 30 天：充值 $120.00");
+    expect(toggle.textContent).toContain("充值 $120.00");
     expect(toggle.textContent).not.toContain("余额");
     expect(screen.queryByRole("table")).toBeNull();
 
@@ -218,7 +218,7 @@ describe("账户弹层", () => {
       }),
     });
     expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
-    expect(screen.getByText(/近 30 天：充值 \$120\.00/)).toBeTruthy();
+    expect(screen.getByText(/充值 \$120\.00/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
   });
 
