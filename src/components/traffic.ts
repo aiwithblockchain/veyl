@@ -31,7 +31,7 @@ export function trafficTomorrowBytes(
   server: Pick<MyServer, "state" | "transfer_gib" | "traffic_limit_bytes">,
 ): number {
   if (server.state === "destroyed") return 0;
-  // 脏值不往下传：否则会渲染成「明天 +NaN GiB」。
+  // 脏值不往下传：否则会渲染成「明天再涨 NaN GiB」。
   if (
     !Number.isFinite(server.transfer_gib) ||
     !Number.isFinite(server.traffic_limit_bytes)

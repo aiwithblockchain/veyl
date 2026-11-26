@@ -449,7 +449,7 @@ function listServer(over: Partial<MyServer> = {}): MyServer {
 }
 
 describe("账号流量（2.79.0）", () => {
-  it("汇总只用 traffic_pool；明天 +X 由列表的增量算", async () => {
+  it("汇总只用 traffic_pool；明天再涨 X 由列表的增量算", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [
         listServer({
@@ -462,9 +462,9 @@ describe("账号流量（2.79.0）", () => {
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("本月流量")).toBeTruthy();
-    const line = screen.getByText(/^已用 300 GiB \/ 共 400 GiB/);
+    const line = screen.getByText(/^本月流量额度 400 GiB · 已用 300 GiB/);
     // 1000 GiB 月额度、已释放 60 GiB：明天加 min(1000/28, 940) ≈ 35.7 GiB。
-    expect(line.textContent).toContain("明天 +35.7 GiB");
+    expect(line.textContent).toContain("明天再涨 35.7 GiB");
     expect(screen.queryByText(/已用 50 /)).toBeNull();
     expect(screen.queryByText("流量快用完了")).toBeNull();
 
@@ -486,7 +486,7 @@ describe("账号流量（2.79.0）", () => {
     }));
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText("已用 0 GiB / 共 400 GiB")).toBeTruthy();
+    expect(await screen.findByText("本月流量额度 400 GiB · 已用 0 GiB")).toBeTruthy();
     const bar = view.container.querySelector(
       ".account-surface__traffic-bar",
     ) as HTMLElement;
@@ -506,14 +506,16 @@ describe("账号流量（2.79.0）", () => {
     }));
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText(/^已用 100 GiB \/ 共 117 GiB/)).toBeTruthy();
+    expect(
+      await screen.findByText(/^本月流量额度 117 GiB · 已用 100 GiB/),
+    ).toBeTruthy();
     const fill = view.container.querySelector(
       ".account-surface__traffic-fill",
     ) as HTMLElement;
     expect(fill.style.width).toBe("85.47%");
   });
 
-  it("near：整好 80% 就提示；明天增量为 0 时不写「明天 +」", async () => {
+  it("near：整好 80% 就提示；明天增量为 0 时不写「明天再涨」", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 320 * GIB, limitBytes: 400 * GIB },
@@ -522,7 +524,7 @@ describe("账号流量（2.79.0）", () => {
 
     const near = await screen.findByText("流量快用完了");
     expect(near.className).toContain("account-surface__traffic-near");
-    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    expect(screen.queryByText(/明天再涨/)).toBeNull();
     expect(screen.queryByText(/按 \$0\.02\/GiB/)).toBeNull();
 
     const fill = view.container.querySelector(
@@ -532,7 +534,7 @@ describe("账号流量（2.79.0）", () => {
     expect(fill.style.width).toBe("80%");
   });
 
-  it("全封顶的账号不出现「明天 +0 GiB」", async () => {
+  it("全封顶的账号不出现「明天再涨 0 GiB」", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [
         listServer({
@@ -544,11 +546,11 @@ describe("账号流量（2.79.0）", () => {
     }));
     renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText("已用 100 GiB / 共 150 GiB")).toBeTruthy();
-    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    expect(await screen.findByText("本月流量额度 150 GiB · 已用 100 GiB")).toBeTruthy();
+    expect(screen.queryByText(/明天再涨/)).toBeNull();
   });
 
-  it("over：扣费句接在汇总后并顶掉「明天 +X」，进度条铺满", async () => {
+  it("over：扣费句接在汇总后并顶掉「明天再涨 X」，进度条铺满", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 450 * GIB, limitBytes: 400 * GIB },
@@ -558,9 +560,9 @@ describe("账号流量（2.79.0）", () => {
     const over = await screen.findByText("超出 50 GiB，按 $0.02/GiB 扣余额");
     expect(over.className).toContain("account-surface__traffic-over");
     const line = over.closest("p");
-    expect(line?.textContent).toContain("已用 450 GiB / 共 400 GiB");
+    expect(line?.textContent).toContain("本月流量额度 400 GiB · 已用 450 GiB");
     expect(line?.textContent).toContain("超出 50 GiB，按 $0.02/GiB 扣余额");
-    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    expect(screen.queryByText(/明天再涨/)).toBeNull();
 
     const fill = view.container.querySelector(
       ".account-surface__traffic-fill",
@@ -579,7 +581,7 @@ describe("账号流量（2.79.0）", () => {
     expect(
       first.container.querySelector(".account-surface__traffic-bar"),
     ).toBeNull();
-    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    expect(screen.queryByText(/明天再涨/)).toBeNull();
     first.unmount();
 
     const noPool = vi.fn(async () => ({ servers: [] }));

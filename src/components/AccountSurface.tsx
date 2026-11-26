@@ -544,8 +544,8 @@ export function AccountSurface({
                         : (
                           <>
                             {tr("account.traffic.summary", {
-                              used: formatTrafficGibValue(traffic.pool.usedBytes),
                               limit: formatTrafficGibValue(traffic.pool.limitBytes),
+                              used: formatTrafficGibValue(traffic.pool.usedBytes),
                             })}
                             {trafficState === "over" ? (
                               <>
@@ -562,7 +562,7 @@ export function AccountSurface({
                                   <>
                                     {" · "}
                                     {tr("account.traffic.tomorrow", {
-                                      amount: formatTrafficGib(
+                                      amount: formatTrafficGibValue(
                                         traffic.tomorrowBytes,
                                       ),
                                     })}

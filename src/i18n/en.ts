@@ -927,9 +927,9 @@ export const en: Record<MessageKey, string> = {
   "account.daily": "About {amount}/day · {count} servers",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
   "account.traffic.title": "This month's traffic",
-  "account.traffic.summary": "Used {used} GiB / {limit} GiB total",
+  "account.traffic.summary": "Allowance {limit} GiB · used {used} GiB",
   "account.traffic.unknown": "Used {used} · limit unknown",
-  "account.traffic.tomorrow": "Tomorrow +{amount}",
+  "account.traffic.tomorrow": "grows {amount} GiB tomorrow",
   "account.traffic.near": "Traffic is almost used up",
   "account.traffic.over": "Over {over}, charged at $0.02/GiB from balance",
   "account.checkoutOpened":
