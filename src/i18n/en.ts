@@ -1017,7 +1017,7 @@ export const en: Record<MessageKey, string> = {
   "login.hint.deviceMismatch": "You need to register this device again; your account and servers are intact.",
   "login.error.deviceRevoked": "This device was disabled.",
   "login.hint.deviceRevoked":
-    "Click \"Register this device again\" below, or sign out of it from Settings › Account first.",
+    "Click \"Register this device again\" below, or sign out of it from the Account panel first.",
   "login.error.accountBlocked": "This account is disabled.",
   "login.hint.accountBlocked":
     "Switching accounts requires registering this device again; the old account stays on this device.",

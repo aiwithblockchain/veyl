@@ -70,7 +70,7 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
-- Email, balance, top-up and sign out are all under Settings › Account. "Use on other devices" is not there — it is in the My servers rail (§3.5).
+- Email, balance, top-up and sign out are all in the Account panel opened from the bottom-left avatar. "Use on other devices" is not there — it is in the My servers rail (§3.5).
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.
 

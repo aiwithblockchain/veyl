@@ -969,7 +969,7 @@ export const zh = {
   "login.error.deviceMismatch": "这台设备的身份对不上。",
   "login.hint.deviceMismatch": "需要重新注册设备；账户和服务器都还在。",
   "login.error.deviceRevoked": "这台设备已被停用。",
-  "login.hint.deviceRevoked": "点下面的「重新注册设备」，或先在 设置 › 账户 里退出这台设备。",
+  "login.hint.deviceRevoked": "点下面的「重新注册设备」，或先在账户弹层里退出这台设备。",
   "login.error.accountBlocked": "这个账户已停用。",
   "login.hint.accountBlocked": "换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
   "login.error.network": "没连上服务器。",
