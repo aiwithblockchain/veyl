@@ -2347,6 +2347,150 @@ body[data-resizing] {
   color: var(--warn-text);
 }
 
+/* 账单弹层（设置 › 账户）：表头固定、内容区自己滚动；金额只用 --ink，不红不绿。 */
+
+.modal--bills {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(70vh, 640px);
+  overflow: hidden;
+}
+
+.billing-summary {
+  margin: 0;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.billing-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.billing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.billing-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--hair);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.billing-table td {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: top;
+}
+
+.billing-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.billing-table__amount-head,
+.billing-table__amount {
+  text-align: right;
+}
+
+.billing-table__server {
+  display: block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.billing-table__date {
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.billing-table__amount {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.billing-panel {
+  padding: 18px 20px;
+}
+
+.billing-status {
+  margin: 0 0 14px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.billing-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.billing-placeholder span {
+  display: block;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+
+.billing-placeholder span:nth-child(2) {
+  width: 80%;
+}
+
+.billing-placeholder span:nth-child(3) {
+  width: 65%;
+}
+
+.billing-placeholder span:nth-child(4) {
+  width: 72%;
+}
+
+.billing-empty {
+  margin: 0;
+  padding: 24px 20px;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.billing-failed__title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.billing-failed__reason,
+.billing-failed__next {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.billing-failed__next {
+  margin-bottom: 14px;
+}
+
+.billing-footnote {
+  margin: 0;
+  padding: 10px 20px 14px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
 /* provider 列表与表单 */
 
 .settings-providers {

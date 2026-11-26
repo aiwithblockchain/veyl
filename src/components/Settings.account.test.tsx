@@ -2,7 +2,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, MyServerAccount, MyServerWallet } from "../agent/bridge";
+import type {
+  AgentBridge,
+  BillingLedger,
+  MyServerAccount,
+  MyServerWallet,
+} from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
 import { Settings } from "./Settings";
 
@@ -24,7 +29,27 @@ const ACCOUNT: MyServerAccount = {
   session_expires_at: null,
 };
 
-function makeBridge(): AgentBridge {
+const LEDGER: BillingLedger = {
+  balance_cents: 11806,
+  currency: "USD",
+  window_days: 30,
+  truncated: false,
+  totals: { topup_cents: 12000, charge_cents: 294 },
+  entries: [
+    {
+      id: "e1",
+      kind: "topup",
+      amount_cents: 12000,
+      at: Date.UTC(2026, 10, 5, 12),
+      server: null,
+      note: null,
+    },
+  ],
+};
+
+function makeBridge(
+  overrides: Partial<Record<keyof AgentBridge, unknown>> = {},
+): AgentBridge {
   return {
     mode: "mock",
     subscribe: vi.fn(() => () => {}),
@@ -54,6 +79,7 @@ function makeBridge(): AgentBridge {
     issueReportPreference: vi.fn(async (includeDomains?: boolean) => ({
       includeDomains: includeDomains ?? false,
     })),
+    ...overrides,
   } as unknown as AgentBridge;
 }
 
@@ -133,19 +159,53 @@ describe("设置 › 账户", () => {
     expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
   });
 
-  it("近 30 天账单是本批占位：点查看展开一句说明，再点收起", () => {
-    renderAccount();
-    const row = document.querySelector('[data-point="account.bills"]') as HTMLElement;
-    const button = within(row).getByRole("button", { name: "查看账单" });
+  it("「查看账单」在余额之后、退出登录之前；从别处打开弹层，Esc 关闭后焦点回到按钮", async () => {
+    const load = vi.fn(async () => LEDGER);
+    renderAccount({ bridge: makeBridge({ myServerBillingLedger: load }) });
 
-    expect(within(row).queryByText("账单还在接入，下一版开放。")).toBeNull();
-    fireEvent.click(button);
-    expect(within(row).getByText("账单还在接入，下一版开放。")).toBeTruthy();
-    expect(button.getAttribute("aria-expanded")).toBe("true");
+    const trigger = screen.getByRole("button", { name: "查看账单" });
+    const logout = screen.getByRole("button", { name: "退出登录" });
+    expect(
+      trigger.compareDocumentPosition(logout) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
 
-    fireEvent.click(button);
-    expect(within(row).queryByText("账单还在接入，下一版开放。")).toBeNull();
-    expect(button.getAttribute("aria-expanded")).toBe("false");
+    // 焦点先停在设置页的另一个控件上，再用鼠标点「查看账单」：click 不移动焦点，
+    // 关闭后能回到按钮才说明 Settings 的归还机制真的在起作用。
+    const settingsOther = screen.getByRole("button", { name: "咨询 AI" });
+    settingsOther.focus();
+    fireEvent.click(trigger);
+
+    await screen.findByRole("dialog", { name: "近 30 天账单" });
+    expect(load).toHaveBeenCalledWith(30);
+    expect(await screen.findByText(/余额 \$118\.06/)).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "近 30 天账单" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("账单读取失败时弹层原地给错误与重试，Esc 只关弹层", async () => {
+    const load = vi.fn(async () => {
+      throw { code: "UPSTREAM_ERROR", message: "" };
+    });
+    renderAccount({ bridge: makeBridge({ myServerBillingLedger: load }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看账单" }));
+    expect(await screen.findByText("账单没有加载出来")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "近 30 天账单" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   });
 
   it("退出登录：成功后关闭设置", async () => {
@@ -199,6 +259,7 @@ describe("设置 › 账户", () => {
 
     expect(screen.queryByText("余额")).toBeNull();
     expect(screen.queryByRole("button", { name: "充值" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看账单" })).toBeNull();
     expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
     expect(screen.getByText(/这个账户已停用/)).toBeTruthy();
 

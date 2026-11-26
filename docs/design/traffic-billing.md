@@ -1,7 +1,7 @@
 # 流量额度与计费
 
 > 日期：2026-11-25
-> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。**未实现**：客户端字段（§7.3）、30 天账单归集（§8.1）、余额三次提醒（§5.4 的预测与提前量）；§5.4 的「扣不动即销毁」已随扣费路径落地。
+> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。30 天账单已实现（接口 `4e375c6` / 契约 2.76.0 与 Tauri 命令 `eb8c281` / 账户页弹层本批），**尚未部署到 dev 与 prod**。**未实现**：客户端字段（§7.3）、余额三次提醒（§5.4 的预测与提前量）；§5.4 的「扣不动即销毁」已随扣费路径落地。
 > 上游：`billing-notes.md`（支付与日价）、`servers-list-detail.md`（详情页事实区）、`node-agent-mcp.md`（agent 通道）
 > 事实来源：DigitalOcean 带宽文档 <https://docs.digitalocean.com/platform/billing/bandwidth/>（2026-11-25 核实）
 
@@ -277,7 +277,7 @@ elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
 | `agent/src/control.rs` | 新增 `traffic()` 调用 | ~15 行 |
 | `agent/src/config.rs` | 读间隔 / 落盘间隔 / 上报阈值三个参数 | ~15 行 |
 | `cloudflare/control-plane/src/traffic.ts`（新增） | `POST /v1/agent/traffic`、去重、按接收时间归周期、累加、额度与超支扣费 | ~310 行。路由挂在 `index.ts`；`servers.ts` 另加 ~33 行（`traffic_overage` 墓碑文案、退款白名单、销毁原因口径） |
-| `cloudflare/control-plane/src/wallet.ts` | 近 30 天按日归集（账单弹层的数据源） | **未实现**，随 §8.1 落地 |
+| `cloudflare/control-plane/src/billing_report.ts`（新增，`4e375c6`） | `GET /v1/billing/ledger`：流水式账单弹层的数据源（不做按日归集，§8.1） | ~250 行，含真实 SQLite 测试 |
 | `cloudflare/control-plane/migrations/0014_server_traffic.sql` | `server_traffic` | ~13 行（`billing_warnings` **未实现**，随 §5.4 提醒落地） |
 | App（`account-billing-ui.md`） | 账单弹层、总可用带宽、账户入口重构、预警弹框 | 单独一批 |
 
@@ -409,9 +409,9 @@ traffic_state: "ok" | "near" | "over" | "unpaid";
 
 - 顶部一行汇总：`余额 $118.06　近 30 天：充值 $120.00 · 扣费 $2.94`（示例数字自洽：期初 $1.00 + 充值 $120.00 − 扣费 $2.94 = $118.06）。
 - 每行三列：**类别 / 日期 / 金额**，按时间倒序。
-- 类别只有四种：`充值`、`机器费`、`流量超支`、`退款`。
-- **每台机器一行**：机器费与流量超支都落到具体机器，行内补一句机器标识（截断名 + 机型 / 地区）；同一天三台机器就是三行。依据是库里本来就是每台机器每天一行（`ref_id = <server_id>:<bucket>`），展示不需要合并，而用户最常问的正是「哪台在烧钱」。
-- 日期按**本地日**显示（用户看的是自己的日子）；计费周期仍按 UTC 月，两者口径不同，界面注明。
+- 类别五种：`充值`、`机器费`、`流量超支`、`退款`、`其他`（兜底：映射不到前四类的流水，例如人工调账；只显示类别，**不丢行**）。
+- **每台机器一行**：机器费、流量超支、退款都落到具体机器，行内补一句机器标识（截断名 + 机型 / 地区）；同一天三台机器就是三行。依据是库里本来就是每台机器每天一行（`ref_id = <server_id>:<bucket>`），展示不需要合并，而用户最常问的正是「哪台在烧钱」。
+- 日期按**本地日**显示（用户看的是自己的日子）；计费周期仍按 UTC 月。两者口径不同，但界面**不写周期说明**：「近 30 天」是滚动窗口，本来就不是计费周期，写一句反而让用户把两者当成一回事（`account-billing-ui.md` §2.3 同此口径）。
 - 数据源只有 `wallet_ledger`，类别映射（`ref_type`）：`stripe_payment` / `dodo_payment` → 充值；**`order` 与 `server_day` 都 → 机器费**；`server_traffic` → 流量超支；`server_refund` → 退款。查询显式排除 `ref_type = 'snapshot'`。
   - **`order` 不能漏**：第 0 天的机器费由 `settleOrder` 用 `refType: "order"`、`refId = order_id` 写入，`server_day` 从第 1 天才开始。漏掉它，每台机器的第一天就不显示，只活一天的机器在账单里一分钱都看不到，顶部扣费合计也会偏小。
   - **机器标识按 `ref_type` 分派**：`server_day` / `server_traffic` / `server_refund` 取 `ref_id` 前缀里的 server id；`order` 要走 `orders.id → servers.order_id`。解析不出来时退化成只显示类别，但**不要丢行**。

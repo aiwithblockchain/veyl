@@ -22,7 +22,7 @@ import type {
   RuntimeView,
 } from "../agent/protocol";
 import { toBridgeError } from "../agent/errors";
-import { getLanguage, setLanguage, t as translate, useT } from "../i18n";
+import { getLanguage, setLanguage, t as translate, useLanguage, useT } from "../i18n";
 import { errorText } from "../i18n/errorText";
 import type { MessageKey } from "../i18n";
 import { formatUsdCents } from "../myservers/labels";
@@ -33,6 +33,7 @@ import { useFocusTrap } from "../ui/focus";
 import { isComposingEvent } from "../ui/ime";
 import { copyText } from "../ui/clipboard";
 import { IconClose } from "./icons";
+import { BillingLedgerDialog } from "./BillingLedgerDialog";
 import { RuntimeUpgradeRow, useRuntimeUpgrade } from "./RuntimeUpgrade";
 import { TunDiagnosticsRow } from "./TunDiagnostics";
 import { TunHelperRow, useTunHelper } from "./TunHelper";
@@ -731,6 +732,7 @@ export function Settings({
   lastSyncedAt = null,
 }: Props) {
   const t = useT();
+  const language = useLanguage();
   const connected = runtime.state === "running" || runtime.state === "degraded";
   const runtimeActive =
     runtime.state === "running" ||
@@ -812,6 +814,9 @@ export function Settings({
   const [resetElapsed, setResetElapsed] = useState(0);
   /** 每次重置的编号；关闭弹层或重新发起后加一，晚到的结果据此丢弃。 */
   const resetRunRef = useRef(0);
+  const [billsOpen, setBillsOpen] = useState(false);
+  const billsTriggerRef = useRef<HTMLButtonElement>(null);
+  const returnBillsFocusRef = useRef(false);
   const [lastReset, setLastReset] = useState<{
     at: number;
     total: number;
@@ -858,12 +863,13 @@ export function Settings({
     open &&
       !consulting &&
       resetPhase === "idle" &&
+      !billsOpen &&
       !trapPaused,
     dialogRef,
   );
   // 咨询 AI 时助手是设置卡的兄弟节点：焦点陷阱改挂遮罩，Tab 能进助手。
   useFocusTrap(
-    open && consulting && resetPhase === "idle" && !trapPaused,
+    open && consulting && resetPhase === "idle" && !billsOpen && !trapPaused,
     backdropRef,
   );
   useFocusTrap(resetPhase !== "idle", resetDialogRef);
@@ -998,6 +1004,8 @@ export function Settings({
     setDiagnosticNotice(null);
     resetRunRef.current += 1;
     setResetPhase("idle");
+    setBillsOpen(false);
+    returnBillsFocusRef.current = false;
     setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
@@ -1016,7 +1024,6 @@ export function Settings({
     setSeedInfo(defaultProfile);
   }, [defaultProfile]);
 
-  const [billsOpen, setBillsOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [reRegistering, setReRegistering] = useState(false);
@@ -1035,6 +1042,18 @@ export function Settings({
     setResetCopy("idle");
     setRouteCopy("idle");
   }, [resetPhase, resetElapsed]);
+
+  const closeBills = useCallback(() => {
+    returnBillsFocusRef.current = true;
+    setBillsOpen(false);
+  }, []);
+
+  // 关闭账单弹层后焦点回到「查看账单」，键盘用户不用从头 Tab。
+  useEffect(() => {
+    if (billsOpen || !returnBillsFocusRef.current) return;
+    returnBillsFocusRef.current = false;
+    billsTriggerRef.current?.focus();
+  }, [billsOpen]);
 
   const closeSettings = useCallback(() => {
     setConsulting(false);
@@ -1331,6 +1350,11 @@ export function Settings({
         closeReset();
         return;
       }
+      // 账单弹层次之：Esc 只关它，不关设置。
+      if (billsOpen) {
+        closeBills();
+        return;
+      }
       // 端口编辑态先拦下 Esc：只退编辑，不关设置。
       if (portEditing) {
         cancelProxyPortEdit();
@@ -1340,7 +1364,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused]);
+  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused, billsOpen, closeBills]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -1873,8 +1897,8 @@ export function Settings({
           role="dialog"
           aria-modal={consulting ? undefined : true}
           aria-labelledby="settings-title"
-          aria-hidden={resetPhase !== "idle" ? true : undefined}
-          inert={resetPhase !== "idle"}
+          aria-hidden={resetPhase !== "idle" || billsOpen ? true : undefined}
+          inert={resetPhase !== "idle" || billsOpen}
           onMouseDown={(event) => event.stopPropagation()}
         >
         <header className="modal__head settings-head">
@@ -2912,6 +2936,7 @@ export function Settings({
                   </div>
                 )}
 
+                {blockedIdentity ? null : (
                 <div
                   className="settings-row settings-row--stack"
                   {...pointAttrs("account.bills")}
@@ -2920,23 +2945,19 @@ export function Settings({
                     <div className="settings-row__label">
                       {t("settings.account.bills")}
                     </div>
-                    {billsOpen ? (
-                      <p className="settings-note" role="status">
-                        {t("settings.account.billsPending")}
-                      </p>
-                    ) : null}
                   </div>
                   <div className="settings-row__aside">
                     <button
+                      ref={billsTriggerRef}
                       type="button"
                       className="btn btn--ghost"
-                      aria-expanded={billsOpen}
-                      onClick={() => setBillsOpen((current) => !current)}
+                      onClick={() => setBillsOpen(true)}
                     >
                       {t("settings.account.viewBills")}
                     </button>
                   </div>
                 </div>
+                )}
 
                 {blockedIdentity ? null : (
                 <div className="settings-row settings-row--stack">
@@ -3186,6 +3207,14 @@ export function Settings({
             ) : null}
           </div>
         </div>
+      ) : null}
+
+      {billsOpen ? (
+        <BillingLedgerDialog
+          bridge={bridge}
+          language={language}
+          onClose={closeBills}
+        />
       ) : null}
     </>
   );
