@@ -183,6 +183,46 @@ describe("POST /v1/agent/traffic", () => {
     expect(db.rows("servers")[0].state).toBe("active");
   });
 
+  it("账号里有一台零额度的存量机器在上报：不能因此跳过整个账号的超支结算", async () => {
+    const db = new FakeD1();
+    // A 是 transfer_gib = 0 的老行，且这一笔是它上报的；B 有正常额度、本周期没上报。
+    await seedServer(db, { balance: 10_000, transferGib: 0 });
+    await addServer(db, SECOND, { transferGib: 500 }, SECOND_TOKEN);
+    const env = envWith(db);
+
+    const res = await handleTraffic(
+      trafficRequest(TOKEN, { seq: 1, delta_bytes: 100 * GIB }),
+      env,
+    );
+    expect(res?.status).toBe(200);
+
+    // 判定口径是账号池：A 不算额度、B 释放 1 天份额（500/28 GiB），超支照扣。
+    const released = Math.floor((500 * GIB) / 28);
+    const due = Math.floor(((100 * GIB - released) / GIB) * 2);
+    expect(due).toBe(164);
+    expect(db.rows("accounts")[0].balance_cents).toBe(10_000 - due);
+    expect(db.rows("server_traffic")[0].charged_cents).toBe(due);
+  });
+
+  it("账号所有机器额度都是 0：整段不结算，不能把全部用量当超支扣钱", async () => {
+    const db = new FakeD1();
+    await seedServer(db, { balance: 10_000, transferGib: 0 });
+    await addServer(db, SECOND, { transferGib: 0 }, SECOND_TOKEN);
+    const env = envWith(db);
+
+    const res = await handleTraffic(
+      trafficRequest(TOKEN, { seq: 1, delta_bytes: 100 * GIB }),
+      env,
+    );
+    expect(res?.status).toBe(200);
+
+    // 额度未知就没有「超出多少」可算：只累计用量，不扣费、不停机。
+    expect(db.rows("accounts")[0].balance_cents).toBe(10_000);
+    expect(db.rows("server_traffic")[0].bytes).toBe(100 * GIB);
+    expect(db.rows("server_traffic")[0].charged_cents).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("active");
+  });
+
   it("余额不足：扣到 0 后按 traffic_overage 停机销毁", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
     const db = new FakeD1();

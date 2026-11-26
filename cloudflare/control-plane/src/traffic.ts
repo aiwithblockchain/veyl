@@ -61,6 +61,10 @@ async function settleOverage(
   now: number,
 ): Promise<void> {
   const totals = await accountTotals(db, server.account_id, cycleId, now);
+  // 判据是**账号池**，不是「这台机器有没有额度」：后者会让一台 `transfer_gib = 0` 的存量机器
+  // 把整个账号的超支结算一起跳过（它免费，同账号有额度的机器也不计超支）。
+  // 账号所有的额度都是 0 时仍然不结算——没有月额度就算不出「超出多少」，不能把全部用量当超支扣。
+  if (totals.released <= 0) return;
   const due = dueCents(totals);
   const delta = Math.max(0, due - totals.charged);
   if (delta <= 0) return;
@@ -240,10 +244,9 @@ export async function handleTraffic(
       );
   }
 
-  // 额度未知的旧行（transfer_gib = 0）只累计，不扣费——没有月额度就算不出公平的超支。
-  if (Math.round(Math.max(0, Number(server.transfer_gib ?? 0)) * GIB) > 0) {
-    await settleOverage(env, db, server, cycleId, seq, now);
-  }
+  // 超支按账号口径结算，与「这一台有没有额度」无关：零额度的存量机器上报时，
+  // 同账号其它机器的超支同样要扣（判据与提前返回都在 settleOverage 里）。
+  await settleOverage(env, db, server, cycleId, seq, now);
 
   return agentJson({ ok: true });
 }
