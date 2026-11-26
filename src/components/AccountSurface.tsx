@@ -257,6 +257,14 @@ export function AccountSurface({
     traffic && traffic.resetAt !== ""
       ? formatTrafficReset(traffic.resetAt, getLanguage())
       : null;
+  /** 进度条只做视觉比例，不写百分比文字；超额时铺满。 */
+  const trafficRatio =
+    traffic !== null && traffic.pool.limitBytes > 0
+      ? traffic.pool.usedBytes / traffic.pool.limitBytes
+      : 0;
+  const trafficBarWidth = Number.isFinite(trafficRatio)
+    ? `${Math.min(100, Math.max(0, trafficRatio * 100))}%`
+    : "0%";
 
   const pointAttrs = (row: string) => ({
     "data-point": row,
@@ -361,15 +369,15 @@ export function AccountSurface({
             <>
               <div className="account-surface__row" {...pointAttrs("account.login")}>
                 <div className="account-surface__identity">
-                  <div className="account-surface__label">
+                  <span className="account-surface__label">
                     {tr("settings.account.email")}
-                  </div>
-                  <div
+                  </span>
+                  <span
                     className="account-surface__email"
                     title={account.email ?? undefined}
                   >
                     {account.email ?? tr("settings.account.signedIn")}
-                  </div>
+                  </span>
                 </div>
                 {account.email ? (
                   <div className="account-surface__aside">
@@ -444,63 +452,62 @@ export function AccountSurface({
                   className="account-surface__row"
                   {...pointAttrs("account.traffic")}
                 >
-                  <div className="account-surface__main">
-                    <div className="account-surface__label">
-                      {tr("account.traffic.title")}
+                  <div className="account-surface__traffic">
+                    <div className="account-surface__traffic-head">
+                      <span className="account-surface__label">
+                        {tr("account.traffic.title")}
+                      </span>
+                      {trafficReset ? (
+                        <span className="account-surface__traffic-reset">
+                          {tr("detail.trafficResetAt", { date: trafficReset })}
+                        </span>
+                      ) : null}
                     </div>
-                    <p className="account-surface__traffic num">
+                    <p className="account-surface__traffic-line num">
                       {trafficState === "unknown"
                         ? tr("account.traffic.unknown", {
                             used: formatTrafficGib(traffic.pool.usedBytes),
                           })
-                        : (
-                          <>
-                            {tr("account.traffic.summary", {
-                              used: formatTrafficGibValue(traffic.pool.usedBytes),
-                              limit: formatTrafficGibValue(traffic.pool.limitBytes),
-                            })}
-                            {trafficState === "over" ? (
-                              <>
-                                {" "}
-                                <span className="account-surface__traffic-over">
-                                  {tr("account.traffic.over", {
-                                    over: formatTrafficGib(trafficOver),
-                                  })}
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                {traffic.tomorrowBytes > 0 ? (
-                                  <>
-                                    {" "}
-                                    {tr("account.traffic.tomorrow", {
-                                      amount: formatTrafficGib(
-                                        traffic.tomorrowBytes,
-                                      ),
-                                    })}
-                                  </>
-                                ) : null}
-                                {trafficState === "near" ? (
-                                  <>
-                                    {" "}
-                                    <span className="account-surface__traffic-near">
-                                      {tr("account.traffic.near")}
-                                    </span>
-                                  </>
-                                ) : null}
-                              </>
-                            )}
-                          </>
-                        )}
-                      {trafficReset ? (
-                        <>
-                          {" "}
-                          <span className="account-surface__traffic-reset">
-                            {tr("detail.trafficResetAt", { date: trafficReset })}
-                          </span>
-                        </>
-                      ) : null}
+                        : tr("account.traffic.summary", {
+                            used: formatTrafficGibValue(traffic.pool.usedBytes),
+                            limit: formatTrafficGibValue(traffic.pool.limitBytes),
+                          })}
                     </p>
+                    {trafficState === "unknown" ? null : (
+                      <div
+                        className="account-surface__traffic-bar"
+                        aria-hidden="true"
+                      >
+                        <span
+                          className={`account-surface__traffic-fill is-${trafficState}`}
+                          style={{ width: trafficBarWidth }}
+                        />
+                      </div>
+                    )}
+                    {trafficState === "over" ? (
+                      <p className="account-surface__traffic-note account-surface__traffic-over">
+                        {tr("account.traffic.over", {
+                          over: formatTrafficGib(trafficOver),
+                        })}
+                      </p>
+                    ) : trafficState !== "unknown" &&
+                      (traffic.tomorrowBytes > 0 || trafficState === "near") ? (
+                      <p className="account-surface__traffic-note">
+                        {traffic.tomorrowBytes > 0
+                          ? tr("account.traffic.tomorrow", {
+                              amount: formatTrafficGib(traffic.tomorrowBytes),
+                            })
+                          : null}
+                        {traffic.tomorrowBytes > 0 && trafficState === "near"
+                          ? " · "
+                          : null}
+                        {trafficState === "near" ? (
+                          <span className="account-surface__traffic-near">
+                            {tr("account.traffic.near")}
+                          </span>
+                        ) : null}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               ) : null}

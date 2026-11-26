@@ -136,7 +136,7 @@ describe("近 30 天账单", () => {
     ).toHaveLength(3);
   });
 
-  it("四列表头；充值行机器格留空，机器行有机器名", async () => {
+  it("三列表头；机器名挂在类别格第二行，充值行不留空格子", async () => {
     renderTable(makeBridge(async () => ledger()));
     await screen.findByRole("button", { name: /明细/ });
     expand();
@@ -144,15 +144,23 @@ describe("近 30 天账单", () => {
     await screen.findByText("机器费");
     expect(
       screen.getAllByRole("columnheader").map((head) => head.textContent),
-    ).toEqual(["类别", "机器", "日期", "金额"]);
+    ).toEqual(["类别", "日期", "金额"]);
 
     const rows = screen.getAllByRole("row").slice(1);
     const topup = rows.find((row) => row.textContent?.includes("充值"))!;
-    expect(within(topup).getAllByRole("cell")[1].textContent).toBe("");
+    const topupCells = within(topup).getAllByRole("cell");
+    expect(topupCells).toHaveLength(3);
+    expect(topupCells[0].textContent).toBe("充值");
+    expect(within(topupCells[0]).queryByText(/新加坡/)).toBeNull();
+
     const machine = rows.find((row) => row.textContent?.includes("机器费"))!;
-    expect(within(machine).getAllByRole("cell")[1].textContent).toBe(
-      "新加坡 1 · s-1vcpu-1gb / sgp1",
+    const machineCells = within(machine).getAllByRole("cell");
+    expect(machineCells[0].textContent).toBe(
+      "机器费新加坡 1 · s-1vcpu-1gb / sgp1",
     );
+    expect(
+      within(machineCells[0]).getByText("新加坡 1 · s-1vcpu-1gb / sgp1").className,
+    ).toContain("billing-table__server");
   });
 
   it("金额带正负号、固定两位小数；零金额不带号", async () => {

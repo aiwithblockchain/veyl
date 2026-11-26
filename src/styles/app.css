@@ -1742,7 +1742,8 @@ body[data-resizing] {
   scroll-padding-top: 8px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  /* 分区各自有分隔线，这里不再叠间距。 */
+  gap: 0;
   padding: 18px 22px 20px;
 }
 
@@ -1779,6 +1780,9 @@ body[data-resizing] {
 }
 
 .account-surface__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   flex: 1;
   min-width: 0;
 }
@@ -1789,8 +1793,8 @@ body[data-resizing] {
 }
 
 .account-surface__email {
-  margin-top: 2px;
-  font-size: 15px;
+  min-width: 0;
+  font-size: 13px;
   color: var(--ink);
   overflow: hidden;
   white-space: nowrap;
@@ -1808,21 +1812,63 @@ body[data-resizing] {
   margin-top: 4px;
 }
 
+/* 本月流量：标签与清零点一行，数值与进度条一行，明天增量单独一行。 */
 .account-surface__traffic {
-  margin: 2px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.account-surface__traffic-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.account-surface__traffic-line {
+  margin: 0;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.4;
   color: var(--ink-2);
 }
 
-.account-surface__traffic-near,
-.account-surface__traffic-over {
-  margin-left: 8px;
+.account-surface__traffic-bar {
+  height: 2px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.account-surface__traffic-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ink-2);
+}
+
+.account-surface__traffic-fill.is-near,
+.account-surface__traffic-fill.is-over {
+  background: var(--amber);
+}
+
+.account-surface__traffic-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+}
+
+.account-surface__traffic-over,
+.account-surface__traffic-near {
   color: var(--amber);
 }
 
 .account-surface__traffic-reset {
-  margin-left: 8px;
+  flex: none;
   font-size: 12px;
   color: var(--ink-3);
 }
@@ -1865,6 +1911,12 @@ body[data-resizing] {
   border-bottom: 1px solid var(--line);
 }
 
+/* 最后一块不画线：footer 自己已有上边框，别叠成双线。 */
+.account-surface__section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
 .account-surface__section-head {
   display: flex;
   align-items: center;
@@ -1898,24 +1950,14 @@ body[data-resizing] {
   padding-right: 10px;
 }
 
-/* 固定布局只取表头第一行的宽度：列宽必须写在 th 上。 */
-.account-surface__section .billing-table th:nth-child(1) {
-  width: 88px;
-}
-
-.account-surface__section .billing-table th:nth-child(3) {
+/* 固定布局只取表头第一行的宽度：列宽必须写在 th 上。
+   三列：类别吃剩余宽度（机器名在第二行），日期与金额固定。 */
+.account-surface__section .billing-table th:nth-child(2) {
   width: 96px;
 }
 
-.account-surface__section .billing-table th:nth-child(4) {
+.account-surface__section .billing-table th:nth-child(3) {
   width: 108px;
-}
-
-.account-surface__section .billing-table__server {
-  max-width: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .account-surface__section .billing-footnote {
@@ -2619,17 +2661,18 @@ body[data-resizing] {
 }
 
 .billing-table__kind {
-  width: 1%;
   white-space: nowrap;
 }
 
 .billing-table__server {
-  max-width: 280px;
+  display: block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--ink-3);
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .billing-table__date {

@@ -88,7 +88,7 @@ export function amountLabel(cents: number): string {
 }
 
 /**
- * 最近 30 天账单：默认折叠成一行摘要，展开后是四列表格。
+ * 最近 30 天账单：默认折叠成一行摘要，展开后是三列表格（机器名挂在类别下）。
  * 打开即请求，不等展开；滚动交给账户弹层的 body，表头 sticky。
  */
 export function BillingLedgerTable({
@@ -214,7 +214,6 @@ function BillingLedgerBody({
             <thead>
               <tr>
                 <th scope="col">{t("billing.column.kind")}</th>
-                <th scope="col">{t("billing.column.server")}</th>
                 <th scope="col">{t("billing.column.date")}</th>
                 <th scope="col" className="billing-table__amount-head">
                   {t("billing.column.amount")}
@@ -226,18 +225,14 @@ function BillingLedgerBody({
                 <tr key={entry.id} data-entry-id={entry.id} tabIndex={-1}>
                   <td className="billing-table__kind">
                     {t(KIND_LABELS[entry.kind])}
-                  </td>
-                  <td
-                    className="billing-table__server"
-                    title={
-                      entry.server && SERVER_KINDS.has(entry.kind)
-                        ? serverLabel(entry.server)
-                        : undefined
-                    }
-                  >
-                    {entry.server && SERVER_KINDS.has(entry.kind)
-                      ? serverLabel(entry.server)
-                      : null}
+                    {entry.server && SERVER_KINDS.has(entry.kind) ? (
+                      <span
+                        className="billing-table__server"
+                        title={serverLabel(entry.server)}
+                      >
+                        {serverLabel(entry.server)}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="billing-table__date num">
                     {formatBillingDay(entry.at, language)}

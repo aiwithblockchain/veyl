@@ -398,14 +398,20 @@ describe("账号流量（2.79.0）", () => {
       ],
       traffic_pool: { usedBytes: 300 * GIB, limitBytes: 400 * GIB },
     }));
-    renderSurface({ bridge: makeBridge({ myServerList }) });
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("本月流量")).toBeTruthy();
-    const line = screen.getByText(/已用 300 \/ 400 GiB/).closest("p");
+    expect(screen.getByText("已用 300 GiB / 共 400 GiB")).toBeTruthy();
     // 1000 GiB 月额度、已释放 60 GiB：明天加 min(1000/28, 940) ≈ 35.7 GiB。
-    expect(line?.textContent).toContain("明天 +35.7 GiB");
+    expect(screen.getByText("明天 +35.7 GiB")).toBeTruthy();
     expect(screen.queryByText(/已用 50 /)).toBeNull();
     expect(screen.queryByText("流量快用完了")).toBeNull();
+
+    const fill = view.container.querySelector(
+      ".account-surface__traffic-fill",
+    ) as HTMLElement;
+    expect(fill.className).toContain("is-ok");
+    expect(fill.style.width).toBe("75%");
   });
 
   it("near：整好 80% 就提示；明天增量为 0 时不写「明天 +」", async () => {
@@ -413,12 +419,18 @@ describe("账号流量（2.79.0）", () => {
       servers: [],
       traffic_pool: { usedBytes: 320 * GIB, limitBytes: 400 * GIB },
     }));
-    renderSurface({ bridge: makeBridge({ myServerList }) });
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     const near = await screen.findByText("流量快用完了");
     expect(near.className).toContain("account-surface__traffic-near");
     expect(screen.queryByText(/明天 \+/)).toBeNull();
     expect(screen.queryByText(/按 \$0\.02\/GiB/)).toBeNull();
+
+    const fill = view.container.querySelector(
+      ".account-surface__traffic-fill",
+    ) as HTMLElement;
+    expect(fill.className).toContain("is-near");
+    expect(fill.style.width).toBe("80%");
   });
 
   it("全封顶的账号不出现「明天 +0 GiB」", async () => {
@@ -433,32 +445,40 @@ describe("账号流量（2.79.0）", () => {
     }));
     renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText(/已用 100 \/ 150 GiB/)).toBeTruthy();
+    expect(await screen.findByText("已用 100 GiB / 共 150 GiB")).toBeTruthy();
     expect(screen.queryByText(/明天 \+/)).toBeNull();
   });
 
-  it("over：扣费提示顶掉「明天 +X」", async () => {
+  it("over：扣费句独占一行并顶掉「明天 +X」，进度条铺满", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 450 * GIB, limitBytes: 400 * GIB },
     }));
-    renderSurface({ bridge: makeBridge({ myServerList }) });
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     const over = await screen.findByText("超出 50 GiB，按 $0.02/GiB 扣余额");
     expect(over.className).toContain("account-surface__traffic-over");
-    expect(screen.getByText(/已用 450 \/ 400 GiB/)).toBeTruthy();
+    expect(over.closest("p")?.textContent).toBe("超出 50 GiB，按 $0.02/GiB 扣余额");
+    expect(screen.getByText("已用 450 GiB / 共 400 GiB")).toBeTruthy();
     expect(screen.queryByText(/明天 \+/)).toBeNull();
-    // 汇总与超出段之间有空格，读屏不会拼成一个词。
-    expect(over.closest("p")?.textContent).toContain("400 GiB 超出 50 GiB");
+
+    const fill = view.container.querySelector(
+      ".account-surface__traffic-fill",
+    ) as HTMLElement;
+    expect(fill.className).toContain("is-over");
+    expect(fill.style.width).toBe("100%");
   });
 
-  it("额度未知：不写明天；pool 缺失时整行不渲染", async () => {
+  it("额度未知：不画进度条、不写明天；pool 缺失时整行不渲染", async () => {
     const unknown = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 12 * GIB, limitBytes: 0 },
     }));
     const first = renderSurface({ bridge: makeBridge({ myServerList: unknown }) });
     expect(await screen.findByText("已用 12 GiB · 额度未知")).toBeTruthy();
+    expect(
+      first.container.querySelector(".account-surface__traffic-bar"),
+    ).toBeNull();
     expect(screen.queryByText(/明天 \+/)).toBeNull();
     first.unmount();
 
