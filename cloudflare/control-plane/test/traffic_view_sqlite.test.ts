@@ -43,15 +43,19 @@ const LIMIT_100GIB_DEC15 = 57_521_883_428;
 interface ServerSpec {
   id: string;
   transferGib?: number;
-  readyAt?: number;
+  readyAt?: number | null;
   state?: string;
   destroyedAt?: number | null;
   failureCode?: string | null;
   dismissedAt?: number | null;
+  billingAnchorAt?: number;
+  createdAt?: number;
   port?: number;
 }
 
 function addServer(db: SqliteD1, spec: ServerSpec): void {
+  const readyAt = spec.readyAt === undefined ? Date.UTC(2026, 10, 1) : spec.readyAt;
+  const createdAt = spec.createdAt ?? NOW - 60 * DAY_MS;
   db.run(
     "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, " +
       "daily_price_cents, billing_anchor_at, state, node_port, transfer_gib, ready_at, failure_code, " +
@@ -61,14 +65,14 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
     ACCOUNT,
     `ord_${spec.id}`,
     `机器 ${spec.id}`,
-    spec.readyAt ?? Date.UTC(2026, 10, 1),
+    spec.billingAnchorAt ?? readyAt ?? 0,
     spec.state ?? "active",
     spec.port ?? 30001,
     spec.transferGib ?? 100,
-    spec.readyAt ?? Date.UTC(2026, 10, 1),
+    readyAt,
     spec.failureCode ?? null,
-    NOW - 60 * DAY_MS,
-    NOW - 60 * DAY_MS,
+    createdAt,
+    createdAt,
     spec.destroyedAt ?? null,
     spec.dismissedAt ?? null,
   );
@@ -162,6 +166,36 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
       // 既有字段不受影响。
       expect(server.transfer_gib).toBe(100);
       expect(server.server_id).toBe("srv_fresh");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("还在建机的机器（ready_at = null、billing_anchor_at = 0）：只给一天份额度，账号池同值", async () => {
+    const { db, env, token } = await setup();
+    try {
+      // 与 orders.ts 建 pending 行时一致：state = creating、billing_anchor_at = 0、ready_at = NULL。
+      addServer(db, {
+        id: "srv_pending",
+        state: "creating",
+        readyAt: null,
+        createdAt: NOW - 2 * 3600 * 1000,
+        port: 30014,
+      });
+
+      const response = await handleServers(listRequest(token), env as never);
+      expect(response?.status).toBe(200);
+      const body = (await response?.json()) as {
+        servers: ServerBody[];
+        traffic_pool: { used_bytes: number; limit_bytes: number };
+      };
+      const [server] = body.servers;
+      // 一天份 = floor(100 GiB / 28)，不是从月初起算的 26 天份。
+      expect(server.traffic_limit_bytes).toBe(3_834_792_228);
+      expect(server.traffic_used_bytes).toBe(0);
+      expect(server.traffic_state).toBe("ok");
+      // 单台与账号池共用 releasedBytes：只有一个账号成员时两边的数必须相等。
+      expect(body.traffic_pool.limit_bytes).toBe(server.traffic_limit_bytes);
     } finally {
       db.close();
     }

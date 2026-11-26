@@ -45,7 +45,11 @@ export function releasedBytes(server: ReleasedRow, cycleId: string, now: number)
   const destroyedAt = server.destroyed_at == null ? null : Number(server.destroyed_at);
   if (destroyedAt !== null && destroyedAt <= cycleStart) return 0;
   const end = destroyedAt ?? now;
-  const anchor = Number(server.ready_at ?? server.billing_anchor_at ?? server.created_at ?? end);
+  // 起算点逐级回退，**0 也要当缺失**：结算前 `billing_anchor_at = 0`（orders.ts 建 pending 行），
+  // 而 `??` 只跳过 null/undefined，会让尚未建机完成的机器从月初起算、凭空拿到整月份度。
+  const pick = (value: number | null | undefined) =>
+    typeof value === "number" && value > 0 ? value : null;
+  const anchor = pick(server.ready_at) ?? pick(server.billing_anchor_at) ?? server.created_at;
   const from = Math.max(cycleStart, anchor);
   const days = Math.max(0, Math.floor((end - from) / DAY_MS));
   return Math.min(monthly, Math.floor((monthly / RELEASE_DAYS) * (days + 1)));
