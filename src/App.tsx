@@ -2070,7 +2070,7 @@ export default function App() {
     setAiUnread(false);
   };
 
-  // 三个「问 AI」入口共用：连接页两个 chip、设置页「咨询 AI」、新建节点向导的「让 AI 帮我选」。
+  // 多个「问 AI」入口共用：连接页开关、设置页「咨询 AI」、其它设备、诊断面板。
   // 未配置时先弹告警；面板保持收起，取消后不留痕迹。返回 false = 被拦下。
   const askAiInPanel = (prompt: string): boolean => {
     if (!requireAi()) return false;

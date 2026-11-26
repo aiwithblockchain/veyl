@@ -716,7 +716,7 @@ describe("三区外壳与连接舞台", () => {
       expect(screen.getByRole("heading", { name: "新建节点" })).toBeTruthy(),
     );
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   });
 
   it("未登录点新建节点：弹登录，不打开向导", async () => {
@@ -875,12 +875,12 @@ describe("三区外壳与连接舞台", () => {
     // 复用向导，但不渲染服务器页外壳与列表列。
     expect(document.querySelector(".rail")).toBeNull();
     expect(document.querySelector(".myservers")).toBeNull();
-    // 地区按大洲分组，类型三档，主按钮与次级入口都在。
+    // 地区按大洲分组，类型三档，主按钮在；次级 AI 入口已移除。
     expect(screen.getByText("亚洲")).toBeTruthy();
     expect(screen.getByText("北美洲")).toBeTruthy();
     expect(screen.getAllByRole("radio", { name: /1 核/ }).length).toBe(3);
     expect(screen.getByRole("button", { name: "创建" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "让 AI 帮我选" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   }, 15_000);
 
   it("client 宿主：导航高亮仍在连接，Esc 与返回相同", async () => {
@@ -976,31 +976,6 @@ describe("三区外壳与连接舞台", () => {
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
     expect(await screen.findByRole("dialog", { name: "充值" })).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
-  }, 15_000);
-
-  it("让 AI 帮我选只发消息，不建机", async () => {
-    signInForWizard();
-    await renderApp();
-    const send = vi.spyOn(bridge, "sendMessage").mockResolvedValue({
-      requestId: "req_ai_pick",
-    });
-    const create = vi.spyOn(bridge, "myServerCreate");
-    fireEvent.click(screen.getByRole("button", { name: /新建节点/ }));
-    await screen.findByRole("heading", { name: "新建节点" });
-
-    // 助手在窄窗口默认收起：点「让 AI 帮我选」必须先把面板展开，消息不能发进看不见的地方。
-    expect(screen.queryByRole("button", { name: "展开助手" })).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我选" }));
-    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("button", { name: "展开助手" })).toBeNull();
-    const call = send.mock.calls[0];
-    expect(call[1]).toBe("帮我选一个地区和规格。");
-    expect(
-      (call[2] as { context: { screen: string; last_action: { id: string } } })
-        .context,
-    ).toMatchObject({ screen: "new_node", last_action: { id: "new_node.ask_ai" } });
-    expect(create).not.toHaveBeenCalled();
-    expect(localStorage.getItem("veyl.configs.mock.v1")).toBeNull();
   }, 15_000);
 
   it("AI 未配置时点「问 AI」弹统一告警，不展开面板也不进设置", async () => {

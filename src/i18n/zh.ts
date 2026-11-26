@@ -786,7 +786,6 @@ export const zh = {
     "连接失败了，这是本地智能诊断收集到的信息。先读产品说明与 FAQ，再判断原因，告诉我下一步该做什么；不要猜，也不要让我上传日志。\n{context}",
   "assistant.prompt.nodeUnreachable":
     "节点「{name}」这次测不通。请先调用工具确认它能否智能恢复（更换连接密码），能恢复就先恢复；确认无法恢复再建议销毁重建。不要编造工具结果，工具不可用时如实说明。",
-  "assistant.prompt.pickRegion": "帮我选一个地区和规格。",
 
   // 设置 › 高级 › 语言
   "settings.language.label": "语言",
@@ -863,7 +862,6 @@ export const zh = {
   "controls.region": "地区",
   "controls.plan": "服务器类型",
   "controls.create": "创建",
-  "controls.askAi": "让 AI 帮我选",
   "controls.server": "服务器",
   "controls.destroy": "销毁",
   "controls.aiLocate": "AI 定位",

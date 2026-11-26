@@ -39,7 +39,6 @@ const STATIC_CONTROLS: StaticControl[] = [
   { id: "new_node.region", screen: "new_node", kind: "choice", label: "controls.region" },
   { id: "new_node.plan", screen: "new_node", kind: "choice", label: "controls.plan" },
   { id: "new_node.create", screen: "new_node", kind: "button", label: "controls.create" },
-  { id: "new_node.ask_ai", screen: "new_node", kind: "button", label: "controls.askAi" },
 
   { id: "servers.item", screen: "servers", kind: "row", label: "controls.server" },
   { id: "servers.destroy", screen: "servers", kind: "button", label: "controls.destroy" },

@@ -825,7 +825,6 @@ export const en: Record<MessageKey, string> = {
     "The connection failed. Here is what the local diagnosis collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; don't guess and don't ask me to upload logs.\n{context}",
   "assistant.prompt.nodeUnreachable":
     "Node \"{name}\" failed its test this time. First use a tool to check whether it can recover intelligently (change the connection password); recover it if you can, and only suggest destroying and rebuilding if it can't be recovered. Don't make up tool results; if tools aren't available, say so honestly.",
-  "assistant.prompt.pickRegion": "Help me pick a region and plan.",
 
   // Settings › Advanced › Language
   "settings.language.label": "Language",
@@ -907,7 +906,6 @@ export const en: Record<MessageKey, string> = {
   "controls.region": "Region",
   "controls.plan": "Server type",
   "controls.create": "Create",
-  "controls.askAi": "Have AI choose",
   "controls.server": "Server",
   "controls.destroy": "Destroy",
   "controls.aiLocate": "AI locate",

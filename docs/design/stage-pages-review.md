@@ -32,7 +32,7 @@
 | `Esc` 与登录弹窗撞车 | 登录弹窗开着时，`Esc` **只关弹窗**，不关向导——一次按键只解一层。弹窗关掉后焦点回到触发它的控件（`登录并继续`），不是回到输入框 |
 | 已有未提交的选择时 `返回` / `Esc` | **直接关闭，不弹确认**（**PM 2026-11-18 确认：保持这条，不要改回「先确认放弃」**）：已选的地区与档位**保留**（`newNodeSelection` 不清），下次打开向导时原样回填——两个宿主共用同一份状态。既然什么都不丢，就没有可「放弃」的东西，确认框只会碍事 |
 | 向导打开时点导航切到另一侧 | **先关闭向导并丢弃未提交的选择**，再切过去；切回时不恢复半填的表单。这里**连地区/档位一起清**（`newNodeSelection`），与上一行相反，理由见下 |
-| 丢弃时还要清掉什么 | **两种离开都要清掉「让 AI 帮我选」那条待选结果（`stageSelect`）**——否则回来会看到上一轮 AI 建议的地区还挂着，用户以为它还有效。区别只在地区/档位：`返回` 保留，切导航清 |
+| 丢弃时还要清掉什么 | **两种离开都要清掉 AI 留下的待选结果（`stageSelect`）**——否则回来会看到上一轮 AI 建议的地区还挂着，用户以为它还有效。区别只在地区/档位：`返回` 保留，切导航清 |
 | 创建在途时点导航 | **不切**，导航同样禁用（沿用 N5「创建中锁返回」）；`返回` 也 `disabled`，`Esc` 被吞（`App.tsx:513`）。**不会永久锁死**：创建请求有超时，失败会落进向导的失败态，`busy` 复位后 `返回`、导航与 `Esc` 一起恢复，不需要额外的「强制退出」入口 |
 | 向导期间左栏 | **可见但禁用**：行不可选中、不可点，`aria-disabled="true"`、45% 透明；`＋` 也禁用 |
 | AI 上下文 | 两个宿主的 `screen` 都是 `new_node`——AI 不需要知道它挂在哪一侧 |
@@ -59,7 +59,7 @@
 |---|---|
 | `App.tsx:371-377` `openNewNode(origin)` | **去掉 `changeDestination("client")`**；按 `origin` 决定宿主：`servers` → 留在 / 切到 servers；`client` / `trial_expired` → 留在 / 切到 client |
 | `App.tsx` 渲染分支 | 新增 `destination === "servers" && newNodeOpen` → 中间渲染 `MyServerWizard`（与 client 分支**同一个组件**），传 `onBack={closeNewNode}` |
-| `closeNewNode()` | 去掉 `if (origin === "servers") changeDestination("servers")`——从未离开，无需切回；只 `setNewNodeOpen(false)`；**同时清掉 `stageSelect` 待选结果**（AI「让 AI 帮我选」留下的那条），否则切回来还会看到上一轮的建议；**不清 `newNodeSelection`——地区/档位保留** |
+| `closeNewNode()` | 去掉 `if (origin === "servers") changeDestination("servers")`——从未离开，无需切回；只 `setNewNodeOpen(false)`；**同时清掉 `stageSelect` 待选结果**（AI 通过 `StageSelect` 留下的那条），否则切回来还会看到上一轮的建议；**不清 `newNodeSelection`——地区/档位保留** |
 | `changeDestination(next)` | 进入前若 `newNodeOpen`：创建在途 → 拒绝切换；否则清 `newNodeOpen` + `stageSelect` + **`newNodeSelection`**（比 `closeNewNode()` 多清一样，**不要直接复用它**）再切 |
 | `MyServersRail` | 向导期间传 `interactive={false}`：行 `aria-disabled="true"` + `pointer-events: none` + 45% 透明；`＋` 同 |
 | `Esc` | 与 `返回` 合并到同一个处理函数；**登录弹窗在最上层时优先关弹窗**——判断顺序：登录弹窗 → 向导 → 页面其它，一次按键只解一层；**创建在途时整键吞掉**（`App.tsx:513`），`busy` 复位后自动恢复，无需额外出口 |

@@ -3528,7 +3528,7 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-/* 标题区第一行：左「返回 + 标题」，右「让 AI 帮我选」；放不下时整颗换行。 */
+/* 标题区第一行：左「返回 + 标题」；放不下时整行换行。 */
 .myservers__wizard-head {
   display: flex;
   align-items: flex-start;
@@ -7152,11 +7152,6 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 标题区右上角的 ghost 按钮：不抢创建主按钮。 */
-.wizard-ask-ai {
-  flex: none;
 }
 
 .myservers__failure .btn {

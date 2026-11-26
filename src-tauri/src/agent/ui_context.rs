@@ -22,7 +22,7 @@ pub const SCREENS: [&str; 7] = [
 ];
 
 /// 静态登记表（与 `commands.md` §9.1.1 同源）：`(screen, control id)`。
-pub const STATIC_CONTROLS: [(&str, &str); 22] = [
+pub const STATIC_CONTROLS: [(&str, &str); 21] = [
     ("onboarding", "onboarding.connect"),
     ("onboarding", "onboarding.other_provider"),
     ("onboarding", "onboarding.get_key"),
@@ -34,7 +34,6 @@ pub const STATIC_CONTROLS: [(&str, &str); 22] = [
     ("new_node", "new_node.region"),
     ("new_node", "new_node.plan"),
     ("new_node", "new_node.create"),
-    ("new_node", "new_node.ask_ai"),
     ("servers", "servers.item"),
     ("servers", "servers.connect"),
     ("servers", "servers.rebuild"),

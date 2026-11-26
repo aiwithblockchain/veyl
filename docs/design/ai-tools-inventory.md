@@ -84,11 +84,11 @@
 | 35 | `DefaultProfileStatus` | 免费节点 | ReadOnly | 读免费节点缓存状态（不联网） | 契约 §4.21；product §3.6 |
 | 36 | `SetUserRegion` | 地区 | Write | 记录用户所在地区 | 契约 §4.47；系统环境段 mod.rs:205/225 |
 | 37 | `MyServers` | 服务器 | ReadOnly | 列我的服务器与状态 | 契约 §4.48；product §3.3 |
-| 38 | `MyServerFailure` | 服务器 | ReadOnly | 读某台服务器创建失败详情 | 契约 §4.51；product #6、ai-docs #6 |
-| 39 | `NodeRotateCredentials` | 服务器 | Execute | 更换某台服务器的连接密码（有确认卡） | 契约 §4.55；product #9（未点名） |
+| 38 | `MyServerFailure` | 服务器 | ReadOnly | 读某台服务器创建失败详情 | 契约 §4.51；product #5、ai-docs #5 |
+| 39 | `NodeRotateCredentials` | 服务器 | Execute | 更换某台服务器的连接密码（有确认卡） | 契约 §4.55；product #8（未点名） |
 | 40 | `OpenSettings` | 设置 | ReadOnly | 打开设置并指向某段 / 某行 | 契约 §4.50；product §3.6（咨询 AI） |
-| 41 | `StageSelect` | 建机 | Write | 把地区 / 规格选进新建节点舞台 | 契约 §4.52；product #5、ai-docs #5 |
-| 42 | `CatalogOptions` | 建机 | ReadOnly | 读建机可选地区与规格 | 契约 §4.53；product #5 |
+| 41 | `StageSelect` | 建机 | Write | 把地区 / 规格选进新建节点舞台 | 契约 §4.52；无固定入口，用户在对话里问时仍可回填舞台 |
+| 42 | `CatalogOptions` | 建机 | ReadOnly | 读建机可选地区与规格 | 契约 §4.53；无固定入口，配合 `StageSelect` |
 | 43 | `AskUserQuestion` | 会话 | None（沿用内置） | 向用户提问并等待回答；Veyl 包装了参数校验 | 契约 §4.22；kickoff:10,40,113 |
 
 > 计数：注册表 43 项 = 42 个产品工具 + 1 个 `AskUserQuestionGuard`；再加 6 个基础文件工具，共 49 个工具定义。`ai-docs-management.md:298` 的「42 个」不含 guard，口径一致。
@@ -303,7 +303,6 @@
 | 连接失败 hero | `product.md:140`、`ai-docs-management.md:33` | `DiagRun` |
 | 设置页咨询 AI | `product.md:84`、`ai-docs-management.md:34` | `OpenSettings`（指路）；其余靠注入的事实 |
 | 报告问题 | `product.md:157`、`ai-docs-management.md:36` | `IssueReport` |
-| 建机向导「让 AI 帮我选」 | `product.md:158`、`ai-docs-management.md:37` | `StageSelect`、`CatalogOptions` |
 | 服务器详情「AI 定位」 | `product.md:159`、`ai-docs-management.md:38` | `MyServerFailure` |
 | 手机使用「不会操作？问 AI」 | `product.md:160`、`ai-docs-management.md:39` | 没有工具（见 G7） |
 | 右栏空态预设问题 | `product.md:161`、`ai-docs-management.md:40` | 没有固定工具 |

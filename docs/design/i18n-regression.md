@@ -88,7 +88,7 @@
 | 场景 | 触发方式 | 中文应显示（语义） | 英文应显示（语义） |
 |---|---|---|---|
 | AI Key 无效 | 设置 › AI 填错 DeepSeek Key | 密钥无效，检查后重试 | key invalid |
-| AI 未配置 | 点连接页「问 AI」或建机向导「让 AI 帮我选」（未配置时右栏没有输入框） | 全局告警 +「去配置」，跳到设置 › AI | global warning + configure, opens Settings › AI |
+| AI 未配置 | 点连接页「问 AI」（未配置时右栏没有输入框） | 全局告警 +「去配置」，跳到设置 › AI | global warning + configure, opens Settings › AI |
 | 模型名/地址不合法 | 设置 › AI 留空或填错 | 对应字段的参数提示 | field-specific copy |
 | 请求繁忙 | 上一条未回完再发 | 等这条回完再发 | wait for the current reply |
 | 令牌超限 | 触发一次超预算请求 | 带金额与上限 | with cost and limit |

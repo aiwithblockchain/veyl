@@ -1426,17 +1426,8 @@ describe("左栏门禁", () => {
   }, 15_000);
 });
 
-describe("新建节点：AI 入口按配置显隐", () => {
-  async function openWizard() {
-    render(<App />);
-    await screen.findByRole("button", { name: /我的服务器/ });
-    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
-    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
-    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
-    await screen.findByRole("main", { name: "新建节点" });
-  }
-
-  it("AI 可用：标题区右上角出现 ghost「让 AI 帮我选」", async () => {
+describe("新建节点：不再有 AI 入口", () => {
+  it("AI 已配置时，向导标题区也没有「让 AI 帮我选」", async () => {
     prepare([SERVER]);
     localStorage.setItem("veyl.onboarding.skipped", "1");
     vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
@@ -1455,21 +1446,13 @@ describe("新建节点：AI 入口按配置显隐", () => {
       activeProviderId: "deepseek",
     } as never);
 
-    await openWizard();
-    const ask = await screen.findByRole("button", { name: "让 AI 帮我选" });
-    expect(ask.className).toContain("btn--ghost");
-    expect(ask.closest(".myservers__wizard-head")).toBeTruthy();
-  }, 15_000);
+    render(<App />);
+    await screen.findByRole("button", { name: /我的服务器/ });
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    const rail = await screen.findByRole("complementary", { name: "服务器列表" });
+    fireEvent.click(rail.querySelector(".rail__add") as HTMLButtonElement);
+    await screen.findByRole("main", { name: "新建节点" });
 
-  it("AI 未配置：不渲染这个入口", async () => {
-    prepare([SERVER]);
-    localStorage.setItem("veyl.onboarding.skipped", "1");
-    vi.spyOn(bridge, "llmProviderList").mockResolvedValue({
-      providers: [],
-      activeProviderId: null,
-    } as never);
-
-    await openWizard();
     expect(screen.queryByRole("button", { name: "让 AI 帮我选" })).toBeNull();
   }, 15_000);
 });

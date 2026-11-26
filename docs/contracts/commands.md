@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.76.0`
+> 契约版本：`2.77.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -3287,6 +3287,12 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.77.0（未发布，2026-11-26：移除 `new_node.ask_ai` 控件）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.77.0`；§9.1.1 的 `new_node` 控件集去掉 `new_node.ask_ai`（建机向导不再提供「让 AI 帮我选」，入口整个移除），静态登记表 22 → 21 项 | 控件移除 | 产品决定 2026-11-26；`ui_context.rs` `STATIC_CONTROLS` |
 
 ### 2.76.0（未发布，2026-11-26：近 30 天账单流水）
 
