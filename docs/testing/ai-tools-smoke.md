@@ -232,4 +232,10 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 | 4.6 AI 服务商 | 通过 | 先取 `[id: deepseek]` 再测；期间修过一次 content 不带 id 的问题 |
 | 4.7 机械核对 | 通过 | `tools.md` §3 / `TOOL_COPY` / `vpn_tools()` 三处 38，`check-contracts` 91 项通过 |
 
+### 2026-11-26 账户入口复测（工具面 38，`tools.md` 3.36.0）
+
+问「余额在哪看？怎么退出登录？」，模型答：左下角头像点开是「账户」弹层，余额与充值都在里面，退出登录也在同一弹层、不影响当前连接；并说明余额是某一刻的读数、刷新失败时显示上次金额。**未再出现「设置 › 账户」。**
+
+对应实现：`85b7ba9`（`OpenSettings` 收起 account 分区，`section: "account"` 按 schema 拒绝，`reason = account_not_in_settings`）。
+
 前四组此前已逐条实测通过（1.1–1.3、2.4、3.1–3.3）；2.1–2.3、2.5、2.6 仍由同事在真机上执行，完成后补记。
