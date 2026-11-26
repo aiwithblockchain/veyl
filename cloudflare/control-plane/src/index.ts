@@ -54,8 +54,10 @@ export interface Env {
 
 const SERVICE = "veyl-control-plane";
 const VERSION = "0.0.0";
-// 入口模块只能导出 handler：导出非函数值会让 workerd 在启动时抛
-// `Incorrect type for map entry 'USER_AGENT'`。
+// 入口模块导出字符串会让 workerd 启动失败：`Incorrect type for map entry
+// 'USER_AGENT': the provided value is not of type 'function or ExportedHandler'`。
+// 数组 / 对象导出不受影响（2026-11-26 被 `export const PLAN_SLUGS` 正常工作证实），
+// 所以这条只针对原始值，不要据此删改其它导出。
 const USER_AGENT = "veyl-control-plane/0.0.0";
 const DO_API = "https://api.digitalocean.com/v2";
 /** 回源超时必须短于目录租约（15 秒），否则租约过期前请求还在挂。 */
