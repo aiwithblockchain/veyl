@@ -34,8 +34,8 @@
 | 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts:7` |
 | 4 | 设置 › 帮助 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
 | 5 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
-| 6 | 「在手机上使用」弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
-| 7 | 右栏 AI 空态 · 预设问题 | 5 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
+| 6 | 「我的服务器」左栏「在其它设备上使用」→ 弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在手机上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
+| 7 | 右栏 AI 空态 · 预设问题 | 6 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
 | 8 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:22` |
 | 9 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:327`、`useNodeDiagnosis.ts:635`、`App.tsx:2310` |
 

@@ -1,7 +1,7 @@
 # AI 工具第 5 组：补缺口决策单
 
 > 日期：2026-11-25
-> 状态：**已落地**（第 5 组 = 3.31.0 `MyServerWallet` + 3.32.0 `LlmProviders`，工具面 38）。
+> 状态：**已落地**（第 5 组 = 3.31.0 `MyServerWallet` + 3.32.0 `LlmProviders`；后续修订 3.34.0 给 `MyServers` 补 `paid_until` / `billing_state`、3.35.0 `LlmProviders` 每行带 service provider id；工具面 38）。
 > 依据：`docs/design/ai-tools-inventory.md` §3.4（G1 / G2 / G3 / G4 / G7 / G8）、§4 待定点第 9、10 条。
 > 范围：只回答「该不该给 AI」，并写到能派活为止；实现细节留给工具实现。
 

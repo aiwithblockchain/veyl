@@ -18,7 +18,7 @@
 | 节点自救链路：共享防火墙、agent、控制面 agent 接口、桌面端 `NodeRotateCredentials`、发版流水线 | `edd46c3`、`4173443`、`8578dbd`、`3c65d21`、`a42eefc` |
 | AI 可选与统一入口：首启可跳过、右栏配置引导、统一告警、后端 `AI_NOT_CONFIGURED`、保存 Key 后激活 | `a25059e` |
 | 节点配置同步：手动与定时拉取最新凭据、同值跳过、凭据串行锁、跨账号守卫 | `ac38a47` |
-| 工具描述按会话语言（41 条英文 + `LocalizedTool`）、界面错误只回稳定码（`errorText` 映射） | `7ce7b29` |
+| 工具描述按会话语言（英文描述随工具集走，现 38 条 + `LocalizedTool`）、界面错误只回稳定码（`errorText` 映射） | `7ce7b29` |
 | 事件状态与工具卡文案按 `text_key` 渲染（批次 B）、两语言回归手册 | `950b876` |
 | 工具卡事实结构化（B3/B2b，100 条 `tool.fact.*`）、公开问题墙（`tools.md` 3.25.0）、节点诊断收尾、版本 1.1.0、同步档位改 30 分钟–24 小时 | `adace5b` |
 | B3 复核修复与节点探测语义收口：工具卡参数名/枚举、缺字段不发 fact、`other_config` → `node_not_in_config`、Clash 404 独立原因、接手 TUN 复原连接上下文、契约 2.59.0 / tools 3.25.1 | `c8a142f` |
@@ -27,6 +27,7 @@
 | 创建记录时间线：审计为主 + 阶段时间戳补里程碑（契约 2.63.0 §7.31）、控制面 `GET /v1/servers/{id}/events` 与迁移 0013、Host `my_server_events`、详情页第四块；dev 已于 2026-11-24 部署（Worker `45470206`） | `7c912f3`、`86b3ff7`、`ebbee8b`、`924f679` |
 | 建机页重做：版心 960、单列吸底动作栏 / ≥900 两栏摘要、标题与分区层级、AI 入口移到标题行且未配 AI 不显示、删系统信息、风险说明块换中性色并写全计费与可达性口径 | `6f97697`、`a41b3a8` |
 | 节点流量计量与扣费：agent nft 出站计数与事件触发上报、控制面 `POST /v1/agent/traffic` 去重/周期归属/超额扣费、迁移 0014；交叉评审 0 P1、P2 全闭合 | `390d017`、`9a96d2d` |
+| AI 工具梳理收口：删三个分流旧工具（40）、合并节点写入为 `NodeImport`（38）、`ServerOptions` 改名、前置批删 `RuntimeStart`/`RuntimeStop` 与 `ConfigUpdate.routing_mode`（36）、第 5 组补 `MyServerWallet` / `LlmProviders` 与 `MyServers` 计费字段（38），契约 tools.md 3.35.0 / commands.md 2.77.0；第 5 组冒烟 4.1–4.6 实测通过 | `051bc8d`、`6645206`、`eb46606`、`ce46f2b`、`ed366dd`、`4509717` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 
