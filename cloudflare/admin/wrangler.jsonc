@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "veyl-admin",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // Access 只保护自定义域名，workers.dev 必须关掉，否则绕过 Access 直连 Worker。
+  "workers_dev": false,
+  // 预览地址同样不受 Access 保护，钉死关闭，防止默认值将来变化。
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // 填成 https://<your-team>.cloudflareaccess.com
+    "ACCESS_TEAM_DOMAIN": "",
+    // 填成 Access 应用的 Application Audience (AUD) Tag
+    "ACCESS_AUD": ""
+  },
+  // 自定义域名要求 dessage.xyz 在同一账号下。本目录只写配置，不部署。
+  "routes": [{ "pattern": "admin.dessage.xyz", "custom_domain": true }]
+}

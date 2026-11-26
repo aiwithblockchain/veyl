@@ -73,11 +73,15 @@
 
 ## 4. 认证与部署
 
+> **2026-11-26 拍板**：不做 HTTP Basic，也不自建登录页，直接用 **Cloudflare Access**。
+
 - 独立 Worker，路由 `admin.dessage.xyz`，与 `edge` 平级（`cloudflare/admin/`）。
-- HTTP Basic；用户名与密码来自环境变量（`ADMIN_USER` / `ADMIN_PASS`，用 `wrangler secret put` 写入），不落库、不写代码。
-- 只走 HTTPS；不做注册、不做找回、不做"记住我"。
-- 所有写动作（停服 / 恢复 / 标记失联）写 `audit_log`：谁、什么时候、对哪台、结果。
-- 可选第二道：再套 Cloudflare Access，把 Basic 当兜底手段，而不是唯一手段。
+- 身份由 Cloudflare Access 在边缘完成：self-hosted 应用 + 只允许管理员邮箱的策略，验证方式用邮箱一次性验证码或 Google 登录（自带 MFA）。**没有登录页、没有密码、没有会话 cookie。**
+- Worker 只校验 `Cf-Access-Jwt-Assertion`：RS256，用 `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs` 的 JWKS 验签，并校验 `aud === ACCESS_AUD`、`exp`、`iss`。
+- **不信** `Cf-Access-Authenticated-User-Email` 头——客户端可以自己塞，必须验 JWT。
+- 缺头或验签失败一律 `401`，不重定向：Access 已在边缘拦掉未登录请求，能走到 Worker 就说明是绕过或伪造。
+- 部署时必须关掉 workers.dev 路由，否则那条路绕过 Access。
+- 只走 HTTPS。所有写动作（停服 / 恢复 / 标记失联）写 `audit_log`：谁、什么时候、对哪台、结果。
 
 ---
 
@@ -184,7 +188,7 @@
 
 ## 10. 待逐条讨论
 
-- **Q1** 认证用 HTTP Basic 够不够？要不要一开始就套 Cloudflare Access？
+- ~~**Q1** 认证用 HTTP Basic 够不够？要不要一开始就套 Cloudflare Access？~~ **已决（2026-11-26）：不用 Basic、不自建登录页，直接 Cloudflare Access，见 §4。**
 - **Q2** 命令走 A、走 B，还是两条都做？
 - **Q3** 健康字段放 `servers` 增列，还是单开一张 `agent_health` 表？后者不污染主表，但要多一次关联。
 - **Q4** 「计量废了」要不要**自动**停服，还是只报警、由管理员点？自动停的风险是误判就断服务。

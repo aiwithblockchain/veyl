@@ -1,0 +1,9 @@
+# 复制成 .dev.vars 后填写；.dev.vars 不入库。
+#
+# Access 团队的域名，形如 https://<your-team>.cloudflareaccess.com
+# 位置：Cloudflare Zero Trust → Settings → Custom Pages 顶部的 Team domain
+ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
+
+# Access 应用的 Application Audience (AUD) Tag
+# 位置：Zero Trust → Access → Applications → 你的应用 → Overview
+ACCESS_AUD=your-application-aud-tag
