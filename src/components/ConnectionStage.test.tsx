@@ -1721,6 +1721,47 @@ describe("混池节点卡：试用 + 自建", () => {
     ).toBeTruthy();
   });
 
+  it("使用中节点所在的标签带绿点", () => {
+    renderStage({
+      config: configWith([OWNED, CUSTOM]),
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date(Date.now() - 5000).toISOString(),
+        health: {
+          ...emptyRuntimeView().health,
+          data_plane: true,
+          checked_at: new Date().toISOString(),
+        },
+      }),
+    });
+
+    const ownedTab = screen.getByRole("tab", {
+      name: /使用中.*我的服务器/,
+    });
+    expect(ownedTab.querySelector(".stage-tabs__inuse")).toBeTruthy();
+    expect(
+      screen
+        .getByRole("tab", { name: /自定义节点/ })
+        .querySelector(".stage-tabs__inuse"),
+    ).toBeNull();
+
+    // 切到另一个标签，绿点仍留在使用中节点所在的标签上。
+    fireEvent.click(screen.getByRole("tab", { name: /自定义节点/ }));
+    expect(
+      screen
+        .getByRole("tab", { name: /使用中.*我的服务器/ })
+        .querySelector(".stage-tabs__inuse"),
+    ).toBeTruthy();
+  });
+
+  it("未连接时标签读作「当前」", () => {
+    renderStage({ config: configWith([OWNED, CUSTOM]) });
+
+    const ownedTab = screen.getByRole("tab", { name: /当前.*我的服务器/ });
+    expect(ownedTab.querySelector(".stage-tabs__inuse")).toBeTruthy();
+  });
+
   it("只有免费节点时：节点卡两个 0 标签 + 独立免费卡", () => {
     const { rerender } = renderStage();
     expect(

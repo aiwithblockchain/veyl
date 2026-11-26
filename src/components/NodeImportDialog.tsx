@@ -439,6 +439,27 @@ export function NodeImportDialog({
     }
   };
 
+  const skippedGroups: Array<{ reason: string; count: number }> = [];
+  if (linkResult) {
+    for (const item of linkResult.skipped) {
+      const group = skippedGroups.find((entry) => entry.reason === item.reason);
+      if (group) group.count += 1;
+      else skippedGroups.push({ reason: item.reason, count: 1 });
+    }
+  }
+  /**
+   * 没有新增、但有节点命中既有记录：这不是「导入失败」，是这份订阅/链接已经导入过。
+   * 不能要求 skipped 全是 duplicate——Clash 订阅每次都会带非 ss 类型与不支持的
+   * cipher，它们和重复项混在同一个 skipped 里，要求「全是重复」就永远不成立。
+   */
+  const alreadyImported =
+    linkResult !== null &&
+    linkResult.imported === 0 &&
+    skippedGroups.some((group) => group.reason === "duplicate");
+  const skippedSummary = skippedGroups
+    .map((group) => `${importSkipReason(group.reason)} ${group.count}`)
+    .join("、");
+
   if (!open) return null;
 
   return (
@@ -533,26 +554,53 @@ export function NodeImportDialog({
                 </div>
               )}
 
-              {linkResult &&
-              (linkResult.imported === 0 || linkResult.skipped.length > 0) ? (
+              {linkResult ? (
                 <div className="settings-import">
-                  {linkResult.imported === 0 ? (
+                  {linkResult.imported > 0 ? (
+                    <>
+                      <p className="settings-feedback" role="status">
+                        {t("settings.import.added", {
+                          count: linkResult.imported,
+                        })}
+                      </p>
+                      <ul
+                        className="settings-import__added"
+                        aria-label={t("settings.import.addedList")}
+                      >
+                        {linkResult.nodes.map((node) => (
+                          <li key={node.node_id}>{node.name}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : alreadyImported ? (
+                    <p className="settings-feedback" role="status">
+                      {t("settings.import.allDuplicate")}
+                    </p>
+                  ) : (
                     <p
                       className="settings-feedback settings-feedback--warn"
                       role="status"
                     >
                       {t("settings.import.noneAdded")}
                     </p>
-                  ) : null}
-                  {linkResult.skipped.length > 0 ? (
-                    <ul className="settings-import__skipped">
-                      {linkResult.skipped.map((item, index) => (
-                        <li key={`${item.name}-${item.reason}-${index}`}>
-                          {item.name ? `${item.name}：` : ""}
-                          {importSkipReason(item.reason)}
-                        </li>
-                      ))}
-                    </ul>
+                  )}
+                  {linkResult.skipped.length > 0 && !alreadyImported ? (
+                    <details className="settings-import__skipped">
+                      <summary>
+                        {t("settings.import.skippedSummary", {
+                          count: linkResult.skipped.length,
+                          reasons: skippedSummary,
+                        })}
+                      </summary>
+                      <ul className="settings-import__skipped-list">
+                        {linkResult.skipped.map((item, index) => (
+                          <li key={`${item.name}-${item.reason}-${index}`}>
+                            {item.name ? `${item.name}：` : ""}
+                            {importSkipReason(item.reason)}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                   ) : null}
                 </div>
               ) : null}

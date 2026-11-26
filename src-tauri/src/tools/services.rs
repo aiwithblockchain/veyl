@@ -6753,11 +6753,14 @@ impl VpnToolServices for WiredServices {
         let target = self.import_target(config_id.as_deref())?;
         let subscription = crate::nodes::parse_subscription(text).map_err(|error| {
             log::debug!("粘贴导入解析失败：{error}");
-            svc_error_with_details(
-                "INVALID_ARGUMENT",
-                "粘贴的内容里没有可用的节点（支持多行 ss:// 链接）",
-                json!({ "reason": "not_node_text" }),
-            )
+            let reason = error.reason();
+            // 认出是 Clash 但没有可用的 ss，与「内容不是节点列表」是两回事。
+            let message = if reason == "not_subscription" {
+                "Clash 配置里没有可用的 Shadowsocks 节点"
+            } else {
+                "内容里没有可用的节点（支持 ss:// 链接或 Clash 配置）"
+            };
+            svc_error_with_details("INVALID_ARGUMENT", message, json!({ "reason": reason }))
         })?;
         // 粘贴来的节点算「手动添加」：来源是用户自己，不是我们替他拉取。
         let (added, duplicates) = self.add_parsed_nodes(
@@ -12885,6 +12888,45 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Clash 配置粘贴进来：`proxies:` 里的 ss 条目进池，其它类型与重复条目各自跳过。
+    #[tokio::test]
+    async fn pasted_clash_proxies_import_and_dedupe() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let text = r#"proxies:
+  - name: 东京
+    type: ss
+    server: 198.51.100.80
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw-a
+  - name: 大阪
+    type: vmess
+    server: 198.51.100.81
+    port: 443
+    cipher: auto
+    password: uuid
+  - name: 东京
+    type: ss
+    server: 198.51.100.80
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw-a
+"#;
+
+        let data = services.node_import_text(None, text).await.unwrap();
+        assert_eq!(data["imported"], 1);
+        assert_eq!(data["nodes"][0]["name"], "东京");
+        let skipped = data["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0]["reason"], "unsupported_scheme");
+        assert_eq!(skipped[0]["name"], "大阪");
+        assert_eq!(skipped[1]["reason"], "duplicate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 整段都不是节点时给可读原因，前端据此提示「这行内容不是节点」。
     #[tokio::test]
     async fn text_without_any_node_is_rejected_with_a_reason() {
@@ -12898,6 +12940,28 @@ mod config_service_tests {
         let service = error.downcast_ref::<ServiceError>().unwrap();
         assert_eq!(service.code, "INVALID_ARGUMENT");
         assert_eq!(service.details.as_ref().unwrap()["reason"], "not_node_text");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 粘贴一份只有 vmess 的 Clash：走 Clash 分支后 reason 是 `not_subscription`，
+    /// 界面才能说清「Clash 里没有可用的 Shadowsocks 节点」。
+    #[tokio::test]
+    async fn clash_text_without_ss_keeps_the_clash_reason() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let text = "proxies:\n  - name: v\n    type: vmess\n    server: 198.51.100.91\n    port: 443\n    cipher: auto\n    password: uuid\n";
+
+        let error = services
+            .node_import_text(None, text)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(
+            service.details.as_ref().unwrap()["reason"],
+            "not_subscription"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

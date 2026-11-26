@@ -1,8 +1,8 @@
 # Shadowsocks 支持（N-03）
 
-> 版本：v1.2
+> 版本：v1.3
 > 日期：2026-11-26
-> 契约：1.0.10
+> 契约：2.83.0
 > 状态：已实施
 
 ---
@@ -98,6 +98,15 @@ pub const SUPPORTED_METHODS: &[&str] = &[
 - **不降级、不猜测、不尝试**。降级会在用户不知情的情况下改变加密强度，比直接失败更糟。
 
 白名单里的每一项都按 sing-box 1.14 的真实行为核对过；新增 method 前先在 `check` 上实测，再同步 `nodes.rs`、手动表单下拉与 `commands.md`。
+
+### 3.1 Clash 配置的解析范围
+
+订阅、粘贴、文件三条入口共用 `parse_subscription`：遇到根级 `proxies:` 时按**手写的块状子集**取节点，不引 YAML 库——别名炸弹这类以订阅内容为入口的风险就不存在。
+
+- 只认 `type: ss` 的条目：`name` / `server` / `port` / `cipher` / `password`；`cipher` 照 §3 的白名单与 PSK 校验。
+- 其它类型（vmess / vless / trojan / hysteria2…）按 `unsupported_scheme` 跳过；缺字段、端口非法、plugin、flow 写法（`- {…}`）、锚点 / 别名（`&` / `*` / `<<`）按 `malformed` 跳过。一条坏条目不影响其它条目。
+- **其它根级键一律不读**（`proxy-groups` / `rules` / `dns` / `tls`…）：只取节点，不接管订阅里的分流、DNS 与证书设置。那是对方的整份客户端配置，不是一份节点清单。
+- 一个可用的 ss 都没有 → `INVALID_ARGUMENT / not_subscription`，界面说「这是 Clash 配置，但里面没有可用的 Shadowsocks 节点」；压根不是节点列表则是 `not_node_text`。
 
 ---
 

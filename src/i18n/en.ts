@@ -707,6 +707,8 @@ export const en: Record<MessageKey, string> = {
   "console.group.empty.owned": "No server nodes yet",
   "console.group.empty.custom": "No custom nodes added yet",
   "console.sources.aria": "Node sources",
+  "console.inUse": "In use",
+  "console.current.label": "Current",
   "console.current.locateAria":
     "Current node “{name}”; select to show its group",
   "console.search.placeholder": "Search this group",
@@ -1286,7 +1288,8 @@ export const en: Record<MessageKey, string> = {
   "settings.error.importFailed": "Import didn't succeed. Try again.",
   "settings.error.modeSwitch": "Couldn't switch capture mode. Try again later.",
   "settings.error.noActiveProvider": "No AI service is available. Choose one in Settings.",
-  "settings.error.notNodeText": "This file has no usable nodes (multi-line ss:// links are supported). Choose another file.",
+  "settings.error.notNodeText":
+    "This file has no usable nodes (ss:// links or Clash configs are supported). Choose another file.",
   "settings.error.providerGone": "This provider no longer exists.",
   "settings.error.providerUnsupported": "AI services aren't available in this version yet. Try again later.",
   "settings.error.resetFailed": "Reset didn't start. Try again later; if it still fails, copy the diagnostics and send them to the assistant.",
@@ -1554,6 +1557,9 @@ export const en: Record<MessageKey, string> = {
   "settings.provider.testOk": "Connected",
   "settings.provider.switchedTo": "Switched to \"{name}\".",
   "settings.import.added": "Added {count} nodes",
+  "settings.import.addedList": "Added nodes",
+  "settings.import.allDuplicate": "These nodes are already in the node pool.",
+  "settings.import.skippedSummary": "Skipped {count}: {reasons}",
   "settings.import.addedNextConnect": "Added {count} nodes; reconnect before testing them",
   "settings.reset.lastPartial": "Last reset: {time} · {count} unfinished",
   "settings.reset.lastDone": "Last reset: {time} · all {count} completed",
@@ -1591,7 +1597,8 @@ export const en: Record<MessageKey, string> = {
   "settings.port.lowHint": "Ports below 1024 usually need admin permission; using one isn't recommended.",
   "settings.port.occupiedHint": "It's in use by another app right now; the app will pick the next free port when connecting.",
   "settings.port.unavailableHint": "This machine can't bind that port (admin permission needed); the app will pick the next free port when connecting.",
-  "settings.import.note": "Supports multi-line ss:// links or an https subscription URL; don't share node passwords from the file.",
+  "settings.import.note":
+    "Supports ss:// links, a Clash config, or an https subscription URL; don't share node passwords from the file.",
   "settings.import.willImport": "Will import:",
   "settings.import.noneAdded": "No nodes were added",
   "settings.import.reselect": "Choose again",
@@ -1813,6 +1820,8 @@ export const en: Record<MessageKey, string> = {
   "error.reason.insecureUrl": "The subscription URL must use https.",
   "error.reason.fetchFailed": "Couldn't fetch the subscription. Check the network and try again.",
   "error.reason.notNodeText": "No usable nodes in that content.",
+  "error.reason.notSubscription":
+    "This is a Clash config, but it has no usable Shadowsocks nodes.",
   "error.reason.unsupportedMethod": "That encryption method isn't supported.",
   "error.reason.invalidArgument": "Some input isn't valid. Check it and try again.",
   "error.reason.nodeNotInConfig": "That node isn't in this config.",

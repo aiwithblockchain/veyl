@@ -1,7 +1,7 @@
 //! Shadowsocks 节点解析与导入。
 //!
-//! 本阶段只做 Shadowsocks：
-//! - URL 模式只接受 base64 编码的多节点订阅（整段 `ss://` 列表）；
+//! 本阶段只做 Shadowsocks 节点：
+//! - 订阅 / 文本：`ss://` 列表（含整段 base64），或 Clash 配置的块状 `proxies:` 子集；
 //! - 手动模式五个字段：name / server / port / password / method。
 //!
 //! 密码只在内存与本模块的返回结构里出现，落库时由服务层写入 `secrets.enc`。
@@ -119,8 +119,10 @@ impl ImportError {
 
     pub fn reason(&self) -> &'static str {
         match self {
+            // 认出是 Clash 配置，但里面没有能用的 Shadowsocks 节点。
             ImportError::Unsupported(_) => "not_subscription",
-            ImportError::Invalid(_) => "not_subscription",
+            // 内容压根不是节点列表（空、乱码、没有 ss:// 也不是 Clash）。
+            ImportError::Invalid(_) => "not_node_text",
             ImportError::Fetch(_) => "fetch_failed",
         }
     }
@@ -156,11 +158,22 @@ pub async fn fetch_subscription(url: &str) -> Result<Subscription, ImportError> 
     parse_subscription(&body)
 }
 
-/// 解析一段订阅：优先按 base64 解码，失败时接受已经展开的 `ss://` 列表。
+/// 解析一段订阅：Clash 配置取其中的 `proxies:` 子集；否则优先按 base64 解码，
+/// 失败时接受已经展开的 `ss://` 列表。
 pub fn parse_subscription(text: &str) -> Result<Subscription, ImportError> {
-    let raw = text.trim();
+    // Windows 编辑器写出的 UTF-8 常带 BOM：不去掉，首行会被当成未知格式。
+    let raw = text.trim_start_matches('\u{feff}').trim();
     if raw.is_empty() {
         return Err(ImportError::Invalid("订阅内容为空".into()));
+    }
+
+    if let Some(subscription) = parse_clash_proxies(raw) {
+        if subscription.nodes.is_empty() {
+            return Err(ImportError::Unsupported(
+                "Clash 配置里没有可用的 Shadowsocks 节点".into(),
+            ));
+        }
+        return Ok(subscription);
     }
 
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
@@ -172,8 +185,8 @@ pub fn parse_subscription(text: &str) -> Result<Subscription, ImportError> {
         Some(decoded) => decoded,
         None if raw.contains("ss://") => raw.to_string(),
         None => {
-            return Err(ImportError::Unsupported(
-                "只支持 base64 编码的 ss:// 多节点订阅".into(),
+            return Err(ImportError::Invalid(
+                "内容里没有 ss:// 链接，也不是 Clash 配置".into(),
             ))
         }
     };
@@ -202,12 +215,301 @@ pub fn parse_subscription(text: &str) -> Result<Subscription, ImportError> {
                 .skipped
                 .push(SkippedNode::new(SkipReason::SubscriptionEmpty, "订阅里没有节点"));
         }
-        return Err(ImportError::Unsupported(
+        return Err(ImportError::Invalid(
             "订阅里没有可用的 Shadowsocks 节点".into(),
         ));
     }
     Ok(subscription)
 }
+
+/// Clash 配置里的一个节点条目。只收块状写法里的六个字段，其余忽略。
+#[derive(Default)]
+struct ClashEntry {
+    name: Option<String>,
+    kind: Option<String>,
+    server: Option<String>,
+    port: Option<String>,
+    cipher: Option<String>,
+    password: Option<String>,
+    plugin: bool,
+    malformed: Option<String>,
+}
+
+impl ClashEntry {
+    fn add_line(&mut self, line: &str) {
+        if self.malformed.is_some() {
+            return;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            self.malformed = Some("这一行不是 key: value".into());
+            return;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let scalar = yaml_scalar(value);
+        let fail = |entry: &mut Self, detail: String| entry.malformed = Some(detail);
+        match key.as_str() {
+            "name" | "type" | "server" | "port" | "cipher" | "password" => match scalar {
+                Ok(text) => {
+                    let slot = match key.as_str() {
+                        "name" => &mut self.name,
+                        "type" => &mut self.kind,
+                        "server" => &mut self.server,
+                        "port" => &mut self.port,
+                        "cipher" => &mut self.cipher,
+                        _ => &mut self.password,
+                    };
+                    *slot = Some(text);
+                }
+                Err(detail) => fail(self, detail),
+            },
+            "plugin" => match scalar {
+                Ok(text) => self.plugin = !text.is_empty(),
+                Err(detail) => fail(self, detail),
+            },
+            // 合并键会引入我们没解析过的字段来源，按不认识的写法处理。
+            "<<" => self.malformed = Some("暂不支持 YAML 合并键".into()),
+            _ => {}
+        }
+    }
+}
+
+/// 取一个 YAML 标量：支持单 / 双引号与行尾注释；锚点、别名、未闭合引号都算不合法。
+fn yaml_scalar(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.starts_with('*') || value.starts_with('&') {
+        return Err("暂不支持 YAML 锚点 / 别名".into());
+    }
+    if let Some(body) = value.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = body.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                }
+                '"' => return Ok(out),
+                _ => out.push(ch),
+            }
+        }
+        return Err("引号没有闭合".into());
+    }
+    if let Some(body) = value.strip_prefix('\'') {
+        let mut out = String::new();
+        let mut chars = body.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    out.push('\'');
+                } else {
+                    return Ok(out);
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        return Err("引号没有闭合".into());
+    }
+    // YAML 的注释必须跟在空白后面：`p@ss#word` 里的 # 是密码的一部分。
+    let bare = match value.find(" #") {
+        Some(index) => &value[..index],
+        None => value,
+    };
+    Ok(bare.trim_end().to_string())
+}
+
+fn push_clash_skip(
+    subscription: &mut Subscription,
+    name: &Option<String>,
+    reason: SkipReason,
+    detail: impl Into<String>,
+) {
+    let mut skipped = SkippedNode::new(reason, detail);
+    skipped.name = name.clone();
+    subscription.skipped.push(skipped);
+}
+
+fn finish_clash_entry(entry: ClashEntry, subscription: &mut Subscription) {
+    let name = entry.name.clone();
+    if let Some(detail) = entry.malformed {
+        push_clash_skip(subscription, &name, SkipReason::Malformed, detail);
+        return;
+    }
+    match entry.kind.as_deref().map(str::trim) {
+        Some(kind) if kind.eq_ignore_ascii_case("ss") => {}
+        Some(kind) if kind.is_empty() => {
+            push_clash_skip(subscription, &name, SkipReason::Malformed, "缺少 type");
+            return;
+        }
+        Some(_) => {
+            push_clash_skip(
+                subscription,
+                &name,
+                SkipReason::UnsupportedScheme,
+                "只支持 ss 类型的节点",
+            );
+            return;
+        }
+        None => {
+            push_clash_skip(subscription, &name, SkipReason::Malformed, "缺少 type");
+            return;
+        }
+    }
+    if entry.plugin {
+        push_clash_skip(
+            subscription,
+            &name,
+            SkipReason::Malformed,
+            "暂不支持带 plugin 的 Shadowsocks 节点",
+        );
+        return;
+    }
+    let (Some(server), Some(port), Some(cipher), Some(password)) =
+        (entry.server, entry.port, entry.cipher, entry.password)
+    else {
+        push_clash_skip(
+            subscription,
+            &name,
+            SkipReason::Malformed,
+            "节点信息不完整（server / port / cipher / password）",
+        );
+        return;
+    };
+    let server = server.trim().to_string();
+    if server.is_empty()
+        || server.len() > 253
+        || server.contains("://")
+        || server
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\' || ch.is_control())
+    {
+        push_clash_skip(subscription, &name, SkipReason::Malformed, "服务器地址不合法");
+        return;
+    }
+    let port = match port.trim().parse::<u16>() {
+        Ok(port) if port > 0 => port,
+        _ => {
+            push_clash_skip(subscription, &name, SkipReason::Malformed, "端口不合法");
+            return;
+        }
+    };
+    let method = cipher.trim().to_ascii_lowercase();
+    if password.trim().is_empty() {
+        push_clash_skip(subscription, &name, SkipReason::Malformed, "缺少密码");
+        return;
+    }
+    if let Err(error) = validate_method_password(&method, &password) {
+        push_clash_skip(
+            subscription,
+            &name,
+            SkipReason::UnsupportedMethod,
+            error.to_string(),
+        );
+        return;
+    }
+    let name = name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("{server}:{port}"));
+    subscription.nodes.push(ParsedNode {
+        name,
+        server,
+        port,
+        method,
+        password,
+    });
+}
+
+/// 手写解析 Clash 配置的块状 `proxies:` 子集：不引 YAML 依赖，也就不用担心
+/// 别名展开这类以订阅内容为入口的问题。没有根级 `proxies:` 时返回 `None`。
+fn parse_clash_proxies(text: &str) -> Option<Subscription> {
+    let mut found = false;
+    let mut subscription = Subscription::default();
+    let mut current: Option<ClashEntry> = None;
+    // 只有与条目同缩进的 `-` 才是新条目；字段只认与首字段同缩进的行，
+    // 更深的是嵌套 map / list，整段忽略——订阅内容不可信，不能让它覆盖外层字段。
+    let mut item_indent: Option<usize> = None;
+    let mut field_indent: Option<usize> = None;
+
+    for raw in text.lines() {
+        if !found {
+            if let Some(rest) = raw.strip_prefix("proxies:") {
+                found = true;
+                let rest = rest.trim();
+                let rest = match rest.find(" #") {
+                    Some(index) => rest[..index].trim(),
+                    None => rest,
+                };
+                if !rest.is_empty() && rest != "[]" {
+                    subscription.skipped.push(SkippedNode::new(
+                        SkipReason::Malformed,
+                        "暂不支持 flow 写法的 proxies 列表",
+                    ));
+                }
+            }
+            continue;
+        }
+
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = raw.len() - raw.trim_start_matches([' ', '\t']).len();
+        if indent == 0 && !trimmed.starts_with('-') {
+            // 根级其它键：proxies 段到此结束。
+            break;
+        }
+
+        if trimmed.starts_with('-') {
+            match item_indent {
+                Some(base) if indent != base => continue, // 嵌套 list，不是条目
+                Some(_) => {}
+                None => item_indent = Some(indent),
+            }
+            if let Some(entry) = current.take() {
+                finish_clash_entry(entry, &mut subscription);
+            }
+            let after_dash = &trimmed[1..];
+            let lead = after_dash.len() - after_dash.trim_start_matches([' ', '\t']).len();
+            let content = after_dash.trim();
+            let mut entry = ClashEntry::default();
+            if content.starts_with('{') {
+                entry.malformed = Some("暂不支持 flow 写法的节点".into());
+                field_indent = None;
+            } else if content.is_empty() {
+                field_indent = None;
+            } else {
+                field_indent = Some(indent + 1 + lead);
+                entry.add_line(content);
+            }
+            current = Some(entry);
+            continue;
+        }
+
+        let Some(entry) = current.as_mut() else {
+            continue;
+        };
+        match field_indent {
+            None => {
+                field_indent = Some(indent);
+                entry.add_line(trimmed);
+            }
+            Some(base) if indent == base => entry.add_line(trimmed),
+            Some(_) => {}
+        }
+    }
+    if let Some(entry) = current.take() {
+        finish_clash_entry(entry, &mut subscription);
+    }
+
+    found.then_some(subscription)
+}
+
 
 /// 解析单条 `ss://`。
 ///
@@ -537,9 +839,279 @@ mod tests {
     }
 
     #[test]
-    fn a_subscription_without_ss_nodes_is_unsupported() {
+    fn a_subscription_without_nodes_reports_not_node_text() {
         let error = parse_subscription("vmess://a\nvmess://b").unwrap_err();
         assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert_eq!(error.reason(), "not_node_text");
+        assert!(matches!(error, ImportError::Invalid(_)));
+    }
+
+    /// Clash 配置的最小外形：根级 `proxies:` + 后面的其它根键。
+    fn clash(proxies: &str) -> String {
+        format!(
+            "port: 7890\nproxies:\n{proxies}\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - 东京 01\n"
+        )
+    }
+
+    #[test]
+    fn parses_shadowsocks_entries_from_a_clash_proxies_block() {
+        let text = clash(
+            r#"  - name: "东京 01"
+    type: ss
+    server: 203.0.113.10
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw-tokyo
+  - name: 'SGP'
+    type: ss
+    server: sgp.example.com
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: "p@ss:word"
+  - name: 坏类型
+    type: vmess
+    server: 203.0.113.12
+    port: 443
+    cipher: auto
+    password: uuid"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 2);
+        assert_eq!(subscription.nodes[0].name, "东京 01");
+        assert_eq!(subscription.nodes[0].server, "203.0.113.10");
+        assert_eq!(subscription.nodes[0].port, 8388);
+        assert_eq!(subscription.nodes[0].method, "aes-256-gcm");
+        assert_eq!(subscription.nodes[0].password, "pw-tokyo");
+        assert_eq!(subscription.nodes[1].name, "SGP");
+        assert_eq!(subscription.nodes[1].method, "chacha20-ietf-poly1305");
+        assert_eq!(subscription.nodes[1].password, "p@ss:word");
+        assert_eq!(subscription.skipped.len(), 1);
+        assert_eq!(subscription.skipped[0].reason, SkipReason::UnsupportedScheme);
+        assert_eq!(subscription.skipped[0].name.as_deref(), Some("坏类型"));
+    }
+
+    #[test]
+    fn clash_values_support_quotes_comments_and_default_names() {
+        let text = clash(
+            "  - name: '狮城'   # 备注\n    type: \"ss\"\n    server: \"198.51.100.20\"\n    port: \"8388\"\n    cipher: AES-256-GCM\n    password: 'it''s'\n  - type: ss\n    server: 198.51.100.21\n    port: 8388\n    cipher: aes-256-gcm\n    password: pw",
+        );
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 2);
+        assert_eq!(subscription.nodes[0].name, "狮城");
+        assert_eq!(subscription.nodes[0].port, 8388);
+        assert_eq!(subscription.nodes[0].method, "aes-256-gcm");
+        assert_eq!(subscription.nodes[0].password, "it's");
+        assert_eq!(subscription.nodes[1].name, "198.51.100.21:8388");
+    }
+
+    #[test]
+    fn clash_skips_incomplete_entries() {
+        let text = clash(
+            r#"  - name: 缺密码
+    type: ss
+    server: 198.51.100.30
+    port: 8388
+    cipher: aes-256-gcm
+  - name: 端口越界
+    type: ss
+    server: 198.51.100.31
+    port: 70000
+    cipher: aes-256-gcm
+    password: pw
+  - name: 缺地址
+    type: ss
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap_err();
+        assert_eq!(subscription.reason(), "not_subscription", "一条都用不了");
+    }
+
+    #[test]
+    fn clash_incomplete_entries_are_skipped_but_good_ones_remain() {
+        let text = clash(
+            r#"  - name: 缺密码
+    type: ss
+    server: 198.51.100.30
+    port: 8388
+    cipher: aes-256-gcm
+  - name: 正常
+    type: ss
+    server: 198.51.100.31
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 1);
+        assert_eq!(subscription.skipped.len(), 1);
+        assert_eq!(subscription.skipped[0].reason, SkipReason::Malformed);
+        assert_eq!(subscription.skipped[0].name.as_deref(), Some("缺密码"));
+    }
+
+    #[test]
+    fn clash_rejects_unknown_ciphers_and_bad_psk() {
+        let text = clash(
+            r#"  - name: 旧算法
+    type: ss
+    server: 198.51.100.40
+    port: 8388
+    cipher: rc4-md5
+    password: pw
+  - name: 普通密码
+    type: ss
+    server: 198.51.100.41
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: plain-password"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap_err();
+        assert_eq!(subscription.reason(), "not_subscription");
+    }
+
+    #[test]
+    fn clash_accepts_a_2022_entry_with_a_real_psk() {
+        let key = STANDARD.encode([3u8; 16]);
+        let text = clash(&format!(
+            "  - name: PSK\n    type: ss\n    server: 198.51.100.42\n    port: 8388\n    cipher: 2022-blake3-aes-128-gcm\n    password: {key}"
+        ));
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 1);
+        assert_eq!(subscription.nodes[0].method, "2022-blake3-aes-128-gcm");
+        assert_eq!(subscription.nodes[0].password, key);
+    }
+
+    #[test]
+    fn clash_rejects_an_empty_password() {
+        let text = clash(
+            "  - name: 空密码\n    type: ss\n    server: 198.51.100.45\n    port: 8388\n    cipher: aes-256-gcm\n    password: \"\"",
+        );
+
+        let subscription = parse_subscription(&text).unwrap_err();
+        assert_eq!(subscription.reason(), "not_subscription");
+    }
+
+    #[test]
+    fn a_bom_does_not_hide_the_first_line() {
+        // 带 BOM 的文件（Windows 编辑器常见）首行不能被当成未知格式。
+        let text = "\u{feff}proxies:\n  - name: BOM\n    type: ss\n    server: 198.51.100.46\n    port: 8388\n    cipher: aes-256-gcm\n    password: pw";
+        assert_eq!(parse_subscription(&text).unwrap().nodes.len(), 1);
+        assert_eq!(
+            parse_subscription("\u{feff}ss://aes-256-gcm:pw@203.0.113.10:8388#A")
+                .unwrap()
+                .nodes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn clash_ignores_fields_nested_deeper_than_the_entry() {
+        let text = clash(
+            r#"  - name: 嵌套
+    type: ss
+    server: 198.51.100.47
+    port: 8388
+    cipher: aes-256-gcm
+    password: outer
+    ws-opts:
+      password: inner
+      cipher: rc4-md5
+      server: 203.0.113.99"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 1, "外层字段不能被嵌套 map 覆盖");
+        assert_eq!(subscription.nodes[0].server, "198.51.100.47");
+        assert_eq!(subscription.nodes[0].method, "aes-256-gcm");
+        assert_eq!(subscription.nodes[0].password, "outer");
+    }
+
+    #[test]
+    fn clash_ignores_nested_lists_instead_of_forging_entries() {
+        let text = clash(
+            r#"  - name: 嵌套列表
+    type: ss
+    server: 198.51.100.48
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+    alpn:
+      - h2
+      - ss"#,
+        );
+
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 1, "嵌套列表不能伪造条目");
+        assert!(subscription.skipped.is_empty(), "{:?}", subscription.skipped);
+        assert_eq!(subscription.nodes[0].name, "嵌套列表");
+    }
+
+    #[test]
+    fn clash_type_and_cipher_are_case_insensitive() {
+        let text = clash(
+            "  - name: 大写\n    type: SS\n    server: 198.51.100.49\n    port: 8388\n    cipher: AES-256-GCM\n    password: pw",
+        );
+        let subscription = parse_subscription(&text).unwrap();
+        assert_eq!(subscription.nodes.len(), 1);
+        assert_eq!(subscription.nodes[0].method, "aes-256-gcm");
+    }
+
+    #[test]
+    fn clash_skips_plugin_entries() {
+        let text = clash(
+            r#"  - name: 带插件
+    type: ss
+    server: 198.51.100.50
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+    plugin: obfs
+    plugin-opts:
+      mode: tls"#,
+        );
+
+        let error = parse_subscription(&text).unwrap_err();
+        assert_eq!(error.reason(), "not_subscription");
+    }
+
+    #[test]
+    fn clash_skips_flow_style_and_anchors() {
+        let text = clash(
+            r#"  - {name: 流式, type: ss, server: 198.51.100.60, port: 8388, cipher: aes-256-gcm, password: pw}
+  - name: 锚点
+    type: ss
+    server: 198.51.100.61
+    port: 8388
+    cipher: aes-256-gcm
+    password: &psk pw
+  - name: 别名
+    type: ss
+    server: 198.51.100.62
+    port: 8388
+    cipher: aes-256-gcm
+    password: *psk"#,
+        );
+
+        let error = parse_subscription(&text).unwrap_err();
+        assert_eq!(error.reason(), "not_subscription");
+    }
+
+    #[test]
+    fn a_clash_config_without_shadowsocks_is_not_a_subscription() {
+        let text = clash(
+            "  - name: v\n    type: vmess\n    server: 198.51.100.70\n    port: 443\n    cipher: auto\n    password: uuid",
+        );
+
+        let error = parse_subscription(&text).unwrap_err();
+        assert_eq!(error.reason(), "not_subscription");
         assert!(matches!(error, ImportError::Unsupported(_)));
     }
 
