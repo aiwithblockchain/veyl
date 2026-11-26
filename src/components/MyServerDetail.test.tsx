@@ -3,6 +3,7 @@ import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
+import { setLanguage } from "../i18n";
 import { DESTROY_RETRY_MS, MyServerDetail } from "./MyServerDetail";
 
 function server(over: Partial<MyServer> = {}): MyServer {
@@ -64,6 +65,8 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
+
+const GIB = 1024 ** 3;
 
 describe("服务器详情", () => {
   it("健康检查失败但 node_id 还在：节点不进事实区，没有「未就绪」", () => {
@@ -460,13 +463,12 @@ describe("服务器详情", () => {
     expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
   });
 
-  it("流量额度为 0 时整行不显示", () => {
+  it("额度为 0：说「额度未知」，不写「已释放 0 GB」或「不限量」", () => {
     renderDetail({ transfer_gib: 0 });
 
-    expect(screen.queryByText("流量")).toBeNull();
-    expect(document.querySelector(".myservers__detail")?.textContent).not.toContain(
-      "不限量",
-    );
+    const dd = screen.getByText(/已用 0 GiB/).closest("dd");
+    expect(dd?.textContent).toContain("额度未知");
+    expect(dd?.textContent).not.toMatch(/已释放|不限量/);
   });
 
   it("建机进度显示已等待，状态推进不重置，就绪后消失", () => {
@@ -704,11 +706,20 @@ describe("服务器详情", () => {
     ).toBeTruthy();
   });
 
-  it("流量行只留额度一个事实，不带括号补充", () => {
-    renderDetail({ transfer_gib: 1000 });
+  it("流量行只说这台已用多少，不再写每月额度", () => {
+    renderDetail({
+      transfer_gib: 1000,
+      traffic_used_bytes: 6 * GIB,
+      traffic_limit_bytes: 20 * GIB,
+      traffic_state: "ok",
+    });
 
-    expect(screen.getByText("每月 1000 GB 出站")).toBeTruthy();
-    expect(screen.queryByText(/共用额度|同账户/)).toBeNull();
+    const dd = screen.getByText(/^已用 6 GiB/).closest("dd");
+    expect(dd?.textContent).not.toMatch(
+      /每月|已释放|可用|剩余|%|共用额度|同账户/,
+    );
+    // 空串清零点不渲染日期。
+    expect(dd?.textContent).not.toContain("重置");
   });
 
   it("就绪详情页没有任何连接相关按钮：连接只在控制台", () => {
@@ -1896,5 +1907,128 @@ describe("sing-box 升级", () => {
     expect(
       (screen.getByRole("button", { name: "检查升级" }) as HTMLButtonElement).disabled,
     ).toBe(false);
+  });
+});
+
+describe("流量行（2.78.0）", () => {
+  const traffic = (over: Partial<MyServer> = {}) =>
+    renderDetail({
+      traffic_used_bytes: 6 * GIB,
+      traffic_limit_bytes: 20 * GIB,
+      traffic_state: "ok",
+      ...over,
+    });
+
+  it("只写这台已用多少；有清零点时按本地日写在行尾", () => {
+    traffic({
+      traffic_reset_at: new Date(2026, 11, 1, 0, 0, 0).toISOString(),
+    });
+
+    const dd = screen.getByText(/^已用 6 GiB/).closest("dd");
+    expect(screen.getByText("12月1日重置")).toBeTruthy();
+    expect(dd?.textContent).not.toMatch(/已释放|可用|剩余|%|快用完|已超出/);
+  });
+  it("额度未知：不写已释放，也不写可用", () => {
+    traffic({
+      traffic_used_bytes: 512 * 1024 ** 2,
+      traffic_limit_bytes: 0,
+    });
+
+    const dd = screen.getByText(/已用 0\.5 GiB/).closest("dd");
+    expect(dd?.textContent).toContain("额度未知");
+    expect(dd?.textContent).not.toMatch(/已释放|可用|剩余/);
+  });
+
+  it("unpaid：墓碑说流量停机，状态点琥珀，不渲染流量行", () => {
+    renderDetail({
+      state: "destroyed",
+      traffic_state: "unpaid",
+      traffic_used_bytes: 42 * GIB,
+      traffic_limit_bytes: 20 * GIB,
+      failure: {
+        stage: "active",
+        code: "traffic_overage",
+        message: "流量超支，余额不足已停机",
+        retryable: false,
+      },
+    });
+
+    expect(screen.getByText("流量超支，余额不足已停机")).toBeTruthy();
+    expect(
+      document.querySelector(".myservers__state")?.className,
+    ).toContain("is-warn");
+    expect(screen.queryByText("流量")).toBeNull();
+    expect(screen.queryByText(/已用/)).toBeNull();
+  });
+
+  it("英文只说 Used；两个 span 之间有空格", () => {
+    setLanguage("en");
+    try {
+      renderDetail({
+        traffic_used_bytes: 37 * GIB,
+        traffic_limit_bytes: 35 * GIB,
+        traffic_state: "ok",
+        traffic_reset_at: new Date(2026, 11, 1, 0, 0, 0).toISOString(),
+      });
+
+      const dd = screen.getByText(/Used 37 GiB/).closest("dd");
+      expect(dd?.textContent).toContain("GiB Resets December 1");
+      expect(dd?.textContent).not.toMatch(/released|over|limit by/i);
+    } finally {
+      setLanguage("zh");
+    }
+  });
+
+  it("error / destroying / gone 都不渲染流量行", () => {
+    for (const state of ["error", "destroying", "gone"] as const) {
+      const view = renderDetail({
+        state,
+        traffic_used_bytes: 6 * GIB,
+        traffic_limit_bytes: 20 * GIB,
+        traffic_state: "ok",
+      });
+      expect(screen.queryByText("流量"), state).toBeNull();
+      expect(screen.queryByText(/已用/), state).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("destroyed：也不渲染流量行", () => {
+    renderDetail({
+      state: "destroyed",
+      traffic_state: "ok",
+      traffic_used_bytes: 42 * GIB,
+      traffic_limit_bytes: 20 * GIB,
+    });
+
+    expect(screen.queryByText("流量")).toBeNull();
+    expect(screen.queryByText(/已用/)).toBeNull();
+    // 通用墓碑文案仍在。
+    expect(screen.getByText(/因余额不足已停机销毁/)).toBeTruthy();
+  });
+
+  it("销毁确认说明额度后果，数字是这台自己的日额度", () => {
+    renderDetail({ transfer_gib: 1000, traffic_limit_bytes: 0 });
+
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    const note = screen.getByText(/每天加 35\.7 GiB/);
+    expect(note.textContent).toContain("删掉后本月额度不再增长");
+    expect(note.textContent).toContain("已用的流量仍然算在账号里");
+  });
+
+  it("封顶机器或额度为 0：销毁确认里没有「每天加」那句", () => {
+    renderDetail({
+      transfer_gib: 1000,
+      traffic_limit_bytes: 1000 * GIB,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    expect(screen.queryByText(/每天加/)).toBeNull();
+    // 其它确认文案保留。
+    expect(screen.getByText(/销毁后不再产生新费用/)).toBeTruthy();
+    cleanup();
+
+    renderDetail({ transfer_gib: 0, traffic_limit_bytes: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "销毁" }));
+    expect(screen.queryByText(/每天加/)).toBeNull();
   });
 });

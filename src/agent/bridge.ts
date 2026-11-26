@@ -656,10 +656,11 @@ export type MyServerState =
   | "gone";
 
 /**
- * 本周期流量状态（契约 2.78.0）：`unpaid` = 因流量超支余额不足已停机，
- * 优先于其余三态；`near` = 已用 ≥ 已释放额度的 80%；额度未知时恒为 `ok`。
+ * 本周期流量状态（契约 2.78.0；口径已收窄）：单台只有两种。
+ * `unpaid` = 因流量超支余额不足已停机。`near` / `over` 是**账号池**的判定，
+ * 不再出现在单台上；旧控制面还在发的 near / over 在归一化时降级为 `ok`。
  */
-export type MyServerTrafficState = "ok" | "near" | "over" | "unpaid";
+export type MyServerTrafficState = "ok" | "unpaid";
 
 /** 账号级流量池（契约 2.79.0）；旧控制面不返回。 */
 export interface TrafficPool {
@@ -757,7 +758,7 @@ export interface MyServer {
   traffic_limit_bytes: number;
   /** 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面为空串。 */
   traffic_reset_at: string;
-  /** 额度未知时恒为 `ok`：不知道额度就不能断言 near / over。 */
+  /** 额度未知时恒为 `ok`：不知道额度就不能断言超支。 */
   traffic_state: MyServerTrafficState;
   /** 建行失败时的扣费快照（USD 分）；后端未给按 0。 */
   charged_cents?: number;

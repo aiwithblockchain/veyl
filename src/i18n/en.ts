@@ -922,6 +922,12 @@ export const en: Record<MessageKey, string> = {
   "account.retry": "Retry",
   "account.topUp": "Top up",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
+  "account.traffic.title": "This month's traffic",
+  "account.traffic.summary": "Used {used} / {limit} GiB",
+  "account.traffic.unknown": "Used {used} · limit unknown",
+  "account.traffic.tomorrow": "Tomorrow +{amount}",
+  "account.traffic.near": "Traffic is almost used up",
+  "account.traffic.over": "Over {over}, charged at $0.02/GiB from balance",
   "account.checkoutOpened":
     "Checkout is open in your browser. Your balance will update after payment.",
   "account.identity.lost":
@@ -1126,7 +1132,12 @@ export const en: Record<MessageKey, string> = {
   "detail.nodeReady": "Ready",
   "detail.cost": "Cost",
   "detail.traffic": "Traffic",
-  "detail.trafficMonthly": "{gib} GB outbound per month",
+  "detail.trafficUsed": "Used {used}",
+  "detail.trafficUnknown": "Used {used} · limit unknown",
+  "detail.trafficUnpaid": "Traffic over limit; the balance ran out, so the server was stopped",
+  "detail.trafficResetAt": "Resets {date}",
+  "detail.destroyTraffic":
+    "This server still adds {amount} to this month's capacity every day. After you destroy it the capacity stops growing, and the traffic already used still counts toward the account.",
   "detail.settleFailed": "The server wasn't activated, so nothing was charged.",
   "detail.topUp": "Top up",
   "detail.destroying": "Destroying…",

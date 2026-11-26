@@ -4,6 +4,7 @@ import type {
   MyServerAccount,
   MyServerTopup,
   MyServerWallet,
+  TrafficPool,
 } from "../agent/bridge";
 import type { WalletTrigger } from "../myservers/useMyServers";
 import { getLanguage, t, useT } from "../i18n";
@@ -11,6 +12,7 @@ import { formatUsdCents } from "../myservers/labels";
 import { copyText } from "../ui/clipboard";
 import { useFocusTrap } from "../ui/focus";
 import { BillingLedgerTable } from "./BillingLedgerTable";
+import { formatTrafficGib, formatTrafficGibValue, formatTrafficReset, trafficPoolTomorrowBytes } from "./traffic";
 import { MyServerTopUp } from "./MyServerTopUp";
 import { IconClose } from "./icons";
 
@@ -88,6 +90,51 @@ export function AccountSurface({
     if (!open || account?.logged_in !== true) return;
     refreshWalletRef.current?.("open_settings");
   }, [open, account?.logged_in]);
+
+  /**
+   * 账号池只认控制面下发的 `traffic_pool`：列表不含已销毁 / 已 dismiss 的行，
+   * 对 `servers[]` 求和会少算、显示「没超」而实际已扣钱。
+   */
+  const [traffic, setTraffic] = useState<{
+    pool: TrafficPool;
+    resetAt: string;
+    /** 明天账号会新增的额度；逐台增量之和，不是账号余额。 */
+    tomorrowBytes: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!open || account?.logged_in !== true) {
+      setTraffic(null);
+      return;
+    }
+    if (typeof bridge.myServerList !== "function") return;
+    let cancelled = false;
+    bridge
+      .myServerList()
+      .then((list) => {
+        if (cancelled) return;
+        // 后一次结果没有 pool：清掉旧值，别让上一个账号/上一次的汇总留着。
+        if (!list.traffic_pool) {
+          setTraffic(null);
+          return;
+        }
+        // 重置时刻是账号级同一个 UTC 月界，取任意一台非空值即可；列表可能为空。
+        const resetAt =
+          list.servers.find((server) => server.traffic_reset_at !== "")
+            ?.traffic_reset_at ?? "";
+        setTraffic({
+          pool: list.traffic_pool,
+          resetAt,
+          tomorrowBytes: trafficPoolTomorrowBytes(list.servers),
+        });
+      })
+      .catch(() => {
+        // 旧控制面 / 读取失败：整行不渲染，不在账户弹层里报错。
+        if (!cancelled) setTraffic(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, account?.logged_in, account?.account_id, bridge]);
 
   useFocusTrap(open && !trapPaused, dialogRef);
 
@@ -192,6 +239,24 @@ export function AccountSurface({
   };
 
   if (!open) return null;
+
+  const trafficOver =
+    traffic !== null && traffic.pool.limitBytes > 0
+      ? Math.max(0, traffic.pool.usedBytes - traffic.pool.limitBytes)
+      : 0;
+  /** 三态只看账号池；80% 用整数比较，浮点会把恰好 80% 判成 ok。 */
+  const trafficState =
+    traffic === null || traffic.pool.limitBytes === 0
+      ? "unknown"
+      : trafficOver > 0
+        ? "over"
+        : traffic.pool.usedBytes * 5 >= traffic.pool.limitBytes * 4
+          ? "near"
+          : "ok";
+  const trafficReset =
+    traffic && traffic.resetAt !== ""
+      ? formatTrafficReset(traffic.resetAt, getLanguage())
+      : null;
 
   const pointAttrs = (row: string) => ({
     "data-point": row,
@@ -373,6 +438,72 @@ export function AccountSurface({
                   </div>
                 </div>
               )}
+
+              {blockedIdentity ? null : traffic ? (
+                <div
+                  className="account-surface__row"
+                  {...pointAttrs("account.traffic")}
+                >
+                  <div className="account-surface__main">
+                    <div className="account-surface__label">
+                      {tr("account.traffic.title")}
+                    </div>
+                    <p className="account-surface__traffic num">
+                      {trafficState === "unknown"
+                        ? tr("account.traffic.unknown", {
+                            used: formatTrafficGib(traffic.pool.usedBytes),
+                          })
+                        : (
+                          <>
+                            {tr("account.traffic.summary", {
+                              used: formatTrafficGibValue(traffic.pool.usedBytes),
+                              limit: formatTrafficGibValue(traffic.pool.limitBytes),
+                            })}
+                            {trafficState === "over" ? (
+                              <>
+                                {" "}
+                                <span className="account-surface__traffic-over">
+                                  {tr("account.traffic.over", {
+                                    over: formatTrafficGib(trafficOver),
+                                  })}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {traffic.tomorrowBytes > 0 ? (
+                                  <>
+                                    {" "}
+                                    {tr("account.traffic.tomorrow", {
+                                      amount: formatTrafficGib(
+                                        traffic.tomorrowBytes,
+                                      ),
+                                    })}
+                                  </>
+                                ) : null}
+                                {trafficState === "near" ? (
+                                  <>
+                                    {" "}
+                                    <span className="account-surface__traffic-near">
+                                      {tr("account.traffic.near")}
+                                    </span>
+                                  </>
+                                ) : null}
+                              </>
+                            )}
+                          </>
+                        )}
+                      {trafficReset ? (
+                        <>
+                          {" "}
+                          <span className="account-surface__traffic-reset">
+                            {tr("detail.trafficResetAt", { date: trafficReset })}
+                          </span>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
 
               {blockedIdentity ? null : (
                 <section className="account-surface__section" {...pointAttrs("account.topup")}>

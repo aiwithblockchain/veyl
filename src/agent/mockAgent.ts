@@ -282,7 +282,7 @@ export class MockAgentBridge implements AgentBridge {
       // demo：造一台「余额不足停机」的墓碑，指向当前配置的第一个节点。
       // 验收：先加节点，再 window.dispatchEvent(new Event("veyl:seed-tombstone"))，然后刷新。
       window.addEventListener("veyl:seed-tombstone", () => this.seedTombstoneDemo());
-      // demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。
+      // demo：造六台流量样例（三台 ok / 额度未知 / 流量超支停机 / 用户主动销毁），第三段验界面用。
       // 验收：window.dispatchEvent(new Event("veyl:seed-traffic"))，然后刷新。
       window.addEventListener("veyl:seed-traffic", () => this.seedTrafficDemo());
     }
@@ -649,7 +649,7 @@ export class MockAgentBridge implements AgentBridge {
     }
   }
 
-  /** demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。 */
+  /** demo：造六台流量样例（单台只有 ok / unpaid；其中一台只进账号池）。 */
   seedTrafficDemo(): void {
     this.myServers.seedTrafficDemo();
   }

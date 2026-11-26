@@ -84,34 +84,39 @@ describe("流量样例（第三段验界面）", () => {
     localStorage.clear();
   });
 
-  it("seedTrafficDemo 给出五态样例，state 与 used/limit 自洽", () => {
+  it("seedTrafficDemo 只有 ok / unpaid，账号池合计落在 85% 附近", () => {
     const service = new MockMyServerService();
     service.seedTrafficDemo();
-    const { servers } = service.list();
+    const { servers, traffic_pool } = service.list();
 
     expect(servers).toHaveLength(5);
     expect(servers.map((server) => server.traffic_state)).toEqual([
       "ok",
-      "near",
-      "over",
+      "ok",
+      "ok",
       "ok",
       "unpaid",
     ]);
 
     const byId = new Map(servers.map((server) => [server.server_id, server]));
-    const ok = byId.get("srv_traffic_ok")!;
-    const near = byId.get("srv_traffic_near")!;
-    const over = byId.get("srv_traffic_over")!;
+    const okA = byId.get("srv_traffic_ok_a")!;
+    const okB = byId.get("srv_traffic_ok_b")!;
+    const okC = byId.get("srv_traffic_ok_c")!;
     const unknown = byId.get("srv_traffic_unknown")!;
     const unpaid = byId.get("srv_traffic_unpaid")!;
 
     // 额度按 §4.1：1000 GiB 月额度 / 28 天。
     const limit = Math.floor((1000 * 1024 ** 3) / 28);
-    expect(near.traffic_limit_bytes).toBe(limit);
-    expect(ok.traffic_used_bytes * 5).toBeLessThan(limit * 4);
-    expect(near.traffic_used_bytes).toBeGreaterThanOrEqual(Math.ceil((limit * 4) / 5));
-    expect(near.traffic_used_bytes).toBeLessThanOrEqual(limit);
-    expect(over.traffic_used_bytes).toBeGreaterThan(limit);
+    for (const server of [okA, okB, okC]) {
+      expect(server.traffic_limit_bytes).toBe(limit);
+      // 单台不再有 over：ok 的已用不超过自己的已释放额度。
+      expect(server.traffic_used_bytes).toBeLessThanOrEqual(limit);
+    }
+    // 三台 ok 的已用量各不相同，界面一眼能分辨。
+    expect(
+      new Set([okA.traffic_used_bytes, okB.traffic_used_bytes, okC.traffic_used_bytes])
+        .size,
+    ).toBe(3);
 
     // 额度未知：limit = 0，状态必须是 ok（不知道额度就不能断言超支）。
     expect(unknown.traffic_limit_bytes).toBe(0);
@@ -126,12 +131,55 @@ describe("流量样例（第三段验界面）", () => {
     });
     expect(unpaid.traffic_used_bytes).toBeGreaterThan(unpaid.traffic_limit_bytes);
 
+    // 账号池：已用 ≈ 已释放的 85.4%（含列表里看不到的那台用户销毁机器），
+    // 账户弹层能直接看到琥珀提示。
+    const ratio = traffic_pool!.usedBytes / traffic_pool!.limitBytes;
+    expect(ratio).toBeGreaterThanOrEqual(0.853);
+    expect(ratio).toBeLessThanOrEqual(0.855);
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_traffic_deleted",
+    );
+
     for (const server of servers) {
       expect(server.traffic_used_bytes).toBeGreaterThan(0);
       if (server.traffic_limit_bytes > 0) {
         expect(server.traffic_reset_at).toMatch(/^\d{4}-\d{2}-01T00:00:00\.000Z$/);
       }
     }
+  });
+
+  it("用户主动销毁的机器不在列表里，但已用与已释放计入账号池", () => {
+    const service = new MockMyServerService();
+    service.seedTrafficDemo();
+    const key = "veyl.mock.myServers";
+    const store = JSON.parse(localStorage.getItem(key) ?? "{}") as {
+      servers: Array<Record<string, unknown>>;
+    };
+    const deleted = store.servers.find(
+      (server) => server.server_id === "srv_traffic_deleted",
+    );
+    expect(deleted).toBeDefined();
+    expect(deleted?.state).toBe("destroyed");
+    expect(deleted?.failure).toBeNull();
+    expect(deleted?.traffic_used_bytes as number).toBeGreaterThan(0);
+
+    const { servers, traffic_pool } = service.list();
+    expect(servers).toHaveLength(5);
+    expect(servers.map((server) => server.server_id)).not.toContain(
+      "srv_traffic_deleted",
+    );
+    expect(traffic_pool?.usedBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_used_bytes as number),
+        0,
+      ),
+    );
+    expect(traffic_pool?.limitBytes).toBe(
+      store.servers.reduce(
+        (sum, server) => sum + (server.traffic_limit_bytes as number),
+        0,
+      ),
+    );
   });
 
   it("账号池对全量机器求和，包含列表里看不到的手动销毁行", () => {

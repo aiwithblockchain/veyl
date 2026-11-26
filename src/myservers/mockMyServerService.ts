@@ -232,9 +232,12 @@ function releasedBytes(transferGib: number): number {
 }
 
 /**
- * demo 用流量样例：ok / near / over / 额度未知 / 流量超支停机各一台。
- * 第三段（界面）照这五台验渲染，不必自己造数；`state` 与 `used`、`limit`
- * 按 §8 的口径自洽（near ≥ 80%、over 严格超出、unpaid 是已停机墓碑）。
+ * demo 用流量样例：单台只有 `ok` / `unpaid`（near / over 是账号池的判定），
+ * 另有一台额度未知、一台流量超支停机的墓碑，以及一台**用户主动销毁**的机器
+ * ——它不在列表里，但已用与已释放仍留在账号池，这是 `traffic_pool` 存在的理由。
+ *
+ * 列表里五台的合计刻意落在「已用 ≈ 已释放的 85.4%」：账户弹层能直接看到琥珀
+ * 提示，而单台一律是 ok / unpaid，不会自相矛盾。
  */
 const TRAFFIC_SAMPLES: Array<{
   server_id: string;
@@ -246,34 +249,36 @@ const TRAFFIC_SAMPLES: Array<{
   state: MyServerTrafficState;
   /** 流量超支停机：列表里以墓碑行保留。 */
   tombstone?: { code: string; message: string };
+  /** 用户主动销毁：不在列表里，但额度与已用计入账号池。 */
+  user_destroyed?: boolean;
 }> = [
   {
-    server_id: "srv_traffic_ok",
-    name: "流量充足 · 新加坡 1",
+    server_id: "srv_traffic_ok_a",
+    name: "新加坡 1 · DigitalOcean",
     region: "sgp1",
     transfer_gib: DEFAULT_PLAN.transfer_gib,
-    used: 6 * GIB,
+    used: 20 * GIB,
     state: "ok",
   },
   {
-    server_id: "srv_traffic_near",
-    name: "接近额度 · 纽约 1",
+    server_id: "srv_traffic_ok_b",
+    name: "纽约 1 · DigitalOcean",
     region: "nyc1",
     transfer_gib: DEFAULT_PLAN.transfer_gib,
-    used: 29 * GIB,
-    state: "near",
+    used: 27 * GIB,
+    state: "ok",
   },
   {
-    server_id: "srv_traffic_over",
-    name: "已超额度 · 旧金山 2",
+    server_id: "srv_traffic_ok_c",
+    name: "旧金山 2 · DigitalOcean",
     region: "sfo2",
     transfer_gib: DEFAULT_PLAN.transfer_gib,
-    used: 37 * GIB,
-    state: "over",
+    used: 32 * GIB,
+    state: "ok",
   },
   {
     server_id: "srv_traffic_unknown",
-    name: "额度未知 · 班加罗尔 1",
+    name: "班加罗尔 1 · DigitalOcean",
     region: "blr1",
     transfer_gib: 0,
     used: 512 * 1024 ** 2,
@@ -281,12 +286,21 @@ const TRAFFIC_SAMPLES: Array<{
   },
   {
     server_id: "srv_traffic_unpaid",
-    name: "流量超支停机 · 旧金山 3",
+    name: "旧金山 3 · DigitalOcean",
     region: "sfo3",
     transfer_gib: DEFAULT_PLAN.transfer_gib,
     used: 42 * GIB,
     state: "unpaid",
     tombstone: { code: "traffic_overage", message: "流量超支，余额不足已停机" },
+  },
+  {
+    server_id: "srv_traffic_deleted",
+    name: "多伦多 1 · DigitalOcean",
+    region: "tor1",
+    transfer_gib: DEFAULT_PLAN.transfer_gib,
+    used: 31 * GIB,
+    state: "ok",
+    user_destroyed: true,
   },
 ];
 
@@ -305,7 +319,8 @@ function withTrafficDefaults(server: StoredServer): StoredServer {
       : 0,
     traffic_reset_at:
       typeof server.traffic_reset_at === "string" ? server.traffic_reset_at : "",
-    traffic_state: server.traffic_state ?? "ok",
+    // 旧存档里可能还有 near / over：单台只认 unpaid，其余一律 ok。
+    traffic_state: server.traffic_state === "unpaid" ? "unpaid" : "ok",
   };
 }
 
@@ -447,7 +462,8 @@ export class MockMyServerService {
   }
 
   /**
-   * demo：造五台流量样例（ok / near / over / 额度未知 / 流量超支停机）。
+   * demo：造六台流量样例（三台 ok / 额度未知 / 流量超支停机 / 用户主动销毁）。
+   * 列表里只出现前五台；最后那台只进账号池。
    * 验收：控制台 `window.dispatchEvent(new Event("veyl:seed-traffic"))` 后刷新。
    */
   seedTrafficDemo(): MyServer[] {
@@ -458,7 +474,8 @@ export class MockMyServerService {
       if (store.servers.some((server) => server.server_id === sample.server_id)) {
         return;
       }
-      const destroyed = sample.tombstone !== undefined;
+      const destroyed =
+        sample.tombstone !== undefined || sample.user_destroyed === true;
       store.servers.push({
         server_id: sample.server_id,
         name: sample.name,

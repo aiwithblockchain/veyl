@@ -122,7 +122,8 @@ pub struct MyServer {
     /// 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面不给时为空串。
     #[serde(default, deserialize_with = "deserialize_lenient_string")]
     pub traffic_reset_at: String,
-    /// `ok` | `near` | `over` | `unpaid`；缺字段、null 或认不出的值都按 `ok`。
+    /// `ok` | `unpaid`（单台没有 near/over，那是账号池的判定）；缺字段、null、
+    /// 认不出的值——包括旧控制面还在发的 `near` / `over`——一律降级 `ok`。
     #[serde(
         default = "default_traffic_state",
         deserialize_with = "deserialize_lenient_traffic_state"
@@ -197,7 +198,9 @@ where
     })
 }
 
-const TRAFFIC_STATES: [&str; 4] = ["ok", "near", "over", "unpaid"];
+/// 单台只有两态：`ok` / `unpaid`。滚动升级期间旧控制面还会发 `near` / `over`，
+/// 它们不在白名单里，按 `ok` 降级，绝不因此让整页解析失败。
+const TRAFFIC_STATES: [&str; 2] = ["ok", "unpaid"];
 
 /// `GET /v1/servers` 的账号级流量池（契约 2.79.0）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1688,7 +1691,7 @@ mod tests {
         value["traffic_used_bytes"] = json!(123_456_789_u64);
         value["traffic_limit_bytes"] = json!(1.5e9_f64);
         value["traffic_reset_at"] = json!("2026-12-01T00:00:00Z");
-        value["traffic_state"] = json!("near");
+        value["traffic_state"] = json!("unpaid");
 
         let mut junk = sample_server_json();
         junk["server_id"] = json!("srv_2");
@@ -1702,11 +1705,33 @@ mod tests {
         assert_eq!(list.servers[0].traffic_used_bytes, 123_456_789);
         assert_eq!(list.servers[0].traffic_limit_bytes, 1_500_000_000);
         assert_eq!(list.servers[0].traffic_reset_at, "2026-12-01T00:00:00Z");
-        assert_eq!(list.servers[0].traffic_state, "near");
+        assert_eq!(list.servers[0].traffic_state, "unpaid");
         assert_eq!(list.servers[1].traffic_used_bytes, 0);
         assert_eq!(list.servers[1].traffic_limit_bytes, 0);
         assert_eq!(list.servers[1].traffic_reset_at, "");
         assert_eq!(list.servers[1].traffic_state, "ok");
+    }
+
+    /// 单台只有 ok / unpaid。滚动升级期间旧控制面还会发 near / over，
+    /// 它们必须降级成 ok，而不是让界面拿到一个已经不存在的状态。
+    #[test]
+    fn retired_traffic_states_degrade_to_ok() {
+        let mut near = sample_server_json();
+        near["traffic_state"] = json!("near");
+        let mut over = sample_server_json();
+        over["server_id"] = json!("srv_2");
+        over["traffic_state"] = json!("over");
+        let mut unpaid = sample_server_json();
+        unpaid["server_id"] = json!("srv_3");
+        unpaid["traffic_state"] = json!("unpaid");
+
+        let list = parse_server_list(&json!({ "servers": [near, over, unpaid] })).unwrap();
+        let states: Vec<&str> = list
+            .servers
+            .iter()
+            .map(|server| server.traffic_state.as_str())
+            .collect();
+        assert_eq!(states, vec!["ok", "ok", "unpaid"]);
     }
 
     #[test]

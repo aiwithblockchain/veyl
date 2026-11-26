@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentBridge,
   BillingLedger,
+  MyServer,
   MyServerAccount,
   MyServerTopup,
   MyServerWallet,
@@ -353,5 +354,142 @@ describe("账户弹层", () => {
     expect(row).toBeTruthy();
     expect(scrollSpy).toHaveBeenCalled();
     expect(row.getAttribute("data-pointed")).toBe("true");
+  });
+});
+
+const GIB = 1024 ** 3;
+
+function listServer(over: Partial<MyServer> = {}): MyServer {
+  return {
+    server_id: "srv_1",
+    name: "新加坡 1",
+    region: "sgp1",
+    plan: "s-1vcpu-1gb",
+    state: "healthy",
+    created_at: new Date(0).toISOString(),
+    ip: null,
+    port: null,
+    node_id: null,
+    local_node_id: null,
+    hourly_usd: 0.00893,
+    monthly_usd: 6,
+    daily_price_cents: 20,
+    paid_until: null,
+    billing_state: "active",
+    grace_ends_at: null,
+    transfer_gib: 1000,
+    traffic_used_bytes: 0,
+    traffic_limit_bytes: 0,
+    traffic_reset_at: "",
+    traffic_state: "ok",
+    failure: null,
+    ...over,
+  };
+}
+
+describe("账号流量（2.79.0）", () => {
+  it("汇总只用 traffic_pool；明天 +X 由列表的增量算", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({
+          traffic_used_bytes: 50 * GIB,
+          traffic_limit_bytes: 60 * GIB,
+        }),
+      ],
+      traffic_pool: { usedBytes: 300 * GIB, limitBytes: 400 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText("本月流量")).toBeTruthy();
+    const line = screen.getByText(/已用 300 \/ 400 GiB/).closest("p");
+    // 1000 GiB 月额度、已释放 60 GiB：明天加 min(1000/28, 940) ≈ 35.7 GiB。
+    expect(line?.textContent).toContain("明天 +35.7 GiB");
+    expect(screen.queryByText(/已用 50 /)).toBeNull();
+    expect(screen.queryByText("流量快用完了")).toBeNull();
+  });
+
+  it("near：整好 80% 就提示；明天增量为 0 时不写「明天 +」", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [],
+      traffic_pool: { usedBytes: 320 * GIB, limitBytes: 400 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    const near = await screen.findByText("流量快用完了");
+    expect(near.className).toContain("account-surface__traffic-near");
+    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    expect(screen.queryByText(/按 \$0\.02\/GiB/)).toBeNull();
+  });
+
+  it("全封顶的账号不出现「明天 +0 GiB」", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({
+          transfer_gib: 1000,
+          traffic_limit_bytes: 1000 * GIB,
+        }),
+      ],
+      traffic_pool: { usedBytes: 100 * GIB, limitBytes: 150 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText(/已用 100 \/ 150 GiB/)).toBeTruthy();
+    expect(screen.queryByText(/明天 \+/)).toBeNull();
+  });
+
+  it("over：扣费提示顶掉「明天 +X」", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [],
+      traffic_pool: { usedBytes: 450 * GIB, limitBytes: 400 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    const over = await screen.findByText("超出 50 GiB，按 $0.02/GiB 扣余额");
+    expect(over.className).toContain("account-surface__traffic-over");
+    expect(screen.getByText(/已用 450 \/ 400 GiB/)).toBeTruthy();
+    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    // 汇总与超出段之间有空格，读屏不会拼成一个词。
+    expect(over.closest("p")?.textContent).toContain("400 GiB 超出 50 GiB");
+  });
+
+  it("额度未知：不写明天；pool 缺失时整行不渲染", async () => {
+    const unknown = vi.fn(async () => ({
+      servers: [],
+      traffic_pool: { usedBytes: 12 * GIB, limitBytes: 0 },
+    }));
+    const first = renderSurface({ bridge: makeBridge({ myServerList: unknown }) });
+    expect(await screen.findByText("已用 12 GiB · 额度未知")).toBeTruthy();
+    expect(screen.queryByText(/明天 \+/)).toBeNull();
+    first.unmount();
+
+    const noPool = vi.fn(async () => ({ servers: [] }));
+    renderSurface({ bridge: makeBridge({ myServerList: noPool }) });
+    await waitFor(() => expect(noPool).toHaveBeenCalled());
+    expect(screen.queryByText("本月流量")).toBeNull();
+  });
+
+  it("清零点有值时按本地日写在行尾", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({
+          traffic_reset_at: new Date(2026, 11, 1, 0, 0, 0).toISOString(),
+        }),
+      ],
+      traffic_pool: { usedBytes: 1 * GIB, limitBytes: 10 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText("12月1日重置")).toBeTruthy();
+  });
+
+  it("列表读取失败：整行不渲染，弹层照常可用", async () => {
+    const myServerList = vi.fn(async () => {
+      throw new Error("down");
+    });
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    await waitFor(() => expect(myServerList).toHaveBeenCalled());
+    expect(screen.queryByText("本月流量")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
   });
 });

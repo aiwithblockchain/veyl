@@ -772,8 +772,6 @@ const MY_SERVER_STATES = new Set<MyServerState>([
 
 const MY_SERVER_TRAFFIC_STATES = new Set<MyServerTrafficState>([
   "ok",
-  "near",
-  "over",
   "unpaid",
 ]);
 

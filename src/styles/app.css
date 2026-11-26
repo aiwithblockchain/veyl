@@ -1808,6 +1808,25 @@ body[data-resizing] {
   margin-top: 4px;
 }
 
+.account-surface__traffic {
+  margin: 2px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.account-surface__traffic-near,
+.account-surface__traffic-over {
+  margin-left: 8px;
+  color: var(--amber);
+}
+
+.account-surface__traffic-reset {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 .account-surface__error {
   display: flex;
   align-items: baseline;
@@ -3475,6 +3494,16 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.myservers__traffic {
+  color: var(--ink-2);
+}
+
+.myservers__traffic-reset {
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 .myservers__notice {
   margin: 0;
   font-size: 12px;
@@ -4524,6 +4553,12 @@ body[data-resizing] {
 
 .myservers__confirm p {
   margin: 0;
+}
+
+.myservers__confirm-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
 }
 
 /* ---------- 流量范围开关（hero 第二行） ---------- */

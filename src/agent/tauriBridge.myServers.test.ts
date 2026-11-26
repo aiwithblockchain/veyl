@@ -126,7 +126,7 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_used_bytes: 4_294_967_296,
       traffic_limit_bytes: 32_212_254_720,
       traffic_reset_at: "2026-12-01T00:00:00.000Z",
-      traffic_state: "near",
+      traffic_state: "unpaid",
     };
     const dirty = {
       ...SERVER,
@@ -144,7 +144,7 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_used_bytes: 4_294_967_296,
       traffic_limit_bytes: 32_212_254_720,
       traffic_reset_at: "2026-12-01T00:00:00.000Z",
-      traffic_state: "near",
+      traffic_state: "unpaid",
     });
     expect(list.servers[1]).toMatchObject({
       server_id: "srv_2",
@@ -154,6 +154,18 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_reset_at: "",
       traffic_state: "ok",
     });
+  });
+
+  it("旧控制面/旧 Rust 发来的 near / over 降级为 ok", async () => {
+    const near = { ...SERVER, server_id: "srv_near", traffic_state: "near" };
+    const over = { ...SERVER, server_id: "srv_over", traffic_state: "over" };
+    invoke.mockResolvedValueOnce({ servers: [near, over] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers.map((server) => server.traffic_state)).toEqual([
+      "ok",
+      "ok",
+    ]);
   });
 
   it("账号池可缺省；内层字段缺失按 0，非对象当没给", async () => {
