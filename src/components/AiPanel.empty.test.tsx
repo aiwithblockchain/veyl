@@ -16,6 +16,7 @@ const PRESETS = [
   "为什么有的软件没走 VPN",
   "为什么个别网站还是打不开",
   "终端里的命令也想走 VPN",
+  "如何在手机上使用",
 ];
 
 function makeSession(over: Partial<Session> = {}): Session {

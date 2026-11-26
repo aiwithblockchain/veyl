@@ -67,6 +67,7 @@ export const en: Record<MessageKey, string> = {
   "assistant.preset.appBypass": "Why do some apps bypass the VPN",
   "assistant.preset.siteBlocked": "Why do some sites still fail",
   "assistant.preset.terminal": "I want terminal commands on the VPN too",
+  "assistant.preset.mobile": "How do I use it on my phone",
   "assistant.time.justNow": "Just now",
   "assistant.time.minutesAgo": "{count} min ago",
   "assistant.time.hoursAgo": "{count} hr ago",

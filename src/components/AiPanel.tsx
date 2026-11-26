@@ -77,6 +77,7 @@ const PRESET_KEYS = [
   "assistant.preset.appBypass",
   "assistant.preset.siteBlocked",
   "assistant.preset.terminal",
+  "assistant.preset.mobile",
 ] as const;
 
 function relativeTime(at: number): string {

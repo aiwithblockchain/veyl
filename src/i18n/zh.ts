@@ -61,6 +61,7 @@ export const zh = {
   "assistant.preset.appBypass": "为什么有的软件没走 VPN",
   "assistant.preset.siteBlocked": "为什么个别网站还是打不开",
   "assistant.preset.terminal": "终端里的命令也想走 VPN",
+  "assistant.preset.mobile": "如何在手机上使用",
   "assistant.time.justNow": "刚刚",
   "assistant.time.minutesAgo": "{count} 分钟前",
   "assistant.time.hoursAgo": "{count} 小时前",
