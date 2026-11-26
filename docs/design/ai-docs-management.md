@@ -2,7 +2,7 @@
 
 > 日期：2026-11-21
 > 最后核对：2026-11-24，对照 `108e6e5`
-> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。
+> 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。**工具清单是 2026-11-21 快照，不再逐版维护；工具面以 `docs/contracts/tools.md` §3 为准。**
 > 依据：`resources/prompts/{zh,en}/{system,kickoff,product,faq}.md`、`src-tauri/src/claurst_session/prompts.rs`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
 
 ---
@@ -72,7 +72,7 @@
 - **连接 / 断开 / 重新连接**的主按钮语义；连接中、切换中、断开中三个进行态。
 - **「连上了但打不开」「有的软件没走 VPN」**：必须诊断后再答，不直接讲概念。
 
-工具：`VpnConnect`、`VpnDisconnect`、`RuntimeStatus`、`RuntimeStart/Stop/Restart`、`ConfigSetMode`、`RouteGet`、`RouteSetMode`、`DiagRun`、`HttpCheck`。
+工具：`VpnConnect`、`VpnDisconnect`、`RuntimeStatus`、`RuntimeRestart`、`ConfigSetMode`、`RouteGet`、`RouteSetMode`、`DiagRun`、`HttpCheck`。
 
 ### 2.2 节点
 
@@ -329,6 +329,8 @@ FAQ 只写**已经有人问过、且答案稳定**的问题；需要实时状态
 ---
 
 ## 附录 · AI 现有工具（Veyl 自研 37 个，另有 1 个不对用户暴露的包装；再加 6 个基础文件工具）
+
+> **本清单是 2026-11-21 快照，不再逐版维护；工具面以 `docs/contracts/tools.md` §3 为准。** 已知差异：`RuntimeStart` / `RuntimeStop` 已于 3.30.0 删除；`MyServerWallet`（3.31.0）与 `LlmProviders`（3.32.0）未列入本节。
 
 运行时：`RuntimeStatus` `RuntimeStart` `RuntimeStop` `RuntimeRestart` `RuntimeLogs`
 核心：`CoreListVersions` `CoreUpgrade`
