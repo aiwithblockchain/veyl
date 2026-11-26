@@ -16,6 +16,7 @@
     // 填成 Access 应用的 Application Audience (AUD) Tag
     "ACCESS_AUD": ""
   },
-  // 自定义域名要求 dessage.xyz 在同一账号下。本目录只写配置，不部署。
-  "routes": [{ "pattern": "admin.dessage.xyz", "custom_domain": true }]
+  // 自定义域名要求 dessage.xyz 在同一账号下。zone_name 必须写明：账号下有多个
+  // zone 时 wrangler 无法从域名反推，会报 "Can't infer zone from route"。
+  "routes": [{ "pattern": "admin.dessage.xyz", "zone_name": "dessage.xyz", "custom_domain": true }]
 }
