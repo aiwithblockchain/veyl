@@ -595,8 +595,6 @@ export const en: Record<MessageKey, string> = {
   "app.questionAway": "A question is waiting for you on the {screen}",
 
   // Global notices and errors
-  "app.billsNotice":
-    "Billing details arrive in the next version. Your current balance is in Top up.",
   "app.loginExpired": "Your session expired. Sign in again.",
   "app.proxyRestored": "Veyl didn't exit cleanly last time; network settings were restored.",
   "app.proxyRestoreFailed":
@@ -916,12 +914,9 @@ export const en: Record<MessageKey, string> = {
   "controls.account": "Account",
   "controls.advanced": "Advanced",
 
-  // Account menu
-  "account.menuAria": "Account menu",
-  "account.balance": "Balance",
+  // Account
   "account.walletError": "Balance is unavailable right now.",
   "account.retry": "Retry",
-  "account.loading": "Loading",
   "account.topUp": "Top up",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
   "account.identity.lost":
@@ -1023,7 +1018,7 @@ export const en: Record<MessageKey, string> = {
   "login.hint.deviceMismatch": "You need to register this device again; your account and servers are intact.",
   "login.error.deviceRevoked": "This device was disabled.",
   "login.hint.deviceRevoked":
-    "Click \"Register this device again\" below, or sign out of it from the account menu first.",
+    "Click \"Register this device again\" below, or sign out of it from Settings › Account first.",
   "login.error.accountBlocked": "This account is disabled.",
   "login.hint.accountBlocked":
     "Switching accounts requires registering this device again; the old account stays on this device.",
@@ -1273,7 +1268,6 @@ export const en: Record<MessageKey, string> = {
   "settings.account.balance": "Balance",
   "settings.account.email": "Email",
   "settings.account.loading": "Loading",
-  "settings.account.mobile": "Use on other devices",
   "settings.account.refresh": "Refresh",
   "settings.account.refreshing": "Refreshing",
   "settings.account.signedIn": "Signed in",
@@ -1628,9 +1622,10 @@ export const en: Record<MessageKey, string> = {
   "settings.advanced.restartNote": "Existing keys and nodes aren't deleted. Only visible in development builds.",
   "settings.advanced.rerun": "Run again",
   "settings.about.aiNote": "AI conversations go to the service you chose; configurations, nodes and logs stay on this device.",
+  "settings.account.bills": "Last 30 days",
+  "settings.account.viewBills": "View bills",
+  "settings.account.billsPending": "Billing details are still being wired up. Coming in the next release.",
   "settings.account.billingNote": "Balance is charged per day, separately for each server.",
-  "settings.account.mobileNote": "Import your node on a phone or computer.",
-  "settings.account.view": "View",
   "settings.reset.confirmBody": "This immediately drops the current connection and undoes Veyl's network changes. Configurations and nodes aren't deleted.",
   "settings.reset.runningShort": "Resetting…",
   "settings.reset.failedRetry": "The network didn't pass the recheck. Click \"Try again\"; if it still fails, copy the diagnostics and send them to the assistant.",

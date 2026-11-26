@@ -130,6 +130,50 @@ async function waitForShell() {
   await waitFor(() => expect(document.querySelector(".app")).not.toBeNull());
 }
 
+const READY_SERVER: MyServer = {
+  server_id: "srv_1",
+  name: "东京 2 · Vultr",
+  region: "nrt1",
+  plan: "s-1vcpu-1gb",
+  state: "active",
+  created_at: new Date(0).toISOString(),
+  ip: "45.76.20.11",
+  port: 8388,
+  node_id: "nd_1",
+  local_node_id: "local_1",
+  hourly_usd: 0.00893,
+  monthly_usd: 9,
+  daily_price_cents: 30,
+  paid_until: null,
+  billing_state: "active",
+  grace_ends_at: null,
+  transfer_gib: 1000,
+  failure: null,
+};
+
+/** 左栏的「在其它设备上使用」只在已登录且有就绪节点时出现。 */
+function signInForExport() {
+  localStorage.setItem(
+    "veyl.mock.account",
+    JSON.stringify({ logged_in: true, email: "buyer@example.com" }),
+  );
+  vi.spyOn(bridge, "myServerAccount").mockResolvedValue({
+    logged_in: true,
+    email: "buyer@example.com",
+    account_id: "acct_1",
+    device_id: "dev_1",
+    account_kind: "email",
+    session_expires_at: null,
+  });
+  vi.spyOn(bridge, "myServerList").mockResolvedValue({ servers: [READY_SERVER] });
+  vi.spyOn(bridge, "myServerWallet").mockResolvedValue({
+    balance_cents: 1000,
+    currency: "USD",
+    denominations_cents: [1000],
+    updated_at: new Date(0).toISOString(),
+  });
+}
+
 function seedSkipped() {
   localStorage.setItem(SKIP_KEY, "1");
 }
@@ -414,13 +458,14 @@ describe("未配置 AI 的动作入口", () => {
 
   it("移动导出 › 问 AI 被拦：告警出现，取消后导出弹层仍开着", async () => {
     seedSkipped();
+    signInForExport();
     render(<App />);
     await waitForShell();
 
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    const settings = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.click(within(settings).getByRole("tab", { name: "账户" }));
-    fireEvent.click(await within(settings).findByRole("button", { name: "查看" }));
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "在其它设备上使用" }),
+    );
 
     const exportDialog = await screen.findByRole("dialog", {
       name: "在其它设备上使用",
@@ -432,9 +477,8 @@ describe("未配置 AI 的动作入口", () => {
     expect(
       await screen.findByRole("dialog", { name: "还没有配置 AI 服务" }),
     ).toBeTruthy();
-    // 被拦下：既不关导出层，也不关设置。
+    // 被拦下：不关导出层。
     expect(screen.getByRole("dialog", { name: "在其它设备上使用" })).toBeTruthy();
-    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() =>
@@ -446,15 +490,16 @@ describe("未配置 AI 的动作入口", () => {
     expect(vi.mocked(bridge.sendMessage)).not.toHaveBeenCalled();
   }, 15_000);
 
-  it("移动导出被拦：Esc 只关告警，导出层与设置仍在", async () => {
+  it("移动导出被拦：Esc 只关告警，导出层仍在", async () => {
     seedSkipped();
+    signInForExport();
     render(<App />);
     await waitForShell();
 
-    fireEvent.click(screen.getByRole("button", { name: "设置" }));
-    const settings = await screen.findByRole("dialog", { name: "设置" });
-    fireEvent.click(within(settings).getByRole("tab", { name: "账户" }));
-    fireEvent.click(await within(settings).findByRole("button", { name: "查看" }));
+    fireEvent.click(screen.getByRole("button", { name: /我的服务器/ }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "在其它设备上使用" }),
+    );
     const exportDialog = await screen.findByRole("dialog", {
       name: "在其它设备上使用",
     });
@@ -470,7 +515,6 @@ describe("未配置 AI 的动作入口", () => {
       ).toBeNull(),
     );
     expect(screen.getByRole("dialog", { name: "在其它设备上使用" })).toBeTruthy();
-    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   }, 15_000);
 
   it("「AI 定位」被拦：弹告警，取消后不建会话、面板不展开", async () => {

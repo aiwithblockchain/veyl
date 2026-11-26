@@ -83,7 +83,7 @@ interface Props {
   /** AI 指路：section 内的 row 高亮 2 秒；row=null 只切段。 */
   point?: { section: SectionId; row: string | null; nonce: number } | null;
   account?: MyServerAccount | null;
-  /** 余额与账号菜单共用同一份 wallet 状态；未接线时按「—」显示。 */
+  /** 设置 › 账户与账号入口共用同一份 wallet 状态；未接线时按「—」显示。 */
   wallet?: MyServerWallet | null;
   walletLoading?: boolean;
   /** 已有值时的刷新在途：余额行入口写「刷新中」，旧值不动。 */
@@ -97,12 +97,16 @@ interface Props {
   onForceRefresh?: () => void;
   onLogin?: () => void;
   onTopUp?: () => void;
-  onViewBills?: () => void;
-  /** 「在其它设备上使用」弹层叠在设置之上：打开期间设置的焦点陷阱与 Esc 退让。 */
-  mobileExportOpen?: boolean;
+  /** 设备/账户的永久状态：在账户页顶部给明确出路，不说「稍后再试」。 */
+  identityProblem?: "lost" | "device_revoked" | "account_blocked" | null;
+  /** 重新注册设备；返回是否恢复成功。 */
+  onReRegister?: () => Promise<boolean>;
+  /** 账户停用：换一个账户（重新注册设备后再登录）。 */
+  onSwitchAccount?: () => Promise<boolean>;
+  /** 退出登录：成功后关闭设置，由 App 给 toast。 */
+  onLogout?: () => Promise<{ ok: boolean; message?: string }>;
   /** 更上层的全局弹层（如 AI 告警）开着：设置让出焦点陷阱，免得两层互抢 Tab。 */
   trapPaused?: boolean;
-  onOpenMobileExport?: (trigger: HTMLElement) => void;
   /** 节点配置同步：间隔档位与手动触发都由 App 持有并落库。 */
   syncInterval?: SyncIntervalMinutes;
   onSyncIntervalChange?: (minutes: SyncIntervalMinutes) => void;
@@ -702,9 +706,11 @@ export function Settings({
   onForceRefresh,
   onLogin,
   onTopUp,
-  mobileExportOpen = false,
+  identityProblem = null,
+  onReRegister,
+  onSwitchAccount,
+  onLogout,
   trapPaused = false,
-  onOpenMobileExport,
   syncInterval = 30,
   onSyncIntervalChange,
   onSyncNow,
@@ -826,7 +832,6 @@ export function Settings({
     open &&
       !consulting &&
       resetPhase === "idle" &&
-      !mobileExportOpen &&
       !trapPaused,
     dialogRef,
   );
@@ -973,12 +978,22 @@ export function Settings({
     setRouteCopy("idle");
     setProxyCopy("idle");
     setLanguageError(null);
+    setBillsOpen(false);
+    setLogoutError(null);
+    setRecoverError(null);
     void refreshProviders();
   }, [open, refreshProviders, initialSection]);
 
   useEffect(() => {
     setSeedInfo(defaultProfile);
   }, [defaultProfile]);
+
+  const [billsOpen, setBillsOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [reRegistering, setReRegistering] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [recoverError, setRecoverError] = useState<string | null>(null);
 
   const closeReset = useCallback(() => {
     if (resetPhase === "running") return;
@@ -996,6 +1011,60 @@ export function Settings({
     onConsultingChange?.(false);
     onClose();
   }, [onClose, onConsultingChange]);
+
+  const blockedIdentity =
+    identityProblem === "device_revoked" || identityProblem === "account_blocked";
+  const recovery =
+    identityProblem === "lost"
+      ? {
+          kind: "register" as const,
+          text: t("account.identity.lost"),
+          label: t("account.identity.lostLabel"),
+        }
+      : identityProblem === "device_revoked"
+        ? {
+            kind: "logout" as const,
+            text: t("account.identity.revoked"),
+            label: t("account.identity.revokedLabel"),
+          }
+        : identityProblem === "account_blocked"
+          ? {
+              kind: "switch" as const,
+              text: t("account.identity.blocked"),
+              label: t("account.identity.blockedLabel"),
+            }
+          : null;
+  // 换账户、重新注册、退出三件事互斥：任一件在途，另一件的按钮也不能点。
+  const identityBusy = loggingOut || switching || reRegistering;
+
+  const logout = async () => {
+    if (loggingOut || !onLogout) return;
+    setLoggingOut(true);
+    setLogoutError(null);
+    const result = await onLogout();
+    setLoggingOut(false);
+    if (result.ok) {
+      closeSettings();
+      return;
+    }
+    setLogoutError(result.message ?? t("account.logoutFailed"));
+  };
+
+  const recoverIdentity = async () => {
+    if (!recovery || identityBusy) return;
+    if (recovery.kind === "logout") {
+      await logout();
+      return;
+    }
+    const run = recovery.kind === "switch" ? onSwitchAccount : onReRegister;
+    if (!run) return;
+    const setBusy = recovery.kind === "switch" ? setSwitching : setReRegistering;
+    setBusy(true);
+    setRecoverError(null);
+    const ok = await run();
+    setBusy(false);
+    if (!ok) setRecoverError(t("account.recoverFailed"));
+  };
 
   const selectSection = (next: SectionId) => {
     setSection(next);
@@ -1226,8 +1295,6 @@ export function Settings({
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
-      // 「在其它设备上使用」弹层在上层：Esc 归它，不关设置。
-      if (mobileExportOpen) return;
       // 重置弹层在上层：先关它，运行中则完全忽略。
       if (resetPhase !== "idle") {
         if (resetPhase !== "running") closeReset();
@@ -1242,7 +1309,7 @@ export function Settings({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, mobileExportOpen, trapPaused]);
+  }, [open, closeSettings, resetPhase, closeReset, portEditing, cancelProxyPortEdit, trapPaused]);
   useEffect(() => {
     if (resetPhase === "confirm") resetCancelRef.current?.focus();
     if (resetPhase === "result") resetCloseRef.current?.focus();
@@ -2659,6 +2726,68 @@ export function Settings({
             id="settings-panel-account"
             aria-labelledby="settings-tab-account"
           >
+            {recovery ? (
+                  <div className="settings-row settings-row--stack">
+                    <p className="settings-note">{recovery.text}</p>
+                    {recoverError ? (
+                      <p className="settings-feedback settings-feedback--error" role="alert">
+                        {recoverError}
+                      </p>
+                    ) : null}
+                    {logoutError && recovery.kind !== "register" ? (
+                      <p className="settings-feedback settings-feedback--error" role="alert">
+                        {logoutError}{" "}
+                        <button
+                          type="button"
+                          className="settings-link"
+                          disabled={loggingOut}
+                          onClick={() => void logout()}
+                        >
+                          {t("account.retry")}
+                        </button>
+                      </p>
+                    ) : null}
+                    <div className="settings-actions">
+                      <button
+                        type="button"
+                        className="btn btn--primary"
+                        disabled={identityBusy || !(recovery.kind === "logout" ? onLogout : recovery.kind === "switch" ? onSwitchAccount : onReRegister)}
+                        aria-busy={
+                          (recovery.kind === "logout"
+                            ? loggingOut
+                            : recovery.kind === "switch"
+                              ? switching
+                              : reRegistering) || undefined
+                        }
+                        onClick={() => void recoverIdentity()}
+                      >
+                        {recovery.kind === "logout"
+                          ? loggingOut
+                            ? t("account.loggingOut")
+                            : recovery.label
+                          : recovery.kind === "switch"
+                            ? switching
+                              ? t("account.switching")
+                              : recovery.label
+                            : reRegistering
+                              ? t("account.working")
+                              : recovery.label}
+                      </button>
+                      {recovery.kind === "switch" ? (
+                        <button
+                          type="button"
+                          className="btn btn--danger-ghost"
+                          disabled={identityBusy || !onLogout}
+                          aria-busy={loggingOut || undefined}
+                          onClick={() => void logout()}
+                        >
+                          {loggingOut ? t("account.loggingOut") : t("account.logoutDevice")}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+            ) : null}
+
             {account?.logged_in ? (
               <>
                 <div className="settings-row" {...pointAttrs("account.login")}>
@@ -2672,60 +2801,123 @@ export function Settings({
                     </div>
                   </div>
                 </div>
+
+                {blockedIdentity ? null : (
                 <div className="settings-row" {...pointAttrs("account.balance")}>
-                  <div>
-                    <div className="settings-row__label">{t("settings.account.balance")}</div>
-                    {walletError ? (
-                      <p className="settings-account__error">
-                        {t("account.walletError")}
+                    <div>
+                      <div className="settings-row__label">{t("settings.account.balance")}</div>
+                      {walletError ? (
+                        <p className="settings-account__error">
+                          {t("account.walletError")}
+                          <button
+                            type="button"
+                            className="settings-link"
+                            onClick={() => onRefreshWallet?.("retry")}
+                            disabled={!onRefreshWallet}
+                          >
+                            {t("account.retry")}
+                          </button>
+                        </p>
+                      ) : (
+                        <div className="settings-account__amount num">
+                          {walletLoading
+                            ? t("settings.account.loading")
+                            : wallet
+                              ? formatUsdCents(wallet.balance_cents)
+                              : "—"}
+                        </div>
+                      )}
+                      <p className="settings-note">
+                        {t("settings.account.billingNote")}
+                      </p>
+                      {walletStale && wallet && !walletError ? (
+                        <p className="settings-note">
+                          {t("account.stale")}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="settings-row__aside">
+                      {walletError ? null : (
                         <button
                           type="button"
                           className="settings-link"
-                          onClick={() => onRefreshWallet?.("retry")}
-                          disabled={!onRefreshWallet}
+                          onClick={onForceRefresh}
+                          disabled={!onForceRefresh || walletRefreshing}
                         >
-                          {t("account.retry")}
+                          {walletRefreshing ? t("settings.account.refreshing") : t("settings.account.refresh")}
                         </button>
-                      </p>
-                    ) : (
-                      <div className="settings-account__amount num">
-                        {walletLoading
-                          ? t("settings.account.loading")
-                          : wallet
-                            ? formatUsdCents(wallet.balance_cents)
-                            : "—"}
-                      </div>
-                    )}
-                    <p className="settings-note">
-                      {t("settings.account.billingNote")}
-                    </p>
-                    {walletStale && wallet && !walletError ? (
-                      <p className="settings-note">
-                        {t("account.stale")}
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn--ghost"
+                        onClick={onTopUp}
+                        disabled={!onTopUp}
+                      >
+                        {t("account.topUp")}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  className="settings-row settings-row--stack"
+                  {...pointAttrs("account.bills")}
+                >
+                  <div className="settings-row__main">
+                    <div className="settings-row__label">
+                      {t("settings.account.bills")}
+                    </div>
+                    {billsOpen ? (
+                      <p className="settings-note" role="status">
+                        {t("settings.account.billsPending")}
                       </p>
                     ) : null}
                   </div>
                   <div className="settings-row__aside">
-                    {walletError ? null : (
-                      <button
-                        type="button"
-                        className="settings-link"
-                        onClick={onForceRefresh}
-                        disabled={!onForceRefresh || walletRefreshing}
-                      >
-                        {walletRefreshing ? t("settings.account.refreshing") : t("settings.account.refresh")}
-                      </button>
-                    )}
                     <button
                       type="button"
                       className="btn btn--ghost"
-                      onClick={onTopUp}
-                      disabled={!onTopUp}
+                      aria-expanded={billsOpen}
+                      onClick={() => setBillsOpen((current) => !current)}
                     >
-                      {t("account.topUp")}
+                      {t("settings.account.viewBills")}
                     </button>
                   </div>
                 </div>
+
+                {blockedIdentity ? null : (
+                <div className="settings-row settings-row--stack">
+                    <div className="settings-row__main">
+                      {logoutError ? (
+                        <p
+                          className="settings-feedback settings-feedback--error"
+                          role="alert"
+                        >
+                          {logoutError}{" "}
+                          <button
+                            type="button"
+                            className="settings-link"
+                            disabled={loggingOut}
+                            onClick={() => void logout()}
+                          >
+                            {t("account.retry")}
+                          </button>
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="settings-row__aside">
+                      <button
+                        type="button"
+                        className="btn btn--danger-ghost"
+                        disabled={loggingOut || !onLogout}
+                        aria-busy={loggingOut || undefined}
+                        onClick={() => void logout()}
+                      >
+                        {loggingOut ? t("account.loggingOut") : t("account.logout")}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div className="settings-row" {...pointAttrs("account.login")}>
@@ -2743,24 +2935,6 @@ export function Settings({
                 </button>
               </div>
             )}
-            <div className="settings-row" {...pointAttrs("account.mobile")}>
-              <div>
-                <div className="settings-row__label">{t("settings.account.mobile")}</div>
-                <p className="settings-note">
-                  {t("settings.account.mobileNote")}
-                </p>
-              </div>
-              <div className="settings-row__aside">
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={(event) => onOpenMobileExport?.(event.currentTarget)}
-                  disabled={!onOpenMobileExport}
-                >
-                  {t("settings.account.view")}
-                </button>
-              </div>
-            </div>
           </section>
         ) : null}
         </div>

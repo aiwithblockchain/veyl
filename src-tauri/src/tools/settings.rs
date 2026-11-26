@@ -14,7 +14,7 @@ use super::turn_guard;
 use crate::claurst_session::events::{self, EV_SETTINGS_POINT};
 
 /// 行 id 白名单（`tools.md` §4.50；与 `commands.md` §9.1.1 的 controls 同源）。
-pub const SETTINGS_ROWS: [&str; 12] = [
+pub const SETTINGS_ROWS: [&str; 11] = [
     "connection.mode",
     "connection.scope",
     "connection.port",
@@ -22,7 +22,6 @@ pub const SETTINGS_ROWS: [&str; 12] = [
     "ai.other",
     "account.login",
     "account.balance",
-    "account.mobile",
     "advanced.core",
     "advanced.helper",
     "advanced.logs",

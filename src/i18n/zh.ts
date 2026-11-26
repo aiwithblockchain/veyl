@@ -575,7 +575,6 @@ export const zh = {
   "app.questionAway": "有一个问题在{screen}等你回答",
 
   // 全局提示与错误
-  "app.billsNotice": "账单明细下一版接入，当前余额可在充值里查看。",
   "app.loginExpired": "登录已过期，请重新登录。",
   "app.proxyRestored": "上次没退出干净，网络设置已恢复。",
   "app.proxyRestoreFailed": "网络设置没能自动恢复。打开「设置 → 遇到问题 → 强制重置网络」。",
@@ -871,12 +870,9 @@ export const zh = {
   "controls.account": "账户",
   "controls.advanced": "高级",
 
-  // 账户菜单
-  "account.menuAria": "账户菜单",
-  "account.balance": "余额",
+  // 账户
   "account.walletError": "余额暂时读不到。",
   "account.retry": "重试",
-  "account.loading": "读取中",
   "account.topUp": "充值",
   "account.stale": "没刷新成功，显示的是上次的余额。",
   "account.identity.lost": "这台设备的身份丢了，需要重新注册设备；账户和服务器都在。",
@@ -974,7 +970,7 @@ export const zh = {
   "login.error.deviceMismatch": "这台设备的身份对不上。",
   "login.hint.deviceMismatch": "需要重新注册设备；账户和服务器都还在。",
   "login.error.deviceRevoked": "这台设备已被停用。",
-  "login.hint.deviceRevoked": "点下面的「重新注册设备」，或先在账号菜单里退出这台设备。",
+  "login.hint.deviceRevoked": "点下面的「重新注册设备」，或先在 设置 › 账户 里退出这台设备。",
   "login.error.accountBlocked": "这个账户已停用。",
   "login.hint.accountBlocked": "换一个账户需要重新注册这台设备；这台设备上的旧账户仍会保留。",
   "login.error.network": "没连上服务器。",
@@ -1193,7 +1189,6 @@ export const zh = {
   "settings.account.balance": "余额",
   "settings.account.email": "邮箱",
   "settings.account.loading": "读取中",
-  "settings.account.mobile": "在其它设备上使用",
   "settings.account.refresh": "刷新",
   "settings.account.refreshing": "刷新中",
   "settings.account.signedIn": "已登录",
@@ -1549,9 +1544,10 @@ export const zh = {
   "settings.advanced.restartNote": "不会删除已有 Key 或节点。仅开发构建可见。",
   "settings.advanced.rerun": "重新运行",
   "settings.about.aiNote": "AI 对话会发给你选的服务；配置、节点和日志都留在本机。",
+  "settings.account.bills": "近 30 天账单",
+  "settings.account.viewBills": "查看账单",
+  "settings.account.billsPending": "账单还在接入，下一版开放。",
   "settings.account.billingNote": "余额按天扣费，每台服务器单独计费。",
-  "settings.account.mobileNote": "在手机或电脑上导入你的节点。",
-  "settings.account.view": "查看",
   "settings.reset.confirmBody": "会立刻断开当前连接，并撤销 Veyl 对网络的改动。不会删除配置和节点。",
   "settings.reset.runningShort": "正在重置…",
   "settings.reset.failedRetry": "网络状态没有通过复查。先点「再试一次」；仍不通过就复制诊断信息发给助手。",

@@ -15,6 +15,8 @@ interface Props {
   onRetry: () => void;
   onTopUp: (denominationCents: number) => Promise<MyServerTopup>;
   onClose: () => void;
+  /** 叠在设置之上：用嵌套遮罩；关掉后回到设置页。 */
+  nested?: boolean;
 }
 
 function topupError(error: unknown): string {
@@ -49,6 +51,7 @@ export function MyServerTopUp({
   onRetry,
   onTopUp,
   onClose,
+  nested = false,
 }: Props) {
   const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
@@ -120,7 +123,10 @@ export function MyServerTopUp({
   });
 
   return (
-    <div className="modal-backdrop" onMouseDown={() => !busy && onClose()}>
+    <div
+      className={`modal-backdrop${nested ? " modal-backdrop--nested" : ""}`}
+      onMouseDown={() => !busy && onClose()}
+    >
       <div
         ref={dialogRef}
         className="modal myservers-topup"

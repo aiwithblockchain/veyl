@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentBridge, MyServerAccount, MyServerWallet } from "../agent/bridge";
@@ -75,14 +75,14 @@ function renderAccount(
       account={ACCOUNT}
       wallet={WALLET}
       onTopUp={() => {}}
-      onViewBills={() => {}}
+      onLogout={async () => ({ ok: true })}
       {...over}
     />,
   );
 }
 
 describe("设置 › 账户", () => {
-  it("邮箱整行显示并带 title，金额与账号菜单同一格式，且没有「查看账单」", () => {
+  it("邮箱整行显示并带 title，金额用与账户页一致的格式", () => {
     renderAccount();
 
     const email = screen.getByText("buyer@example.com");
@@ -94,8 +94,7 @@ describe("设置 › 账户", () => {
     expect(amount.className).toContain("num");
 
     expect(screen.getByRole("button", { name: "充值" })).toBeTruthy();
-    expect(screen.queryByText("查看账单")).toBeNull();
-    expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
+    expect(screen.queryByText("在其它设备上使用")).toBeNull();
   });
 
   it("余额下有一句计费说明", () => {
@@ -133,26 +132,79 @@ describe("设置 › 账户", () => {
     expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
   });
 
-  it("在其它设备上使用：行常驻，点查看把触发行交给 App", () => {
-    const open = vi.fn();
-    renderAccount({ onOpenMobileExport: open });
+  it("近 30 天账单是本批占位：点查看展开一句说明，再点收起", () => {
+    renderAccount();
+    const row = document.querySelector('[data-point="account.bills"]') as HTMLElement;
+    const button = within(row).getByRole("button", { name: "查看账单" });
 
-    const button = screen.getByRole("button", { name: "查看" });
-    expect(button.closest('[data-point="account.mobile"]')).toBeTruthy();
-    button.click();
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(open.mock.calls[0][0]).toBe(button);
+    expect(within(row).queryByText("账单还在接入，下一版开放。")).toBeNull();
+    fireEvent.click(button);
+    expect(within(row).getByText("账单还在接入，下一版开放。")).toBeTruthy();
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(button);
+    expect(within(row).queryByText("账单还在接入，下一版开放。")).toBeNull();
+    expect(button.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("未登录也有在其它设备上使用：入口对所有用户开放", () => {
+  it("退出登录：成功后关闭设置", async () => {
+    const onLogout = vi.fn(async () => ({ ok: true as const }));
+    const onClose = vi.fn();
+    renderAccount({ onLogout, onClose });
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("退出登录失败：原位显示错误并可重试", async () => {
+    const onLogout = vi.fn(async () => ({ ok: false as const, message: "没网。" }));
+    renderAccount({ onLogout });
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    expect(await screen.findByText("没网。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(2));
+  });
+
+  it("设备身份丢了：顶部给说明与重新注册", async () => {
+    const onReRegister = vi.fn(async () => true);
+    renderAccount({ identityProblem: "lost", onReRegister });
+
+    expect(screen.getByText(/这台设备的身份丢了/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新注册设备" }));
+    await waitFor(() => expect(onReRegister).toHaveBeenCalledTimes(1));
+  });
+
+  it("设备停用：退出这台设备失败时，错误出现在恢复块里", async () => {
+    const onLogout = vi.fn(async () => ({ ok: false as const, message: "没网。" }));
+    renderAccount({ identityProblem: "device_revoked", onLogout });
+
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("没网。")).toBeTruthy();
+    expect(within(alert).getByRole("button", { name: "重试" })).toBeTruthy();
+  });
+
+  it("账户停用：隐藏余额与充值，给换账户与退出这台设备", async () => {
+    const onSwitchAccount = vi.fn(async () => true);
+    const onLogout = vi.fn(async () => ({ ok: true as const }));
     renderAccount({
-      account: { ...ACCOUNT, logged_in: false, email: null },
-      onOpenMobileExport: () => {},
+      identityProblem: "account_blocked",
+      onSwitchAccount,
+      onLogout,
     });
-    expect(screen.getByText("在其它设备上使用")).toBeTruthy();
-    expect(
-      screen.getByText("在手机或电脑上导入你的节点。"),
-    ).toBeTruthy();
+
+    expect(screen.queryByText("余额")).toBeNull();
+    expect(screen.queryByRole("button", { name: "充值" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "退出登录" })).toBeNull();
+    expect(screen.getByText(/这个账户已停用/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "换一个账户" }));
+    await waitFor(() => expect(onSwitchAccount).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "退出这台设备" }));
+    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
   });
 });
 

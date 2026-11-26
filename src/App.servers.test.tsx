@@ -587,7 +587,7 @@ describe("下单成功后回到详情", () => {
 });
 
 describe("设备身份丢失后的恢复入口", () => {
-  it("账号菜单给「重新注册设备」，点击后重新注册并回到正常态", async () => {
+  it("设置 › 账户给「重新注册设备」，点击后重新注册并回到正常态", async () => {
     prepare([]);
     let recovered = false;
     vi.spyOn(bridge, "myServerList").mockImplementation(async () => {
@@ -687,7 +687,7 @@ describe("设备 / 账户被停用的出路", () => {
     expect(
       await screen.findByRole("button", { name: "账户，未登录" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
   }, 15_000);
 
   it("账户停用：主行动「换一个账户」重新注册设备并打开登录", async () => {
@@ -828,7 +828,7 @@ describe("设备 / 账户被停用的出路", () => {
     ).toBeTruthy();
   }, 15_000);
 
-  it("收到 my-server-account-cleared 后收起菜单并回到未登录", async () => {
+  it("收到 my-server-account-cleared 后账户页回到未登录", async () => {
     prepare([]);
 
     render(<App />);
@@ -838,7 +838,7 @@ describe("设备 / 账户被停用的出路", () => {
       await screen.findByRole("button", { name: "账户，me@example.com" }),
     );
     expect(
-      await screen.findByRole("dialog", { name: "账户菜单" }),
+      await screen.findByRole("dialog", { name: "设置" }),
     ).toBeTruthy();
 
     act(() => {
@@ -853,9 +853,9 @@ describe("设备 / 账户被停用的出路", () => {
     expect(
       await screen.findByRole("button", { name: "账户，未登录" }),
     ).toBeTruthy();
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "账户菜单" })).toBeNull(),
-    );
+    const settings = screen.getByRole("dialog", { name: "设置" });
+    expect(await within(settings).findByRole("button", { name: "登录" })).toBeTruthy();
+    expect(within(settings).queryByText("me@example.com")).toBeNull();
   }, 15_000);
 
   it("account_blocked 优先于身份丢失", async () => {

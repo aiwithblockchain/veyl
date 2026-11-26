@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.32.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38）。**第 5 组完成，工具面 38。**
+> 契约版本：`3.33.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.33.0 行登记表移除 `account.mobile`，工具数不变）。**第 5 组完成，工具面 38。**
 >
-> ⚠️ 本文件 3.32.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.33.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -1925,7 +1925,6 @@ type OpenSettingsData = {
 | `ai.other` | 其他 AI 服务 |
 | `account.login` | 登录 / 退出登录 |
 | `account.balance` | 余额与充值 |
-| `account.mobile` | 在手机上使用（3.22.0 新增；打开设置 › 账户并高亮这一行，不打开弹层、不读 URL） |
 | `advanced.core` | 运行时核心版本 |
 | `advanced.helper` | 系统助手（helper） |
 | `advanced.logs` | 日志目录 |
@@ -2441,6 +2440,12 @@ type LlmProvidersData = {
 ---
 
 ## 8. 变更记录
+
+### 3.33.0（未发布，2026-11-26：`OpenSettings` 行登记表移除 `account.mobile`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.33.0`；§4.50 行登记表移除 `account.mobile`（该行随账号浮层删除，设置 › 账户不再有「在其它设备上使用」行），登记表 12 → 11 项（`src-tauri/src/tools/settings.rs` 的 `SETTINGS_ROWS` 与 `envelope.rs` 的 `CONTRACT_VERSION` 同步）。工具总数不变 | 行登记收缩 | 账号浮层删除（2026-11-26） |
 
 ### 3.32.0（未发布，2026-11-25：第 5 组第二片，新增 `LlmProviders`，37 → 38）
 

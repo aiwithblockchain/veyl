@@ -991,29 +991,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const openLogin = () => setLoginOpen(true);
   const closeLogin = () => setLoginOpen(false);
 
-  /**
-   * 查看账单前的登录校验：只在购买服务器和查看账单时需要登录。
-   * Host 回 auth_required 时沿用同一套登录弹窗；返回值告诉调用方要不要继续。
-   */
-  const requestBills = useCallback(async (): Promise<boolean> => {
-    if (!loggedIn) {
-      setLoginOpen(true);
-      return false;
-    }
-    const source = (bridge as AccountCapable).myServerWallet;
-    if (!source) return true;
-    try {
-      await source.call(bridge);
-      return true;
-    } catch (error) {
-      if (AUTH_REASONS.has(errorReason(error))) {
-        setLoginOpen(true);
-        return false;
-      }
-      // 余额读不到不影响账单入口；账单接口接入后按它自己的错误处理。
-      return true;
-    }
-  }, [bridge, loggedIn]);
   const openTopUp = () => {
     setTopupOpen(true);
     void refreshWallet({ trigger: "topup" });
@@ -1231,7 +1208,6 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
     loginOpen,
     openLogin,
     closeLogin,
-    requestBills,
     loginStart,
     loginVerify,
     topupOpen,

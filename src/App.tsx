@@ -91,7 +91,6 @@ import { readPanelOpen, writePanelChoice } from "./ui/panelPreference";
 import { ASSISTANT_MIN, RAIL_MIN } from "./ui/layout";
 import { IconConsole, IconServer, IconSliders } from "./components/icons";
 import { AccountAvatar } from "./components/AccountAvatar";
-import { AccountMenu } from "./components/AccountMenu";
 import { usePaneLayout } from "./ui/usePaneLayout";
 import { activeSession, chatReducer, createInitialState, createSession, nextId } from "./state/chatStore";
 import { t as translate, useT } from "./i18n";
@@ -463,7 +462,6 @@ export default function App() {
   };
   // 再点一次已激活的「我的服务器」图标：回到列表根（默认第一台）。
   const [serversRootSignal, setServersRootSignal] = useState(0);
-  const [accountMenu, setAccountMenu] = useState<"nav" | null>(null);
   const myServers = useMyServers(bridge, {
     active: destination === "servers",
     rootSignal: serversRootSignal,
@@ -512,7 +510,7 @@ export default function App() {
       }
     },
   });
-  /** 账号菜单同一时刻只开一个：导航头像或左栏账号行。 */
+  /** 主动退出登录：区分随后到来的登录过期提示。 */
   const userLogoutRef = useRef(false);
   const wasLoggedInRef = useRef(false);
 
@@ -541,28 +539,6 @@ export default function App() {
     myServers.loggedIn,
     myServers.account?.account_id,
   ]);
-  // 查看账单拉起的登录成功了：回到账户页，账单入口保持可见。
-  useEffect(() => {
-    const pending = pendingBillsRef.current;
-    if (!pending) return;
-    if (myServers.loginOpen) {
-      pendingBillsRef.current = "seen";
-      return;
-    }
-    if (pending !== "seen") return;
-    pendingBillsRef.current = null;
-    if (!myServers.loggedIn) return; // 登录框关了但没登录：用户取消
-    openSettings("account");
-    setAppNotice({
-      level: "info",
-      text: translate("app.billsNotice"),
-    });
-  }, [myServers.loggedIn, myServers.loginOpen]);
-
-  // 账号菜单：登出后收起。
-  useEffect(() => {
-    if (!myServers.loggedIn) setAccountMenu(null);
-  }, [myServers.loggedIn]);
   // 登录过期：用户主动退出时不提示，其余掉线给一次 toast。
   useEffect(() => {
     const was = wasLoggedInRef.current;
@@ -595,8 +571,6 @@ export default function App() {
       cancelled = true;
     };
   }, [bridge]);
-  /** 从「查看账单」拉起的登录：成功后回到账户页。 */
-  const pendingBillsRef = useRef<"waiting" | "seen" | null>(null);
   const destinationRef = useRef(destination);
   destinationRef.current = destination;
   /** 正在为问题报告开会话并发送开场：期间禁用三处入口。 */
@@ -2630,28 +2604,12 @@ export default function App() {
 
   const handleDiagnose = handleDiagnoseConnection;
 
-  // 查看账单：先确认登录；没登录就拉起登录，成功后回到账户页。
-  const handleViewBills = async () => {
-    pendingBillsRef.current = "waiting";
-    const allowed = await myServers.requestBills();
-    if (!allowed) {
-      closeSettings();
-      return;
-    }
-    pendingBillsRef.current = null;
-    setAppNotice({
-      level: "info",
-      text: translate("app.billsNotice"),
-    });
-  };
-
-  // 账号菜单里的退出登录：不二次确认，成功后给一次 toast。
+  // 账号页里的退出登录：不二次确认，成功后给一次 toast。
   const handleAccountLogout = async () => {
     const wasLoggedIn = myServers.loggedIn;
     userLogoutRef.current = true;
     const result = await myServers.logout();
     if (result.ok) {
-      setAccountMenu(null);
       setAppNotice({ level: "info", text: translate("app.loggedOut") });
       // 原本就没登录时不会触发过期 effect，这里自己把标志清掉。
       if (!wasLoggedIn) userLogoutRef.current = false;
@@ -2666,8 +2624,9 @@ export default function App() {
   const handleSwitchAccount = async () => {
     const ok = await myServers.reRegister();
     if (ok) {
+      // 登录弹窗要看得见：设置不能让它在下面。
+      closeSettings();
       myServers.openLogin();
-      setAccountMenu(null);
     }
     return ok;
   };
@@ -3036,7 +2995,6 @@ export default function App() {
                 ? t("activity.accountError")
                 : t("activity.account")
             }
-            aria-expanded={accountMenu === "nav"}
             onClick={() => {
               if (
                 myServers.accountError &&
@@ -3050,7 +3008,7 @@ export default function App() {
                 myServers.openLogin();
                 return;
               }
-              setAccountMenu((current) => (current === "nav" ? null : "nav"));
+              openSettings("account");
             }}
           >
             <AccountAvatar
@@ -3062,25 +3020,6 @@ export default function App() {
               <span className="activity__dot" aria-hidden="true" />
             ) : null}
           </button>
-          {accountMenu === "nav" && myServers.loggedIn ? (
-            <AccountMenu
-              email={myServers.account?.email ?? null}
-              wallet={myServers.wallet}
-              walletLoading={myServers.walletLoading}
-              walletRefreshing={myServers.walletRefreshing}
-              walletError={myServers.walletError}
-              walletStale={myServers.walletStale}
-              identityProblem={myServers.identityProblem}
-              onTopUp={() => myServers.openTopUp()}
-              onRefreshWallet={(trigger) =>
-                void myServers.refreshWallet({ trigger })
-              }
-              onReRegister={() => myServers.identityAction()}
-              onSwitchAccount={handleSwitchAccount}
-              onLogout={handleAccountLogout}
-              onClose={() => setAccountMenu(null)}
-            />
-          ) : null}
         </div>
       </nav>
       {destination === "servers" ? (
@@ -3351,6 +3290,7 @@ export default function App() {
           onRetry={() => void myServers.refreshWallet({ trigger: "retry" })}
           onTopUp={myServers.topup}
           onClose={myServers.closeTopUp}
+          nested={settingsOpen}
         />
       ) : null}
 
@@ -3448,13 +3388,12 @@ export default function App() {
           closeSettings();
           myServers.openLogin();
         }}
-        onTopUp={() => {
-          closeSettings();
-          myServers.openTopUp();
-        }}
-        onViewBills={() => void handleViewBills()}
-        mobileExportOpen={mobileExportOpen}
-        trapPaused={aiRequiredOpen}
+        onTopUp={() => myServers.openTopUp()}
+        identityProblem={myServers.identityProblem}
+        onReRegister={() => myServers.identityAction()}
+        onSwitchAccount={handleSwitchAccount}
+        onLogout={handleAccountLogout}
+        trapPaused={aiRequiredOpen || myServers.topupOpen}
         syncInterval={syncInterval ?? 240}
         syncIntervalUnsaved={syncIntervalUnsaved}
         onSyncIntervalChange={changeSyncInterval}
@@ -3463,7 +3402,6 @@ export default function App() {
         lastSyncedAt={serverSync.lastSyncedAt}
         syncResult={serverSync.lastResult}
         syncResultAt={serverSync.lastResultAt}
-        onOpenMobileExport={openMobileExport}
       />
 
       {mobileExportOpen ? (
