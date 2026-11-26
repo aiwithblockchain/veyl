@@ -50,7 +50,6 @@ import { useServerSync } from "./myservers/useServerSync";
 import { uiLog } from "./log/uiLog";
 import { rotateFailureReason, rotateNodeCredentials } from "./myservers/rotateCredentials";
 import { staleConfigNodeId } from "./myservers/staleConfig";
-import { repairAvailableFor } from "./myservers/repairAvailability";
 import type {
   ConnectionFacts,
   ConnectionLocalCheck,
@@ -3181,17 +3180,6 @@ export default function App() {
           onRefreshAccount={() => void myServers.refreshAccount()}
           onRetry={() => void myServers.retry()}
           onChanged={() => void myServers.refresh()}
-          repairAvailable={
-            myServers.selected !== null &&
-            diagnosisEligibleServer(myServers.selected) &&
-            repairAvailableFor(
-              myServers.selected.local_node_id,
-              vpn.activeConfig,
-              nodeProbes.results,
-              nodeProbes.probing,
-            )
-          }
-          onDiagnose={handleAnalyzeNode}
           onGone={() => myServers.clearSelection()}
           onRebuilt={myServers.rebuilt}
           onRetryDetail={myServers.retryDetail}

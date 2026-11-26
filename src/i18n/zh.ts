@@ -1087,7 +1087,6 @@ export const zh = {
   "detail.upgradeFailed.busy": "节点正在执行其他操作，稍后再试。",
   "detail.upgradeFailed.node": "节点没能完成升级，稍后可以再检查一次。",
   "detail.upgradeFailed.generic": "没能升级。节点可能暂时连不上，稍后再试。",
-  "detail.repair": "智能修复",
 
   // 新建节点向导
   "wizard.back": "返回",

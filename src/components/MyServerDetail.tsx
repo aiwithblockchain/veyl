@@ -47,10 +47,6 @@ interface Props {
   onForget: (serverId: string, nodeId: string) => Promise<void>;
   /** 改名成功：用返回的完整对象更新列表与详情，不二次拉取。 */
   onRenamed?: (server: MyServer) => void;
-  /** 这台服务器的本地节点最近一次探测不可达：显示「智能分析」入口。 */
-  repairAvailable?: boolean;
-  /** 打开节点诊断面板；面板与命令依赖由 App 统一构造。 */
-  onDiagnose?: (target: { serverId: string; nodeName: string }) => void;
 }
 
 /** 服务端允许对 destroying 再发一次销毁；界面等这么久才放开重试入口。 */
@@ -135,8 +131,6 @@ export function MyServerDetail({
   onGone,
   onForget,
   onRenamed,
-  repairAvailable = false,
-  onDiagnose,
 }: Props) {
   const tr = useT();
   const language = useLanguage();
@@ -944,21 +938,6 @@ export function MyServerDetail({
             </>
           ) : (
             <>
-              {ready && !readOnly && repairAvailable && onDiagnose ? (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  disabled={locked || confirming}
-                  onClick={() =>
-                    onDiagnose({
-                      serverId: server.server_id,
-                      nodeName: server.name,
-                    })
-                  }
-                >
-                  {tr("diagnosis.entry")}
-                </button>
-              ) : null}
               {deficient && onTopUp && !readOnly ? (
                 <button
                   type="button"

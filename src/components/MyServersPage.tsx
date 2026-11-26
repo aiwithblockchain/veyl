@@ -58,10 +58,6 @@ interface Props {
   pendingServer?: boolean;
   /** 改名成功：用返回的完整对象更新列表与详情。 */
   onRenamed?: (server: MyServer) => void;
-  /** 选中服务器的本地节点最近一次探测不可达。 */
-  repairAvailable?: boolean;
-  /** 打开节点诊断面板（App 统一构造依赖）。 */
-  onDiagnose?: (target: { serverId: string; nodeName: string }) => void;
 }
 
 /**
@@ -98,8 +94,6 @@ export function MyServersPage({
   onGoConnect,
   pendingServer = false,
   onRenamed,
-  repairAvailable = false,
-  onDiagnose,
 }: Props) {
   const t = useT();
   // 会话过期：邮箱账户明确未登录、且本地会话时刻已过；设备身份不走这句。
@@ -185,8 +179,6 @@ export function MyServersPage({
             onGone={onGone}
             onForget={onForget}
             onRenamed={onRenamed}
-            repairAvailable={repairAvailable}
-            onDiagnose={onDiagnose}
           />
         )}
       </div>

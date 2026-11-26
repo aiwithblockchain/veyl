@@ -1156,7 +1156,6 @@ export const en: Record<MessageKey, string> = {
     "The node couldn't finish the upgrade. You can check again later.",
   "detail.upgradeFailed.generic":
     "Couldn't upgrade. The node may be temporarily unreachable; try again later.",
-  "detail.repair": "Smart repair",
 
   // New node wizard
   "wizard.back": "Back",
