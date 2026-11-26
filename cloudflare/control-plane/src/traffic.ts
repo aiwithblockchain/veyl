@@ -208,12 +208,37 @@ export async function handleTraffic(
     return agentJson({ ok: true });
   }
 
-  // §6.7：上报刷新活跃时间，但控制面不据此做任何动作。
+  // §6.7：上报刷新活跃时间。除清失联标记外，控制面不据心跳做任何动作——
+  // 而上报就是「机器还在」的证据：清掉标记、恢复计费与额度增长
+  // （DO 的 404 可能只是一次抖动，标记本身从来不是终态）。
+  const recovered = server.provider_gone_at != null;
   await db
-    .prepare("UPDATE servers SET last_seen_at = ? WHERE id = ?")
+    .prepare("UPDATE servers SET last_seen_at = ?, provider_gone_at = NULL WHERE id = ?")
     .bind(now, server.id)
     .run()
-    .catch(() => {});
+    .catch((error) =>
+      console.warn(
+        `[traffic] gone_flag_clear_failed server=${server.id} error=${String(error)}`,
+      ),
+    );
+  if (recovered) {
+    await db
+      .prepare(
+        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'billing.gone_recovered', ?)",
+      )
+      .bind(
+        now,
+        server.account_id,
+        server.id,
+        JSON.stringify({ provider_gone_at: Number(server.provider_gone_at), seen_at: now }),
+      )
+      .run()
+      .catch((error) =>
+        console.warn(
+          `[traffic] audit_failed action=billing.gone_recovered server=${server.id} error=${String(error)}`,
+        ),
+      );
+  }
 
   // 额度未知的旧行（transfer_gib = 0）只累计，不扣费——没有月额度就算不出公平的超支。
   if (Math.round(Math.max(0, Number(server.transfer_gib ?? 0)) * GIB) > 0) {

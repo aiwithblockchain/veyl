@@ -1131,10 +1131,23 @@ export class FakeD1 {
       return { used: sum("bytes"), released: sum("released_bytes"), charged: sum("charged_cents") };
     }
     if (sql.startsWith("update servers set last_seen_at") && !sql.includes("agent_version")) {
-      // 流量上报只刷新活跃时间；agent.report 的完整登记语句另有分支。
+      // 流量上报刷新活跃时间；带 provider_gone_at 的那版还会清掉失联标记。
       const [lastSeen, id] = a;
       const server = this.tables.servers.find((s) => s.id === id);
-      if (server) server.last_seen_at = lastSeen;
+      if (server) {
+        server.last_seen_at = lastSeen;
+        if (sql.includes("provider_gone_at = null")) server.provider_gone_at = null;
+      }
+      return null;
+    }
+    if (sql.startsWith("update servers set provider_gone_at = ?")) {
+      // 失联标记只在未标记时落一次（SQL 侧 `AND provider_gone_at IS NULL`）。
+      const [goneAt, updatedAt, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server && server.provider_gone_at == null) {
+        server.provider_gone_at = goneAt;
+        server.updated_at = updatedAt;
+      }
       return null;
     }
     if (sql.startsWith("update servers set last_seen_at")) {
@@ -1792,7 +1805,7 @@ export class FakeD1 {
         .slice(0, Number(limit))
         .map((row) => ({ id: row.id }));
     }
-    if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at from servers")) {
+    if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at, provider_gone_at from servers")) {
       // 额度池现算：账号下每台机器（含已销毁行，由 releasedBytes 按 destroyed_at 截止）。
       return this.tables.servers
         .filter((server) => server.account_id === a[0])
@@ -1802,6 +1815,7 @@ export class FakeD1 {
           billing_anchor_at: server.billing_anchor_at ?? 0,
           created_at: server.created_at ?? 0,
           destroyed_at: server.destroyed_at ?? null,
+          provider_gone_at: server.provider_gone_at ?? null,
         }));
     }
     if (sql.startsWith("select coalesce(sum(t.bytes), 0) as used")) {
@@ -2006,6 +2020,7 @@ export class FakeD1 {
             row.account_id === a[0] &&
             row.billing_state === "expired" &&
             row.destroyed_at == null &&
+            row.provider_gone_at == null &&
             row.provider_id != null,
         )
         .slice(0, 20)
@@ -2018,11 +2033,12 @@ export class FakeD1 {
           billing_state: row.billing_state ?? "expired",
         }));
     }
-    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers")) {
+    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state, provider_id, last_seen_at, ready_at, provider_gone_at from servers")) {
       return this.tables.servers
         .filter((row) => {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
+          if (row.provider_gone_at != null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
           if (Number(row.daily_price_cents ?? 0) <= 0) return false;
           if (Number(row.billing_anchor_at ?? 0) <= 0) return false;
@@ -2043,6 +2059,10 @@ export class FakeD1 {
           billing_anchor_at: row.billing_anchor_at ?? 0,
           paid_until: row.paid_until ?? 0,
           billing_state: row.billing_state ?? "active",
+          provider_id: row.provider_id ?? null,
+          last_seen_at: row.last_seen_at ?? null,
+          ready_at: row.ready_at ?? null,
+          provider_gone_at: row.provider_gone_at ?? null,
         }));
     }
     if (sql.startsWith("select a.id as account_id")) {
@@ -2067,11 +2087,12 @@ export class FakeD1 {
         .filter((s) => s.account_id === a[0] && s.destroyed_at === null)
         .map((s) => ({ node_port: s.node_port }));
     }
-    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers")) {
+    if (sql.startsWith("select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state, provider_id, last_seen_at, ready_at, provider_gone_at from servers")) {
       return this.tables.servers
         .filter((row) => {
           if (row.destroyed_at != null) return false;
           if (row.provider_id == null) return false;
+          if (row.provider_gone_at != null) return false;
           if (Number(row.paid_until ?? 0) <= 0) return false;
           if (Number(row.daily_price_cents ?? 0) <= 0) return false;
           if (Number(row.billing_anchor_at ?? 0) <= 0) return false;
@@ -2092,6 +2113,10 @@ export class FakeD1 {
           billing_anchor_at: row.billing_anchor_at ?? 0,
           paid_until: row.paid_until ?? 0,
           billing_state: row.billing_state ?? "active",
+          provider_id: row.provider_id ?? null,
+          last_seen_at: row.last_seen_at ?? null,
+          ready_at: row.ready_at ?? null,
+          provider_gone_at: row.provider_gone_at ?? null,
         }));
     }
     if (sql.startsWith("select a.id as account_id")) {

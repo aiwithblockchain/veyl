@@ -4,6 +4,7 @@
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { refundProvision } from "./provision";
+import { getDroplet } from "./providers/digitalocean";
 import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry, type WalletEnv } from "./wallet";
 
@@ -43,10 +44,24 @@ interface BillingRow {
   billing_state: string;
 }
 
+/** `collectDue` 多带四列，只给「失联判定」用；结算本身不需要。 */
+interface DueRow extends BillingRow {
+  provider_id: string | null;
+  last_seen_at: number | null;
+  ready_at: number | null;
+  provider_gone_at: number | null;
+}
+
 export interface BillingReport {
   renewed: number;
   /** 窗口内扣不动、已停机销毁的台数（余额不足）。 */
   unpaidDestroyed: number;
+  /** DO 侧确认已不存在、本轮停止计费的台数（不销毁）。 */
+  providerGone: number;
+  /** 本轮真的打了 DO 存在性查询的台数（含判「还在」与判「消失」）：探测量级一眼可见。 */
+  providerProbed: number;
+  /** 心跳静默但 DO 查询没给出结论（超时/5xx/无令牌）的台数：下一轮再查，仍照常扣。 */
+  providerUnknown: number;
   pastDue: number;
   expired: number;
   rebuilt: number;
@@ -86,7 +101,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -101,6 +116,14 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
 
   for (const server of due) {
     try {
+      // 先确认 DO 侧还在不在，再谈钱：不存在的机器既不该扣费，也不该按「余额不足」销毁。
+      const check = await markProviderGone(env, server, now);
+      if (check.probed) report.providerProbed += 1;
+      if (check.verdict === "gone") {
+        report.providerGone += 1;
+        continue;
+      }
+      if (check.verdict === "unknown") report.providerUnknown += 1;
       const result = await settleServer(env, server, now, { delinquent: false });
       // 收集之后才被销毁：销毁已按当时 paid_until 退款，这里不能再扣。
       if (result.reason === "destroyed") continue;
@@ -260,27 +283,29 @@ async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> 
  * 取本轮到期的服务器：游标分页，避免「永远只扣前 50 台」。
  * expired 不参与（§4.6：停机期间不产生费用），只由充值后的恢复路径处理。
  */
-async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
+async function collectDue(env: BillingEnv, now: number): Promise<DueRow[]> {
   const db = env.DB!;
   const stored = await db
     .prepare("SELECT value FROM billing_cursor WHERE id = 'servers'")
     .first<{ value: string }>();
   let cursor = stored?.value ?? "";
-  const rows: BillingRow[] = [];
+  const rows: DueRow[] = [];
   let exhausted = false;
 
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const result = await db
       .prepare(
-        "SELECT id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state FROM servers " +
+        "SELECT id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state, " +
+          "provider_id, last_seen_at, ready_at, provider_gone_at FROM servers " +
           "WHERE destroyed_at IS NULL AND provider_id IS NOT NULL AND paid_until > 0 " +
           "AND daily_price_cents > 0 AND billing_anchor_at > 0 " +
           "AND billing_state <> 'expired' AND billing_state <> 'pending' " +
+          "AND provider_gone_at IS NULL " +
           "AND state IN ('booting', 'installing', 'verifying', 'healthy', 'active') " +
           "AND paid_until <= ? AND id > ? ORDER BY id LIMIT ?",
       )
       .bind(now + PREPAY_MS, cursor, PAGE_SIZE)
-      .all<BillingRow>();
+      .all<DueRow>();
     const pageRows = result.results ?? [];
     rows.push(...pageRows);
     if (pageRows.length < PAGE_SIZE) {
@@ -295,6 +320,82 @@ async function collectDue(env: BillingEnv, now: number): Promise<BillingRow[]> {
     .bind(exhausted ? "" : cursor)
     .run();
   return rows;
+}
+
+/** agent 30 分钟必报一次（空闲也报 0 字节）；静默超过这个时间才值得花一次 DO 查询。 */
+const GONE_PROBE_AFTER_MS = 2 * 60 * 60 * 1000;
+
+type ProviderGoneVerdict = "gone" | "alive" | "unknown";
+
+interface ProviderGoneCheck {
+  verdict: ProviderGoneVerdict;
+  /** 本轮真的打了 DO（不论结论）：上线第一轮要能从 cron 报告里看出探测量级。 */
+  probed: boolean;
+}
+
+/**
+ * 用户在 DO 后台直接删掉 droplet 时，我们自己的表没有任何痕迹（迁移 0017）：
+ * `state` 还是 active、`destroyed_at` 为空，于是照常扣费、额度照常涨。
+ * 只在「到期待扣 + 心跳静默超过 2 小时」的交集上问一次 DO：
+ *
+ * - 404：唯一正向的「不存在」信号，落 `provider_gone_at`，本轮不扣、不销毁；
+ * - 200：机器还在。agent 挂了不是停计费的理由（计费不看在线），照常扣；
+ * - 超时 / 5xx / 429 / 401 / 没配令牌：**不下结论**，本轮照常扣、下一轮再查。
+ *   绝不能「查不出来就免费」——那会把一次 DO 抖动变成全站免单。
+ */
+async function markProviderGone(
+  env: BillingEnv,
+  server: DueRow,
+  now: number,
+): Promise<ProviderGoneCheck> {
+  const db = env.DB;
+  if (!db) return { verdict: "unknown", probed: false };
+  if (server.provider_gone_at != null) return { verdict: "gone", probed: false };
+  // 心跳优先；0010 之前建的老机器没有心跳，退到 ready_at / 计费锚点当「最后一次已知存活」——
+  // 否则恰恰是这类最老的机器永远绕过检测，而它们最可能早就被删了。
+  // 已结算行必有其一（collectDue 要求 `billing_anchor_at > 0`）。
+  const seen = server.last_seen_at ?? server.ready_at ?? server.billing_anchor_at;
+  if (now - Number(seen) <= GONE_PROBE_AFTER_MS) return { verdict: "alive", probed: false };
+  if (!env.DO_API_TOKEN || !server.provider_id) return { verdict: "unknown", probed: false };
+
+  const droplet = await getDroplet(env.DO_API_TOKEN, server.provider_id);
+  if (droplet.ok) return { verdict: "alive", probed: true };
+  if (droplet.status !== 404) return { verdict: "unknown", probed: true };
+
+  // 写入失败不能静默：标记没落库就等于这台继续扣费，下一轮还会重来。
+  await db
+    .prepare(
+      "UPDATE servers SET provider_gone_at = ?, updated_at = ? WHERE id = ? AND provider_gone_at IS NULL",
+    )
+    .bind(now, now, server.id)
+    .run()
+    .catch((error) =>
+      console.warn(`[billing] provider_gone_write_failed server=${server.id} error=${String(error)}`),
+    );
+  await db
+    .prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.provider_gone', ?)",
+    )
+    .bind(
+      now,
+      server.account_id,
+      server.id,
+      JSON.stringify({
+        provider_id: server.provider_id,
+        last_seen_at: server.last_seen_at ?? null,
+        ready_at: server.ready_at ?? null,
+        seen_at: Number(seen),
+        checked_at: now,
+      }),
+    )
+    .run()
+    .catch((error) =>
+      console.warn(`[billing] audit_failed action=server.provider_gone server=${server.id} error=${String(error)}`),
+    );
+  console.warn(
+    `[billing] provider_gone server=${server.id} provider_id=${server.provider_id} seen_at=${seen}`,
+  );
+  return { verdict: "gone", probed: true };
 }
 
 /** 当前是否还能扣费；行不存在、已销毁、正在销毁都不能。 */
@@ -468,7 +569,7 @@ export async function recoverExpiredServers(env: WalletEnv, accountId: string): 
     .prepare(
       "SELECT id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state FROM servers " +
         "WHERE account_id = ? AND billing_state = 'expired' AND destroyed_at IS NULL " +
-        "AND provider_id IS NOT NULL LIMIT 20",
+        "AND provider_gone_at IS NULL AND provider_id IS NOT NULL LIMIT 20",
     )
     .bind(accountId)
     .all<BillingRow>();

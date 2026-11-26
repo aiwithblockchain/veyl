@@ -51,6 +51,8 @@ function seedServer(db: FakeD1, overrides: Record<string, unknown> = {}) {
     created_at: anchor,
     updated_at: Date.now() - DAY,
     destroyed_at: null,
+    // 默认给一个新鲜心跳：现有用例都不关心失联判定，别让它们意外去打 DO。
+    last_seen_at: Date.now() - 60_000,
     ...overrides,
   });
 }
@@ -195,6 +197,23 @@ describe("按天续费", () => {
     expect(db.rows("wallet_ledger")).toHaveLength(0);
     expect(db.rows("servers")[0].billing_state).toBe("expired");
     expect(Number(db.rows("servers")[0].paid_until)).toBeLessThan(Date.now());
+  });
+
+  it("已失联的 expired 行不参与充值恢复：不能复扣一台 DO 侧已经没了的机器", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 10 * DAILY;
+    seedServer(db, {
+      paid_until: Date.now() - 3 * DAY,
+      billing_state: "expired",
+      provider_gone_at: Date.now() - DAY,
+    });
+
+    const recovered = await recoverExpiredServers(env as never, ACCOUNT);
+
+    expect(recovered).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")[0].billing_state).toBe("expired");
   });
 
   it("充值后恢复：补扣到 active", async () => {
@@ -1091,5 +1110,196 @@ describe("失败退款的补退扫描", () => {
 
     expect(report.refunded).toBe(0);
     expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+  });
+});
+
+describe("DO 侧已删除的机器（用户在 DO 后台直接删 droplet）", () => {
+  /** agent 30 分钟必报一次；超过 2 小时静默才值得查一次 DO。 */
+  const STALE = 3 * 3600 * 1000;
+
+  function stubDoGet(status: number, body: unknown = {}) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        calls.push(String(input));
+        return new Response(JSON.stringify(body), { status });
+      }),
+    );
+    return calls;
+  }
+
+  it("心跳静默 + DO 404：不扣费、不销毁、不按欠费处理", async () => {
+    const db = new FakeD1();
+    // 余额为 0：如果守卫顺序写错，这台会在同一轮被当成欠费销毁。
+    const env = envWith(db);
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    const calls = stubDoGet(404, { id: "not_found", message: "could not be found" });
+
+    const report = await runBilling(env as never);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("/droplets/4242");
+    expect(report.providerProbed).toBe(1);
+    expect(report.providerGone).toBe(1);
+    expect(report.renewed).toBe(0);
+    expect(report.unpaidDestroyed).toBe(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("healthy");
+    expect(server.destroyed_at).toBeNull();
+    expect(Number(server.provider_gone_at)).toBeGreaterThan(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.provider_gone"),
+    ).toHaveLength(1);
+  });
+
+  it("心跳静默 + DO 200：机器还在，agent 挂了也照常扣（计费不看在线）", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(200, {
+      droplet: {
+        id: 4242,
+        status: "active",
+        networks: { v4: [{ ip_address: "203.0.113.9", type: "public" }] },
+      },
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.renewed).toBe(1);
+    // 探了但结论是「还在」：探测量级必须可见，否则上线第一轮看不出打了多少 DO 请求。
+    expect(report.providerProbed).toBe(1);
+    expect(report.providerGone).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
+    expect(db.rows("servers")[0].provider_gone_at ?? null).toBeNull();
+  });
+
+  it("DO 查询失败（5xx/超时/没令牌）：不下结论，照常扣，下一轮再查", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(500, { id: "server_error" });
+
+    const report = await runBilling(env as never);
+
+    // 绝不能「查不出来就免费」：一次 DO 抖动变成全站免单。
+    expect(report.renewed).toBe(1);
+    expect(report.providerProbed).toBe(1);
+    expect(report.providerUnknown).toBe(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
+    expect(db.rows("servers")[0].provider_gone_at ?? null).toBeNull();
+  });
+
+  it("心跳新鲜时根本不查 DO", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - 60_000 });
+    const calls = stubDoGet(200, { droplet: { id: 4242, status: "active" } });
+
+    const report = await runBilling(env as never);
+
+    expect(calls).toHaveLength(0);
+    expect(report.providerProbed).toBe(0);
+    expect(report.renewed).toBe(1);
+  });
+
+  it("没有心跳的老行：退到 ready_at 当最后一次已知存活，DO 404 照样停扣", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    // 0010 之前建的机器：`last_seen_at` 从来没人写，`ready_at` 在两个月前。
+    seedServer(db, {
+      paid_until: Date.now() - 60_000,
+      last_seen_at: null,
+      ready_at: Date.now() - 60 * DAY,
+    });
+    const calls = stubDoGet(404, { id: "not_found" });
+
+    const report = await runBilling(env as never);
+
+    expect(calls).toHaveLength(1);
+    expect(report.providerProbed).toBe(1);
+    expect(report.providerGone).toBe(1);
+    expect(report.renewed).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(Number(db.rows("servers")[0].provider_gone_at)).toBeGreaterThan(0);
+  });
+
+  it("心跳与 ready_at 都没有：退到计费锚点，不能让老行绕过检测", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, {
+      paid_until: Date.now() - 60_000,
+      last_seen_at: null,
+      ready_at: null,
+      billing_anchor_at: Date.now() - 60 * DAY,
+    });
+    const calls = stubDoGet(404, { id: "not_found" });
+
+    const report = await runBilling(env as never);
+
+    expect(calls).toHaveLength(1);
+    expect(report.providerGone).toBe(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+  });
+
+  it("ready_at 很新（刚建好的机器还没首报）：不查 DO，照常扣", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, {
+      paid_until: Date.now() - 60_000,
+      last_seen_at: null,
+      ready_at: Date.now() - 30 * 60 * 1000,
+    });
+    const calls = stubDoGet(404, { id: "not_found" });
+
+    const report = await runBilling(env as never);
+
+    expect(calls).toHaveLength(0);
+    expect(report.renewed).toBe(1);
+  });
+
+  it("已失联的行不再进 collectDue：第二轮既不扣费也不重复标记", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    const calls = stubDoGet(404, { id: "not_found" });
+
+    const first = await runBilling(env as never);
+    const second = await runBilling(env as never);
+
+    expect(first.providerGone).toBe(1);
+    expect(second.providerGone).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.provider_gone"),
+    ).toHaveLength(1);
+  });
+
+  it("恢复后重新计费：标记清空后下一次结算照常扣一天", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(404, { id: "not_found" });
+    await runBilling(env as never);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+
+    // agent 又上报了（traffic.ts 清标记的同一个动作），下一次结算恢复扣费。
+    db.rows("servers")[0].provider_gone_at = null;
+    db.rows("servers")[0].last_seen_at = Date.now();
+    const report = await runBilling(env as never);
+
+    expect(report.renewed).toBe(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(1);
   });
 });

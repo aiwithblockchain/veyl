@@ -14,6 +14,8 @@ export interface ReleasedRow {
   billing_anchor_at: number;
   created_at: number;
   destroyed_at: number | null;
+  /** DO 侧确认已不存在（迁移 0017）：额度在失联时刻封顶，之后的周期不再释放。 */
+  provider_gone_at: number | null;
 }
 
 /** 周期 = UTC 自然月，清零点在每个 1 日 00:00 UTC（§4.0）。 */
@@ -32,9 +34,9 @@ export function cycleStartOf(cycleId: string): number {
  * `min(月额度, 日额度 × (本周期存活天数 + 1))`，`+1` 是建机预付的那一天。
  * 存活天数只算本周期内，按整天向下取整。
  *
- * 计算截止 `destroyed_at ?? now`，周期开始前就已销毁的机器不计；
- * 因此周期内销毁的机器会把已累计额度留在账号池里（与 DO 团队级按存在秒累计一致），
- * 不按「未用额度作废」的字面读法反向多收用户。
+ * 计算截止 `min(destroyed_at, provider_gone_at, now)`：
+ * 周期开始前就已销毁 / 失联的机器不计；因此周期内停掉的机器会把已累计额度留在账号池里
+ * （与 DO 团队级按存在秒累计一致），不按「未用额度作废」的字面读法反向多收用户。
  *
  * 额度未知（旧行 / 目录缺 transfer）返回 0：不释放额度，也不据此扣费。
  */
@@ -43,13 +45,19 @@ export function releasedBytes(server: ReleasedRow, cycleId: string, now: number)
   if (monthly <= 0) return 0;
   const cycleStart = cycleStartOf(cycleId);
   const destroyedAt = server.destroyed_at == null ? null : Number(server.destroyed_at);
-  if (destroyedAt !== null && destroyedAt <= cycleStart) return 0;
-  const end = destroyedAt ?? now;
+  const goneAt = server.provider_gone_at == null ? null : Number(server.provider_gone_at);
+  const end = Math.min(destroyedAt ?? now, goneAt ?? now);
+  if (end <= cycleStart) return 0;
   // 起算点逐级回退，**0 也要当缺失**：结算前 `billing_anchor_at = 0`（orders.ts 建 pending 行），
   // 而 `??` 只跳过 null/undefined，会让尚未建机完成的机器从月初起算、凭空拿到整月份度。
   const pick = (value: number | null | undefined) =>
     typeof value === "number" && value > 0 ? value : null;
-  const anchor = pick(server.ready_at) ?? pick(server.billing_anchor_at) ?? server.created_at;
+  const settled = pick(server.ready_at) ?? pick(server.billing_anchor_at);
+  // 建机阶段就能销（destroy 只拦 destroyed），而 `+1` 的预付天会让每一台「从未结算就被销毁」的
+  // 机器白拿 monthly/28：造 28 台再立刻销毁 = 一个月的额度。没有结算记录就不该有额度。
+  if (destroyedAt !== null && settled === null) return 0;
+  // `created_at` 同样要跳过 0：真落成 0 时锚点退到 end，只剩一天份额，不会变回整月。
+  const anchor = settled ?? pick(server.created_at) ?? end;
   const from = Math.max(cycleStart, anchor);
   const days = Math.max(0, Math.floor((end - from) / DAY_MS));
   return Math.min(monthly, Math.floor((monthly / RELEASE_DAYS) * (days + 1)));

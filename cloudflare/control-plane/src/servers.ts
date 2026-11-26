@@ -79,6 +79,8 @@ interface ServerRow {
   created_at: number;
   updated_at: number;
   destroyed_at: number | null;
+  /** DO 侧确认已不存在（0017）：不再扣费、额度在失联时刻封顶；agent 再上报即清空。 */
+  provider_gone_at?: number | null;
   /** 激活成功的那一刻；旧机器为 null（用时未知）。 */
   ready_at?: number | null;
   /** 首次进入 installing / verifying 的时刻；进度上报只写一次。 */
@@ -151,6 +153,7 @@ function trafficFields(row: ServerRow, usedBytes: number, cycleId: string, now: 
       billing_anchor_at: row.billing_anchor_at,
       created_at: row.created_at,
       destroyed_at: row.destroyed_at,
+      provider_gone_at: row.provider_gone_at ?? null,
     },
     cycleId,
     now,

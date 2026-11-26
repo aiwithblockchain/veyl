@@ -17,6 +17,7 @@ interface ServerOptions {
   readyAt?: number;
   state?: string;
   destroyedAt?: number | null;
+  providerGoneAt?: number | null;
 }
 
 function serverRecord(id: string, options: ServerOptions, tokenHash: string | null) {
@@ -49,6 +50,7 @@ function serverRecord(id: string, options: ServerOptions, tokenHash: string | nu
     created_at: now,
     updated_at: now,
     destroyed_at: options.destroyedAt ?? null,
+    provider_gone_at: options.providerGoneAt ?? null,
     ready_at: options.readyAt ?? now,
     billing_anchor_at: now,
     transfer_gib: options.transferGib ?? 500,
@@ -114,6 +116,21 @@ describe("POST /v1/agent/traffic", () => {
     expect(db.rows("server_traffic")[0].bytes).toBe(GIB);
     // 未超出已释放额度，余额不动。
     expect(db.rows("accounts")[0].balance_cents).toBe(10_000);
+  });
+
+  it("失联标记被 agent 上报清空：恢复计费与额度增长，并留一条审计", async () => {
+    const db = new FakeD1();
+    // DO 404 可能只是一次抖动：标记从来不是终态，机器真的还在就会自己上报。
+    await seedServer(db, { providerGoneAt: Date.now() - 3600 * 1000 });
+    const env = envWith(db);
+
+    const response = await handleTraffic(trafficRequest(TOKEN, { seq: 1, delta_bytes: 0 }), env);
+
+    expect(response?.status).toBe(200);
+    expect(db.rows("servers")[0].provider_gone_at ?? null).toBeNull();
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "billing.gone_recovered"),
+    ).toHaveLength(1);
   });
 
   it("跨周期：按收到请求的 UTC 年月归到新行，用量与已扣金额从 0 起", async () => {

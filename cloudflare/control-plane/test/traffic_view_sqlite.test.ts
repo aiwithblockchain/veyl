@@ -48,6 +48,7 @@ interface ServerSpec {
   destroyedAt?: number | null;
   failureCode?: string | null;
   dismissedAt?: number | null;
+  providerGoneAt?: number | null;
   billingAnchorAt?: number;
   createdAt?: number;
   port?: number;
@@ -59,8 +60,8 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
   db.run(
     "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, " +
       "daily_price_cents, billing_anchor_at, state, node_port, transfer_gib, ready_at, failure_code, " +
-      "created_at, updated_at, destroyed_at, billing_state, dismissed_at) " +
-      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+      "created_at, updated_at, destroyed_at, billing_state, dismissed_at, provider_gone_at) " +
+      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
     spec.id,
     ACCOUNT,
     `ord_${spec.id}`,
@@ -75,6 +76,7 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
     createdAt,
     spec.destroyedAt ?? null,
     spec.dismissedAt ?? null,
+    spec.providerGoneAt ?? null,
   );
 }
 
@@ -366,6 +368,37 @@ describeSqlite("MyServer 流量四字段 · 真实 SQL", () => {
       });
 
       // 防「另写一份求和」：必须与扣费用的 accountTotals 逐字节一致。
+      const totals = await accountTotals(db as unknown as D1Database, ACCOUNT, CYCLE, NOW);
+      expect(body.traffic_pool).toEqual({
+        used_bytes: totals.used,
+        limit_bytes: totals.released,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("DO 侧已确认不存在的机器：额度停在失联时刻，不再是按 now 现算", async () => {
+    const { db, env, token } = await setup();
+    try {
+      addServer(db, {
+        id: "srv_provider_gone",
+        transferGib: 100,
+        providerGoneAt: NOW - 3 * DAY_MS,
+        port: 30015,
+      });
+
+      const response = await handleServers(listRequest(token), env as never);
+      expect(response?.status).toBe(200);
+      const body = (await response?.json()) as {
+        servers: ServerBody[];
+        traffic_pool: { used_bytes: number; limit_bytes: number };
+      };
+      const [server] = body.servers;
+      // 与「11 月 23 日 12 点销毁」同一份期望值：都是 23 天份。
+      expect(server.traffic_limit_bytes).toBe(LIMIT_100GIB_DESTROYED_NOV23);
+      expect(server.traffic_state).toBe("ok");
+      // 池子同源，不能另写一份求和。
       const totals = await accountTotals(db as unknown as D1Database, ACCOUNT, CYCLE, NOW);
       expect(body.traffic_pool).toEqual({
         used_bytes: totals.used,

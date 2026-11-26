@@ -35,7 +35,7 @@ export async function accountTotals(
     .first<{ used: number; charged: number }>();
   const servers = await db
     .prepare(
-      "SELECT transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at " +
+      "SELECT transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at, provider_gone_at " +
         "FROM servers WHERE account_id = ?",
     )
     .bind(accountId)
