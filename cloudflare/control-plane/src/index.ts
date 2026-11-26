@@ -49,8 +49,11 @@ export interface Env {
   ISSUE_SUBMIT_MODE?: string;
 }
 
-const SERVICE = "veyl-control-plane";const VERSION = "0.0.0";
-export const USER_AGENT = "veyl-control-plane/0.0.0";
+const SERVICE = "veyl-control-plane";
+const VERSION = "0.0.0";
+// 入口模块只能导出 handler：导出非函数值会让 workerd 在启动时抛
+// `Incorrect type for map entry 'USER_AGENT'`。
+const USER_AGENT = "veyl-control-plane/0.0.0";
 const DO_API = "https://api.digitalocean.com/v2";
 /** 回源超时必须短于目录租约（15 秒），否则租约过期前请求还在挂。 */
 const DO_TIMEOUT_MS = 10_000;
