@@ -145,6 +145,16 @@ type TestState = { state: "idle" | "running" | "ok" | "error"; text: string };
 
 type ResetPhase = "idle" | "confirm" | "running" | "result";
 
+/** 后端预算 15 秒，前端留 3 秒余量；到点就不再等，界面转入可关闭的结果态。 */
+const RESET_TIMEOUT_MS = 18_000;
+const RESET_TIMEOUT_SECONDS = RESET_TIMEOUT_MS / 1000;
+
+type ResetErrorState = {
+  /** notStarted = 命令直接失败；timeout = 18 秒没回结果，后台可能还在跑。 */
+  kind: "notStarted" | "timeout";
+  text: string;
+};
+
 type ResetStepKey =
   | "stop_runtime"
   | "stop_tun"
@@ -798,7 +808,10 @@ export function Settings({
   const [domainError, setDomainError] = useState<string | null>(null);
   const [resetPhase, setResetPhase] = useState<ResetPhase>("idle");
   const [resetResult, setResetResult] = useState<NetworkForceResetResult | null>(null);
-  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<ResetErrorState | null>(null);
+  const [resetElapsed, setResetElapsed] = useState(0);
+  /** 每次重置的编号；关闭弹层或重新发起后加一，晚到的结果据此丢弃。 */
+  const resetRunRef = useRef(0);
   const [lastReset, setLastReset] = useState<{
     at: number;
     total: number;
@@ -828,6 +841,19 @@ export function Settings({
   const resetCloseRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef(false);
   const copyTimerRef = useRef<number | null>(null);
+
+  // 运行中每秒更新已用时间：用户看得到等待在往前走，不是一句静止的「正在重置…」。
+  useEffect(() => {
+    if (resetPhase !== "running") return;
+    const started = Date.now();
+    setResetElapsed(0);
+    const timer = window.setInterval(
+      () => setResetElapsed(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [resetPhase]);
+
   useFocusTrap(
     open &&
       !consulting &&
@@ -970,7 +996,9 @@ export function Settings({
     setListTest(null);
     setPendingDelete(null);
     setDiagnosticNotice(null);
+    resetRunRef.current += 1;
     setResetPhase("idle");
+    setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
     setLastReset(null);
@@ -996,14 +1024,17 @@ export function Settings({
   const [recoverError, setRecoverError] = useState<string | null>(null);
 
   const closeReset = useCallback(() => {
-    if (resetPhase === "running") return;
+    // 18 秒后即使命令还没回来也放行：在途结果按编号丢弃，别把用户锁死在弹层里。
+    if (resetPhase === "running" && resetElapsed < RESET_TIMEOUT_SECONDS) return;
+    resetRunRef.current += 1;
     returnFocusRef.current = true;
     setResetPhase("idle");
+    setResetElapsed(0);
     setResetResult(null);
     setResetError(null);
     setResetCopy("idle");
     setRouteCopy("idle");
-  }, [resetPhase]);
+  }, [resetPhase, resetElapsed]);
 
   const closeSettings = useCallback(() => {
     setConsulting(false);
@@ -1295,9 +1326,9 @@ export function Settings({
       // 输入法取消组合的 Esc 不能冒到关窗逻辑：否则刚填的内容全丢。
       if (isComposingEvent(event)) return;
       if (event.key !== "Escape") return;
-      // 重置弹层在上层：先关它，运行中则完全忽略。
+      // 重置弹层在上层：先关它。18 秒内运行中是否放行由 closeReset 自己判断。
       if (resetPhase !== "idle") {
-        if (resetPhase !== "running") closeReset();
+        closeReset();
         return;
       }
       // 端口编辑态先拦下 Esc：只退编辑，不关设置。
@@ -1685,23 +1716,37 @@ export function Settings({
 
   const runNetworkReset = async () => {
     if (resetPhase === "running") return;
+    const runId = ++resetRunRef.current;
     setResetResult(null);
     setResetError(null);
     setResetCopy("idle");
     setRouteCopy("idle");
     setResetPhase("running");
+    let timer: number | null = null;
+    // 后端自己按 15 秒兜底；这里只兜「命令永远不回」，到点转成可关闭的结果态。
+    const timedOut = new Promise<null>((resolve) => {
+      timer = window.setTimeout(() => resolve(null), RESET_TIMEOUT_MS);
+    });
     try {
-      const result = await bridge.networkForceReset();
-      setResetResult(result);
-      setLastReset({
-        at: Date.now(),
-        total: result.steps.length,
-        failed: result.steps.filter((step) => resetStepStatus(step) !== "ok").length,
-      });
+      const result = await Promise.race([bridge.networkForceReset(), timedOut]);
+      // 弹层已被关闭或已重新发起：这次的结果在后台丢弃，不再碰界面。
+      if (resetRunRef.current !== runId) return;
+      if (result === null) {
+        setResetError({ kind: "timeout", text: t("settings.reset.timeoutSub") });
+      } else {
+        setResetResult(result);
+        setLastReset({
+          at: Date.now(),
+          total: result.steps.length,
+          failed: result.steps.filter((step) => resetStepStatus(step) !== "ok").length,
+        });
+      }
     } catch (error) {
-      setResetError(describeResetError(error));
+      if (resetRunRef.current !== runId) return;
+      setResetError({ kind: "notStarted", text: describeResetError(error) });
     } finally {
-      setResetPhase("result");
+      if (timer !== null) window.clearTimeout(timer);
+      if (resetRunRef.current === runId) setResetPhase("result");
     }
   };
 
@@ -1717,7 +1762,7 @@ export function Settings({
             exitIp: resetResult.exitIp,
             steps: resetResult.steps,
           }
-        : { error: resetError },
+        : { error: resetError?.text ?? null },
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
@@ -1737,7 +1782,15 @@ export function Settings({
   };
 
   const outcome = resetError
-    ? { kind: "failed" as const, title: t("settings.reset.notStarted"), sub: resetError }
+    ? {
+        kind: "failed" as const,
+        title: t(
+          resetError.kind === "timeout"
+            ? "settings.reset.timeoutTitle"
+            : "settings.reset.notStarted",
+        ),
+        sub: resetError.text,
+      }
     : resetResult
       ? resetOutcome(resetResult)
       : null;
@@ -3008,8 +3061,14 @@ export function Settings({
             ) : null}
 
             {resetPhase === "running" ? (
-              <div className="reset-running" role="status" aria-live="polite">
-                <p className="reset-running__text">{t("settings.reset.runningNote")}</p>
+              <div className="reset-running">
+                <p className="reset-running__text" role="status" aria-live="polite">
+                  {t("settings.reset.runningNote")}
+                </p>
+                {/* 每秒计时的行不进 live region：否则读屏每秒念一遍。 */}
+                <p className="reset-running__text" aria-hidden="true">
+                  {t("settings.reset.runningElapsed", { seconds: resetElapsed })}
+                </p>
                 <div
                   className="reset-progress"
                   role="progressbar"

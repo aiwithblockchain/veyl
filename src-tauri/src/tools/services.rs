@@ -1533,6 +1533,134 @@ fn tun_error_details(error: &crate::tun::backend::TunError) -> Value {
     })
 }
 
+/// `clear_plaintext` 这一步的本体：清明文配置、active.json 与运行记录。
+fn clear_plaintext_body(
+    manager: Arc<crate::runtime::RuntimeManager>,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+) -> Result<(usize, bool, bool), String> {
+    let removed = vpn_config::remove_all_profile_configs_checked(&config_dir)?;
+
+    // `remove_all_profile_configs_checked` 只清 `profile-*`，连接时 rename
+    // 出来的 `active.json` 同样是明文，要单独删。
+    let active_path = config_dir.join("active.json");
+    let active_removed = match std::fs::remove_file(&active_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("删除 active.json 失败：{error}")),
+    };
+
+    // 进程还活着就别删记录：那是下次启动安全回收的唯一线索。
+    // 用命令行核对，不只看 pid——pid 会被复用。
+    if manager.recorded_sing_box_is_alive() {
+        return Err("明文配置已清理；代理 sing-box 仍在运行，保留运行记录以便下次回收".into());
+    }
+    let pid_path = data_dir.join("runtime.pid");
+    let pid_removed = match std::fs::remove_file(&pid_path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("删除运行记录失败：{error}")),
+    };
+
+    Ok((removed, active_removed, pid_removed))
+}
+
+/// 明文清理这一步的结果 → 步骤。抽出来让阻塞调用与步骤组装分开。
+fn clear_plaintext_step(result: Result<(usize, bool, bool), String>) -> Value {
+    match result {
+        Ok((removed, active_removed, pid_removed)) => reset_step(
+            "clear_plaintext",
+            true,
+            format!(
+                "已清理 {removed} 个明文配置{}，{}",
+                if active_removed { "、active.json" } else { "" },
+                if pid_removed {
+                    "运行记录已删除"
+                } else {
+                    "没有残留的运行记录"
+                }
+            ),
+        ),
+        Err(error) => reset_step("clear_plaintext", false, error),
+    }
+}
+
+/// `clear_routes` 这一步的本体：只读系统路由表/接口名，必要时删残留路由。
+/// 抽成自由函数是为了能在 `spawn_blocking` + 超时里跑。
+#[cfg(target_os = "macos")]
+fn reset_clear_routes_body() -> Value {
+    let netstat = match crate::net_reset::read_netstat() {
+        Ok(output) => output,
+        Err(error) => {
+            return reset_step("clear_routes", false, format!("读取路由表失败：{error}"))
+        }
+    };
+    let live = match crate::net_reset::read_ifconfig() {
+        Ok(output) => crate::net_reset::parse_interface_names(&output),
+        Err(error) => {
+            // 读不到接口就无法判断哪条路由是残留：fail-closed。
+            // 这里既不能删，也不能给删除建议——照做会删掉正在用的 TUN。
+            return reset_step(
+                "clear_routes",
+                false,
+                format!("读取接口列表失败，未删除任何路由：{error}"),
+            );
+        }
+    };
+    let stale = crate::net_reset::stale_split_routes(&netstat, &live);
+    if stale.is_empty() {
+        return reset_step("clear_routes", true, "没有指向已消失 utun 的分流路由");
+    }
+
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for route in &stale {
+        match crate::net_reset::delete_route(&route.destination, &route.interface) {
+            Ok(()) => deleted.push(route.destination.clone()),
+            Err(error) => {
+                log::warn!("删除路由 {} 失败：{error}", route.destination);
+                failed.push(route.clone());
+            }
+        }
+    }
+
+    if failed.is_empty() {
+        return reset_step(
+            "clear_routes",
+            true,
+            format!("已删除分流路由 {}", deleted.join("、")),
+        );
+    }
+    // 改路由表要 root；这里不弹管理员，如实给出可复制的命令。
+    // 只对「接口确认已消失」的路由给建议（上面的 fail-closed 保证）。
+    let manual = failed
+        .iter()
+        .map(|route| {
+            format!(
+                "sudo route -n delete -net {} -ifscope {}（该接口已消失）",
+                route.destination, route.interface
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    reset_step(
+        "clear_routes",
+        false,
+        format!("路由残留需要手工清理：{manual}"),
+    )
+}
+
+
+
+#[cfg(not(target_os = "macos"))]
+fn reset_clear_routes_body() -> Value {
+    reset_step(
+        "clear_routes",
+        false,
+        "当前平台未实现路由检查；若 TUN 仍在接管流量请重启系统",
+    )
+}
+
 /// 强制重置里的一步。字段固定为 `{id, ok, detail}`，前端按 id 渲染。
 fn reset_step(id: &str, ok: bool, detail: impl Into<String>) -> Value {
     json!({ "id": id, "ok": ok, "detail": detail.into() })
@@ -1544,6 +1672,102 @@ fn reset_step(id: &str, ok: bool, detail: impl Into<String>) -> Value {
 /// 这正是「重置报 ok、网络没恢复」的成因，不能让退出码再冒充成功。
 fn flush_dns_verdict(resolved: bool, privileged_ok: bool, helper_enabled: bool) -> bool {
     resolved && (privileged_ok || !helper_enabled)
+}
+
+/// 单次解析探测的硬上限。`getaddrinfo` 不可中断，只能在等待侧限时。
+const DNS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 刷新 DNS 后等 mDNSResponder 回来的预算。原来是固定 20 次 ×150ms（注释写
+/// 「给它 3 秒」），但单次探测在断网时要 5–7 秒，20 次就是两分钟。
+const FLUSH_DNS_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 强制重置的总预算：到点必须返回。前端在 18 秒左右解锁关闭按钮，后端不许拖过 15 秒。
+const RESET_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+const RESET_STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+const RESET_DNS_RESTORE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+const RESET_PROXY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+const RESET_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+const RESET_ROUTES_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+const RESET_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+const RESET_PLAINTEXT_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+const RESET_VERIFY_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepTimeout {
+    TimedOut,
+    BudgetExhausted,
+}
+
+impl StepTimeout {
+    fn detail(self, cap: std::time::Duration) -> String {
+        match self {
+            Self::TimedOut => format!("超时：{:.0} 秒内未完成，已跳过", cap.as_secs_f32()),
+            Self::BudgetExhausted => {
+                format!("总预算 {} 秒已用完，未执行", RESET_TOTAL_BUDGET.as_secs())
+            }
+        }
+    }
+}
+
+/// 在总预算内跑一步：`min(cap, 剩余预算)`，到点返回 `Err`，由调用方写成红步。
+async fn run_bounded<F, T>(
+    deadline: tokio::time::Instant,
+    cap: std::time::Duration,
+    future: F,
+) -> Result<T, StepTimeout>
+where
+    F: std::future::Future<Output = T>,
+{
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(StepTimeout::BudgetExhausted);
+    }
+    match tokio::time::timeout(remaining.min(cap), future).await {
+        Ok(value) => Ok(value),
+        Err(_) => Err(StepTimeout::TimedOut),
+    }
+}
+
+/// 一次解析探测：`spawn_blocking` + 硬超时。后台线程会在 OS 自己的超时后退出。
+async fn probe_dns_once(timeout: std::time::Duration) -> bool {
+    let probe = tokio::task::spawn_blocking(move || crate::netcfg::dns_resolvable_within(timeout));
+    match tokio::time::timeout(timeout + std::time::Duration::from_millis(200), probe).await {
+        Ok(Ok(resolved)) => resolved,
+        _ => false,
+    }
+}
+
+/// 在预算内轮询解析探测：单次最多 `DNS_PROBE_TIMEOUT`，次数由预算推导。
+/// 探针自身卡死也会被这里的 `tokio::time::timeout` 截断。
+async fn wait_until_resolvable_with<F, Fut>(budget: std::time::Duration, mut probe: F) -> bool
+where
+    F: FnMut(std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let slice = DNS_PROBE_TIMEOUT.min(remaining);
+        let resolved =
+            tokio::time::timeout(slice + std::time::Duration::from_millis(200), probe(slice))
+                .await
+                .unwrap_or(false);
+        if resolved {
+            return true;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150).min(left)).await;
+    }
+}
+
+async fn wait_until_resolvable(budget: std::time::Duration) -> bool {
+    wait_until_resolvable_with(budget, probe_dns_once).await
 }
 
 /// 特权刷新失败的文案：不把 wire 码或「未知方法」这类内部字眼甩给用户。
@@ -1627,6 +1851,84 @@ struct ProxyResetFacts {
 }
 
 /// `restore_proxy` 的判定，与系统调用隔开以便直接构造事实做测试。
+/// 撤销系统代理并复核。抽成自由函数：重置要把整步挪进 `spawn_blocking`，
+/// 那里拿不到 `&self`，只能持有 `Arc<ProxyController>`。
+fn restore_system_proxy_with(proxy: &crate::proxy::ProxyController) -> anyhow::Result<()> {
+    let applied = proxy.applied_endpoint().ok().flatten();
+    if let Err(error) = proxy.disable() {
+        return Err(svc_error_with_details(
+            "PRECONDITION_FAILED",
+            format!("撤销系统代理失败：{error}"),
+            json!({ "reason": "proxy_restore_failed" }),
+        ));
+    }
+    if let Some(endpoint) = applied {
+        let still = proxy.endpoint_in_use(&endpoint).map_err(|error| {
+            svc_error_with_details(
+                "INTERNAL",
+                format!("校验系统代理失败：{error}"),
+                json!({ "reason": "proxy_restore_failed" }),
+            )
+        })?;
+        if !still.is_empty() {
+            return Err(svc_error_with_details(
+                "PRECONDITION_FAILED",
+                format!("{endpoint} 仍被 {} 个网络服务使用", still.len()),
+                json!({ "reason": "proxy_restore_failed", "services": still }),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `restore_proxy` 这一步的本体（同步实现，内部起系统命令）。
+fn reset_restore_proxy_body(
+    proxy: Arc<crate::proxy::ProxyController>,
+    applied: Option<crate::proxy::ProxyEndpoint>,
+    plan_port: Option<u16>,
+) -> Value {
+    // 与 cleanup_network 共用同一段「还原 + 复核」。
+    let disable_error = restore_system_proxy_with(&proxy)
+        .err()
+        .map(|error| user_message(&error));
+
+    // 备份丢失或还原失败时，系统代理可能还指着我们的端口。
+    // 只按「回环 + 这个端口」精确关掉，用户自己的代理一概不动。
+    let mut cleared_services = Vec::new();
+    let mut clear_error = None;
+    if (applied.is_none() || disable_error.is_some()) && plan_port.is_some() {
+        if let Some(port) = plan_port {
+            match crate::netcfg::disable_proxy_for_port(port) {
+                Ok(services) => cleared_services = services,
+                Err(error) => clear_error = Some(error),
+            }
+        }
+    }
+
+    let in_use = applied
+        .as_ref()
+        .and_then(|endpoint| proxy.endpoint_in_use(endpoint).ok());
+
+    let current = if applied.is_none() {
+        Some(match proxy.current_endpoint() {
+            Ok(value) => CurrentProxy::Known(value),
+            Err(error) => CurrentProxy::Unknown(error.to_string()),
+        })
+    } else {
+        None
+    };
+
+    judge_restore_proxy(&ProxyResetFacts {
+        applied,
+        plan_port,
+        disable_error,
+        clear_error,
+        cleared_services,
+        in_use,
+        current,
+    })
+}
+
 fn judge_restore_proxy(facts: &ProxyResetFacts) -> Value {
     if let Some(error) = &facts.disable_error {
         let mut detail = format!("恢复系统代理失败：{error}");
@@ -3750,30 +4052,11 @@ impl WiredServices {
 
     /// 清掉明文配置与运行记录。返回 `(profile 数, 是否删了 active.json, 是否删了 runtime.pid)`。
     fn clear_plaintext_action(&self) -> Result<(usize, bool, bool), String> {
-        let removed = vpn_config::remove_all_profile_configs_checked(&self.config_dir())?;
-
-        // `remove_all_profile_configs_checked` 只清 `profile-*`，连接时 rename
-        // 出来的 `active.json` 同样是明文，要单独删。
-        let active_path = self.config_dir().join("active.json");
-        let active_removed = match std::fs::remove_file(&active_path) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(format!("删除 active.json 失败：{error}")),
-        };
-
-        // 进程还活着就别删记录：那是下次启动安全回收的唯一线索。
-        // 用命令行核对，不只看 pid——pid 会被复用。
-        if self.manager.recorded_sing_box_is_alive() {
-            return Err("明文配置已清理；代理 sing-box 仍在运行，保留运行记录以便下次回收".into());
-        }
-        let pid_path = self.data_dir.join("runtime.pid");
-        let pid_removed = match std::fs::remove_file(&pid_path) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(format!("删除运行记录失败：{error}")),
-        };
-
-        Ok((removed, active_removed, pid_removed))
+        clear_plaintext_body(
+            Arc::clone(&self.manager),
+            self.data_dir.clone(),
+            self.config_dir(),
+        )
     }
 
     #[allow(dead_code)] // E3 重置网络与卸载清理的接缝，界面还没做
@@ -8822,31 +9105,7 @@ impl WiredServices {
     }
 
     fn restore_system_proxy(&self) -> anyhow::Result<()> {
-        let applied = self.proxy.applied_endpoint().ok().flatten();
-        if let Err(error) = self.proxy.disable() {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                format!("撤销系统代理失败：{error}"),
-                json!({ "reason": "proxy_restore_failed" }),
-            ));
-        }
-        if let Some(endpoint) = applied {
-            let still = self.proxy.endpoint_in_use(&endpoint).map_err(|error| {
-                svc_error_with_details(
-                    "INTERNAL",
-                    format!("校验系统代理失败：{error}"),
-                    json!({ "reason": "proxy_restore_failed" }),
-                )
-            })?;
-            if !still.is_empty() {
-                return Err(svc_error_with_details(
-                    "PRECONDITION_FAILED",
-                    format!("{endpoint} 仍被 {} 个网络服务使用", still.len()),
-                    json!({ "reason": "proxy_restore_failed", "services": still }),
-                ));
-            }
-        }
-        Ok(())
+        restore_system_proxy_with(&self.proxy)
     }
 
     /// 代理设置失败后的回滚（架构裁决 A1）：撤代理 → 取锁 → 按实例身份判定 → 停。
@@ -10318,31 +10577,27 @@ impl WiredServices {
             crate::tun::privilege::HelperStatus::Enabled
         ) {
             let tun = Arc::clone(&self.tun);
-            tokio::task::spawn_blocking(move || tun.flush_dns())
-                .await
-                .map_err(|error| svc_error("INTERNAL", error))?
-                .map_err(|error| {
-                    log::warn!("特权刷新 DNS 失败：{error}");
-                    svc_error("INTERNAL", flush_dns_failure_message(&error))
-                })?;
+            // XPC 调用本身也要有界：后台助手卡住时不能让这条请求无限期挂着。
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::task::spawn_blocking(move || tun.flush_dns()),
+            )
+            .await
+            .map_err(|_| svc_error("INTERNAL", "刷新 DNS 超过 3 秒未返回"))?
+            .map_err(|error| svc_error("INTERNAL", error))?
+            .map_err(|error| {
+                log::warn!("特权刷新 DNS 失败：{error}");
+                svc_error("INTERNAL", flush_dns_failure_message(&error))
+            })?;
         } else {
             tokio::task::spawn_blocking(crate::netcfg::flush_dns)
                 .await
                 .map_err(|error| svc_error("INTERNAL", error))?
                 .map_err(|error| svc_error("INTERNAL", error))?;
         }
-        // HUP 之后 mDNSResponder 要几百毫秒才回来；给它 3 秒。
-        let mut verified = false;
-        for _ in 0..20 {
-            if tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
-                .await
-                .unwrap_or(false)
-            {
-                verified = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
+        // HUP 之后 mDNSResponder 要几百毫秒才回来：按 3 秒总预算轮询，
+        // 单次探测 2 秒封顶（断网时无超时的 getaddrinfo 单次就要 5–7 秒）。
+        let verified = wait_until_resolvable(FLUSH_DNS_PROBE_BUDGET).await;
         Ok(json!({
             "ok": verified,
             "action": "flush_dns",
@@ -10362,19 +10617,37 @@ impl WiredServices {
     /// 顶层 `ok` 要求八步全过；`verified` 只反映最后一步的复检——
     /// 「跑完了」不等于「恢复好了」，两者不能混。
     async fn force_reset_network(&self) -> anyhow::Result<Value> {
+        // 总预算 15 秒：前端在 18 秒左右解锁关闭按钮，后端必须到点就返回。
+        // 每一步各自有界；到点的步骤在 `steps` 里如实标红，不伪造成成功。
+        let deadline = tokio::time::Instant::now() + RESET_TOTAL_BUDGET;
         // 端口与备份必须在 stop 之前取：manager.stop() 会清掉 plan。
-        let plan_port = self
-            .manager
-            .current_plan()
-            .await
-            .map(|plan| plan.mixed_port);
+        // 取 plan 也要限时：它等的是运行期锁，卡住同样会吃掉总预算。
+        let plan_port = run_bounded(
+            deadline,
+            std::time::Duration::from_millis(500),
+            self.manager.current_plan(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|plan| plan.mixed_port);
         let applied = self.proxy.applied_endpoint().ok().flatten();
 
         let mut steps = Vec::with_capacity(8);
         // 停 TUN + 停运行时都真实改运行时：同一把锁内完成、只推进一代。
         // 两步相邻上报；DNS 兜底还原不是上报步骤，排在两步之后、锁外执行，
         // 不让一次 XPC 卡住整条连接路径。
-        let (stop_tun, stop_runtime) = self.reset_stop_everything().await;
+        let (stop_tun, stop_runtime) =
+            match run_bounded(deadline, RESET_STOP_BUDGET, self.reset_stop_everything()).await {
+                Ok(pair) => pair,
+                Err(timeout) => {
+                    let detail = timeout.detail(RESET_STOP_BUDGET);
+                    (
+                        reset_step("stop_tun", false, detail.clone()),
+                        reset_step("stop_runtime", false, detail),
+                    )
+                }
+            };
         steps.push(stop_tun);
         steps.push(stop_runtime);
         // 兜底：连接期系统 DNS 指向了隧道；helper 崩溃重启后原始快照会丢，
@@ -10382,19 +10655,119 @@ impl WiredServices {
         // 放 spawn_blocking：XPC 调用可能等到超时，不能占住 async 线程。
         {
             let tun = Arc::clone(&self.tun);
-            match tokio::task::spawn_blocking(move || tun.restore_dns()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => log::warn!("强制重置：系统 DNS 还原失败：{error}"),
-                Err(error) => log::warn!("强制重置：系统 DNS 还原任务失败：{error}"),
+            match run_bounded(deadline, RESET_DNS_RESTORE_BUDGET, async move {
+                tokio::task::spawn_blocking(move || tun.restore_dns()).await
+            })
+            .await
+            {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => log::warn!("强制重置：系统 DNS 还原失败：{error}"),
+                Ok(Err(error)) => log::warn!("强制重置：系统 DNS 还原任务失败：{error}"),
+                Err(timeout) => log::warn!(
+                    "强制重置：系统 DNS 还原{}",
+                    timeout.detail(RESET_DNS_RESTORE_BUDGET)
+                ),
             }
         }
-        steps.push(self.reset_restore_proxy(applied.as_ref(), plan_port));
-        steps.push(self.reset_sweep_processes().await);
-        steps.push(self.reset_clear_routes());
-        steps.push(self.reset_flush_dns().await);
-        steps.push(self.reset_clear_plaintext());
 
-        let (verify, exit_ip) = self.reset_verify(applied.as_ref(), plan_port).await;
+        // 代理还原 / 清路由 / 清明文都是同步实现（内部起系统命令）：挪到阻塞
+        // 线程并限时，到点就记红步继续，不能让一次卡住的命令吃掉总预算。
+        let proxy = Arc::clone(&self.proxy);
+        let applied_owned = applied.clone();
+        steps.push(
+            match run_bounded(deadline, RESET_PROXY_BUDGET, async move {
+                tokio::task::spawn_blocking(move || {
+                    reset_restore_proxy_body(proxy, applied_owned, plan_port)
+                })
+                .await
+            })
+            .await
+            {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    reset_step("restore_proxy", false, format!("代理还原任务失败：{error}"))
+                }
+                Err(timeout) => reset_step(
+                    "restore_proxy",
+                    false,
+                    timeout.detail(RESET_PROXY_BUDGET),
+                ),
+            },
+        );
+
+        steps.push(
+            match run_bounded(deadline, RESET_SWEEP_BUDGET, self.reset_sweep_processes()).await {
+                Ok(value) => value,
+                Err(timeout) => reset_step(
+                    "sweep_processes",
+                    false,
+                    timeout.detail(RESET_SWEEP_BUDGET),
+                ),
+            },
+        );
+
+        steps.push(
+            match run_bounded(deadline, RESET_ROUTES_BUDGET, async {
+                tokio::task::spawn_blocking(reset_clear_routes_body).await
+            })
+            .await
+            {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    reset_step("clear_routes", false, format!("路由清理任务失败：{error}"))
+                }
+                Err(timeout) => reset_step(
+                    "clear_routes",
+                    false,
+                    timeout.detail(RESET_ROUTES_BUDGET),
+                ),
+            },
+        );
+
+        steps.push(
+            match run_bounded(deadline, RESET_FLUSH_BUDGET, self.reset_flush_dns()).await {
+                Ok(value) => value,
+                Err(timeout) => reset_step("flush_dns", false, timeout.detail(RESET_FLUSH_BUDGET)),
+            },
+        );
+
+        let manager = Arc::clone(&self.manager);
+        let data_dir = self.data_dir.clone();
+        let config_dir = self.config_dir();
+        steps.push(
+            match run_bounded(deadline, RESET_PLAINTEXT_BUDGET, async move {
+                tokio::task::spawn_blocking(move || {
+                    clear_plaintext_body(manager, data_dir, config_dir)
+                })
+                .await
+            })
+            .await
+            {
+                Ok(result) => clear_plaintext_step(result.unwrap_or_else(|error| {
+                    Err(format!("明文清理任务失败：{error}"))
+                })),
+                Err(timeout) => reset_step(
+                    "clear_plaintext",
+                    false,
+                    timeout.detail(RESET_PLAINTEXT_BUDGET),
+                ),
+            },
+        );
+
+        let (verify, exit_ip) =
+            match run_bounded(deadline, RESET_VERIFY_BUDGET, self.reset_verify(
+                applied.as_ref(),
+                plan_port,
+                deadline,
+            ))
+            .await
+            {
+                Ok(pair) => pair,
+                Err(timeout) => (
+                    reset_step("verify", false, timeout.detail(RESET_VERIFY_BUDGET)),
+                    None,
+                ),
+            };
         steps.push(verify);
 
         let ok = steps_all_ok(&steps);
@@ -10404,7 +10777,9 @@ impl WiredServices {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         log::info!(
-            "强制重置网络 完成 ok={ok} verified={verified} 未通过={:?}",
+            "强制重置网络 完成 ok={ok} verified={verified} 耗时={}ms 未通过={:?}",
+            (RESET_TOTAL_BUDGET - deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .as_millis(),
             steps
                 .iter()
                 .filter(|step| step.get("ok").and_then(Value::as_bool) != Some(true))
@@ -10486,55 +10861,6 @@ impl WiredServices {
             }
             Err(message) => reset_step("stop_runtime", false, message),
         }
-    }
-
-    fn reset_restore_proxy(
-        &self,
-        applied: Option<&crate::proxy::ProxyEndpoint>,
-        plan_port: Option<u16>,
-    ) -> Value {
-        let applied = applied.cloned();
-        // 与 cleanup_network 共用同一段「还原 + 复核」。
-        let disable_error = self
-            .restore_system_proxy()
-            .err()
-            .map(|error| user_message(&error));
-
-        // 备份丢失或还原失败时，系统代理可能还指着我们的端口。
-        // 只按「回环 + 这个端口」精确关掉，用户自己的代理一概不动。
-        let mut cleared_services = Vec::new();
-        let mut clear_error = None;
-        if (applied.is_none() || disable_error.is_some()) && plan_port.is_some() {
-            if let Some(port) = plan_port {
-                match crate::netcfg::disable_proxy_for_port(port) {
-                    Ok(services) => cleared_services = services,
-                    Err(error) => clear_error = Some(error),
-                }
-            }
-        }
-
-        let in_use = applied
-            .as_ref()
-            .and_then(|endpoint| self.proxy.endpoint_in_use(endpoint).ok());
-
-        let current = if applied.is_none() {
-            Some(match self.proxy.current_endpoint() {
-                Ok(value) => CurrentProxy::Known(value),
-                Err(error) => CurrentProxy::Unknown(error.to_string()),
-            })
-        } else {
-            None
-        };
-
-        judge_restore_proxy(&ProxyResetFacts {
-            applied,
-            plan_port,
-            disable_error,
-            clear_error,
-            cleared_services,
-            in_use,
-            current,
-        })
     }
 
     /// 扫描 `ps` 里属于我们的 sing-box，返回 `(pid, 命令行, 是否 root)`。
@@ -10684,87 +11010,32 @@ impl WiredServices {
         reset_step("sweep_processes", false, detail)
     }
 
-    #[cfg(target_os = "macos")]
-    fn reset_clear_routes(&self) -> Value {
-        let netstat = match crate::net_reset::read_netstat() {
-            Ok(output) => output,
-            Err(error) => {
-                return reset_step("clear_routes", false, format!("读取路由表失败：{error}"))
-            }
-        };
-        let live = match crate::net_reset::read_ifconfig() {
-            Ok(output) => crate::net_reset::parse_interface_names(&output),
-            Err(error) => {
-                // 读不到接口就无法判断哪条路由是残留：fail-closed。
-                // 这里既不能删，也不能给删除建议——照做会删掉正在用的 TUN。
-                return reset_step(
-                    "clear_routes",
-                    false,
-                    format!("读取接口列表失败，未删除任何路由：{error}"),
-                );
-            }
-        };
-        let stale = crate::net_reset::stale_split_routes(&netstat, &live);
-        if stale.is_empty() {
-            return reset_step("clear_routes", true, "没有指向已消失 utun 的分流路由");
-        }
-
-        let mut deleted = Vec::new();
-        let mut failed = Vec::new();
-        for route in &stale {
-            match crate::net_reset::delete_route(&route.destination, &route.interface) {
-                Ok(()) => deleted.push(route.destination.clone()),
-                Err(error) => {
-                    log::warn!("删除路由 {} 失败：{error}", route.destination);
-                    failed.push(route.clone());
-                }
-            }
-        }
-
-        if failed.is_empty() {
-            return reset_step(
-                "clear_routes",
-                true,
-                format!("已删除分流路由 {}", deleted.join("、")),
-            );
-        }
-        // 改路由表要 root；这里不弹管理员，如实给出可复制的命令。
-        // 只对「接口确认已消失」的路由给建议（上面的 fail-closed 保证）。
-        let manual = failed
-            .iter()
-            .map(|route| {
-                format!(
-                    "sudo route -n delete -net {} -ifscope {}（该接口已消失）",
-                    route.destination, route.interface
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("；");
-        reset_step(
-            "clear_routes",
-            false,
-            format!("路由残留需要手工清理：{manual}"),
-        )
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn reset_clear_routes(&self) -> Value {
-        reset_step(
-            "clear_routes",
-            false,
-            "当前平台未实现路由检查；若 TUN 仍在接管流量请重启系统",
-        )
-    }
-
     async fn reset_flush_dns(&self) -> Value {
+        self.reset_flush_dns_with(FLUSH_DNS_PROBE_BUDGET, probe_dns_once)
+            .await
+    }
+
+    /// 重置里的刷新步骤。`probe` 单独注入：测试用一个「永远不返回」的探测器
+    /// 证明这条路径一定在预算内返回并判失败。
+    async fn reset_flush_dns_with<F, Fut>(&self, probe_budget: std::time::Duration, probe: F) -> Value
+    where
+        F: FnMut(std::time::Duration) -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         // 关键：macOS 上 `dscacheutil -flushcache` 用普通用户执行也返回 0，
         // 但真正装着解析缓存的是 mDNSResponder，只有 root 的 `killall -HUP`
         // 才清得掉。只跑本地命令正是上次「重置报 ok、网络没恢复」的原因。
         let tun = Arc::clone(&self.tun);
-        let privileged = match tokio::task::spawn_blocking(move || tun.flush_dns()).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(error.message),
-            Err(error) => Err(format!("刷新任务失败：{error}")),
+        let privileged = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || tun.flush_dns()),
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(error.message),
+            Ok(Err(error)) => Err(format!("刷新任务失败：{error}")),
+            Err(_) => Err("特权刷新超过 3 秒未返回".to_string()),
         };
         let privileged_ok = privileged.is_ok();
         if let Err(reason) = &privileged {
@@ -10778,18 +11049,8 @@ impl WiredServices {
             crate::netcfg::flush_dns().err()
         };
 
-        // HUP 之后 mDNSResponder 要几百毫秒才回来；给它 3 秒。
-        let mut resolved = false;
-        for _ in 0..20 {
-            if tokio::task::spawn_blocking(crate::netcfg::dns_resolvable)
-                .await
-                .unwrap_or(false)
-            {
-                resolved = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
+        // HUP 之后 mDNSResponder 要几百毫秒才回来：预算驱动，单次 2 秒封顶。
+        let resolved = wait_until_resolvable_with(probe_budget, probe).await;
 
         // 点名指向本机的解析器。可能是 Veyl 残留，也可能是用户自建的本地 DNS，
         // 所以只写进 detail；是否真的坏了，由「能不能解析」判断。
@@ -10836,38 +11097,32 @@ impl WiredServices {
         reset_step("flush_dns", ok, detail)
     }
 
+    /// 测试用：直接跑一遍明文清理并组装步骤（生产路径走 `clear_plaintext_step`）。
+    #[cfg(test)]
     fn reset_clear_plaintext(&self) -> Value {
         // 删除失败必须让这一步变红：报 ok 却把明文留在磁盘上更糟。
-        match self.clear_plaintext_action() {
-            Ok((removed, active_removed, pid_removed)) => reset_step(
-                "clear_plaintext",
-                true,
-                format!(
-                    "已清理 {removed} 个明文配置{}，{}",
-                    if active_removed { "、active.json" } else { "" },
-                    if pid_removed {
-                        "运行记录已删除"
-                    } else {
-                        "没有残留的运行记录"
-                    }
-                ),
-            ),
-            Err(error) => reset_step("clear_plaintext", false, error),
-        }
+        clear_plaintext_step(self.clear_plaintext_action())
     }
 
     async fn reset_verify(
         &self,
         applied: Option<&crate::proxy::ProxyEndpoint>,
         plan_port: Option<u16>,
+        deadline: tokio::time::Instant,
     ) -> (Value, Option<String>) {
         let mut problems: Vec<String> = Vec::new();
 
         // 1. 没有 TUN 接口。地址按平台取（`tun::TUN_ADDRESS`）：
         // macOS 172.19.0.1/30，Windows 198.18.0.1/15，这里不写死。
         // 读不到接口时判 unknown 并让这一步变红，不能因为「空」就通过。
-        match tokio::task::spawn_blocking(crate::tun::try_collect).await {
-            Ok(Ok(addrs)) => {
+        let interfaces = run_bounded(
+            deadline,
+            std::time::Duration::from_secs(2),
+            async { tokio::task::spawn_blocking(crate::tun::try_collect).await },
+        )
+        .await;
+        match interfaces {
+            Ok(Ok(Ok(addrs))) => {
                 if let Some(name) = crate::tun::device_name(&addrs) {
                     problems.push(format!(
                         "仍有 TUN 接口 {name}（{}）",
@@ -10875,39 +11130,81 @@ impl WiredServices {
                     ));
                 }
             }
+            Ok(Ok(Err(error))) => {
+                problems.push(format!("无法读取接口列表，TUN 状态未知：{error}"))
+            }
             Ok(Err(error)) => problems.push(format!("无法读取接口列表，TUN 状态未知：{error}")),
-            Err(error) => problems.push(format!("无法读取接口列表，TUN 状态未知：{error}")),
+            Err(timeout) => problems.push(format!(
+                "无法读取接口列表，TUN 状态未知：{}",
+                timeout.detail(std::time::Duration::from_secs(2))
+            )),
         }
 
-        // 2. 默认路由不在 utun 上
-        match crate::netcfg::read() {
-            Ok(config) => {
+        // 2. 默认路由不在 utun 上。`netcfg::read()` 里全是同步系统命令，
+        //    挪到阻塞线程并限时——断网时它内部同样会解析，不能占住 async 线程。
+        let config = run_bounded(
+            deadline,
+            std::time::Duration::from_secs(3),
+            async { tokio::task::spawn_blocking(crate::netcfg::read).await },
+        )
+        .await;
+        match config {
+            Ok(Ok(Ok(config))) => {
                 if let Some(iface) = config.route.default_interface.as_deref() {
                     if iface.starts_with("utun") {
                         problems.push(format!("默认路由仍指向 {iface}"));
                     }
                 }
             }
-            Err(error) => problems.push(format!("无法读取路由表：{error}")),
+            Ok(Ok(Err(error))) => problems.push(format!("无法读取路由表：{error}")),
+            Ok(Err(error)) => problems.push(format!("无法读取路由表：{error}")),
+            Err(timeout) => problems.push(format!(
+                "无法读取路由表：{}",
+                timeout.detail(std::time::Duration::from_secs(3))
+            )),
         }
 
-        // 3. 系统代理不指向 Veyl
-        let mut proxy_ok = true;
-        if let Some(endpoint) = applied {
-            proxy_ok = self
-                .proxy
-                .endpoint_in_use(endpoint)
-                .map(|in_use| in_use.is_empty())
-                .unwrap_or(false);
-        }
-        if let Some(port) = plan_port {
-            let ours = format!("127.0.0.1:{port}");
-            if self.proxy.current_endpoint().ok().flatten().as_deref() == Some(ours.as_str()) {
-                proxy_ok = false;
+        // 3. 系统代理不指向 Veyl（同步读系统设置：同样挪到阻塞线程并限时）
+        let proxy_probe = {
+            let proxy = Arc::clone(&self.proxy);
+            let endpoint = applied.cloned();
+            run_bounded(
+                deadline,
+                std::time::Duration::from_secs(2),
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let in_use = endpoint
+                            .as_ref()
+                            .and_then(|endpoint| proxy.endpoint_in_use(endpoint).ok());
+                        let current = proxy.current_endpoint().ok().flatten();
+                        (in_use, current)
+                    })
+                    .await
+                },
+            )
+            .await
+        };
+        match proxy_probe {
+            Ok(Ok((in_use, current))) => {
+                let mut proxy_ok = true;
+                if applied.is_some() {
+                    proxy_ok = in_use.map(|in_use| in_use.is_empty()).unwrap_or(false);
+                }
+                if let Some(port) = plan_port {
+                    let ours = format!("127.0.0.1:{port}");
+                    if current.as_deref() == Some(ours.as_str()) {
+                        proxy_ok = false;
+                    }
+                }
+                if !proxy_ok {
+                    problems.push("系统代理仍指向 Veyl".into());
+                }
             }
-        }
-        if !proxy_ok {
-            problems.push("系统代理仍指向 Veyl".into());
+            Ok(Err(error)) => problems.push(format!("无法确认系统代理状态：{error}")),
+            Err(timeout) => problems.push(format!(
+                "无法确认系统代理状态：{}",
+                timeout.detail(std::time::Duration::from_secs(2))
+            )),
         }
 
         // 4. 没有 Veyl 的 sing-box
@@ -10939,12 +11236,12 @@ impl WiredServices {
         // 6. 用户视角：系统解析器真的能给地址。
         // 进程、路由、代理都干净但 DNS 坏掉时，用户一样上不了网——
         // 这正是上次「ok=true 但断网」的形态。
-        match probe_dns(
-            crate::netcfg::DNS_PROBE_DOMAIN,
-            std::time::Duration::from_secs(3),
-        )
-        .await
-        {
+        let dns_budget = std::time::Duration::from_secs(3).min(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(std::time::Duration::from_millis(1)),
+        );
+        match probe_dns(crate::netcfg::DNS_PROBE_DOMAIN, dns_budget).await {
             Ok(addresses) => {
                 log::info!("强制重置 DNS 探测通过（{} 个地址）", addresses.len());
             }
@@ -10954,17 +11251,32 @@ impl WiredServices {
         // 7. 用户视角：真发一次 HTTPS 请求。失败**不判重置失败**——
         //    DNS 与出口 IP 都正常时，单个站点失败更可能是站点或线路问题；
         //    只在 detail 里作为「部分完成」提示，避免误报整体失败。
-        let https_warning =
-            match probe_https(&DIRECT_PROBE_URLS, std::time::Duration::from_secs(5)).await {
-                Ok((url, status)) => {
-                    log::info!("强制重置 HTTPS 探测通过：{url} 返回 {status}");
-                    None
-                }
-                Err(error) => {
-                    log::warn!("强制重置 HTTPS 探测失败：{error}");
-                    Some(error)
-                }
-            };
+        let https_budget = std::time::Duration::from_secs(5).min(
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(std::time::Duration::from_millis(1)),
+        );
+        // `probe_https` 会对多个 URL 逐个试，单次超时乘以个数可能超出本步预算，
+        // 所以整条探测再套一层 deadline。
+        let https_warning = match tokio::time::timeout(
+            https_budget,
+            probe_https(&DIRECT_PROBE_URLS, https_budget),
+        )
+        .await
+        {
+            Ok(Ok((url, status))) => {
+                log::info!("强制重置 HTTPS 探测通过：{url} 返回 {status}");
+                None
+            }
+            Ok(Err(error)) => {
+                log::warn!("强制重置 HTTPS 探测失败：{error}");
+                Some(error)
+            }
+            Err(_) => {
+                log::warn!("强制重置 HTTPS 探测超时（{:?}）", https_budget);
+                Some(format!("HTTPS 探测超时（{:.0} 秒）", https_budget.as_secs_f32()))
+            }
+        };
 
         let ok = problems.is_empty();
         let detail = if ok {
@@ -11213,6 +11525,77 @@ mod config_service_tests {
         let dir = std::env::temp_dir().join(format!("veyl-svc-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 探测器「永远不返回」时，刷新 DNS 这一步必须在预算内收起并判失败。
+    #[tokio::test]
+    async fn a_hanging_resolver_does_not_hold_the_flush_step() {
+        let dir = temp_dir();
+        let services = services(&dir);
+        let started = std::time::Instant::now();
+        let step = services
+            .reset_flush_dns_with(std::time::Duration::from_millis(300), |_| {
+                std::future::pending::<bool>()
+            })
+            .await;
+        assert_eq!(step["ok"], false);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "刷新步骤必须在预算内返回，实际 {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 轮询本身有界：探针不返回时不会等满 20 次 × 单次超时。
+    #[tokio::test]
+    async fn a_hanging_probe_stops_at_the_probe_budget() {
+        let started = std::time::Instant::now();
+        let resolved = wait_until_resolvable_with(std::time::Duration::from_millis(300), |_| {
+            std::future::pending::<bool>()
+        })
+        .await;
+        assert!(!resolved);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 一直解析不出来时按预算收手，不是固定 20 次。
+    #[tokio::test]
+    async fn a_failing_probe_stops_at_the_probe_budget() {
+        let started = std::time::Instant::now();
+        let resolved = wait_until_resolvable_with(std::time::Duration::from_millis(400), |_| async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            false
+        })
+        .await;
+        assert!(!resolved);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 总预算：预算已用完时这一步根本不执行；到点则记超时。
+    #[tokio::test]
+    async fn the_total_budget_bounds_every_step() {
+        let expired = tokio::time::Instant::now() - std::time::Duration::from_millis(1);
+        let outcome: Result<(), StepTimeout> =
+            run_bounded(expired, std::time::Duration::from_secs(1), async {}).await;
+        assert_eq!(outcome.unwrap_err(), StepTimeout::BudgetExhausted);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let outcome: Result<(), StepTimeout> = run_bounded(
+            deadline,
+            std::time::Duration::from_millis(50),
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), StepTimeout::TimedOut);
     }
 
     fn create_input(name: &str) -> ConfigCreateInput {

@@ -398,6 +398,70 @@ describe("设置 → 遇到问题 → 修复网络", () => {
     });
   });
 
+  it("后端一直不返回时显示已用时间，18 秒后可以 Esc 关掉，晚到的结果不会重开", async () => {
+    let resolveReset!: (value: NetworkForceResetResult) => void;
+    const pending = new Promise<NetworkForceResetResult>((resolve) => {
+      resolveReset = resolve;
+    });
+    const networkForceReset = vi.fn(() => pending);
+    renderSettings(makeBridge({ networkForceReset }));
+    const { dialog } = await openConfirm();
+
+    vi.useFakeTimers();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getByText("最多需要十几秒 · 已用 5 秒")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(13_000);
+    });
+
+    const result = screen.getByRole("dialog", { name: "重置网络" });
+    expect(within(result).getByRole("heading", { name: "重置还没结束" })).toBeTruthy();
+    expect(within(result).getByText(/18 秒内没收到结果/)).toBeTruthy();
+    expect(within(result).getByRole("button", { name: "再试一次" })).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "重置网络" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+
+    await act(async () => {
+      resolveReset(successResult());
+      await pending;
+    });
+    expect(screen.queryByRole("dialog", { name: "重置网络" })).toBeNull();
+  });
+
+  it("超时后点「关闭」能退出；「再试一次」会重新发起并回到运行态", async () => {
+    const networkForceReset = vi.fn(
+      () => new Promise<NetworkForceResetResult>(() => {}),
+    );
+    renderSettings(makeBridge({ networkForceReset }));
+    const { dialog } = await openConfirm();
+
+    vi.useFakeTimers();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重置网络" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(18_000);
+    });
+
+    const first = screen.getByRole("dialog", { name: "重置网络" });
+    fireEvent.click(within(first).getByRole("button", { name: "再试一次" }));
+    expect(networkForceReset).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("dialog", { name: "正在重置网络" })).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(18_000);
+    });
+    const second = screen.getByRole("dialog", { name: "重置网络" });
+    fireEvent.click(within(second).getAllByRole("button", { name: "关闭" })[1]);
+    expect(screen.queryByRole("dialog", { name: "重置网络" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+  });
+
   it("重置弹层打开时设置弹层的陷阱让位，Tab 不会把焦点拉回设置头部", async () => {
     renderSettings(makeBridge());
     const { dialog } = await openConfirm();
