@@ -1,7 +1,7 @@
 # 流量额度与计费
 
 > 日期：2026-11-25
-> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。客户端字段（§7.3）、账单归集与余额预警（§5.4、§8.1）**尚未实现**，随第 3 / 第 5 步落地。
+> 状态：计量与扣费已实现（2026-11-26，agent `390d017` / 控制面 `9a96d2d`），待真机验收 §6.10。**未实现**：客户端字段（§7.3）、30 天账单归集（§8.1）、余额三次提醒（§5.4 的预测与提前量）；§5.4 的「扣不动即销毁」已随扣费路径落地。
 > 上游：`billing-notes.md`（支付与日价）、`servers-list-detail.md`（详情页事实区）、`node-agent-mcp.md`（agent 通道）
 > 事实来源：DigitalOcean 带宽文档 <https://docs.digitalocean.com/platform/billing/bandwidth/>（2026-11-25 核实）
 
@@ -39,7 +39,7 @@
 | 4 | 单台每计费周期最多累计 28 天（672 小时） | "up to a maximum of 2,419,200 seconds (28 days) per monthly billing cycle" |
 | 5 | 超额 **$0.01/GiB**，不分区、不分机型 | 文档原文 |
 | 6 | 销毁后**停止累计**，已用流量**不清零** | 累计按"存在"计算；用量记在团队池上 |
-| 7 | 计费周期 = 账户 billing cycle（开户周年日），不是自然月 | "per monthly billing cycle" |
+| 7 | 计费周期 = **自然月（UTC）**，每月 1 日 00:00 UTC 清零 | 原写「开户周年日」是错的；2026-11-26 以官方文档复核："billing cycles are monthly … calendar month"、"invoice … on the first day of each month" |
 | 8 | 机型额度：`s-1vcpu-512mb-10gb` 500 GiB、`s-1vcpu-1gb` 1,000 GiB、`s-1vcpu-2gb` 2,000 GiB | DO 定价页；目录里 `transfer_gib` 由 `size.transfer × 1000` 得到 |
 | 9 | **没有**按机器查累计量的 API；Billing 页用量 T+1，明细 CSV 需手动申请 | OpenAPI 里只有 `/v2/monitoring/metrics/droplet/bandwidth`（Mbps 速率） |
 
@@ -78,7 +78,7 @@
 - 因此 `cycle_id` 直接由 UTC 年月推导（`YYYY-MM`），**不需要调用 DO 接口**；发票只在月末对账时用。
 - **不用我们自己的 30 天，也不做固定 28 天窗口**：长度和 DO 不一致时，一年会多清零几次，每次多给一份「第 1 天额度」（500 GB 机型约 $0.18），是净亏。28 天只是**单台机器在一个 DO 周期内最多累计的额度封顶**，不是我们的周期。
 - 额度与用量都在同一边界归零，两者必须同源，否则超额判断会错位。
-- 降级：拿不到 DO 边界时退化为固定 28 天滚动窗口（长度与 DO 封顶一致，不会多给），并在日志里标记为降级运行。
+- 不需要降级路径：`cycle_id` 由 UTC 年月本地推导，全程不调 DO 接口，所以不存在「拿不到 DO 边界」的情况。（初稿写过「退化为固定 28 天滚动窗口」，既没实现也与这条矛盾，已删除。）
 
 ### 4.1 公式
 
@@ -107,6 +107,7 @@
   - 与 DO 团队级「按存在秒累计」一致：DO 在机器存在期间攒出的额度留在团队池里，不会因为销毁而作废。按「未用额度作废」实现会反向多收用户，不做。
 - 换机型重建：新机器按新机型的日额度从建机当天重新释放；旧机器的已释放额度保留在账号总和里。
 - 账号层面的判断永远是：`Σ 各机器已用 > Σ 各机器已释放` 才有超额，与机器换过几次无关。
+- **已释放额度是现算的**：控制面从 `servers` 表按账号重算每台机器的额度（用 `ready_at` 与本周期内的 `destroyed_at` 推导），**不是**把 `server_traffic.released_bytes` 求和。那一列只是当次上报时刻的快照，不参与扣费——按列求和会在「周期开始后还没人上报」或「新机首次上报前」漏掉额度。
 
 ### 4.4 周期切换时发生什么
 
@@ -137,6 +138,7 @@ over_bytes      = max(0, 本周期已用 − 已释放额度)
 - 只对**增量**扣，`已扣_cents` 落库，重复上报不会重复扣。
 - 扣费与额度判断都在控制面做；agent 只上报字节数，不参与钱的计算。
 - **扣的是「此刻累计」**：`已用` 与 `已释放` 都取当刻值，额度随机器存活逐日长出来。所以一次突发会被即时扣费；如果这台机器之后继续存活、额度追上用量，DO 月末的净算可能是 0，我们**不退回**已扣的部分（v1 不做负增量退款，见 §10 第 5 项）。方向是我方多收，不会少收，所以不会被用户套利。
+- 「不退回」只指**超支那一笔**。机器因流量超支被停机销毁时，机器费仍按现有停机路径退还未开始的整天（`traffic_overage` 与 `billing_unpaid` 同口径），已扣的超支不退回。
 
 ### 5.2 余额不足
 
@@ -270,13 +272,13 @@ elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
 
 | 位置 | 改动 | 量级 |
 |---|---|---|
-| `agent/src/traffic.rs`（新增） | nft 表管理、计数读取、累加器、状态文件、上报触发 | ~200 行 |
+| `agent/src/traffic.rs`（新增） | nft 表管理、计数读取、累加器、状态文件、上报触发 | ~460 行（不含测试） |
 | `agent/src/agent.rs` | 复用现有 select 循环加一个 30 秒 tick（轮询已删，循环仍在） | ~20 行 |
 | `agent/src/control.rs` | 新增 `traffic()` 调用 | ~15 行 |
 | `agent/src/config.rs` | 读间隔 / 落盘间隔 / 上报阈值三个参数 | ~15 行 |
-| `cloudflare/control-plane/src/traffic.ts`（新增） | `POST /v1/agent/traffic`、去重、按接收时间归周期、累加、额度与超支扣费 | ~310 行（`servers.ts` 只加路由转发） |
-| `cloudflare/control-plane/src/wallet.ts` | 近 30 天按日归集（账单弹层的数据源） | ~80 行 |
-| `cloudflare/control-plane/migrations/0014_server_traffic.sql` | `server_traffic` + `billing_warnings` | ~25 行 |
+| `cloudflare/control-plane/src/traffic.ts`（新增） | `POST /v1/agent/traffic`、去重、按接收时间归周期、累加、额度与超支扣费 | ~310 行。路由挂在 `index.ts`；`servers.ts` 另加 ~33 行（`traffic_overage` 墓碑文案、退款白名单、销毁原因口径） |
+| `cloudflare/control-plane/src/wallet.ts` | 近 30 天按日归集（账单弹层的数据源） | **未实现**，随 §8.1 落地 |
+| `cloudflare/control-plane/migrations/0014_server_traffic.sql` | `server_traffic` | ~13 行（`billing_warnings` **未实现**，随 §5.4 提醒落地） |
 | App（`account-billing-ui.md`） | 账单弹层、总可用带宽、账户入口重构、预警弹框 | 单独一批 |
 
 ### 6.10 测试与验收
@@ -312,7 +314,7 @@ elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
 | `server_id` | 服务器 id |
 | `cycle_id` | `YYYY-MM`（UTC 自然月，**控制面按收到上报的时间判定**） |
 | `bytes` | 本周期已用出站字节 |
-| `released_bytes` | 本周期已释放额度快照（按天释放，封顶 28 天） |
+| `released_bytes` | 本周期已释放额度**快照**（写于最近一次上报，仅供审计；账号池按 §4.3 从 `servers` 表现算，不读这一列） |
 | `charged_cents` | 本周期已扣的超支金额 |
 | `last_seq` | 已接受的最大上报序号（去重用，按 server 记、跨周期不清零） |
 | `updated_at` | 最后上报时间 |
@@ -329,17 +331,22 @@ Authorization: Bearer <server_token>
 
 200 { "ok": true }
 400 { "ok": false, "reason": "invalid_body" }
-401 unknown token
+401 { "ok": false, "reason": "missing_token" }      // 没带 Authorization
+401 { "ok": false, "reason": "unknown_token" }      // 令牌对不上任何机器
 409 { "ok": false, "reason": "server_destroyed" }   // 终态，agent 停止上报
+503 { "ok": false, "reason": "unavailable" }        // D1 未绑定
 ```
 
 - `seq` 每个 server 单调递增、永不清零；`seq <= last_seq` 视为重复，回 200 但不记账。
 - 归属周期 = 控制面收到请求时的 UTC 年月，agent 不传周期。
-- 接受 delta 后：`bytes += delta`，并按 §5.1 在同一事务里算并扣超支。
+- 接受 delta 后分两步，**不是同一个事务**：
+  1. `server_traffic.bytes += delta` 与 `last_seq` 推进是**一条原子写入**（`ON CONFLICT … WHERE last_seq < excluded.last_seq`，并发时后到的那条 `changes = 0`，按重复处理）；
+  2. 再按 §5.1 算超支并扣费，扣费在 `recordLedgerEntry` 的 `db.batch` 里原子完成——账本行、`accounts.balance_cents`、`server_traffic.charged_cents` 三者同批。
+- 两步之间进程中断也不会永久错账：下一次上报按 `应付 − 已扣` 补算。
 
 ### 7.3 客户端契约（`commands.md` 2.75.0，**未实现**）
 
-> 下面四个字段截至 2026-11-26 在控制面 `serverView` / `toMyServer`、`commands.md` 与 `src/agent/bridge.ts` 里都还不存在，比例的计量链路（§7.1 / §7.2）晚一步。落地时同时改这三处并升契约版本。
+> 下面四个字段截至 2026-11-26 在控制面 `serverView` / `toMyServer`、`commands.md` 与 `src/agent/bridge.ts` 里都还不存在，比计量链路（§7.1 / §7.2）晚一步。落地时同时改这三处并升契约版本。
 
 `MyServer` 增：
 
