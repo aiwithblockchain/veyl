@@ -245,13 +245,13 @@ fn environment_section(
         };
         let log_line = if logs.app == logs.proxy {
             format!(
-                "Logs: app, proxy and background component {}; install service and sing-box {}.",
+                "Logs: app, proxy and background component {}; install service and background component {}.",
                 logs.app.display(),
                 logs.helper.display()
             )
         } else {
             format!(
-                "Logs: app {}; proxy and background component {}; install service and sing-box {}.",
+                "Logs: app {}; proxy and background component {}; install service and background component {}.",
                 logs.app.display(),
                 logs.proxy.display(),
                 logs.helper.display()
@@ -280,13 +280,13 @@ and no longer follows system time-zone changes. If unsure, don't write; keep usi
     };
     let log_line = if logs.app == logs.proxy {
         format!(
-            "日志：应用、代理与后台组件 {}；安装服务与 sing-box {}。",
+            "日志：应用、代理与后台组件 {}；安装服务与后台组件 {}。",
             logs.app.display(),
             logs.helper.display()
         )
     } else {
         format!(
-            "日志：应用 {}；代理与后台组件 {}；安装服务与 sing-box {}。",
+            "日志：应用 {}；代理与后台组件 {}；安装服务与后台组件 {}。",
             logs.app.display(),
             logs.proxy.display(),
             logs.helper.display()
@@ -1797,7 +1797,7 @@ mod prompt_tests {
         assert!(zh.starts_with("# 环境"), "{zh}");
         assert!(
             zh.contains(&format!(
-                "日志：应用 {app}；代理与后台组件 {proxy}；安装服务与 sing-box {helper}。"
+                "日志：应用 {app}；代理与后台组件 {proxy}；安装服务与后台组件 {helper}。"
             )),
             "{zh}"
         );
@@ -1812,7 +1812,7 @@ mod prompt_tests {
         assert!(en.starts_with("# Environment"), "{en}");
         assert!(
             en.contains(&format!(
-                "Logs: app {app}; proxy and background component {proxy}; install service and sing-box {helper}."
+                "Logs: app {app}; proxy and background component {proxy}; install service and background component {helper}."
             )),
             "{en}"
         );
@@ -1829,7 +1829,7 @@ mod prompt_tests {
         let zh = dynamic_prompt("zh", &cn, crate::rules::RegionSource::System, &cn, &merged);
         assert!(
             zh.contains(&format!(
-                "日志：应用、代理与后台组件 {shared}；安装服务与 sing-box {helper}。"
+                "日志：应用、代理与后台组件 {shared}；安装服务与后台组件 {helper}。"
             )),
             "{zh}"
         );
@@ -1841,7 +1841,7 @@ mod prompt_tests {
         let en = dynamic_prompt("en", &cn, crate::rules::RegionSource::System, &cn, &merged);
         assert!(
             en.contains(&format!(
-                "Logs: app, proxy and background component {shared}; install service and sing-box {helper}."
+                "Logs: app, proxy and background component {shared}; install service and background component {helper}."
             )),
             "{en}"
         );
@@ -2084,7 +2084,7 @@ mod prompt_tests {
         assert!(cn.contains("不要为了确认地区而追问用户"));
         assert!(
             cn.contains(&format!(
-                "日志：应用 {}；代理与后台组件 {}；安装服务与 sing-box {}。",
+                "日志：应用 {}；代理与后台组件 {}；安装服务与后台组件 {}。",
                 logs.app.display(),
                 logs.proxy.display(),
                 logs.helper.display()
