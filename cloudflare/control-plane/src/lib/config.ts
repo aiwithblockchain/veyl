@@ -5,8 +5,11 @@ export interface PaymentConfigEnv {
   ENVIRONMENT?: string;
   /** 日价（USD 分/天）：{"s-1vcpu-1gb":30}。唯一真源，月价由它派生。 */
   PLAN_DAILY_PRICE_CENTS?: string;
-  /** 可充值面额（美分）的 JSON 数组："[1200,2400,3600,4800]"。唯一真源。 */
+  /** UI 快捷充值档（美分）的 JSON 数组："[600,1000,2500,5000,10000]"。不是支付白名单。 */
   TOPUP_DENOMINATIONS_CENTS?: string;
+  /** 自定义充值范围（美分）；两者都是必需配置。 */
+  MIN_TOPUP_CENTS?: string;
+  MAX_TOPUP_CENTS?: string;
   APP_PAYMENT_RETURN_URL?: string;
 }
 
@@ -41,23 +44,24 @@ export function monthlyUsdFromDaily(dailyCents: number): number {
 
 export interface TopupDenominationConfig {
   cents: number[];
-  /** 未配置 / 配置非法；调用方据此返回「充值未就绪」，不要当成用户传错面额。 */
-  problem: "missing" | "invalid" | null;
 }
 
 /**
- * 读充值面额白名单。只接受非空的正整数 JSON 数组；配置了但解析为空/含非数字
- * 都算 infrastructure 问题，打 error 让调用方 fail closed。
+ * 读 UI 快捷充值档。只接受非空的正整数 JSON 数组；解析失败 / 为空返回空数组并记日志，
+ * 不参与控制流——自定义金额只看 MIN_TOPUP_CENTS / MAX_TOPUP_CENTS。
  */
 export function readTopupDenominations(env: PaymentConfigEnv): TopupDenominationConfig {
   const raw = env.TOPUP_DENOMINATIONS_CENTS?.trim();
-  if (!raw) return { cents: [], problem: "missing" };
+  if (!raw) {
+    console.warn("[topup] TOPUP_DENOMINATIONS_CENTS 未配置，快捷档为空");
+    return { cents: [] };
+  }
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
     console.error("[topup] TOPUP_DENOMINATIONS_CENTS 不是合法 JSON");
-    return { cents: [], problem: "invalid" };
+    return { cents: [] };
   }
   if (
     !Array.isArray(value) ||
@@ -65,9 +69,41 @@ export function readTopupDenominations(env: PaymentConfigEnv): TopupDenomination
     !value.every((entry) => typeof entry === "number" && Number.isInteger(entry) && entry > 0)
   ) {
     console.error("[topup] TOPUP_DENOMINATIONS_CENTS 必须是非空正整数数组");
-    return { cents: [], problem: "invalid" };
+    return { cents: [] };
   }
-  return { cents: [...new Set(value)].sort((a, b) => a - b), problem: null };
+  return { cents: [...new Set(value)].sort((a, b) => a - b) };
+}
+
+export interface TopupRangeConfig {
+  minCents: number;
+  maxCents: number;
+  /** 缺失或非法；调用方据此返回「充值未就绪」。 */
+  problem: "missing" | "invalid" | null;
+}
+
+/**
+ * 读自定义充值范围。两者都是必需配置：正整数、MIN <= MAX、MIN >= 100。
+ * 缺任何一个都 fail closed，不拿默认值兜底。
+ */
+export function readTopupRange(env: PaymentConfigEnv): TopupRangeConfig {
+  const minRaw = env.MIN_TOPUP_CENTS?.trim();
+  const maxRaw = env.MAX_TOPUP_CENTS?.trim();
+  if (!minRaw || !maxRaw) {
+    console.error("[topup] MIN_TOPUP_CENTS / MAX_TOPUP_CENTS 未配置");
+    return { minCents: 0, maxCents: 0, problem: "missing" };
+  }
+  const minCents = Number(minRaw);
+  const maxCents = Number(maxRaw);
+  if (
+    !Number.isInteger(minCents) ||
+    !Number.isInteger(maxCents) ||
+    minCents < 100 ||
+    maxCents < minCents
+  ) {
+    console.error("[topup] 充值范围必须是正整数且 100 <= MIN <= MAX");
+    return { minCents: 0, maxCents: 0, problem: "invalid" };
+  }
+  return { minCents, maxCents, problem: null };
 }
 
 export function paymentReturnUrl(env: PaymentConfigEnv): string | null {

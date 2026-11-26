@@ -43,8 +43,11 @@
 		"ENROLL_BASE_URL": "https://veyl.dessage.xyz",
 		// 生产使用独立的凭据签名密钥（dev 是 cp-2026-11），公钥内置在客户端。
 		"CREDENTIAL_KEY_ID": "cp-2026-12",
-		// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
-		"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
+		// UI 快捷充值档（USD 分）：仅快捷按钮，不是支付白名单。$6 / $10 / $25 / $50 / $100。
+		"TOPUP_DENOMINATIONS_CENTS": "[600,1000,2500,5000,10000]",
+		// 自定义充值范围（USD 分）：$6–$300，整美元。
+		"MIN_TOPUP_CENTS": "600",
+		"MAX_TOPUP_CENTS": "30000",
 		// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 		"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
 		"APP_PAYMENT_RETURN_URL": "https://veyl.dessage.xyz/payment/return",
@@ -84,8 +87,11 @@
 				"PUBLIC_SITE_URL": "https://veyl-edge-dev.pages.dev",
 				"ENROLL_BASE_URL": "https://dev.veyl.dessage.xyz",
 				"CREDENTIAL_KEY_ID": "cp-2026-11",
-				// 可充值面额（USD 分）：唯一真源，升序。$12 / $24 / $36 / $48。
-				"TOPUP_DENOMINATIONS_CENTS": "[1200,2400,3600,4800]",
+				// UI 快捷充值档（USD 分）：仅快捷按钮，不是支付白名单。$6 / $10 / $25 / $50 / $100。
+				"TOPUP_DENOMINATIONS_CENTS": "[600,1000,2500,5000,10000]",
+				// 自定义充值范围（USD 分）：$6–$300，整美元。
+				"MIN_TOPUP_CENTS": "600",
+				"MAX_TOPUP_CENTS": "30000",
 				// 日价（USD 分/天）是唯一售价真源，月价 = 日价 × 30。
 				"PLAN_DAILY_PRICE_CENTS": "{\"s-1vcpu-512mb-10gb\":30,\"s-1vcpu-1gb\":40,\"s-1vcpu-2gb\":80}",
 				"APP_PAYMENT_RETURN_URL": "https://dev.veyl.dessage.xyz/payment/return",

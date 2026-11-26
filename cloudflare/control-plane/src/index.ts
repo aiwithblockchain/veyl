@@ -40,8 +40,11 @@ export interface Env {
   STRIPE_WEBHOOK_SECRET?: string;
   /** 日价表（USD 分/天）：{"s-1vcpu-1gb":"30"}；唯一售价真源，月价由它派生。 */
   PLAN_DAILY_PRICE_CENTS?: string;
-  /** 可充值面额（美分）的 JSON 数组；唯一真源。 */
+  /** UI 快捷充值档（USD 分）；不是支付白名单。 */
   TOPUP_DENOMINATIONS_CENTS?: string;
+  /** 自定义充值范围（USD 分）；两者都是必需配置。 */
+  MIN_TOPUP_CENTS?: string;
+  MAX_TOPUP_CENTS?: string;
   APP_PAYMENT_RETURN_URL?: string;
   /** 官网站点地址：问题墙帖子链接与允许的跨域来源。 */
   PUBLIC_SITE_URL?: string;

@@ -12,10 +12,14 @@ export interface StoredResponse {
 /** 占位超过这个时间还没写完，视为上一个请求已经死掉，允许接管。 */
 const STALE_MS = 120 * 1000;
 /**
- * 5xx 回放的保质期：2xx 永久回放（重复点只会拿到同一结果），
- * 但上游故障是暂时的，永久回放会让重试在同一 key 下永远拿到旧错误。
+ * 5xx / 429 回放的保质期：2xx 永久回放（重复点只会拿到同一结果），
+ * 但上游故障与频控都是暂时的，永久回放会让重试在同一 key 下永远拿到旧错误。
  */
 const FAILED_REPLAY_MS = 60 * 1000;
+
+function isTransientStatus(status: number): boolean {
+  return status >= 500 || status === 429;
+}
 
 export function idempotencyKey(request: Request): string | null {
   const key = request.headers.get("idempotency-key")?.trim() ?? "";
@@ -49,7 +53,8 @@ export async function withIdempotency(
       });
     }
     const failedExpired =
-      existing.status >= 500 && Number(existing.created_at) <= now - FAILED_REPLAY_MS;
+      isTransientStatus(existing.status) &&
+      Number(existing.created_at) <= now - FAILED_REPLAY_MS;
     if (existing.status !== 0 && !failedExpired) {
       const stored = JSON.parse(existing.response ?? "{}") as StoredResponse;
       return json(stored.body, stored.status);

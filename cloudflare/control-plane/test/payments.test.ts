@@ -12,7 +12,8 @@ import { FakeD1 } from "./helpers/fakeD1";
 const ACCOUNT = "acct_wallet00000000000000";
 const DEVICE = "dev_wallettest00000000000";
 const WEBHOOK_SECRET = "whsec_test_secret";
-const TOPUP_TIERS = [1200, 2400, 3600, 4800];
+const QUICK_TIERS = [600, 1000, 2500, 5000, 10000];
+const LEGACY_TIERS = [1200, 2400, 3600, 4800];
 
 async function signingJwk(): Promise<string> {
   const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
@@ -66,7 +67,9 @@ async function makeEnv(db: FakeD1, environment = "dev") {
     STRIPE_SECRET_KEY: "sk_test_wallet",
     STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
     PLAN_DAILY_PRICE_CENTS: JSON.stringify({ "s-1vcpu-1gb": 30 }),
-    TOPUP_DENOMINATIONS_CENTS: JSON.stringify(TOPUP_TIERS),
+    TOPUP_DENOMINATIONS_CENTS: JSON.stringify(QUICK_TIERS),
+    MIN_TOPUP_CENTS: "600",
+    MAX_TOPUP_CENTS: "30000",
     APP_PAYMENT_RETURN_URL: "https://control.example.com/payment/return",
     PUBLIC_SITE_URL:
       environment === "production"
@@ -151,6 +154,10 @@ function topupRequest(env: TestEnv, cents: number) {
     headers: authed(env.token),
     body: JSON.stringify({ denomination_cents: cents }),
   });
+}
+
+function walletRequest(env: TestEnv) {
+  return new Request("https://example.com/v1/wallet", { headers: authed(env.token) });
 }
 
 async function signStripe(body: string, timestamp: string): Promise<string> {
@@ -274,25 +281,59 @@ describe("充值", () => {
     expect(db.rows("accounts")[0].balance_cents).toBe(0);
   });
 
-  it("只接受控制面白名单里的四个面额", async () => {
-    for (const cents of TOPUP_TIERS) {
+  it("$6–$300 的整美元金额与新旧快捷档都能建会话", async () => {
+    for (const cents of [...QUICK_TIERS, ...LEGACY_TIERS, 30000]) {
       const db = new FakeD1();
       const env = await makeEnv(db);
       stubUpstream();
       const res = await handleTopups(topupRequest(env, cents), env as never);
-      expect(res?.status, `档位 ${cents}`).toBe(200);
+      expect(res?.status, `金额 ${cents}`).toBe(200);
       expect(db.rows("topups")[0].denomination_cents).toBe(cents);
       expect(db.rows("topups")[0].product_id).toBeNull();
     }
   });
 
-  it("非法面额（含旧档位）被拒绝", async () => {
-    for (const cents of [1000, 5000]) {
+  it("非整美元、越界、负数、NaN 都被拒绝", async () => {
+    for (const raw of [599, 30001, 1250, -100, "abc"]) {
       const db = new FakeD1();
       const env = await makeEnv(db);
       stubUpstream();
-      const res = await handleTopups(topupRequest(env, cents), env as never);
-      expect(res?.status).toBe(409);
+      const req = new Request("https://example.com/v1/topups", {
+        method: "POST",
+        headers: authed(env.token),
+        body: JSON.stringify({ denomination_cents: raw }),
+      });
+      const res = await handleTopups(req, env as never);
+      expect(res?.status, String(raw)).toBe(409);
+      const body = (await res!.json()) as {
+        details: { reason: string; min_cents: number; max_cents: number; whole_dollars: boolean };
+      };
+      expect(body.details.reason).toBe("invalid_denomination");
+      expect(body.details.min_cents).toBe(600);
+      expect(body.details.max_cents).toBe(30000);
+      expect(body.details.whole_dollars).toBe(true);
+      expect(db.rows("topups")).toHaveLength(0);
+    }
+  });
+
+  it("请求体不是对象或金额不是数字时 409", async () => {
+    for (const rawBody of [
+      "null",
+      "[]",
+      JSON.stringify("3600"),
+      JSON.stringify({ denomination_cents: "3600" }),
+      JSON.stringify({ denomination_cents: ["3600"] }),
+    ]) {
+      const db = new FakeD1();
+      const env = await makeEnv(db);
+      stubUpstream();
+      const req = new Request("https://example.com/v1/topups", {
+        method: "POST",
+        headers: authed(env.token),
+        body: rawBody,
+      });
+      const res = await handleTopups(req, env as never);
+      expect(res?.status, rawBody).toBe(409);
       const body = (await res!.json()) as { details: { reason: string } };
       expect(body.details.reason).toBe("invalid_denomination");
       expect(db.rows("topups")).toHaveLength(0);
@@ -314,21 +355,161 @@ describe("充值", () => {
     }
   });
 
-  it("TOPUP_DENOMINATIONS_CENTS 非法时 503，不混成用户面额错误", async () => {
+  it("快捷档缺失/非法不阻断自定义充值，wallet 返回空快捷档", async () => {
     for (const raw of ["[]", "[\"1200\"]", "not-json"]) {
       const db = new FakeD1();
       const env = await makeEnv(db);
       stubUpstream();
-      const res = await handleTopups(topupRequest({ ...env, TOPUP_DENOMINATIONS_CENTS: raw } as TestEnv, 2400), {
-        ...env,
-        TOPUP_DENOMINATIONS_CENTS: raw,
-      } as never);
-      expect(res?.status, raw).toBe(503);
+      const patched = { ...env, TOPUP_DENOMINATIONS_CENTS: raw };
+      const res = await handleTopups(topupRequest(patched as TestEnv, 1000), patched as never);
+      expect(res?.status, raw).toBe(200);
+      const wallet = await handleTopups(walletRequest(patched as TestEnv), patched as never);
+      expect(wallet?.status, raw).toBe(200);
+      const body = (await wallet!.json()) as {
+        denominations_cents: number[];
+        min_topup_cents: number;
+        max_topup_cents: number;
+      };
+      expect(body.denominations_cents).toEqual([]);
+      expect(body.min_topup_cents).toBe(600);
+      expect(body.max_topup_cents).toBe(30000);
+    }
+  });
+
+  it("MIN/MAX 缺失或非法时 503", async () => {
+    for (const patch of [
+      { MIN_TOPUP_CENTS: undefined },
+      { MAX_TOPUP_CENTS: undefined },
+      { MIN_TOPUP_CENTS: "50" },
+      { MIN_TOPUP_CENTS: "abc" },
+      { MIN_TOPUP_CENTS: "30000", MAX_TOPUP_CENTS: "600" },
+    ]) {
+      const db = new FakeD1();
+      const env = await makeEnv(db);
+      stubUpstream();
+      const patched = { ...env, ...patch };
+      const res = await handleTopups(topupRequest(patched as TestEnv, 1000), patched as never);
+      expect(res?.status, JSON.stringify(patch)).toBe(503);
       const body = (await res!.json()) as { retryable: boolean; details: { reason: string } };
       expect(body.retryable).toBe(false);
       expect(body.details.reason).toBe("topup_config_unavailable");
       expect(db.rows("topups")).toHaveLength(0);
     }
+  });
+
+  it("wallet 返回 min/max，并过滤越界/非整美元的快捷档", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    const patched = {
+      ...env,
+      TOPUP_DENOMINATIONS_CENTS: JSON.stringify([500, 600, 1000, 1250, 2500, 5000, 10000, 35000]),
+    };
+    const res = await handleTopups(walletRequest(patched as TestEnv), patched as never);
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as {
+      denominations_cents: number[];
+      min_topup_cents: number;
+      max_topup_cents: number;
+    };
+    expect(body.denominations_cents).toEqual(QUICK_TIERS);
+    expect(body.min_topup_cents).toBe(600);
+    expect(body.max_topup_cents).toBe(30000);
+  });
+
+  it("同一账号一小时内第 6 笔 pending/paid 充值被 429，failed 不计数", async () => {
+    const now = Date.now();
+    const seed = (db: FakeD1, status: string, ageMs: number, i: number) => {
+      db.rows("topups").push({
+        id: `top_seed_${status}_${i}`,
+        account_id: ACCOUNT,
+        denomination_cents: 1000,
+        product_id: null,
+        checkout_session_id: null,
+        checkout_url: null,
+        status,
+        created_at: now - ageMs,
+        paid_at: status === "paid" ? now - ageMs : null,
+      });
+    };
+
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    for (let i = 0; i < 5; i += 1) seed(db, i % 2 === 0 ? "pending" : "paid", 1000, i);
+    const blocked = await handleTopups(topupRequest(env, 1000), env as never);
+    expect(blocked?.status).toBe(429);
+    const blockedBody = (await blocked!.json()) as {
+      request_id?: string;
+      details: { reason: string };
+    };
+    expect(blockedBody.details.reason).toBe("topup_rate_limited");
+    expect(typeof blockedBody.request_id).toBe("string");
+    expect(db.rows("topups")).toHaveLength(5);
+
+    const failedDb = new FakeD1();
+    const failedEnv = await makeEnv(failedDb);
+    stubUpstream();
+    for (let i = 0; i < 4; i += 1) seed(failedDb, "failed", 1000, i);
+    const allowed = await handleTopups(topupRequest(failedEnv, 1000), failedEnv as never);
+    expect(allowed?.status).toBe(200);
+    expect(failedDb.rows("topups")).toHaveLength(5);
+
+    const oldDb = new FakeD1();
+    const oldEnv = await makeEnv(oldDb);
+    stubUpstream();
+    for (let i = 0; i < 5; i += 1) seed(oldDb, "paid", 2 * 60 * 60 * 1000, i);
+    const oldAllowed = await handleTopups(topupRequest(oldEnv, 1000), oldEnv as never);
+    expect(oldAllowed?.status).toBe(200);
+  });
+
+  it("429 不作永久幂等缓存：新 key 或过期后可重试", async () => {
+    const now = Date.now();
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    stubUpstream();
+    for (let i = 0; i < 5; i += 1) {
+      db.rows("topups").push({
+        id: `top_seed_rate_${i}`,
+        account_id: ACCOUNT,
+        denomination_cents: 1000,
+        product_id: null,
+        checkout_session_id: null,
+        checkout_url: null,
+        status: i % 2 === 0 ? "pending" : "paid",
+        created_at: now - 1000,
+        paid_at: null,
+      });
+    }
+
+    const keyed = (key: string) =>
+      new Request("https://example.com/v1/topups", {
+        method: "POST",
+        headers: { ...authed(env.token), "Idempotency-Key": key },
+        body: JSON.stringify({ denomination_cents: 1000 }),
+      });
+
+    const first = await handleTopups(keyed("idem-rate-0001"), env as never);
+    expect(first?.status).toBe(429);
+
+    const freshKey = await handleTopups(keyed("idem-rate-0002"), env as never);
+    expect(freshKey?.status).toBe(429);
+
+    for (const row of db.rows("topups")) row.status = "failed";
+
+    const newKey = await handleTopups(keyed("idem-rate-0003"), env as never);
+    expect(newKey?.status).toBe(200);
+
+    const replay = await handleTopups(keyed("idem-rate-0001"), env as never);
+    expect(replay?.status).toBe(429);
+
+    const stored = db
+      .rows("idempotency_keys")
+      .find((row) => row.key === "idem-rate-0001");
+    expect(stored).toBeTruthy();
+    stored!.created_at = Date.now() - 61_000;
+
+    const retried = await handleTopups(keyed("idem-rate-0001"), env as never);
+    expect(retried?.status).toBe(200);
   });
 
   it("Stripe key 前缀与环境不匹配时 fail closed", async () => {

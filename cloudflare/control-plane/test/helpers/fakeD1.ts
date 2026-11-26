@@ -1497,6 +1497,33 @@ export class FakeD1 {
       const row = this.tables.accounts.find((x) => x.id === a[0]);
       return row ? { balance_cents: row.balance_cents } : null;
     }
+    if (
+      sql.startsWith("insert into topups") &&
+      sql.includes("select ?, ?, ?, null, 'pending', ?")
+    ) {
+      // 条件 INSERT：计数和写入在同一条语句里，超限时 0 行。
+      const [id, accountId, cents, createdAt, , since, maxActive] = a;
+      const active = this.tables.topups.filter(
+        (row) =>
+          row.account_id === accountId &&
+          Number(row.created_at) >= Number(since) &&
+          (row.status === "pending" || row.status === "paid"),
+      ).length;
+      if (active < Number(maxActive)) {
+        this.tables.topups.push({
+          id,
+          account_id: accountId,
+          denomination_cents: cents,
+          product_id: null,
+          checkout_session_id: null,
+          checkout_url: null,
+          status: "pending",
+          created_at: createdAt,
+          paid_at: null,
+        });
+      }
+      return null;
+    }
     if (sql.startsWith("insert into topups")) {
       // 建单只带面额与 product_id，收银台会话随后 UPDATE 补上。
       this.tables.topups.push({
@@ -2227,6 +2254,20 @@ export class FakeStatement {
         );
       if (row) row.created_at = now;
       return { success: true, meta: { changes: row ? 1 : 0 } };
+    } else if (
+      sql.startsWith("insert into topups") &&
+      sql.includes("select ?, ?, ?, null, 'pending', ?")
+    ) {
+      const [, accountId, , , , since, maxActive] = this.statement.args;
+      const active = this.db
+        .rows("topups")
+        .filter(
+          (row) =>
+            row.account_id === accountId &&
+            Number(row.created_at) >= Number(since) &&
+            (row.status === "pending" || row.status === "paid"),
+        ).length;
+      changes = active < Number(maxActive) ? 1 : 0;
     } else if (sql.startsWith("insert into server_traffic")) {
       const [serverId, cycleId, , , seq] = this.statement.args;
       const row = this.db
