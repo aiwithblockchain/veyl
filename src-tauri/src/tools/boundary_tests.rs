@@ -194,6 +194,10 @@ impl VpnToolServices for FakeServices {
         self.rec.record("my_server_wallet");
         Ok(self.data.clone())
     }
+    async fn my_servers(&self) -> anyhow::Result<Value> {
+        self.rec.record("my_servers");
+        Ok(self.data.clone())
+    }
     async fn llm_providers(&self, test_provider_id: Option<String>) -> anyhow::Result<Value> {
         self.rec
             .record(format!("llm_providers({test_provider_id:?})"));
@@ -601,7 +605,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.36.0",
+                env["contract_version"], "3.37.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1197,6 +1201,106 @@ async fn my_servers_requires_a_logged_in_account() {
     auth::clear_tokens_for_test();
 }
 
+/// 账号流量：池子原样透出，不等于列表逐台求和；缺池子时字段不出现、也不编 0。
+#[tokio::test]
+async fn my_servers_reports_the_account_pool_not_a_sum() {
+    use crate::control_plane::auth;
+    let _guard = crate::test_support::AUTH_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    crate::test_support::install_test_secrets();
+    auth::clear_tokens_for_test();
+    auth::store_device_for_test("dev_pool");
+    auth::store_tokens_for_test(&auth::TokenSet {
+        account_id: "acct_pool".into(),
+        device_id: "dev_pool".into(),
+        access_token: "access".into(),
+        access_expires_at: "2099-01-01T00:00:00Z".into(),
+        refresh_token: "refresh".into(),
+        refresh_expires_at: "2099-01-01T00:00:00Z".into(),
+        account_kind: "email".into(),
+        email: Some("a@example.com".into()),
+    });
+
+    // 列表两台共 2.2 GB；池子 5.4 GB——差的那台已销毁、不在列表里，但用量仍计扣费。
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "servers": [
+            {
+                "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+                "ip": "203.0.113.1", "node_ready": true, "daily_price_cents": 30,
+                "traffic_used_bytes": 1_100_000_000_u64,
+                "traffic_limit_bytes": 50_000_000_000_u64,
+                "traffic_reset_at": "2026-12-01T00:00:00Z",
+                "traffic_state": "ok",
+            },
+            {
+                "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "active",
+                "ip": "203.0.113.2", "node_ready": false, "daily_price_cents": 30,
+                "traffic_used_bytes": 1_100_000_000_u64,
+                "traffic_limit_bytes": 50_000_000_000_u64,
+                "traffic_reset_at": "2026-12-01T00:00:00Z",
+                "traffic_state": "unpaid",
+            }
+        ],
+        "traffic_pool": { "used_bytes": 5_400_000_000_u64, "limit_bytes": 100_000_000_000_u64 },
+        "internal_note": "must-not-leak",
+    }));
+    let all = tools(svc);
+    let (is_error, env) = run(tool(&all, "MyServers"), json!({})).await;
+    assert!(!is_error, "{env}");
+    assert_eq!(env["data"]["traffic_pool"]["used_bytes"], 5_400_000_000_u64);
+    assert_eq!(
+        env["data"]["traffic_pool"]["limit_bytes"],
+        100_000_000_000_u64
+    );
+    assert!(
+        env["data"].get("internal_note").is_none(),
+        "顶层只放契约字段：{env}"
+    );
+    let content = env["summary"].as_str().unwrap_or("");
+    assert!(
+        content.contains("本月流量：已用 5.4 GB / 额度 100.0 GB"),
+        "首行必须是账号池：{content}"
+    );
+    assert_eq!(env["data"]["servers"][0]["traffic_state"], "ok");
+    assert_eq!(env["data"]["servers"][1]["traffic_state"], "unpaid");
+    assert_eq!(
+        env["data"]["servers"][0]["traffic_reset_at"],
+        "2026-12-01T00:00:00Z"
+    );
+    assert!(
+        !content.contains("2.2 GB"),
+        "不能把逐台求和当账号总量：{content}"
+    );
+    assert!(
+        content.contains("流量 已用 1.1 GB / 额度 50.0 GB（未付费）"),
+        "unpaid 的机器必须写进摘要：{content}"
+    );
+
+    // 旧控制面不给池子：整个字段不出现，也不补 0。
+    let (svc, _rec) = FakeServices::with_data(json!({
+        "servers": [{
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "ip": null, "node_ready": false, "daily_price_cents": 30,
+            "traffic_used_bytes": 1_000_000_000_u64,
+            "traffic_limit_bytes": 50_000_000_000_u64,
+            "traffic_state": "ok",
+        }],
+    }));
+    let (is_error, env) = run(tool(&tools(svc), "MyServers"), json!({})).await;
+    assert!(!is_error, "{env}");
+    assert!(
+        env["data"].get("traffic_pool").is_none(),
+        "没有池子就不出这个字段：{env}"
+    );
+    assert!(
+        !env["summary"].as_str().unwrap_or("").contains("本月流量"),
+        "{env}"
+    );
+
+    auth::clear_tokens_for_test();
+}
+
 /// 钱包：未登录必须要求登录（不能报 0）；登录后只回三个字段，充值档位不进 AI 上下文。
 #[tokio::test]
 async fn my_server_wallet_requires_login_and_exposes_only_the_balance() {
@@ -1453,7 +1557,7 @@ async fn readonly_failures_never_report_an_unknown_change() {
         "HttpCheck 失败不能报 unknown"
     );
 
-    // MyServers：登录后服务层报错（FakeServices 未接入）也不能报 unknown。
+    // MyServers：登录后服务层报错（未接入）也不能报 unknown。
     use crate::control_plane::auth;
     let _guard = crate::test_support::AUTH_STATE_LOCK
         .lock()
@@ -1472,8 +1576,10 @@ async fn readonly_failures_never_report_an_unknown_change() {
         email: Some("a@example.com".into()),
     });
     const SERVER_SESSION: &str = "boundary-readonly-servers";
-    let (is_error, env) =
-        run_in_session(tool(&all, "MyServers"), json!({}), SERVER_SESSION).await;
+    let failing = crate::tools::my_servers::MyServersTool::new(Arc::new(
+        crate::tools::NotWiredServices,
+    ));
+    let (is_error, env) = run_in_session(&failing, json!({}), SERVER_SESSION).await;
     assert!(is_error, "{env}");
     let outcome = crate::tools::envelope::take_outcome(SERVER_SESSION, "MyServers")
         .expect("工具结果应当已登记");

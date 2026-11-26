@@ -71,7 +71,8 @@ Running a node on your own server gives you a dedicated, stable exit.
 
 - Two identities: **email sign-in code**, or **device identity** (this device only).
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
-- Email, balance, top-up and sign out are all in the Account panel opened from the bottom-left avatar. "Use on other devices" is not there — it is in the My servers rail (§3.5).
+- Email, balance, top-up, **this month's traffic** and sign out are all in the Account panel opened from the bottom-left avatar. "Use on other devices" is not there — it is in the My servers rail (§3.5).
+- This month's traffic is an **account-level** pool: never add up the individual servers, and do not estimate how many days are left.
 - The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.
 - Signing out does not affect an active connection.

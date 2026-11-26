@@ -61,7 +61,7 @@ fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static 
 
 /// 对模型可见的字段白名单：地址可以给（用户已同意 AI 看到自己服务器的 IP）；
 /// 端口、密码、节点 id、provider id 等内部字段一律不出。
-const VISIBLE_FIELDS: [&str; 12] = [
+const VISIBLE_FIELDS: [&str; 16] = [
     "server_id",
     "name",
     "region",
@@ -75,6 +75,11 @@ const VISIBLE_FIELDS: [&str; 12] = [
     // 计费口径直接透出，不推算「约可运行 N 天」：结算前 pending 时 paid_until 为 null。
     "paid_until",
     "billing_state",
+    // 流量四字段原样透出：单台只回答「这台用了多少」，账号总量看顶层 traffic_pool。
+    "traffic_used_bytes",
+    "traffic_limit_bytes",
+    "traffic_reset_at",
+    "traffic_state",
 ];
 
 /// 对模型可见的单条：按白名单重建，destroyed 时补人话原因并抹掉内部 failure。
@@ -158,8 +163,10 @@ impl Tool for MyServersTool {
     }
 
     fn description(&self) -> &str {
-        "查看「我的服务器」列表：名称、地区、状态、地址、是否可用、月费。\
+        "查看「我的服务器」列表：名称、地区、状态、地址、是否可用、月费、流量。\
          只读；返回地址，不返回端口、密码。用户问这台机器的地址时直接答，不要绕。\
+         账号本月流量只看摘要首行，不要把各台相加——列表不含已销毁的机器；\
+         流量只说已用与额度，不推算还能用几天，也不换算成钱。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
          不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
          用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
@@ -197,9 +204,17 @@ impl Tool for MyServersTool {
                 } else {
                     original.iter().take(8).filter_map(server_row_fact).collect()
                 };
-                let summary = summarise_servers(&servers);
-                let mut visible = data;
-                visible["servers"] = Value::Array(servers);
+                // 顶层只放契约里的两个键：服务层多给的内部字段不进界面，也不进模型。
+                let pool = data.get("traffic_pool").and_then(|pool| {
+                    let used = pool.get("used_bytes").and_then(Value::as_u64)?;
+                    let limit = pool.get("limit_bytes").and_then(Value::as_u64)?;
+                    Some(json!({ "used_bytes": used, "limit_bytes": limit }))
+                });
+                let summary = summarise_servers(&servers, pool.as_ref());
+                let mut visible = json!({ "servers": servers });
+                if let Some(pool) = pool {
+                    visible["traffic_pool"] = pool;
+                }
                 ToolOutcome::ok(summary, visible).with_facts(facts)
             }
             Err(error) => ToolOutcome::fail(failure(error)),
@@ -208,14 +223,41 @@ impl Tool for MyServersTool {
     }
 }
 
+/// 字节按 GB（10^9）展示，保留一位小数；只做展示，不参与任何判定。
+fn gb_text(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+}
+
+/// 额度为 0 = 控制面没给（额度未知）：只说已用，不编一个 0 GB 的额度。
+fn traffic_text(used: u64, limit: u64) -> String {
+    if limit == 0 {
+        format!("已用 {}", gb_text(used))
+    } else {
+        format!("已用 {} / 额度 {}", gb_text(used), gb_text(limit))
+    }
+}
+
 /// 模型只看得到摘要（`ToolResult.content`），`data` 只进界面。
 /// 所以每台的 id / 名称 / 地区 / 状态 / 地址 / 计费必须写在这里，
 /// `server_id` 是 `NodeRotateCredentials` 等工具的唯一入参来源。
-fn summarise_servers(servers: &[Value]) -> String {
-    if servers.is_empty() {
-        return "你名下还没有自建服务器。".to_string();
+///
+/// 账号总量只读 `traffic_pool`：列表不含已销毁 / 已 dismiss 的机器，
+/// 逐台求和会把「账号已超」答成「没超」。
+fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
+    let mut lines = Vec::new();
+    if let Some(pool) = pool {
+        if let (Some(used), Some(limit)) = (
+            pool.get("used_bytes").and_then(Value::as_u64),
+            pool.get("limit_bytes").and_then(Value::as_u64),
+        ) {
+            lines.push(format!("本月流量：{}", traffic_text(used, limit)));
+        }
     }
-    let mut lines = vec![format!("共 {} 台服务器：", servers.len())];
+    if servers.is_empty() {
+        lines.push("你名下还没有自建服务器。".to_string());
+        return lines.join("\n");
+    }
+    lines.push(format!("共 {} 台服务器：", servers.len()));
     for server in servers {
         let id = server
             .get("server_id")
@@ -245,6 +287,19 @@ fn summarise_servers(servers: &[Value]) -> String {
             if let Some(paid_until) = server.get("paid_until").and_then(Value::as_str) {
                 let until = friendly_time(paid_until).unwrap_or_else(|| paid_until.to_string());
                 line.push_str(&format!(" | 本期有效至 {until}"));
+            }
+        }
+        // 正常的（ok）不写流量，避免摘要变长；非 ok 就是因流量超支停机，必须说出来。
+        if let Some(state) = server.get("traffic_state").and_then(Value::as_str) {
+            if state != "ok" {
+                let traffic = match (
+                    server.get("traffic_used_bytes").and_then(Value::as_u64),
+                    server.get("traffic_limit_bytes").and_then(Value::as_u64),
+                ) {
+                    (Some(used), Some(limit)) => traffic_text(used, limit),
+                    _ => "已超额度".to_string(),
+                };
+                line.push_str(&format!(" | 流量 {traffic}（未付费）"));
             }
         }
         if ready {
@@ -416,7 +471,7 @@ mod tests {
                 "destroyed_reason": "已销毁",
             }),
         ];
-        let text = summarise_servers(&servers);
+        let text = summarise_servers(&servers, None);
         for expected in [
             "共 2 台服务器",
             "srv_1",
@@ -430,7 +485,7 @@ mod tests {
         ] {
             assert!(text.contains(expected), "摘要缺少 {expected}：{text}");
         }
-        assert_eq!(summarise_servers(&[]), "你名下还没有自建服务器。");
+        assert_eq!(summarise_servers(&[], None), "你名下还没有自建服务器。");
     }
 
     /// 地址保留；端口、密码、节点 id、provider id 等内部字段不得出现。
@@ -448,9 +503,21 @@ mod tests {
             "password": "pw-secret",
             "node_id": "nd_x",
             "provider_id": "123",
+            "traffic_used_bytes": 1_100_000_000_u64,
+            "traffic_limit_bytes": 50_000_000_000_u64,
+            "traffic_reset_at": "2026-12-01T00:00:00Z",
+            "traffic_state": "ok",
         });
         let visible = visible_server(&server);
         assert_eq!(visible["ip"], "167.99.195.212");
+        for kept in [
+            "traffic_used_bytes",
+            "traffic_limit_bytes",
+            "traffic_reset_at",
+            "traffic_state",
+        ] {
+            assert!(visible.get(kept).is_some(), "流量字段必须透出：{visible}");
+        }
         for hidden in ["port", "password", "node_id", "provider_id"] {
             assert!(
                 visible.get(hidden).is_none(),
@@ -500,15 +567,88 @@ mod tests {
             "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
             "ip": "203.0.113.1", "node_ready": true, "daily_price_cents": 30,
             "paid_until": "2026-11-27T10:00:00Z", "billing_state": "active",
-        })]);
+        })], None);
         assert!(active.contains("本期有效至"), "{active}");
 
         let pending = summarise_servers(&[json!({
             "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "creating",
             "paid_until": null, "billing_state": "pending",
-        })]);
+        })], None);
         assert!(!pending.contains("本期有效至"), "{pending}");
         assert!(!pending.contains("约可运行"), "{pending}");
+    }
+
+    /// 账号总量只认池子：列表只有一台、池子却是更大的数（已销毁机器的用量仍计扣费）。
+    #[test]
+    fn the_pool_wins_over_the_sum_of_listed_servers() {
+        let servers = vec![json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "ip": "203.0.113.1", "node_ready": true, "daily_price_cents": 30,
+            "traffic_used_bytes": 1_100_000_000_u64,
+            "traffic_limit_bytes": 50_000_000_000_u64,
+            "traffic_state": "ok",
+        })];
+        let pool = json!({
+            "used_bytes": 5_400_000_000_u64,
+            "limit_bytes": 100_000_000_000_u64,
+        });
+        let text = summarise_servers(&servers, Some(&pool));
+        assert!(
+            text.starts_with("本月流量：已用 5.4 GB / 额度 100.0 GB"),
+            "首行必须是账号池：{text}"
+        );
+        assert!(!text.contains("1.1 GB"), "正常的机器不写流量：{text}");
+    }
+
+    /// 旧控制面没有池子：整段不出现，也绝不补一个 0。
+    #[test]
+    fn a_missing_pool_is_not_invented_as_zero() {
+        let text = summarise_servers(&[], None);
+        assert_eq!(text, "你名下还没有自建服务器。");
+        assert!(!text.contains("本月流量"), "{text}");
+        assert!(!text.contains("0.0 GB"), "{text}");
+    }
+
+    /// 机器都销毁了但账号还有用量：池子照说。
+    #[test]
+    fn the_pool_survives_an_empty_server_list() {
+        let pool = json!({ "used_bytes": 500_000_000_u64, "limit_bytes": 100_000_000_000_u64 });
+        let text = summarise_servers(&[], Some(&pool));
+        assert!(text.contains("本月流量：已用 0.5 GB / 额度 100.0 GB"), "{text}");
+        assert!(text.contains("还没有自建服务器"), "{text}");
+    }
+
+    /// 额度为 0 是「未知」：只说已用，不写 0 GB。
+    #[test]
+    fn an_unknown_limit_is_not_printed_as_zero() {
+        let pool = json!({ "used_bytes": 500_000_000_u64, "limit_bytes": 0 });
+        let text = summarise_servers(&[], Some(&pool));
+        assert!(text.contains("本月流量：已用 0.5 GB"), "{text}");
+        assert!(!text.contains("额度"), "{text}");
+    }
+
+    /// 非 ok（unpaid）的机器必须在摘要里带上已用 / 额度；正常的机器不带。
+    #[test]
+    fn an_unpaid_server_shows_its_traffic_in_the_summary() {
+        let text = summarise_servers(&[json!({
+            "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
+            "ip": null, "node_ready": false, "daily_price_cents": 30,
+            "traffic_used_bytes": 6_000_000_000_u64,
+            "traffic_limit_bytes": 5_000_000_000_u64,
+            "traffic_state": "unpaid",
+        })], None);
+        assert!(
+            text.contains("流量 已用 6.0 GB / 额度 5.0 GB（未付费）"),
+            "{text}"
+        );
+
+        let ok = summarise_servers(&[json!({
+            "server_id": "srv_2", "name": "东京", "region": "tyo1", "state": "active",
+            "traffic_used_bytes": 1_000_000_000_u64,
+            "traffic_limit_bytes": 50_000_000_000_u64,
+            "traffic_state": "ok",
+        })], None);
+        assert!(!ok.contains("流量"), "正常的机器不写流量：{ok}");
     }
 
     /// 已销毁的服务器给用户能懂的原因；内部 failure_code 不能交给模型。

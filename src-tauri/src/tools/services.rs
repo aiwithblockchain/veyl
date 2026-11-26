@@ -6107,12 +6107,15 @@ impl VpnToolServices for WiredServices {
     }
 
     async fn my_servers(&self) -> anyhow::Result<Value> {
-        let servers = crate::control_plane::servers::list()
+        // 必须用带池子的那份：账号流量只能取控制面的聚合，不能拿列表逐台求和
+        // （列表不含已销毁 / 已 dismiss 的机器，它们的用量仍计扣费）。
+        let list = crate::control_plane::servers::list_with_pool()
             .await
             .map_err(|error| svc_error(&error.code, error.message.clone()))?;
         // 只给用户能理解的字段：地址**可以**给（用户已同意 AI 能看到自己服务器的 IP，
         // 用于排障）；端口、密码、节点 id 与其它内部字段不给。
-        let summaries: Vec<Value> = servers
+        let summaries: Vec<Value> = list
+            .servers
             .into_iter()
             .map(|server| {
                 json!({
@@ -6129,6 +6132,11 @@ impl VpnToolServices for WiredServices {
                     // 计费口径原样透出；结算前 pending 时 paid_until 为 null。
                     "paid_until": server.paid_until,
                     "billing_state": server.billing_state,
+                    // 流量四字段原样透出，不求和、不换算（统计口径见 commands.md §7.15）。
+                    "traffic_used_bytes": server.traffic_used_bytes,
+                    "traffic_limit_bytes": server.traffic_limit_bytes,
+                    "traffic_reset_at": server.traffic_reset_at,
+                    "traffic_state": server.traffic_state,
                     "failure": server.failure.map(|failure| json!({
                         "code": failure.code,
                         "message": failure.message,
@@ -6137,7 +6145,15 @@ impl VpnToolServices for WiredServices {
                 })
             })
             .collect();
-        Ok(json!({ "servers": summaries }))
+        let mut data = json!({ "servers": summaries });
+        // 旧控制面没有池子：整个字段不出现，绝不补 0。
+        if let Some(pool) = list.traffic_pool {
+            data["traffic_pool"] = json!({
+                "used_bytes": pool.used_bytes,
+                "limit_bytes": pool.limit_bytes,
+            });
+        }
+        Ok(data)
     }
 
     async fn my_server_wallet(&self) -> anyhow::Result<Value> {

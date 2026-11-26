@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::display::{self, Changed, Display, Fact};
 
-pub const CONTRACT_VERSION: &str = "3.36.0";
+pub const CONTRACT_VERSION: &str = "3.37.0";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AivpnError {

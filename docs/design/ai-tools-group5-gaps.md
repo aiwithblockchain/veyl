@@ -52,6 +52,7 @@
 - 理由：用户问的「到期」其实是三类东西——付费服务器「本期有效至」（`paid_until` + `billing_state`）、免费节点试用到期（已由 2.2 覆盖）、自建 / 导入节点（没有到期概念）。前一类是 `MyServers` 的输出缺字段，不是缺工具。
 - 方案（**已落地，3.34.0**）：`MyServers` 的每台服务器补 `paid_until`、`billing_state` 两个字段（`daily_price_cents` 已有；界面显示的就是这组值）；白名单 10 → 12，`tools.md` 的可见字段表与 `content` 要求同步（服务中时追加「本期有效至 …」）。
 - 不做：不给「到期提醒 / 账单预测」这类派生值——产品已拍板不推算「约可运行 N 天」。
+- 流量（2026-11-26 补）：`traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state` 与账号池 `traffic_pool` 已随 3.37.0 透出给模型（不新增工具，同样不推算天数与金额，账号池不得由 `servers[]` 求和）。
 - 权限：不变（`MyServers` 现有级别）。
 
 ### 2.4 批量测速：**只给 UI**（不做工具）
