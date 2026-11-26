@@ -996,6 +996,11 @@ export const zh = {
   "topup.none": "现在没有可用的充值档位。",
   "topup.refresh": "刷新",
   "topup.pick": "选一档充值。",
+  "topup.custom.label": "自定义金额",
+  "topup.custom.placeholder": "6–300",
+  "topup.custom.hint": "$6–$300，整美元",
+  "topup.custom.invalid": "请输入 $6–$300 的整美元金额",
+  "topup.custom.submit": "充值 {amount}",
   "topup.reopenCheckout": "重新打开支付页面",
   "topup.copyLink": "复制链接",
   "topup.charged": "已充值 {amount}。",
@@ -1005,6 +1010,7 @@ export const zh = {
   "topup.channelNotAllowed": "这个环境不能充值。换正式环境再试。",
   "topup.network": "没连上服务器。没有扣钱，稍后再试。",
   "topup.failed": "没发起充值。稍后再试。",
+  "topup.rateLimited": "充值太频繁，请一小时后再试。",
 
   // 我的服务器：中间区与左栏
   "serversPage.goConsole": "去控制台",

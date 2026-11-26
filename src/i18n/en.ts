@@ -1047,6 +1047,11 @@ export const en: Record<MessageKey, string> = {
   "topup.none": "No top-up options are available right now.",
   "topup.refresh": "Refresh",
   "topup.pick": "Pick an amount.",
+  "topup.custom.label": "Custom amount",
+  "topup.custom.placeholder": "6–300",
+  "topup.custom.hint": "$6–$300, whole dollars",
+  "topup.custom.invalid": "Enter a whole-dollar amount from $6 to $300",
+  "topup.custom.submit": "Top up {amount}",
   "topup.reopenCheckout": "Reopen checkout",
   "topup.copyLink": "Copy link",
   "topup.charged": "Topped up {amount}.",
@@ -1058,6 +1063,7 @@ export const en: Record<MessageKey, string> = {
     "Top-up isn't available in this environment. Use the production environment.",
   "topup.network": "Couldn't reach the server. You weren't charged; try again later.",
   "topup.failed": "Top-up wasn't started. Try again later.",
+  "topup.rateLimited": "Too many top-ups. Try again in an hour.",
 
   // My servers: center pane and rail
   "serversPage.goConsole": "Go to console",

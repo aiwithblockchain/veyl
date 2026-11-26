@@ -176,6 +176,11 @@ pub struct MyServerWallet {
     /// 充值档位，直接来自控制面，Host 不排序、不换算。
     #[serde(default)]
     pub denominations_cents: Vec<i64>,
+    /// 自定义充值范围（USD 分）；控制面未提供时两者都按 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_topup_cents: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_topup_cents: Option<i64>,
     /// 控制面不给时间，由 Host 补本地时间。
     #[serde(default)]
     pub updated_at: String,
@@ -782,6 +787,18 @@ fn parse_wallet(raw: Value) -> Result<MyServerWallet, CpError> {
     }
     if wallet.denominations_cents.iter().any(|cents| *cents <= 0) {
         return Err(CpError::invalid_response("充值面额必须是正整数分"));
+    }
+    match (wallet.min_topup_cents, wallet.max_topup_cents) {
+        (Some(min), Some(max)) => {
+            if min < 100 || max < min {
+                return Err(CpError::invalid_response("充值范围不合法"));
+            }
+        }
+        // 两者必须同时出现；缺一个就都按未提供处理，客户端用自己的兜底值。
+        _ => {
+            wallet.min_topup_cents = None;
+            wallet.max_topup_cents = None;
+        }
     }
     if wallet.currency.trim().is_empty() {
         wallet.currency = default_currency();
@@ -1864,6 +1881,53 @@ mod tests {
             .is_empty());
         assert!(parse_wallet(json!({ "balance_cents": 0, "denominations_cents": [0] })).is_err());
         assert!(parse_wallet(json!({ "balance_cents": -1 })).is_err());
+    }
+
+    #[test]
+    fn a_wallet_response_carries_optional_topup_range() {
+        // 缺失：两者都 None，序列化时两个 key 都不出现。
+        let wallet = parse_wallet(json!({ "balance_cents": 0 })).unwrap();
+        assert_eq!(wallet.min_topup_cents, None);
+        assert_eq!(wallet.max_topup_cents, None);
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert!(value.get("min_topup_cents").is_none());
+        assert!(value.get("max_topup_cents").is_none());
+
+        // 合法。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+            "max_topup_cents": 30000,
+        }))
+        .unwrap();
+        assert_eq!(wallet.min_topup_cents, Some(600));
+        assert_eq!(wallet.max_topup_cents, Some(30000));
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert_eq!(value["min_topup_cents"], 600);
+        assert_eq!(value["max_topup_cents"], 30000);
+
+        // 只给一个：都按未提供处理。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+        }))
+        .unwrap();
+        assert_eq!(wallet.min_topup_cents, None);
+        assert_eq!(wallet.max_topup_cents, None);
+
+        // 非法范围。
+        assert!(parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 50,
+            "max_topup_cents": 30000,
+        }))
+        .is_err());
+        assert!(parse_wallet(json!({
+            "balance_cents": 0,
+            "min_topup_cents": 600,
+            "max_topup_cents": 500,
+        }))
+        .is_err());
     }
 
     #[test]

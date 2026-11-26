@@ -3286,6 +3286,47 @@ body[data-resizing] {
   font-variant-numeric: tabular-nums;
 }
 
+.myservers-topup__custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.myservers-topup__custom-label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.myservers-topup__custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.myservers-topup__input {
+  height: 44px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-raise);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.myservers-topup__input:focus {
+  outline: 0;
+  border-color: var(--link);
+}
+
+.myservers-topup__submit {
+  height: 44px;
+  padding: 0 18px;
+  font-size: 15px;
+}
+
 .myservers__detail {
   display: flex;
   flex-direction: column;

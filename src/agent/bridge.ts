@@ -887,6 +887,9 @@ export interface MyServerWallet {
   balance_cents: number;
   currency: string;
   denominations_cents: number[];
+  /** 自定义充值范围（USD 分）；旧后端缺省时前端按 600 / 30000 兜底。 */
+  min_topup_cents?: number;
+  max_topup_cents?: number;
   updated_at: string;
 }
 

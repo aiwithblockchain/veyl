@@ -32,6 +32,9 @@ function topupError(error: unknown): string {
   if (reason === "channel_not_allowed") {
     return t("topup.channelNotAllowed");
   }
+  if (reason === "topup_rate_limited") {
+    return t("topup.rateLimited");
+  }
   if (problem.code === "TIMEOUT" || problem.code === "NETWORK") {
     return t("topup.network");
   }
@@ -49,6 +52,7 @@ export function MyServerTopUp({
 }: Props) {
   const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
+  const [custom, setCustom] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<{
     message: string;
@@ -103,6 +107,17 @@ export function MyServerTopUp({
 
   const busy = busyCents !== null;
   const denominations = wallet?.denominations_cents ?? [];
+  const minCents = wallet?.min_topup_cents ?? 600;
+  const maxCents = wallet?.max_topup_cents ?? 30000;
+  const customDollars = /^\d+$/.test(custom) ? Number(custom) : Number.NaN;
+  const customCents = Number.isSafeInteger(customDollars)
+    ? customDollars * 100
+    : Number.NaN;
+  const customValid =
+    Number.isSafeInteger(customCents) && customCents >= minCents && customCents <= maxCents;
+  const customSubmitLabel = tr("topup.custom.submit", {
+    amount: Number.isSafeInteger(customCents) ? formatUsdCents(customCents) : "—",
+  });
 
   return (
     <div className="modal-backdrop" onMouseDown={() => !busy && onClose()}>
@@ -153,31 +168,82 @@ export function MyServerTopUp({
                 </button>
               </div>
             </>
-          ) : denominations.length === 0 ? (
+          ) : wallet ? (
+            <>
+              {denominations.length > 0 ? (
+                <>
+                  <p className="myservers__hint">{tr("topup.pick")}</p>
+                  <div className="myservers-topup__grid">
+                    {denominations.map((cents) => (
+                      <button
+                        key={cents}
+                        type="button"
+                        className="btn btn--ghost myservers-topup__option"
+                        disabled={busy}
+                        aria-busy={busyCents === cents || undefined}
+                        onClick={() => void start(cents)}
+                      >
+                        {formatUsdCents(cents)}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+              <div className="myservers-topup__custom">
+                <label
+                  className="myservers-topup__custom-label"
+                  htmlFor="myservers-topup-custom"
+                >
+                  {tr("topup.custom.label")}
+                </label>
+                <div className="myservers-topup__custom-row">
+                  <input
+                    id="myservers-topup-custom"
+                    className="myservers-topup__input"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    placeholder={tr("topup.custom.placeholder")}
+                    value={custom}
+                    disabled={busy}
+                    aria-invalid={custom.length > 0 && !customValid ? true : undefined}
+                    aria-describedby="myservers-topup-custom-hint"
+                    onChange={(event) => setCustom(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn--primary myservers-topup__submit"
+                    disabled={busy || !customValid}
+                    aria-busy={busyCents === customCents || undefined}
+                    onClick={() => {
+                      if (customValid) void start(customCents);
+                    }}
+                  >
+                    {customSubmitLabel}
+                  </button>
+                </div>
+                <p
+                  id="myservers-topup-custom-hint"
+                  className={
+                    custom.length > 0 && !customValid
+                      ? "myservers__error"
+                      : "myservers__hint"
+                  }
+                  role={custom.length > 0 && !customValid ? "alert" : undefined}
+                >
+                  {custom.length > 0 && !customValid
+                    ? tr("topup.custom.invalid")
+                    : tr("topup.custom.hint")}
+                </p>
+              </div>
+            </>
+          ) : (
             <>
               <p className="myservers__hint">{tr("topup.none")}</p>
               <div className="myservers__login-actions">
                 <button type="button" className="btn btn--ghost" onClick={onRetry}>
                   {tr("topup.refresh")}
                 </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="myservers__hint">{tr("topup.pick")}</p>
-              <div className="myservers-topup__grid">
-                {denominations.map((cents) => (
-                  <button
-                    key={cents}
-                    type="button"
-                    className="btn btn--ghost myservers-topup__option"
-                    disabled={busy}
-                    aria-busy={busyCents === cents || undefined}
-                    onClick={() => void start(cents)}
-                  >
-                    {formatUsdCents(cents)}
-                  </button>
-                ))}
               </div>
             </>
           )}
