@@ -57,7 +57,7 @@ function addServer(
     billing_anchor_at: Date.UTC(2026, 10, 1),
     ready_at: Date.UTC(2026, 10, 1),
     transfer_gib: 100,
-    paid_until: 0,
+    paid_until: NOW + 24 * 3600 * 1000,
     billing_state: "active",
     created_at: Date.UTC(2026, 10, 1),
     updated_at: Date.UTC(2026, 10, 1),

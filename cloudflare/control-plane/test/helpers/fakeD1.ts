@@ -850,9 +850,32 @@ export class FakeD1 {
     }
 
     if (sql.startsWith("select coalesce(sum(daily_price_cents), 0) as total from servers")) {
+      // 钱包「每天约」：与 App 同口径，待开通、已过期、已销毁、DO 侧已不存在的都不计。
+      const billableOnly = sql.includes("billing_state not in");
       const total = this.tables.servers
-        .filter((server) => server.account_id === a[0] && server.destroyed_at == null)
+        .filter(
+          (server) =>
+            server.account_id === a[0] &&
+            server.destroyed_at == null &&
+            server.provider_gone_at == null &&
+            (!billableOnly ||
+              !["pending", "expired"].includes(String(server.billing_state ?? "active"))),
+        )
         .reduce((sum, server) => sum + Number(server.daily_price_cents ?? 0), 0);
+      return { total };
+    }
+    if (sql.startsWith("select coalesce(sum(-amount_cents), 0) as total from wallet_ledger")) {
+      // 近 7 天流量超支扣费：扣费是负数入账，取反后求和。
+      const [accountId, cutoff] = a;
+      const total = this.tables.wallet_ledger
+        .filter(
+          (row) =>
+            row.account_id === accountId &&
+            row.ref_type === "server_traffic" &&
+            row.kind === "charge" &&
+            Number(row.created_at) > Number(cutoff),
+        )
+        .reduce((sum, row) => sum - Number(row.amount_cents), 0);
       return { total };
     }
     if (sql.startsWith("select id from servers where order_id")) {
@@ -1805,7 +1828,7 @@ export class FakeD1 {
         .slice(0, Number(limit))
         .map((row) => ({ id: row.id }));
     }
-    if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at, provider_gone_at from servers")) {
+    if (sql.startsWith("select transfer_gib, ready_at, billing_anchor_at, created_at, destroyed_at, provider_gone_at, paid_until from servers")) {
       // 额度池现算：账号下每台机器（含已销毁行，由 releasedBytes 按 destroyed_at 截止）。
       return this.tables.servers
         .filter((server) => server.account_id === a[0])
@@ -1816,6 +1839,7 @@ export class FakeD1 {
           created_at: server.created_at ?? 0,
           destroyed_at: server.destroyed_at ?? null,
           provider_gone_at: server.provider_gone_at ?? null,
+          paid_until: server.paid_until ?? null,
         }));
     }
     if (sql.startsWith("select coalesce(sum(t.bytes), 0) as used")) {

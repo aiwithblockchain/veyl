@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { recoverExpiredServers, runBilling } from "../src/billing";
+import { cycleIdOf, releasedBytes } from "../src/traffic_cycle";
 import { provisionPaidOrder } from "../src/orders";
 import { FakeD1 } from "./helpers/fakeD1";
 
@@ -294,9 +295,10 @@ describe("按天续费", () => {
     expect(server).toBeTruthy();
     expect(server.order_id).toBe("ord_orphan0000000000");
     expect(server.daily_price_cents).toBe(30);
-    // 锚点取订单已扣的那一天，不是 now。
-    expect(server.billing_anchor_at).toBe(db.rows("orders")[0].paid_at);
-    expect(Number(server.paid_until)).toBe(Number(server.billing_anchor_at) + DAY);
+    // 锚点取订单已扣的那一天（对齐到 UTC 00:00），不是 now。
+    const dayStart = Math.floor(Number(db.rows("orders")[0].paid_at) / DAY) * DAY;
+    expect(server.billing_anchor_at).toBe(dayStart);
+    expect(Number(server.paid_until)).toBe(dayStart + DAY);
   });
 
   it("账本明细超过保留期时：先写月末快照，再裁剪 server_day", async () => {
@@ -1010,6 +1012,12 @@ describe("已收款订单的补建", () => {
     expect(order.failure_code).toBe("provider_unconfigured");
     const server = db.rows("servers")[0];
     expect(server.state).toBe("error");
+    // 补建也走 UTC 自然日网格：锚点与已付到的时刻都落在 00:00，其余三条路径同口径。
+    const paidAt = Number(db.rows("orders")[0].paid_at);
+    expect(Number(server.billing_anchor_at)).toBe(Math.floor(paidAt / DAY) * DAY);
+    expect(Number(server.billing_anchor_at) % DAY).toBe(0);
+    expect(Number(server.paid_until) % DAY).toBe(0);
+    expect(Number(server.paid_until)).toBeGreaterThanOrEqual(Number(server.billing_anchor_at) + DAY);
   });
 });
 
@@ -1301,5 +1309,48 @@ describe("DO 侧已删除的机器（用户在 DO 后台直接删 droplet）", (
 
     expect(report.renewed).toBe(1);
     expect(db.rows("wallet_ledger")).toHaveLength(1);
+  });
+});
+
+describe("日边界：付费天数与额度份额同一个 00:00", () => {
+  it("每过一个 00:00，付费天数与额度份额同时 +1（不变量）", async () => {
+    const DAY0 = Date.UTC(2026, 11, 5);
+    vi.useFakeTimers();
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, {
+      billing_anchor_at: DAY0,
+      paid_until: DAY0 + DAY,
+      ready_at: DAY0,
+      created_at: DAY0,
+      transfer_gib: 100,
+    });
+
+    for (const dayIndex of [0, 1, 2]) {
+      vi.setSystemTime(new Date(DAY0 + dayIndex * DAY + 12 * 3600 * 1000));
+      // agent 还活着：别让失联判定把行拦在计费之前。
+      db.rows("servers")[0].last_seen_at = Date.now();
+      await runBilling(env as never);
+
+      const row = db.rows("servers")[0];
+      const paidDays = (Number(row.paid_until) - Number(row.billing_anchor_at)) / DAY;
+      const shares = releasedBytes(
+        {
+          transfer_gib: 100,
+          ready_at: DAY0,
+          billing_anchor_at: DAY0,
+          created_at: DAY0,
+          destroyed_at: null,
+          provider_gone_at: null,
+          paid_until: Number(row.paid_until),
+        },
+        cycleIdOf(Date.now()),
+        Date.now(),
+      );
+      expect(paidDays).toBe(dayIndex + 1);
+      // 付了 k 天就拿 k 份额度：两边用的是同一个 00:00 边界。
+      expect(shares).toBe(Math.floor(((100 * 1024 ** 3) / 28) * paidDays));
+    }
   });
 });

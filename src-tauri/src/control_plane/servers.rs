@@ -266,6 +266,14 @@ pub struct MyServerWallet {
     pub min_topup_cents: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_topup_cents: Option<i64>,
+    /// 每天在扣的合计（USD 分，2.85.0）：控制面按与 App 相同的口径求和；
+    /// 旧控制面没有该字段，界面回退到客户端自己按列表计算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_cents: Option<i64>,
+    /// 余额还能用几天（2.85.0）：控制面现算，`null` = 没有在跑的机器。
+    /// 旧控制面没有该字段（序列化时也省略），界面据此不显示这一段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_days: Option<i64>,
     /// 控制面不给时间，由 Host 补本地时间。
     #[serde(default)]
     pub updated_at: String,
@@ -929,6 +937,12 @@ fn parse_wallet(raw: Value) -> Result<MyServerWallet, CpError> {
             wallet.min_topup_cents = None;
             wallet.max_topup_cents = None;
         }
+    }
+    // 预测值只用于展示，但负数说明控制面算错了，不能原样带到界面。
+    if wallet.daily_cents.is_some_and(|cents| cents < 0)
+        || wallet.remaining_days.is_some_and(|days| days < 0)
+    {
+        return Err(CpError::invalid_response("钱包剩余天数不合法"));
     }
     if wallet.currency.trim().is_empty() {
         wallet.currency = default_currency();
@@ -2176,6 +2190,46 @@ mod tests {
             "max_topup_cents": 500,
         }))
         .is_err());
+    }
+
+    #[test]
+    fn a_wallet_response_carries_the_optional_day_forecast() {
+        // 旧控制面没有这两个字段：都 None，序列化时不出现（界面回退本地计算）。
+        let wallet = parse_wallet(json!({ "balance_cents": 1000 })).unwrap();
+        assert_eq!(wallet.daily_cents, None);
+        assert_eq!(wallet.remaining_days, None);
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert!(value.get("daily_cents").is_none());
+        assert!(value.get("remaining_days").is_none());
+
+        // 余额为 0 时控制面给 0，必须原样保留（不能当成「没算」）。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 0,
+            "daily_cents": 70,
+            "remaining_days": 0,
+        }))
+        .unwrap();
+        assert_eq!(wallet.daily_cents, Some(70));
+        assert_eq!(wallet.remaining_days, Some(0));
+        let value = serde_json::to_value(&wallet).unwrap();
+        assert_eq!(value["daily_cents"], 70);
+        assert_eq!(value["remaining_days"], 0);
+
+        // 没有在跑的机器：控制面给 null，反序列化成 None 后不再出现。
+        let wallet = parse_wallet(json!({
+            "balance_cents": 5000,
+            "daily_cents": 0,
+            "remaining_days": null,
+        }))
+        .unwrap();
+        assert_eq!(wallet.daily_cents, Some(0));
+        assert_eq!(wallet.remaining_days, None);
+
+        // 负数说明控制面算错了。
+        assert!(
+            parse_wallet(json!({ "balance_cents": 0, "remaining_days": -1 })).is_err()
+        );
+        assert!(parse_wallet(json!({ "balance_cents": 0, "daily_cents": -1 })).is_err());
     }
 
     #[test]

@@ -1572,3 +1572,114 @@ describe("支付回跳页 /payment/return", () => {
     expect(html).not.toContain("支付");
   });
 });
+
+describe("钱包剩余天数（§5.4）", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function seedServer(
+    db: FakeD1,
+    id: string,
+    cents: number,
+    patch: Record<string, unknown> = {},
+  ) {
+    db.rows("servers").push({
+      id,
+      account_id: ACCOUNT,
+      state: "healthy",
+      destroyed_at: null,
+      billing_state: "active",
+      daily_price_cents: cents,
+      ...patch,
+    });
+  }
+
+  function seedLedger(
+    db: FakeD1,
+    id: string,
+    amountCents: number,
+    refType: string,
+    createdAt: number,
+    kind = "charge",
+  ) {
+    db.rows("wallet_ledger").push({
+      id,
+      account_id: ACCOUNT,
+      kind,
+      amount_cents: amountCents,
+      balance_after_cents: 0,
+      ref_type: refType,
+      ref_id: id,
+      note: null,
+      created_at: createdAt,
+    });
+  }
+
+  async function readWallet(env: TestEnv) {
+    const res = await handleTopups(walletRequest(env), env as never);
+    expect(res?.status).toBe(200);
+    return (await res!.json()) as {
+      balance_cents: number;
+      daily_cents: number;
+      remaining_days: number | null;
+    };
+  }
+
+  it("日价只算在跑的机器，天数按余额向下取整", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    db.rows("accounts")[0].balance_cents = 4200;
+    seedServer(db, "srv_a", 30);
+    seedServer(db, "srv_b", 40);
+    // 待开通、已过期、已销毁、DO 侧已确认不存在都不在「每天约」的口径里。
+    seedServer(db, "srv_pending", 100, { billing_state: "pending" });
+    seedServer(db, "srv_expired", 50, { billing_state: "expired" });
+    seedServer(db, "srv_gone", 60, { destroyed_at: 1 });
+    // 用户在 DO 后台直接删掉：destroyed_at 仍是 null、state 仍是 active，靠 provider_gone_at 排除。
+    seedServer(db, "srv_provider_gone", 100, { provider_gone_at: 1 });
+
+    const wallet = await readWallet(env as TestEnv);
+    expect(wallet.balance_cents).toBe(4200);
+    expect(wallet.daily_cents).toBe(70);
+    expect(wallet.remaining_days).toBe(60);
+  });
+
+  it("余额为 0 时是 0 天，不是 null", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    db.rows("accounts")[0].balance_cents = 0;
+    seedServer(db, "srv_a", 30);
+
+    const wallet = await readWallet(env as TestEnv);
+    expect(wallet.daily_cents).toBe(30);
+    expect(wallet.remaining_days).toBe(0);
+  });
+
+  it("没有在跑的机器：日消耗 0，remaining_days 为 null", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    db.rows("accounts")[0].balance_cents = 5000;
+
+    const wallet = await readWallet(env as TestEnv);
+    expect(wallet.daily_cents).toBe(0);
+    expect(wallet.remaining_days).toBeNull();
+  });
+
+  it("近 7 天超支扣费按日均计进日消耗", async () => {
+    const db = new FakeD1();
+    const env = await makeEnv(db);
+    const now = Date.now();
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, "srv_a", 70);
+    // 窗口内超支 700 分 → 日均 100；10 天前那笔与其它类别都不算。
+    seedLedger(db, "wl_traffic_now", -700, "server_traffic", now - 3 * DAY);
+    seedLedger(db, "wl_traffic_old", -1400, "server_traffic", now - 10 * DAY);
+    seedLedger(db, "wl_day", -30, "server_day", now - DAY);
+    seedLedger(db, "wl_topup", 5000, "stripe_payment", now - DAY, "topup");
+
+    const wallet = await readWallet(env as TestEnv);
+    // 「每天约」是完整日消耗 = 70 + 700 / 7 = 170，和 remaining_days 用同一个除数：
+    // 1000 / 170 = 5.88 → 5 天。只报 70 会跟「还能用 5 天」自相矛盾（1000 / 70 = 14 天）。
+    expect(wallet.daily_cents).toBe(170);
+    expect(wallet.remaining_days).toBe(5);
+  });
+});

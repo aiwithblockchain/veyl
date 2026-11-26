@@ -24,6 +24,24 @@ export function formatTrafficGib(bytes: number): string {
 }
 
 /**
+ * 已用比例（不带 `%`）：保留一位小数、整数不带 `.0`，有量但不足 0.1% 写 `<0.1`，
+ * 0 字节写 `0`。额度未知（`limit ≤ 0`）或非有限值写「—」，不伪装成 0%。
+ */
+export function formatTrafficPercent(
+  usedBytes: number,
+  limitBytes: number,
+): string {
+  if (!Number.isFinite(usedBytes) || !Number.isFinite(limitBytes)) return "—";
+  if (limitBytes <= 0) return "—";
+  const used = Math.max(0, usedBytes);
+  if (used === 0) return "0";
+  const percent = (used / limitBytes) * 100;
+  if (percent < 0.1) return "<0.1";
+  const rounded = Math.round(percent * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
+}
+
+/**
  * 这台机器明天会新增的额度（字节）：`min(月额度 / 28, 月额度 − 已释放)`。
  * 已销毁不增长；到 28 天封顶（`traffic_limit_bytes` 追平月额度）贡献 0。
  */
@@ -72,4 +90,34 @@ export function formatTrafficReset(
   const at = Date.parse(iso);
   if (!Number.isFinite(at)) return null;
   return RESET_FORMATTERS[language].format(new Date(at));
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 每日增量时刻的 formatter：`hourCycle: "h23"`（不用 `hour12: false`——后者在
+ * 部分时区会把午夜格式化成 24:00）。`timeZone` 只给测试钉住时区，生产不传。
+ */
+export function dailyBoundaryFormatter(
+  language: Language,
+  timeZone?: string,
+): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    ...(timeZone === undefined ? {} : { timeZone }),
+  });
+}
+
+/**
+ * 计费日边界（下一个 00:00 UTC）换算到本地时区的时分，例如北京 `08:00`。
+ * 日期不重要，只取时分；时区由 Intl 现算，不写死。
+ */
+export function formatDailyBoundaryTime(
+  language: Language,
+  now = Date.now(),
+): string {
+  const nextMidnightUtc = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
+  return dailyBoundaryFormatter(language).format(new Date(nextMidnightUtc));
 }

@@ -7,7 +7,7 @@ import { apiError, json } from "./lib/http";
 import { paymentReturnUrl, readTopupDenominations, readTopupRange } from "./lib/config";
 import { idempotencyKey, requestHashOf, withIdempotency, type StoredResponse } from "./lib/idempotency";
 import { createCheckoutSession, stripeCheckoutProblem, type StripeEnv } from "./payments/stripe";
-import { balanceCents } from "./wallet";
+import { balanceCents, type WalletEnv } from "./wallet";
 
 export interface TopupEnv extends MaybeAuthEnv, StripeEnv {}
 
@@ -110,6 +110,60 @@ export async function startTopupSession(
   return { ok: true, topupId, checkoutUrl: session.checkoutUrl, denominationCents: input.cents };
 }
 
+const TRAFFIC_WINDOW_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** 余额还能用几天（`traffic-billing.md` §5.4）；控制面现算，不落库。 */
+export interface WalletSummary {
+  daily_cents: number;
+  remaining_days: number | null;
+}
+
+function readTotal(raw: unknown): number {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+
+/**
+ * 日消耗 = 在跑的机器日价合计 + max(0, 近 7 天流量超支扣费日均)，**四舍五入到分**。
+ * 「每天约」和「还能用 N 天」必须用这同一个数：只给机器日价、却用它加超支去除余额，
+ * 有超支的人会看到「每天约 $0.70 · 还能用 5 天」这种自相矛盾的组合。
+ * 日消耗为 0（没有在跑的机器）→ `null`；余额 ≤ 0 → 0；其余按天向下取整。
+ * 日价口径：排除待开通、已过期、已销毁，以及 DO 侧已确认不存在的机器（`provider_gone_at`）。
+ */
+export async function walletSummary(
+  env: WalletEnv,
+  accountId: string,
+  balance: number,
+  now = Date.now(),
+): Promise<WalletSummary> {
+  const db = env.DB;
+  if (!db) return { daily_cents: 0, remaining_days: null };
+  const daily = await db
+    .prepare(
+      "SELECT COALESCE(SUM(daily_price_cents), 0) AS total FROM servers " +
+        "WHERE account_id = ? AND destroyed_at IS NULL AND provider_gone_at IS NULL " +
+        "AND billing_state NOT IN ('pending', 'expired')",
+    )
+    .bind(accountId)
+    .first<{ total: number }>();
+  const machineCents = readTotal(daily?.total);
+
+  const traffic = await db
+    .prepare(
+      "SELECT COALESCE(SUM(-amount_cents), 0) AS total FROM wallet_ledger " +
+        "WHERE account_id = ? AND ref_type = 'server_traffic' AND kind = 'charge' " +
+        "AND created_at > ?",
+    )
+    .bind(accountId, now - TRAFFIC_WINDOW_DAYS * DAY_MS)
+    .first<{ total: number }>();
+  // 超支扣费是负数入账，取反后按 7 天平均。
+  const trafficPerDay = Math.max(0, readTotal(traffic?.total)) / TRAFFIC_WINDOW_DAYS;
+  const dailyCents = Math.round(machineCents + trafficPerDay);
+  const remainingDays =
+    dailyCents <= 0 ? null : balance <= 0 ? 0 : Math.floor(balance / dailyCents);
+  return { daily_cents: dailyCents, remaining_days: remainingDays };
+}
+
 export async function handleTopups(request: Request, env: TopupEnv): Promise<Response | null> {
   const url = new URL(request.url);
   const isWallet = url.pathname === "/v1/wallet";
@@ -143,8 +197,12 @@ export async function handleTopups(request: Request, env: TopupEnv): Promise<Res
   if (isResponse(identity)) return identity;
 
   if (isWallet) {
+    const balance = await balanceCents(env, identity.accountId);
+    const summary = await walletSummary(env, identity.accountId, balance);
     return json({
-      balance_cents: await balanceCents(env, identity.accountId),
+      balance_cents: balance,
+      daily_cents: summary.daily_cents,
+      remaining_days: summary.remaining_days,
       currency: "USD",
       denominations_cents: denominations,
       min_topup_cents: range.minCents,

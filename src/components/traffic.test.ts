@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  dailyBoundaryFormatter,
+  formatDailyBoundaryTime,
   formatTrafficGib,
   formatTrafficGibValue,
+  formatTrafficPercent,
   formatTrafficReset,
   trafficPoolTomorrowBytes,
   trafficTomorrowBytes,
@@ -41,6 +44,49 @@ describe("流量单位与清零点", () => {
     const at = new Date(2026, 11, 1, 0, 0, 0).toISOString();
     expect(formatTrafficReset(at, "zh")).toBe("12月1日");
     expect(formatTrafficReset(at, "en")).toBe("Dec 1");
+  });
+
+  it("已用比例：一位小数、0 与极小值、额度未知", () => {
+    const limit = 536 * GIB;
+    // 2.2 / 536 ≈ 0.41% → 0.4
+    expect(formatTrafficPercent(2.2 * GIB, limit)).toBe("0.4");
+    expect(formatTrafficPercent(0, limit)).toBe("0");
+    // 有量但不足 0.1%。
+    expect(formatTrafficPercent(1024 ** 2, limit)).toBe("<0.1");
+    expect(formatTrafficPercent(200 * GIB, 400 * GIB)).toBe("50");
+    expect(formatTrafficPercent(399.6 * GIB, 400 * GIB)).toBe("99.9");
+    // 额度未知与非有限值不伪装成 0%。
+    expect(formatTrafficPercent(12 * GIB, 0)).toBe("—");
+    expect(formatTrafficPercent(Number.NaN, 400 * GIB)).toBe("—");
+    expect(formatTrafficPercent(12 * GIB, Number.POSITIVE_INFINITY)).toBe("—");
+  });
+
+  it("每日增量时刻：固定时区下 00:00 UTC 是 08:00，且强制 h23", () => {
+    const formatter = dailyBoundaryFormatter("zh");
+    expect(formatter.resolvedOptions().hourCycle).toBe("h23");
+    // 固定时区 + 固定输入：不拿 formatter 自己算期望值。
+    expect(
+      dailyBoundaryFormatter("zh", "Asia/Shanghai").format(
+        new Date(Date.UTC(2026, 10, 27, 0, 0, 0)),
+      ),
+    ).toBe("08:00");
+    expect(
+      dailyBoundaryFormatter("en", "Asia/Shanghai").format(
+        new Date(Date.UTC(2026, 10, 27, 0, 0, 0)),
+      ),
+    ).toBe("08:00");
+    // UTC 时区下是午夜，h23 必须是 00:00 而不是 24:00。
+    expect(
+      dailyBoundaryFormatter("en", "UTC").format(
+        new Date(Date.UTC(2026, 10, 27, 0, 0, 0)),
+      ),
+    ).toBe("00:00");
+
+    // 「下一个 00:00 UTC」的取值：同一 UTC 日内不同时刻指向同一个零点。
+    const noon = Date.UTC(2026, 10, 26, 12, 0, 0);
+    const time = formatDailyBoundaryTime("zh", noon);
+    expect(time).toMatch(/^\d{2}:\d{2}$/);
+    expect(formatDailyBoundaryTime("zh", noon + 6 * 3600 * 1000)).toBe(time);
   });
 });
 

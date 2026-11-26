@@ -9,6 +9,7 @@ import { idempotencyKey, withIdempotency, type StoredResponse } from "./lib/idem
 import { fetchCatalogData, type CatalogData } from "./index";
 import { NODE_PORT_END, NODE_PORT_START } from "./providers/digitalocean";
 import { provisionServer } from "./provision";
+import { dayStartOf } from "./traffic_cycle";
 import { balanceCents } from "./wallet";
 
 const ORDER_TTL_MS = 10 * 60 * 1000;
@@ -516,7 +517,8 @@ export async function provisionPaidOrder(
   if (!server) {
     const now = Date.now();
     // 补建的锚点必须取「已扣过的那一天」，不能取 now：否则日桶整体漂移，用户白拿一天。
-    const anchor = Number(order.paid_at ?? order.created_at);
+    // 与其余三条路径一致对齐到 UTC 自然日（§4.0），`paid_until` 才会落在 00:00。
+    const anchor = dayStartOf(Number(order.paid_at ?? order.created_at));
     // 机器没建出来的空档不补扣：paid_until 直接对齐到锚点网格上的今天，
     // 只保留已经扣过的第 0 天，空档写审计豁免。
     const nNow = Math.floor((now - anchor) / DAY_MS);

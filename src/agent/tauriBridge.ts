@@ -1202,10 +1202,19 @@ function normalizeMyServerWallet(raw: unknown): MyServerWallet | null {
     .map((item) => readCents(item))
     .filter((item): item is number => item !== null && item > 0)
     .sort((a, b) => a - b);
+  // 旧 Host 没有这两个字段：保持 undefined，界面自行回退。
+  const daily = readCents(value.daily_cents);
+  // 显式 null 是控制面的「没有在跑的机器」，与「字段缺失」区分开。
+  const remaining: number | null | undefined =
+    value.remaining_days === null ? null : (readCents(value.remaining_days) ?? undefined);
   return {
     balance_cents: balance,
     currency: typeof value.currency === "string" ? value.currency : "USD",
     denominations_cents: denominations,
+    ...(daily === null || daily < 0 ? {} : { daily_cents: daily }),
+    ...(remaining === undefined || (remaining !== null && remaining < 0)
+      ? {}
+      : { remaining_days: remaining }),
     updated_at: typeof value.updated_at === "string" ? value.updated_at : "",
   };
 }

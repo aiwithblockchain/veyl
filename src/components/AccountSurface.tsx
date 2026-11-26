@@ -12,7 +12,14 @@ import { formatUsdCents } from "../myservers/labels";
 import { copyText } from "../ui/clipboard";
 import { useFocusTrap } from "../ui/focus";
 import { BillingLedgerTable } from "./BillingLedgerTable";
-import { formatTrafficGib, formatTrafficGibValue, formatTrafficReset, trafficPoolTomorrowBytes } from "./traffic";
+import {
+  formatDailyBoundaryTime,
+  formatTrafficGib,
+  formatTrafficGibValue,
+  formatTrafficPercent,
+  formatTrafficReset,
+  trafficPoolTomorrowBytes,
+} from "./traffic";
 import { MyServerTopUp } from "./MyServerTopUp";
 import { IconClose } from "./icons";
 
@@ -124,8 +131,11 @@ export function AccountSurface({
         if (cancelled) return;
         const billable = list.servers.filter(
           (server) =>
-            server.billing_state === "active" ||
-            server.billing_state === "past_due",
+            // 余额不足停机销毁的行 billing_state 还是 active，只有 state 变成
+            // destroyed；不排除会让台数比金额多，出现「每天约 $0.00 · 1 台服务器」。
+            server.state !== "destroyed" &&
+            (server.billing_state === "active" ||
+              server.billing_state === "past_due"),
         );
         setDaily({
           cents: billable.reduce(
@@ -296,13 +306,21 @@ export function AccountSurface({
     traffic && traffic.resetAt !== ""
       ? formatTrafficReset(traffic.resetAt, getLanguage())
       : null;
-  /** 有服务器才给动态估算；读不到列表就退回固定说明。 */
+  /** 有服务器才给动态估算；读不到列表就退回固定说明。日价优先用控制面下发的。 */
   const dailyLabel =
     daily !== null && daily.count > 0
-      ? tr("account.daily", {
-          amount: formatUsdCents(daily.cents),
-          count: daily.count,
-        })
+      ? [
+          tr("account.daily", {
+            amount: formatUsdCents(wallet?.daily_cents ?? daily.cents),
+            count: daily.count,
+          }),
+          // null / 缺字段 = 控制面没算（没有在跑的机器或旧 Host），整段不出现。
+          wallet?.remaining_days != null
+            ? tr("account.remainingDays", { days: wallet.remaining_days })
+            : null,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" · ")
       : null;
   /** 进度条只做视觉比例，不写百分比文字；超额时铺满。 */
   const trafficRatio =
@@ -545,6 +563,10 @@ export function AccountSurface({
                         : (
                           <>
                             {tr("account.traffic.summary", {
+                              percent: formatTrafficPercent(
+                                traffic.pool.usedBytes,
+                                traffic.pool.limitBytes,
+                              ),
                               limit: formatTrafficGibValue(traffic.pool.limitBytes),
                               used: formatTrafficGibValue(traffic.pool.usedBytes),
                             })}
@@ -563,6 +585,7 @@ export function AccountSurface({
                                   <>
                                     {" · "}
                                     {tr("account.traffic.tomorrow", {
+                                      time: formatDailyBoundaryTime(getLanguage()),
                                       amount: formatTrafficGibValue(
                                         traffic.tomorrowBytes,
                                       ),

@@ -918,6 +918,16 @@ export interface MyServerWallet {
   /** 自定义充值范围（USD 分）；旧后端缺省时前端按 600 / 30000 兜底。 */
   min_topup_cents?: number;
   max_topup_cents?: number;
+  /**
+   * 每天在扣的合计（USD 分，2.85.0）；旧控制面没有该字段时界面回退到
+   * 客户端按列表自己求和。与「每天约」同口径，不重复计算。
+   */
+  daily_cents?: number;
+  /**
+   * 余额还能用几天（2.85.0）；`null` = 没有在跑的机器。
+   * `undefined` = 旧 Host / 旧控制面没给，界面整段不显示。
+   */
+  remaining_days?: number | null;
   updated_at: string;
 }
 

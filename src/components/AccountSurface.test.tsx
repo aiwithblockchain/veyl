@@ -463,7 +463,7 @@ function listServer(over: Partial<MyServer> = {}): MyServer {
 }
 
 describe("账号流量（2.79.0）", () => {
-  it("汇总只用 traffic_pool；明天再涨 X 由列表的增量算", async () => {
+  it("汇总只用 traffic_pool；每日增量由列表的增量算", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [
         listServer({
@@ -476,9 +476,10 @@ describe("账号流量（2.79.0）", () => {
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("本月流量")).toBeTruthy();
-    const line = screen.getByText(/^本月流量额度 400 GiB · 已用 300 GiB/);
-    // 1000 GiB 月额度、已释放 60 GiB：明天加 min(1000/28, 940) ≈ 35.7 GiB。
-    expect(line.textContent).toContain("明天再涨 35.7 GiB");
+    const line = screen.getByText(/^已用 75% · 300 \/ 400 GiB/);
+    // 1000 GiB 月额度、已释放 60 GiB：每天加 min(1000/28, 940) ≈ 35.7 GiB。
+    // 时间按本地时区格式化，只断言「同一句里带时分与增量」。
+    expect(line.textContent).toMatch(/每日 \d{2}:\d{2} 增加 35\.7 GiB/);
     expect(screen.queryByText(/已用 50 /)).toBeNull();
     expect(screen.queryByText("流量快用完了")).toBeNull();
 
@@ -500,7 +501,7 @@ describe("账号流量（2.79.0）", () => {
     }));
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText("本月流量额度 400 GiB · 已用 0 GiB")).toBeTruthy();
+    expect(await screen.findByText("已用 0% · 0 / 400 GiB")).toBeTruthy();
     const bar = view.container.querySelector(
       ".account-surface__traffic-bar",
     ) as HTMLElement;
@@ -521,7 +522,7 @@ describe("账号流量（2.79.0）", () => {
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(
-      await screen.findByText(/^本月流量额度 117 GiB · 已用 100 GiB/),
+      await screen.findByText(/^已用 85\.5% · 100 \/ 117 GiB/),
     ).toBeTruthy();
     const fill = view.container.querySelector(
       ".account-surface__traffic-fill",
@@ -529,7 +530,7 @@ describe("账号流量（2.79.0）", () => {
     expect(fill.style.width).toBe("85.47%");
   });
 
-  it("near：整好 80% 就提示；明天增量为 0 时不写「明天再涨」", async () => {
+  it("near：整好 80% 就提示；增量为 0 时不写「每日」", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 320 * GIB, limitBytes: 400 * GIB },
@@ -538,7 +539,7 @@ describe("账号流量（2.79.0）", () => {
 
     const near = await screen.findByText("流量快用完了");
     expect(near.className).toContain("account-surface__traffic-near");
-    expect(screen.queryByText(/明天再涨/)).toBeNull();
+    expect(screen.queryByText(/每日 \d{2}:\d{2} 增加/)).toBeNull();
     expect(screen.queryByText(/按 \$0\.02\/GiB/)).toBeNull();
 
     const fill = view.container.querySelector(
@@ -548,7 +549,7 @@ describe("账号流量（2.79.0）", () => {
     expect(fill.style.width).toBe("80%");
   });
 
-  it("全封顶的账号不出现「明天再涨 0 GiB」", async () => {
+  it("全封顶的账号不出现「每日增加 0 GiB」", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [
         listServer({
@@ -560,11 +561,11 @@ describe("账号流量（2.79.0）", () => {
     }));
     renderSurface({ bridge: makeBridge({ myServerList }) });
 
-    expect(await screen.findByText("本月流量额度 150 GiB · 已用 100 GiB")).toBeTruthy();
-    expect(screen.queryByText(/明天再涨/)).toBeNull();
+    expect(await screen.findByText("已用 66.7% · 100 / 150 GiB")).toBeTruthy();
+    expect(screen.queryByText(/每日 \d{2}:\d{2} 增加/)).toBeNull();
   });
 
-  it("over：扣费句接在汇总后并顶掉「明天再涨 X」，进度条铺满", async () => {
+  it("over：扣费句接在汇总后并顶掉「每日增加」，进度条铺满", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 450 * GIB, limitBytes: 400 * GIB },
@@ -574,9 +575,9 @@ describe("账号流量（2.79.0）", () => {
     const over = await screen.findByText("超出 50 GiB，按 $0.02/GiB 扣余额");
     expect(over.className).toContain("account-surface__traffic-over");
     const line = over.closest("p");
-    expect(line?.textContent).toContain("本月流量额度 400 GiB · 已用 450 GiB");
+    expect(line?.textContent).toContain("已用 112.5% · 450 / 400 GiB");
     expect(line?.textContent).toContain("超出 50 GiB，按 $0.02/GiB 扣余额");
-    expect(screen.queryByText(/明天再涨/)).toBeNull();
+    expect(screen.queryByText(/每日 \d{2}:\d{2} 增加/)).toBeNull();
 
     const fill = view.container.querySelector(
       ".account-surface__traffic-fill",
@@ -585,7 +586,7 @@ describe("账号流量（2.79.0）", () => {
     expect(fill.style.width).toBe("100%");
   });
 
-  it("额度未知：不画进度条、不写明天；pool 缺失时整行不渲染", async () => {
+  it("额度未知：不画进度条、不写每日增量；pool 缺失时整行不渲染", async () => {
     const unknown = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 12 * GIB, limitBytes: 0 },
@@ -595,7 +596,7 @@ describe("账号流量（2.79.0）", () => {
     expect(
       first.container.querySelector(".account-surface__traffic-bar"),
     ).toBeNull();
-    expect(screen.queryByText(/明天再涨/)).toBeNull();
+    expect(screen.queryByText(/每日 \d{2}:\d{2} 增加/)).toBeNull();
     first.unmount();
 
     const noPool = vi.fn(async () => ({ servers: [] }));
@@ -644,6 +645,63 @@ describe("账号流量（2.79.0）", () => {
     renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("每天约 $0.60 · 2 台服务器")).toBeTruthy();
+  });
+
+  it("余额不足停机的墓碑行不计入台数", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({
+          server_id: "srv_gone",
+          state: "destroyed",
+          // 停机销毁的行 billing_state 仍是 active，只有 state 变了。
+          billing_state: "active",
+          daily_price_cents: 0,
+        }),
+      ],
+      traffic_pool: { usedBytes: 0, limitBytes: 10 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    await waitFor(() => expect(myServerList).toHaveBeenCalled());
+    // 不能出现「每天约 $0.00 · 1 台服务器」。
+    expect(
+      await screen.findByText("余额按天扣费，每台服务器单独计费。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/每天约/)).toBeNull();
+  });
+
+  it("控制面给了日价与剩余天数：日价优先，行尾追加天数", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [listServer({ daily_price_cents: 30 })],
+      traffic_pool: { usedBytes: 0, limitBytes: 10 * GIB },
+    }));
+    renderSurface({
+      bridge: makeBridge({ myServerList }),
+      wallet: { ...WALLET, daily_cents: 70, remaining_days: 66 },
+    });
+
+    expect(
+      await screen.findByText("每天约 $0.70 · 1 台服务器 · 还能用 66 天"),
+    ).toBeTruthy();
+  });
+
+  it("剩余天数为 0 照常写 0 天；为 null 时整段不出现", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [listServer({ daily_price_cents: 30 })],
+      traffic_pool: { usedBytes: 0, limitBytes: 10 * GIB },
+    }));
+    const zero = renderSurface({
+      bridge: makeBridge({ myServerList }),
+      wallet: { ...WALLET, remaining_days: 0 },
+    });
+    expect(await screen.findByText(/还能用 0 天/)).toBeTruthy();
+    zero.unmount();
+
+    renderSurface({
+      bridge: makeBridge({ myServerList }),
+      wallet: { ...WALLET, remaining_days: null },
+    });
+    expect(await screen.findByText("每天约 $0.30 · 1 台服务器")).toBeTruthy();
   });
 
   it("列表读不到时余额下退回固定说明", () => {

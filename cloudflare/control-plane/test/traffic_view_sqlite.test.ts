@@ -60,8 +60,8 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
   db.run(
     "INSERT INTO servers (id, account_id, order_id, name, region, plan, hourly_usd, monthly_usd, " +
       "daily_price_cents, billing_anchor_at, state, node_port, transfer_gib, ready_at, failure_code, " +
-      "created_at, updated_at, destroyed_at, billing_state, dismissed_at, provider_gone_at) " +
-      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+      "created_at, updated_at, destroyed_at, billing_state, dismissed_at, provider_gone_at, paid_until) " +
+      "VALUES (?, ?, ?, ?, 'sgp1', 's-1vcpu-1gb', 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
     spec.id,
     ACCOUNT,
     `ord_${spec.id}`,
@@ -77,6 +77,7 @@ function addServer(db: SqliteD1, spec: ServerSpec): void {
     spec.destroyedAt ?? null,
     spec.dismissedAt ?? null,
     spec.providerGoneAt ?? null,
+    NOW + DAY_MS,
   );
 }
 

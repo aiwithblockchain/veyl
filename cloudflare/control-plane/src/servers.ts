@@ -12,7 +12,7 @@ import {
   signAgentToken,
   signDetached,
 } from "./lib/crypto";
-import { cycleIdOf, releasedBytes } from "./traffic_cycle";
+import { cycleIdOf, dayStartOf, releasedBytes } from "./traffic_cycle";
 import { accountTotals } from "./traffic_pool";
 import { apiError, json } from "./lib/http";
 import {
@@ -154,6 +154,7 @@ function trafficFields(row: ServerRow, usedBytes: number, cycleId: string, now: 
       created_at: row.created_at,
       destroyed_at: row.destroyed_at,
       provider_gone_at: row.provider_gone_at ?? null,
+      paid_until: row.paid_until ?? null,
     },
     cycleId,
     now,
@@ -530,7 +531,10 @@ async function settleOrder(
     return { ok: false, reason: "invalid_price" };
   }
   const db = env.DB!;
-  const paidUntil = info.readyAt + DAY_MS;
+  // 计费按 UTC 自然日（§4.0）：锚点取就绪当天的 00:00，首日付到次日 00:00。
+  // 代价：建于 10:00 的机器第一天按整天收，实际只服务 14 小时——一天一次、上限一天价。
+  const anchor = dayStartOf(info.readyAt);
+  const paidUntil = anchor + DAY_MS;
   const result = await recordLedgerEntry(env, {
     accountId: row.account_id,
     kind: "charge",
@@ -565,7 +569,7 @@ async function settleOrder(
           info.version,
           info.readyAt,
           dailyCents,
-          info.readyAt,
+          anchor,
           paidUntil,
           info.readyAt,
           row.id,

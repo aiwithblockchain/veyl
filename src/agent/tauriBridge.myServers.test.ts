@@ -105,6 +105,45 @@ describe("按天计费的归一化", () => {
     expect(wallet.balance_cents).toBe(1000);
     expect("runway_days" in wallet).toBe(false);
   });
+
+  it("旧 Host 没有日价与剩余天数：不补默认值", async () => {
+    invoke.mockResolvedValueOnce({
+      balance_cents: 1000,
+      currency: "USD",
+      denominations_cents: [1000],
+      updated_at: new Date(0).toISOString(),
+    });
+
+    const wallet = await new TauriAgentBridge().myServerWallet();
+    expect("daily_cents" in wallet).toBe(false);
+    expect("remaining_days" in wallet).toBe(false);
+  });
+
+  it("日价与剩余天数原样解析；null 表示没有在跑的机器", async () => {
+    invoke.mockResolvedValueOnce({
+      balance_cents: 0,
+      currency: "USD",
+      denominations_cents: [1000],
+      daily_cents: 70,
+      remaining_days: 0,
+      updated_at: new Date(0).toISOString(),
+    });
+    const wallet = await new TauriAgentBridge().myServerWallet();
+    expect(wallet.daily_cents).toBe(70);
+    expect(wallet.remaining_days).toBe(0);
+
+    invoke.mockResolvedValueOnce({
+      balance_cents: 5000,
+      currency: "USD",
+      denominations_cents: [1000],
+      daily_cents: 0,
+      remaining_days: null,
+      updated_at: new Date(0).toISOString(),
+    });
+    const empty = await new TauriAgentBridge().myServerWallet();
+    expect(empty.daily_cents).toBe(0);
+    expect(empty.remaining_days).toBeNull();
+  });
 });
 
 describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {

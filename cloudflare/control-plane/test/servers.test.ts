@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { signAccessToken, sha256B64u } from "../src/lib/crypto";
 import { firewallName } from "../src/providers/digitalocean";
 import { destroyUnpaidServer, handleServers } from "../src/servers";
+import { runBilling } from "../src/billing";
 import { FakeD1 } from "./helpers/fakeD1";
 
 const ACCOUNT = "acct_test0000000000000000";
@@ -86,6 +87,7 @@ function destroyRequest(token: string) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -202,8 +204,10 @@ describe("就绪后结算（2.39.0）", () => {
     expect(server.state).toBe("active");
     expect(server.billing_state).toBe("active");
     expect(Number(server.daily_price_cents)).toBe(DAILY);
-    expect(Number(server.billing_anchor_at)).toBe(Number(server.ready_at));
-    expect(Number(server.paid_until)).toBe(Number(server.ready_at) + DAY);
+    // 计费按 UTC 自然日（§4.0）：锚点取就绪当天的 00:00，首日付到次日 00:00。
+    const dayStart = Math.floor(Number(server.ready_at) / DAY) * DAY;
+    expect(Number(server.billing_anchor_at)).toBe(dayStart);
+    expect(Number(server.paid_until)).toBe(dayStart + DAY);
     expect(db.rows("accounts")[0].balance_cents).toBe(100 - DAILY);
 
     const charge = db.rows("wallet_ledger").find(
@@ -233,6 +237,31 @@ describe("就绪后结算（2.39.0）", () => {
     expect(body.paid_until).toBe(new Date(Number(server.paid_until)).toISOString());
     // 口径来自订单行（LEFT JOIN），服务器表本身不存。
     expect(body.charge_mode).toBe("at_ready");
+  });
+
+  it("建于 23:59：首日付到次日 00:00，跨过零点就扣第二天（旧口径会睡到第二天的 23:59）", async () => {
+    const LATE = Date.UTC(2026, 11, 1, 23, 59);
+    const DAY_START = Date.UTC(2026, 11, 1);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(LATE));
+    const db = new FakeD1();
+    const env = { ...(await envWith(db, await signingJwk())), CREDENTIAL_ENC_KEY: ENC_KEY };
+    await seedAtReady(db, { providerId: PROVIDER_ID });
+
+    const res = await handleServers(enrollRequest(), env as never);
+    expect(res?.status).toBe(200);
+    const settled = db.rows("servers")[0];
+    expect(Number(settled.ready_at)).toBe(LATE);
+    expect(Number(settled.billing_anchor_at)).toBe(DAY_START);
+    expect(Number(settled.paid_until)).toBe(DAY_START + DAY);
+
+    // 次日 00:00：日边界即到期点，Cron 当轮就补第二天。
+    vi.setSystemTime(new Date(DAY_START + DAY));
+    const report = await runBilling(env as never);
+
+    expect(report.renewed).toBe(1);
+    expect(Number(db.rows("servers")[0].paid_until)).toBe(DAY_START + 2 * DAY);
+    expect(db.rows("wallet_ledger").filter((row) => row.kind === "charge")).toHaveLength(2);
   });
 
   it("就绪时余额不足：销毁实例、服务器 error / settle_insufficient、订单 failed、不写 destroyed", async () => {

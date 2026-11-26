@@ -21,6 +21,8 @@ function server(overrides: Partial<Parameters<typeof releasedBytes>[0]> = {}) {
     created_at: MONTH_START,
     destroyed_at: null as number | null,
     provider_gone_at: null as number | null,
+    // 默认「已续到明天」：额度天数被已付天数封顶，专门测上限的用例自己覆盖它。
+    paid_until: NOW + DAY_MS as number | null,
     ...overrides,
   };
 }
@@ -93,6 +95,79 @@ describe("releasedBytes · 起算点", () => {
       destroyed_at: null,
     });
     expect(releasedBytes(broken, CYCLE, NOW)).toBe(ONE_DAY_100GIB);
+  });
+});
+
+describe("releasedBytes · 日边界 00:00", () => {
+  it("同一天建的机器，不管几点建，额度都在同一个 00:00 涨一格", () => {
+    const morning = server({
+      ready_at: Date.parse("2026-11-10T08:00:00Z"),
+      billing_anchor_at: Date.parse("2026-11-10T08:00:00Z"),
+      created_at: Date.parse("2026-11-10T08:00:00Z"),
+    });
+    const evening = server({
+      ready_at: Date.parse("2026-11-10T20:00:00Z"),
+      billing_anchor_at: 0,
+      created_at: Date.parse("2026-11-10T20:00:00Z"),
+    });
+    const at = Date.parse("2026-11-11T09:00:00Z");
+
+    // 旧口径按各自的建机时刻起算：早上那台 2 份、晚上那台 1 份。
+    expect(releasedBytes(morning, CYCLE, at)).toBe(7_669_584_457);
+    expect(releasedBytes(evening, CYCLE, at)).toBe(7_669_584_457);
+  });
+
+  it("额度在 00:00 那一刻涨一格，不是按建机时刻的相位", () => {
+    const machine = server({
+      ready_at: Date.parse("2026-11-10T08:00:00Z"),
+      billing_anchor_at: 0,
+      created_at: Date.parse("2026-11-10T08:00:00Z"),
+    });
+    expect(releasedBytes(machine, CYCLE, Date.parse("2026-11-10T23:59:59Z"))).toBe(ONE_DAY_100GIB);
+    expect(releasedBytes(machine, CYCLE, Date.parse("2026-11-11T00:00:00Z"))).toBe(7_669_584_457);
+  });
+});
+
+describe("releasedBytes · 额度被已付天数封顶", () => {
+  const SAME_DAY = {
+    ready_at: Date.parse("2026-11-10T23:59:00Z"),
+    billing_anchor_at: Date.parse("2026-11-10T00:00:00Z"),
+    created_at: Date.parse("2026-11-10T23:59:00Z"),
+  };
+
+  it("23:59 建、00:05 销毁：付 1 天就只给 1 份，不能拿 2 份", () => {
+    const machine = server({
+      ...SAME_DAY,
+      paid_until: Date.parse("2026-11-11T00:00:00Z"),
+      destroyed_at: Date.parse("2026-11-11T00:05:00Z"),
+    });
+    // 存活天数算出来是 1 个整天（2 份），但钱只付了 1 天。
+    expect(releasedBytes(machine, CYCLE, Date.parse("2026-11-11T00:05:00Z"))).toBe(ONE_DAY_100GIB);
+  });
+
+  it("跨过 00:00 且已预扣：额度从 1 份变 2 份（上限不压已付的那一天）", () => {
+    const running = {
+      ready_at: Date.parse("2026-11-10T10:00:00Z"),
+      billing_anchor_at: Date.parse("2026-11-10T00:00:00Z"),
+      created_at: Date.parse("2026-11-10T10:00:00Z"),
+      paid_until: Date.parse("2026-11-12T00:00:00Z"), // 23:00 预扣了第二天
+    };
+    expect(releasedBytes(server(running), CYCLE, Date.parse("2026-11-10T23:59:00Z"))).toBe(
+      ONE_DAY_100GIB,
+    );
+    expect(releasedBytes(server(running), CYCLE, Date.parse("2026-11-11T00:00:00Z"))).toBe(
+      7_669_584_457,
+    );
+  });
+
+  it("付 1 天、活 3 天（没续上）：额度停在 1 份，不随存活天数涨", () => {
+    const machine = server({
+      ready_at: Date.parse("2026-11-10T10:00:00Z"),
+      billing_anchor_at: Date.parse("2026-11-10T00:00:00Z"),
+      created_at: Date.parse("2026-11-10T10:00:00Z"),
+      paid_until: Date.parse("2026-11-11T00:00:00Z"),
+    });
+    expect(releasedBytes(machine, CYCLE, Date.parse("2026-11-13T10:00:00Z"))).toBe(ONE_DAY_100GIB);
   });
 });
 

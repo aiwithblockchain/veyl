@@ -18,6 +18,7 @@ interface ServerOptions {
   state?: string;
   destroyedAt?: number | null;
   providerGoneAt?: number | null;
+  paidUntil?: number;
 }
 
 function serverRecord(id: string, options: ServerOptions, tokenHash: string | null) {
@@ -56,7 +57,7 @@ function serverRecord(id: string, options: ServerOptions, tokenHash: string | nu
     transfer_gib: options.transferGib ?? 500,
     daily_price_cents: 0,
     billing_state: "active",
-    paid_until: 0,
+    paid_until: options.paidUntil ?? now + 24 * 3600 * 1000,
   };
 }
 
@@ -138,7 +139,8 @@ describe("POST /v1/agent/traffic", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-11-15T12:00:00Z"));
     const readyAt = Date.parse("2026-11-15T00:00:00Z");
-    await seedServer(db, { readyAt });
+    // 一直续费到 12 月 3 日：额度被已付天数封顶，这个用例要的是「12 月 2 日拿到第 2 份」。
+    await seedServer(db, { readyAt, paidUntil: Date.parse("2026-12-03T00:00:00Z") });
     const env = envWith(db);
 
     await handleTraffic(
