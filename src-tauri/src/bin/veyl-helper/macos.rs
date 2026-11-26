@@ -34,10 +34,18 @@ use protocol::ProtocolError;
 use xpc::xpc_object_t;
 
 mod dns;
+mod dns_forwarder;
 
 /// 进程退出时还原系统 DNS。`restart` 走 `exit(75)`，不放回收拾会把 DNS 留指向隧道。
 extern "C" fn restore_dns_at_exit() {
+    // 先还原系统 DNS，再停转发器：反过来的话，关监听瞬间的查询会打到空端口。
     dns::restore_at_exit();
+    dns_forwarder::stop();
+    // 还原失败时系统 DNS 可能仍停在回环上：退出前最后兜一次。
+    // 退出路径带 500ms 预算（try_lock + scutil 都受控），绝不拖慢 launchd 拉起。
+    if let Err(error) = dns::ensure_no_dangling_loopback_at_exit() {
+        eprintln!("veyl-helper: 退出时回环兜底改写失败：{error}");
+    }
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -440,6 +448,10 @@ fn handle_message(
                     if let Some(reason) = &started.dns.reason {
                         unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
                     }
+                    let via = *supervisor.dns_via.lock().unwrap();
+                    if let Some(via) = via {
+                        unsafe { xpc::dict_set_string(reply, "dns_via", via) };
+                    }
                     Ok(())
                 }
                 Err(error) => Err(error),
@@ -484,6 +496,9 @@ fn handle_message(
             let legacy = dns::legacy_peer_from_config(&supervisor.config_path());
             match dns::restore_or_clear(legacy.as_deref(), &|line| supervisor.note(line)) {
                 Ok(()) => {
+                    if let Err(fix) = dns::ensure_no_dangling_loopback() {
+                        supervisor.note(&format!("[warn] 回环兜底改写失败：{fix}"));
+                    }
                     unsafe { xpc::dict_set_bool(reply, "ok", true) };
                     Ok(())
                 }
@@ -536,6 +551,10 @@ fn handle_message(
                             unsafe { xpc::dict_set_bool(reply, "dns_applied", dns.applied) };
                             if let Some(reason) = &dns.reason {
                                 unsafe { xpc::dict_set_string(reply, "dns_reason", reason) };
+                            }
+                            let via = *supervisor.dns_via.lock().unwrap();
+                            if let Some(via) = via {
+                                unsafe { xpc::dict_set_string(reply, "dns_via", via) };
                             }
                         }
                     }
@@ -781,6 +800,9 @@ struct Supervisor {
     dns_target: Mutex<Option<String>>,
     /// 上一次复核系统 DNS 的时刻。轮询很频繁，`scutil` 要起进程，必须节流。
     dns_checked_at: Mutex<Option<Instant>>,
+    /// 本次连接的 DNS 接管路径：`forwarder` / `system` / `none`。
+    /// 单独回报给 App：这次定位一下午，就差这一格。
+    dns_via: Mutex<Option<&'static str>>,
     /// 最近一次请求时刻。空闲退出用它判断「真的没人用了」。
     last_request: Mutex<Instant>,
     /// 正在处理的请求数。空闲退出不能在处理中退出。
@@ -821,6 +843,7 @@ impl Supervisor {
             last_dns: Mutex::new(None),
             dns_target: Mutex::new(None),
             dns_checked_at: Mutex::new(None),
+            dns_via: Mutex::new(None),
             last_request: Mutex::new(Instant::now()),
             in_flight: AtomicUsize::new(0),
             prewarmed: Mutex::new(None),
@@ -1054,6 +1077,14 @@ impl Supervisor {
         self.tun_dir().join("active.json")
     }
 
+    /// 当前运行中配置的 utun 索引（换网络或隧道重建后名字会变）。
+    /// 读不到就返回 `None`，转发器会退到不绑接口的直发路径。
+    fn current_tun_index(&self) -> Option<u32> {
+        let text = std::fs::read_to_string(self.config_path()).ok()?;
+        let config: serde_json::Value = serde_json::from_str(&text).ok()?;
+        dns_forwarder::tun_index(&config)
+    }
+
     fn pid_path(&self) -> PathBuf {
         self.tun_dir().join("sing-box.pid")
     }
@@ -1160,6 +1191,11 @@ impl Supervisor {
         // 还在**取一次对端：删掉之后只能靠常量猜。公网地址不清（见 `dns` 模块）。
         let legacy = dns::legacy_peer_from_config(&self.config_path());
         let _ = dns::restore_or_clear(legacy.as_deref(), &|line| self.note(line));
+        // 崩溃后系统 DNS 可能停在 [127.0.0.1, 223.5.5.5]：转发器此刻不在，
+        // 按不变量改回公网，别让用户开机就顶着一个死回环。
+        if let Err(error) = dns::ensure_no_dangling_loopback() {
+            self.note(&format!("[warn] 启动清扫时回环兜底改写失败：{error}"));
+        }
         for path in [self.config_path(), self.pid_path()] {
             match std::fs::remove_file(&path) {
                 Ok(()) => eprintln!("veyl-helper: 清理残留 {}", path.display()),
@@ -1223,6 +1259,34 @@ impl Supervisor {
         };
         if !due {
             return;
+        }
+        // 转发器模式：先确认监听还活着。线程意外退出时系统 DNS 仍指着回环，
+        // 实际只有次选 223.5.5.5 在工作——要能重建就重建，重建不了就如实降级。
+        let via = *self.dns_via.lock().unwrap();
+        if via == Some("forwarder") {
+            let utun = self.current_tun_index();
+            if dns_forwarder::is_running() {
+                // 读不到索引（配置没落盘、ifconfig 失败）时保留上一次的绑定，
+                // 不要把它清成“直发”——那会在隧道还活着时把查询漏出物理网卡。
+                if utun.is_some() {
+                    dns_forwarder::set_utun(utun);
+                }
+            } else if let Err(error) = dns_forwarder::start(utun) {
+                let outcome = dns::DnsHijack::failed(format!(
+                    "DNS 转发器已停止（解析退到次选公网 DNS）：{error}"
+                ));
+                if outcome != current {
+                    eprintln!("veyl-helper: DNS 转发器重建失败：{error}");
+                    *self.last_dns.lock().unwrap() = Some(outcome);
+                }
+                // 不变量兜底：转发器不在就不能让系统 DNS 停在回环上。
+                if let Err(fix) = dns::ensure_no_dangling_loopback() {
+                    eprintln!("veyl-helper: 回环兜底改写失败：{fix}");
+                }
+                return;
+            } else {
+                eprintln!("veyl-helper: DNS 转发器已重建");
+            }
         }
         let probe = dns::target_still_applied(&target);
         if let Err(error) = &probe {
@@ -1507,8 +1571,59 @@ impl Supervisor {
         // **失败不阻断连接**：DNS 是优化项，隧道才是产品；但要如实回报，
         // 让界面能说明「国外网站可能较慢」，不能静默降级。
         let phase = Instant::now();
-        let hijack = dns::activate();
-        if !hijack.applied {
+        // 先把转发器起来：系统 DNS 会指向它，它必须先能接住查询。
+        // 绑定失败（端口被占、非 root）不阻断连接，回退到旧路径：直接写公网 DNS。
+        //
+        // utun 由刚 spawn 的 sing-box 创建，可能晚一两百毫秒；最多等 1 秒。
+        // 等不到也不要紧：转发器会先走不绑接口的直发路径，5 秒复核时补上索引。
+        let mut utun_index = dns_forwarder::tun_index(&prepared);
+        for _ in 0..10 {
+            if utun_index.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            utun_index = dns_forwarder::tun_index(&prepared);
+        }
+        let forwarder = match dns_forwarder::start(utun_index) {
+            Ok(()) => {
+                self.note_for(
+                    uid,
+                    &format!(
+                        "DNS 转发器已启动 listen={} utun_index={utun_index:?}",
+                        dns_forwarder::LISTEN_ADDR
+                    ),
+                );
+                true
+            }
+            Err(error) => {
+                self.note_for(
+                    uid,
+                    &format!("[warn] DNS 转发器未启动，回退到直接改公网 DNS：{error}"),
+                );
+                false
+            }
+        };
+        // 首选回环（转发器），次选公网：转发器不在时 mDNSResponder 自动退到次选，
+        // 机器不会失去解析（设计 §2、§4）。
+        let targets: Vec<String> = if forwarder {
+            vec![
+                dns_forwarder::LISTEN_IP.to_string(),
+                dns::SYSTEM_DNS_TARGET.to_string(),
+            ]
+        } else {
+            vec![dns::SYSTEM_DNS_TARGET.to_string()]
+        };
+        let hijack = dns::activate_with_targets(&targets);
+        if hijack.applied {
+            // 换了解析目标必须清缓存，否则 mDNSResponder 会继续用旧（被污染）的答案。
+            let _ = flush_system_dns();
+        } else {
+            // 转发器已经没有用了：不要把 127.0.0.1:53 继续占着。
+            dns_forwarder::stop();
+            // 接管失败且回滚也失败时，系统 DNS 可能还停在回环上——兜底改回公网。
+            if let Err(fix) = dns::ensure_no_dangling_loopback() {
+                self.note_for(uid, &format!("[warn] 回环兜底改写失败：{fix}"));
+            }
             self.note_for(
                 uid,
                 &format!(
@@ -1517,8 +1632,10 @@ impl Supervisor {
                 ),
             );
         }
+        let via = dns_via_label(forwarder, hijack.applied);
         *self.last_dns.lock().unwrap() = Some(hijack.clone());
-        *self.dns_target.lock().unwrap() = Some(dns::SYSTEM_DNS_TARGET.to_string());
+        *self.dns_target.lock().unwrap() = Some(targets[0].clone());
+        *self.dns_via.lock().unwrap() = Some(via);
         *self.dns_checked_at.lock().unwrap() = Some(Instant::now());
         self.note_for(
             uid,
@@ -1645,10 +1762,17 @@ impl Supervisor {
         let dns_started = Instant::now();
         // App 等 stop 回复上限 10 秒；这里把整条还原（含验证/兜底）压在 9 秒内。
         let report = dns::restore_within(started + Duration::from_secs(9));
+        // 顺序不能反：系统 DNS 先还原，查询不会再打到回环，然后才停监听。
+        dns_forwarder::stop();
+        // 还原失败时系统 DNS 可能仍是 [127.0.0.1, 223.5.5.5]：兜底改回公网。
+        if let Err(error) = dns::ensure_no_dangling_loopback() {
+            self.note(&format!("[warn] 停止时回环兜底改写失败：{error}"));
+        }
         let dns_ms = dns_started.elapsed().as_millis();
         *self.last_dns.lock().unwrap() = None;
         *self.dns_target.lock().unwrap() = None;
         *self.dns_checked_at.lock().unwrap() = None;
+        *self.dns_via.lock().unwrap() = None;
 
         // helper 只承载 TUN；代理模式不经过这里。
         self.note(&format!(
@@ -2461,6 +2585,15 @@ fn diag_tun_address(config: &serde_json::Value) -> String {
         .next()
         .unwrap_or_default()
         .to_string()
+}
+
+/// DNS 接管路径的标签，回给 App 做诊断（`dns_via`）。
+fn dns_via_label(forwarder: bool, applied: bool) -> &'static str {
+    match (forwarder, applied) {
+        (true, true) => "forwarder",
+        (false, true) => "system",
+        _ => "none",
+    }
 }
 
 /// 复核探测结果的解释。单独抽出来，测试不用真的去读系统 DNS。
@@ -3438,6 +3571,15 @@ mod tests {
         assert!(applied.reason.is_none(), "恢复后不能留着上一次的原因");
     }
 
+    /// `dns_via` 是这次排查缺的那一格：路径必须能分出来。
+    #[test]
+    fn dns_via_reports_which_path_is_serving() {
+        assert_eq!(dns_via_label(true, true), "forwarder");
+        assert_eq!(dns_via_label(false, true), "system");
+        assert_eq!(dns_via_label(true, false), "none");
+        assert_eq!(dns_via_label(false, false), "none");
+    }
+
     #[test]
     fn diag_reads_the_tun_address_from_the_array() {
         let config = serde_json::json!({
@@ -3471,7 +3613,7 @@ mod tests {
             service: Some("ABC".into()),
             before: Some(vec!["223.5.5.5".into()]),
             resolver1: Some("223.5.5.5".into()),
-            target: Some("223.5.5.5".into()),
+            target: Some(vec!["223.5.5.5".to_string()]),
             branch: "write",
             written: Some(vec!["10.0.0.53".into()]),
             readback: Some(vec!["10.0.0.53".into()]),
