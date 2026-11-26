@@ -932,8 +932,6 @@ export const en: Record<MessageKey, string> = {
   "account.traffic.tomorrow": "grows {amount} GiB tomorrow",
   "account.traffic.near": "Traffic is almost used up",
   "account.traffic.over": "Over {over}, charged at $0.02/GiB from balance",
-  "account.checkoutOpened":
-    "Checkout is open in your browser. Your balance will update after payment.",
   "account.identity.lost":
     "This device lost its identity and needs to register again. Your account and servers are intact.",
   "account.identity.lostLabel": "Register this device again",
@@ -1031,6 +1029,11 @@ export const en: Record<MessageKey, string> = {
   "topup.submit": "Top up",
   "topup.reopenCheckout": "Reopen checkout",
   "topup.copyLink": "Copy link",
+  "topup.waiting.title": "Checkout is open in your browser",
+  "topup.waiting.note":
+    "Your balance updates automatically once payment goes through. If it doesn't, hit Refresh above.",
+  "topup.waiting.changeAmount": "Change amount",
+  "topup.paid": "Received {amount} · balance {balance}",
   "topup.charged": "Topped up {amount}.",
   "topup.invalidDenomination": "This amount isn't available right now. Pick another.",
   "topup.checkoutUnavailable":

@@ -35,7 +35,7 @@ interface Props {
   onForceRefresh?: () => void;
   /** 就地充值：建单成功后收银台已在外部浏览器打开。 */
   onTopUp?: (denominationCents: number) => Promise<MyServerTopup>;
-  /** 收银台已打开：App 关闭本层、给 toast，并安排回来时补刷余额。 */
+  /** 收银台已在外部浏览器打开：面板留在原地显示等待态，App 只安排回焦时补刷余额。 */
   onCheckoutOpened?: () => void;
   onLogin?: () => void;
   identityProblem?: "lost" | "device_revoked" | "account_blocked" | null;
@@ -470,7 +470,7 @@ export function AccountSurface({
                       <button
                         ref={topupButtonRef}
                         type="button"
-                        className="btn btn--primary"
+                        className={`btn ${topupOpen ? "btn--ghost" : "btn--primary"}`}
                         aria-expanded={topupOpen}
                         aria-controls="account-topup"
                         onClick={() => setTopupOpen((value) => !value)}
@@ -498,6 +498,7 @@ export function AccountSurface({
                         <div className="account-surface__topup-body">
                           <MyServerTopUp
                             wallet={wallet}
+                            open={topupOpen}
                             onTopUp={onTopUp}
                             onCheckoutOpened={() => onCheckoutOpened?.()}
                           />

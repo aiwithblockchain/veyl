@@ -2666,13 +2666,8 @@ export default function App() {
     return result;
   };
 
-  // 换一个账户：换新设备身份后再登录，避免旧设备绑在停用账户上重登失败。
+  // 收银台已在浏览器打开：面板留着就地等付款，回来时补刷余额。
   const handleCheckoutOpened = () => {
-    setAccountOpen(false);
-    setAppNotice({
-      level: "info",
-      text: translate("account.checkoutOpened"),
-    });
     armWalletRefocus();
   };
 

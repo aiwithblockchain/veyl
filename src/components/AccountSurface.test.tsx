@@ -172,20 +172,34 @@ describe("账户弹层", () => {
     expect(screen.getByText("—")).toBeTruthy();
   });
 
-  it("充值成功打开收银台：交给 App 关面板，不就地置灰", async () => {
+  it("充值成功打开收银台：面板留着就地等待，主按钮让位", async () => {
     const onCheckoutOpened = vi.fn();
     const onTopUp = vi.fn(async () => TOPUP);
     renderSurface({ onCheckoutOpened, onTopUp });
 
-    fireEvent.click(screen.getByRole("button", { name: "充值" }));
+    const topup = screen.getByRole("button", { name: "充值" });
+    expect(topup.className).toContain("btn--primary");
+    fireEvent.click(topup);
+    // 展开后「收起」降为描边：屏幕上只有一个实心按钮（自定义金额提交）。
+    expect(topup.className).toContain("btn--ghost");
+    expect(topup.className).not.toContain("btn--primary");
+
     fireEvent.click(await screen.findByRole("button", { name: "$10" }));
     await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(1000));
     expect(onCheckoutOpened).toHaveBeenCalledTimes(1);
-    // 面板不自己关，也不进入等待态。
+    // 弹层不关，档位整块换成等待态。
     expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
-    expect(
-      (screen.getByRole("button", { name: "$10" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(screen.getByRole("button", { name: "收起" }).className).toContain(
+      "btn--ghost",
+    );
+
+    // 收起再展开：回到选择态，不保留等待块。
+    fireEvent.click(screen.getByRole("button", { name: "收起" }));
+    fireEvent.click(screen.getByRole("button", { name: "充值" }));
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+    expect(screen.queryByText("已在浏览器打开收付款页")).toBeNull();
   });
 
   it("余额已经到账（没有 checkout_url）：原地提示已充值", async () => {

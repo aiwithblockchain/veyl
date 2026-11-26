@@ -449,7 +449,7 @@ describe("余额刷新的门禁（App 接线）", () => {
     await waitFor(() => expect(wallet.mock.calls.length).toBe(2));
   });
 
-  it("收银台打开后：关闭账户层、给 toast，回窗口时补刷一次余额", async () => {
+  it("收银台打开后：面板留着显示等待态，回窗口时补刷一次余额", async () => {
     const wallet = prepareWallet();
     vi.spyOn(bridge, "myServerTopup").mockResolvedValue({
       topup_id: "top_1",
@@ -462,18 +462,20 @@ describe("余额刷新的门禁（App 接线）", () => {
     fireEvent.click(await screen.findByRole("button", { name: "充值" }));
     fireEvent.click(await screen.findByRole("button", { name: "$10" }));
 
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "账户" })).toBeNull(),
-    );
-    expect(
-      await screen.findByText("已在浏览器打开收付款页。付款完成后余额会自动更新。"),
-    ).toBeTruthy();
+    // 面板不关、也不再弹 toast：就地换成等待态。
+    expect(await screen.findByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "账户" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
 
     const before = wallet.mock.calls.length;
     act(() => {
       window.dispatchEvent(new Event("focus"));
     });
     await waitFor(() => expect(wallet.mock.calls.length).toBe(before + 1));
+
+    // 余额没变：仍是等待态，不误报已到账。
+    expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(screen.queryByText(/已到账/)).toBeNull();
 
     // 一次性：再回窗口不再补刷。
     act(() => {

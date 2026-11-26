@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
 import { BridgeError } from "../agent/errors";
@@ -28,15 +28,16 @@ function renderPanel(
   onTopUp: (cents: number) => Promise<MyServerTopup> = async () => TOPUP,
   onCheckoutOpened: () => void = () => {},
   wallet: MyServerWallet | null = WALLET,
+  open = true,
 ) {
-  const { container } = render(
+  return render(
     <MyServerTopUp
       wallet={wallet}
+      open={open}
       onTopUp={onTopUp}
       onCheckoutOpened={onCheckoutOpened}
     />,
   );
-  return container;
 }
 
 describe("充值面板（账户弹层内嵌）", () => {
@@ -55,17 +56,177 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(document.getElementById("myservers-topup-custom")).toBeTruthy();
   });
 
-  it("打开收银台：交给外层关面板，不进入等待态", async () => {
+  it("打开收银台：面板不关，档位整块换成等待块", async () => {
     const onCheckoutOpened = vi.fn();
     renderPanel(async () => TOPUP, onCheckoutOpened);
 
     fireEvent.click(screen.getByRole("button", { name: "$10" }));
 
     await waitFor(() => expect(onCheckoutOpened).toHaveBeenCalledTimes(1));
-    expect(
-      (screen.getByRole("button", { name: "$10" }) as HTMLButtonElement).disabled,
-    ).toBe(false);
-    expect(screen.queryByText(/已在浏览器打开收款页/)).toBeNull();
+    const wait = screen.getByRole("status");
+    expect(wait.textContent).toContain("已在浏览器打开收付款页");
+    expect(wait.textContent).toContain("$10");
+    expect(wait.textContent).toContain("付款完成后余额会自动更新；没更新就点上面的「刷新」。");
+    expect(screen.getByRole("button", { name: "重新打开收付款页" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "改金额" })).toBeTruthy();
+    // 不留置灰的档位，焦点落在等待块上。
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(document.activeElement).toBe(wait);
+  });
+
+  it("等待中余额没变不跳到账；变大立刻改成已到账", async () => {
+    const props = {
+      onTopUp: async () => TOPUP,
+      onCheckoutOpened: () => {},
+    };
+    const view = renderPanel(props.onTopUp, props.onCheckoutOpened);
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    await screen.findByText("已在浏览器打开收付款页");
+
+    view.rerender(
+      <MyServerTopUp
+        wallet={{ ...WALLET, balance_cents: 100 }}
+        onTopUp={props.onTopUp}
+        onCheckoutOpened={props.onCheckoutOpened}
+      />,
+    );
+    expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(screen.queryByText(/已到账/)).toBeNull();
+
+    // 余额变小更不能算到账（钉住 >，不是 !==）。
+    view.rerender(
+      <MyServerTopUp
+        wallet={{ ...WALLET, balance_cents: 50 }}
+        onTopUp={props.onTopUp}
+        onCheckoutOpened={props.onCheckoutOpened}
+      />,
+    );
+    expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(screen.queryByText(/已到账/)).toBeNull();
+
+    view.rerender(
+      <MyServerTopUp
+        wallet={{ ...WALLET, balance_cents: 3420 }}
+        onTopUp={props.onTopUp}
+        onCheckoutOpened={props.onCheckoutOpened}
+      />,
+    );
+    const paid = screen.getByText("已到账 $10 · 余额 $34.20");
+    expect(paid.className).toContain("myservers-topup__paid");
+    expect(paid.querySelector(".myservers-topup__dot")).toBeTruthy();
+    // 已到账不自动收起：等待块与档位都不回来。
+    expect(screen.queryByText("已在浏览器打开收付款页")).toBeNull();
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(document.activeElement).toBe(paid);
+  });
+
+  it("等待中「改金额」回到选择态，焦点落回档位格", async () => {
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    await screen.findByText("已在浏览器打开收付款页");
+
+    fireEvent.click(screen.getByRole("button", { name: "改金额" }));
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+    expect(screen.queryByText("已在浏览器打开收付款页")).toBeNull();
+    expect((document.activeElement as HTMLElement).className).toContain(
+      "myservers-topup__grid",
+    );
+  });
+
+  it("等待中「重新打开收付款页」再发一单，等待块全程不消失", async () => {
+    const deferred: { resolve?: (value: MyServerTopup) => void } = {};
+    let calls = 0;
+    const onTopUp = vi.fn((): Promise<MyServerTopup> => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(TOPUP);
+      return new Promise((resolve) => {
+        deferred.resolve = resolve;
+      });
+    });
+    renderPanel(onTopUp);
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    await screen.findByText("已在浏览器打开收付款页");
+
+    const reopen = screen.getByRole("button", {
+      name: "重新打开收付款页",
+    }) as HTMLButtonElement;
+    fireEvent.click(reopen);
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledTimes(2));
+    // 在途：等待块留着，不闪回置灰的档位网格。
+    expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy();
+    expect(document.querySelector(".myservers-topup__grid")).toBeNull();
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(reopen.getAttribute("aria-disabled")).toBe("true");
+    // 不用原生 disabled：焦点留在按钮上。
+    expect(reopen.disabled).toBe(false);
+
+    deferred.resolve?.(TOPUP);
+    await waitFor(() => expect(screen.getByText("已在浏览器打开收付款页")).toBeTruthy());
+    expect(reopen.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("请求在途时收起：响应被丢弃，再展开是选择态", async () => {
+    const deferred: { resolve?: (value: MyServerTopup) => void } = {};
+    const onTopUp = vi.fn(
+      (): Promise<MyServerTopup> =>
+        new Promise((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+    const onCheckoutOpened = vi.fn();
+    const view = renderPanel(onTopUp, onCheckoutOpened);
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    await waitFor(() => expect(onTopUp).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <MyServerTopUp
+        wallet={WALLET}
+        open={false}
+        onTopUp={onTopUp}
+        onCheckoutOpened={onCheckoutOpened}
+      />,
+    );
+    await act(async () => {
+      deferred.resolve?.(TOPUP);
+    });
+
+    view.rerender(
+      <MyServerTopUp
+        wallet={WALLET}
+        open
+        onTopUp={onTopUp}
+        onCheckoutOpened={onCheckoutOpened}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+    expect(screen.queryByText("已在浏览器打开收付款页")).toBeNull();
+    expect(onCheckoutOpened).not.toHaveBeenCalled();
+  });
+
+  it("收起再展开：回到选择态，不保留已到账", async () => {
+    const view = renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "$10" }));
+    await screen.findByText("已在浏览器打开收付款页");
+
+    view.rerender(
+      <MyServerTopUp
+        wallet={{ ...WALLET, balance_cents: 3420 }}
+        open={false}
+        onTopUp={async () => TOPUP}
+        onCheckoutOpened={() => {}}
+      />,
+    );
+    view.rerender(
+      <MyServerTopUp
+        wallet={WALLET}
+        open
+        onTopUp={async () => TOPUP}
+        onCheckoutOpened={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+    expect(screen.queryByText(/已到账/)).toBeNull();
+    expect(screen.queryByText("已在浏览器打开收付款页")).toBeNull();
   });
 
   it("checkout_url 为空：保留直接到账提示", async () => {
@@ -96,7 +257,7 @@ describe("充值面板（账户弹层内嵌）", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByText(/收银台暂时打不开/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重新打开支付页面" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新打开收付款页" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制链接" })).toBeTruthy();
     expect(screen.getByText("https://pay.example.com/session/abc")).toBeTruthy();
     expect(onCheckoutOpened).not.toHaveBeenCalled();
@@ -115,7 +276,7 @@ describe("充值面板（账户弹层内嵌）", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "$10" }));
     expect(await screen.findByRole("button", { name: "重试" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "重新打开支付页面" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重新打开收付款页" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(onTopUp).toHaveBeenCalledTimes(2));
@@ -271,11 +432,12 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(await screen.findByText("充值太频繁，请一小时后再试。")).toBeTruthy();
   });
 
-  it("没有钱包时不渲染档位，只看自定义输入", () => {
+  it("没有钱包：档位与「其他」都不可用，开不了自定义", () => {
     renderPanel(async () => TOPUP, () => {}, null);
     expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
-    expect(screen.getByRole("button", { name: "其他" })).toBeTruthy();
-    openCustom();
-    expect(screen.getByLabelText("自定义金额")).toBeTruthy();
+    const other = screen.getByRole("button", { name: "其他" }) as HTMLButtonElement;
+    expect(other.disabled).toBe(true);
+    fireEvent.click(other);
+    expect(screen.queryByLabelText("自定义金额")).toBeNull();
   });
 });
