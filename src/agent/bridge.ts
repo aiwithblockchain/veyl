@@ -655,6 +655,25 @@ export type MyServerState =
   | "destroyed"
   | "gone";
 
+/**
+ * 本周期流量状态（契约 2.78.0）：`unpaid` = 因流量超支余额不足已停机，
+ * 优先于其余三态；`near` = 已用 ≥ 已释放额度的 80%；额度未知时恒为 `ok`。
+ */
+export type MyServerTrafficState = "ok" | "near" | "over" | "unpaid";
+
+/** 账号级流量池（契约 2.79.0）；旧控制面不返回。 */
+export interface TrafficPool {
+  usedBytes: number;
+  limitBytes: number;
+}
+
+/** `my_server_list` 的返回。 */
+export interface MyServerList {
+  servers: MyServer[];
+  /** 账号池；控制面没给时缺省，不按 0 处理。 */
+  traffic_pool?: TrafficPool;
+}
+
 export interface MyServerFailure {
   stage: MyServerState;
   code: string;
@@ -732,6 +751,14 @@ export interface MyServer {
   grace_ends_at: string | null;
   /** 每月公网出口流量额度（GiB）快照；0 = 未知。 */
   transfer_gib: number;
+  /** 本周期（UTC 自然月）已用字节；没有上报行 = 0。 */
+  traffic_used_bytes: number;
+  /** 本周期已释放额度（字节）；0 = 额度未知（`transfer_gib = 0`）。 */
+  traffic_limit_bytes: number;
+  /** 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面为空串。 */
+  traffic_reset_at: string;
+  /** 额度未知时恒为 `ok`：不知道额度就不能断言 near / over。 */
+  traffic_state: MyServerTrafficState;
   /** 建行失败时的扣费快照（USD 分）；后端未给按 0。 */
   charged_cents?: number;
   /** 建行失败时已退回的金额（USD 分）；后端未给按 0。 */
@@ -1180,7 +1207,7 @@ export interface AgentBridge {
   /** 「我的服务器」：可售地区 / 套餐 / 价格（本期只读展示）。 */
   /** `fresh` = 回源取 DigitalOcean 当下可用性；只给新建向导用，别处保持缓存。 */
   myServerCatalog(fresh?: boolean): Promise<MyServerCatalog>;
-  myServerList(): Promise<{ servers: MyServer[] }>;
+  myServerList(): Promise<MyServerList>;
   /** 批量同步节点配置：拉列表 + 逐台取凭据落库；单台失败不影响整批。 */
   myServerSync(): Promise<ServerSyncData>;
   /** 读取同步间隔；缺失或非法时 Host 按 30 返回。 */

@@ -113,6 +113,21 @@ pub struct MyServer {
     pub daily_price_cents: i64,
     /// 每月公网出口额度快照（GiB）；0 = 未知，不参与任何扣费。
     pub transfer_gib: i64,
+    /// 本周期（UTC 自然月）已用字节；没有上报行 = 0（契约 2.78.0）。
+    #[serde(default, deserialize_with = "deserialize_lenient_bytes")]
+    pub traffic_used_bytes: u64,
+    /// 本周期已释放额度（字节），控制面现算、不是快照；额度未知 = 0。
+    #[serde(default, deserialize_with = "deserialize_lenient_bytes")]
+    pub traffic_limit_bytes: u64,
+    /// 本周期清零点（下个 UTC 月 1 日 00:00，ISO 8601）；旧控制面不给时为空串。
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub traffic_reset_at: String,
+    /// `ok` | `near` | `over` | `unpaid`；缺字段、null 或认不出的值都按 `ok`。
+    #[serde(
+        default = "default_traffic_state",
+        deserialize_with = "deserialize_lenient_traffic_state"
+    )]
+    pub traffic_state: String,
     /// 这台服务器实际扣过的钱（USD 分）；没扣过 = 0。
     #[serde(default)]
     pub charged_cents: i64,
@@ -134,6 +149,73 @@ pub struct MyServer {
     pub grace_ends_at: Option<String>,
     #[serde(default)]
     pub failure: Option<MyServerFailure>,
+}
+
+fn default_traffic_state() -> String {
+    "ok".into()
+}
+
+/// 字节字段的宽解析：整数与非负浮点都收，其余（null、字符串、负数）按 0。
+///
+/// 口径与账单流水的逐条宽松一致：滚动升级期间宁可显示 0，也不能因为
+/// 一个流量字段让整页服务器消失。
+fn deserialize_lenient_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value.min(u64::MAX as f64) as u64)
+            })
+            .unwrap_or(0),
+        _ => 0,
+    })
+}
+
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(value)) => value,
+        _ => String::new(),
+    })
+}
+
+fn deserialize_lenient_traffic_state<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(value)) if TRAFFIC_STATES.contains(&value.as_str()) => value,
+        _ => default_traffic_state(),
+    })
+}
+
+const TRAFFIC_STATES: [&str; 4] = ["ok", "near", "over", "unpaid"];
+
+/// `GET /v1/servers` 的账号级流量池（契约 2.79.0）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrafficPool {
+    pub used_bytes: u64,
+    pub limit_bytes: u64,
+}
+
+/// `my_server_list` 的返回：服务器列表 + 账号级流量池。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ServerList {
+    pub servers: Vec<MyServer>,
+    /// 账号池；控制面没给（旧版本）时缺省，不影响解析。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic_pool: Option<TrafficPool>,
+    /// 有条目解析失败 → 这不是一份完整快照，不能拿它做镜像收敛。
+    #[serde(skip)]
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -555,26 +637,56 @@ fn parse_order(raw: Value) -> Result<RawOrder, CpError> {
     serde_json::from_value(raw).map_err(|_| CpError::invalid_response("订单响应格式不正确"))
 }
 
-/// 拉取并校验控制面的服务器列表；**不碰本地缓存**。
+/// 拉取控制面的服务器列表；**不碰本地缓存**。
 ///
 /// 拆出来给后台轮询用：那边要先看「哪台刚变成 destroyed、是不是正在连着」，
 /// 才能在落库发事件之前停运行时。缓存与事件统一走 [`cache_all`]。
-pub(crate) async fn fetch_all() -> Result<Vec<MyServer>, CpError> {
+pub(crate) async fn fetch_all() -> Result<ServerList, CpError> {
     let client = ControlPlane::new()?;
     let raw = client.get("/v1/servers").await?;
+    parse_server_list(&raw)
+}
+
+/// 解析 `GET /v1/servers` 的响应体。逐条宽松：单条坏条目跳过，不整页失败。
+fn parse_server_list(raw: &Value) -> Result<ServerList, CpError> {
     let values = raw
         .get("servers")
         .and_then(Value::as_array)
         .ok_or_else(|| CpError::invalid_response("服务器列表响应缺少 servers"))?;
     let mut servers = Vec::with_capacity(values.len());
+    let mut dropped = 0usize;
     for value in values {
-        let mut server: MyServer = serde_json::from_value(value.clone())
-            .map_err(|_| CpError::invalid_response("服务器列表条目格式不正确"))?;
-        validate_server(&mut server)?;
+        let Ok(mut server) = serde_json::from_value::<MyServer>(value.clone()) else {
+            dropped += 1;
+            continue;
+        };
+        if validate_server(&mut server).is_err() {
+            dropped += 1;
+            continue;
+        }
         remember_server_failure(&server);
         servers.push(server);
     }
-    Ok(servers)
+    if dropped > 0 {
+        log::warn!(
+            "服务器列表有 {dropped} 条无法解析，已跳过；这份快照不完整，不做镜像收敛"
+        );
+    }
+    Ok(ServerList {
+        servers,
+        traffic_pool: parse_traffic_pool(raw.get("traffic_pool")),
+        complete: dropped == 0,
+    })
+}
+
+/// `traffic_pool` 整体缺失或不是对象时视为「控制面没给」；对象内的字段缺失按 0。
+fn parse_traffic_pool(value: Option<&Value>) -> Option<TrafficPool> {
+    let pool = value?.as_object()?;
+    let bytes = |key: &str| pool.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(TrafficPool {
+        used_bytes: bytes("used_bytes"),
+        limit_bytes: bytes("limit_bytes"),
+    })
 }
 
 /// 把一次列表快照写进本地镜像，状态变了就发 `my-server-changed`。
@@ -582,13 +694,18 @@ pub(crate) async fn fetch_all() -> Result<Vec<MyServer>, CpError> {
 /// 读路径也会顺带维护缓存，这是有意的：一次成功的列表响应是唯一能判断
 /// 「云端已无这台服务器」的完整快照；落库与收敛必须共用同一个连接，
 /// 否则并发 list 的旧快照可能删掉新快照刚建的行。
-pub(crate) fn cache_all(servers: &mut [MyServer]) {
+pub(crate) fn cache_all(servers: &mut [MyServer], prune: bool) {
     let Some(store) = crate::store::global() else {
         return;
     };
     let conn = store.conn();
     for server in servers.iter_mut() {
         cache_and_link(&conn, server);
+    }
+    // 有条目被跳过时这份列表不是完整快照，「云端已无这台服务器」无从判断，
+    // 此时只做 upsert、不删行。
+    if !prune {
+        return;
     }
     let ids: Vec<&str> = servers
         .iter()
@@ -599,10 +716,15 @@ pub(crate) fn cache_all(servers: &mut [MyServer]) {
     }
 }
 
+/// 列表 + 账号级流量池；命令层用它，同步流程只用列表。
+pub async fn list_with_pool() -> Result<ServerList, CpError> {
+    let mut list = fetch_all().await?;
+    cache_all(&mut list.servers, list.complete);
+    Ok(list)
+}
+
 pub async fn list() -> Result<Vec<MyServer>, CpError> {
-    let mut servers = fetch_all().await?;
-    cache_all(&mut servers);
-    Ok(servers)
+    Ok(list_with_pool().await?.servers)
 }
 
 /// 列表里缺失的 owned 节点：`source_key` 不在本次列表里，可能服务器已经没了。
@@ -1074,6 +1196,11 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             monthly_usd: old.monthly_usd,
             daily_price_cents: old.daily_price_cents,
             transfer_gib: old.transfer_gib,
+            // 流量按新机器的周期重新开始；下一次列表以控制面为准。
+            traffic_used_bytes: 0,
+            traffic_limit_bytes: 0,
+            traffic_reset_at: String::new(),
+            traffic_state: default_traffic_state(),
             // 新订单的钱还没结算，等下一次列表/详情以控制面为准。
             charged_cents: 0,
             refunded_cents: 0,
@@ -1484,6 +1611,11 @@ pub(crate) fn local_server(server_id: &str) -> Option<MyServer> {
         monthly_usd: row.monthly_usd,
         daily_price_cents: row.daily_price_cents,
         transfer_gib: row.transfer_gib,
+        // 本地镜像不存流量；拿不到远端时按「本周期没用过、额度未知」展示。
+        traffic_used_bytes: 0,
+        traffic_limit_bytes: 0,
+        traffic_reset_at: String::new(),
+        traffic_state: default_traffic_state(),
         // 本地缓存只存服务器状态，不存钱；拿不到远端时按「没扣过/没退过」展示。
         charged_cents: 0,
         refunded_cents: 0,
@@ -1530,6 +1662,86 @@ mod tests {
             "grace_ends_at": null,
             "failure": null
         })
+    }
+
+    #[test]
+    fn traffic_fields_default_when_the_control_plane_is_old() {
+        let list = parse_server_list(&json!({ "servers": [sample_server_json()] })).unwrap();
+        assert_eq!(list.servers.len(), 1);
+        let server = &list.servers[0];
+        assert_eq!(server.traffic_used_bytes, 0);
+        assert_eq!(server.traffic_limit_bytes, 0);
+        assert_eq!(server.traffic_reset_at, "");
+        assert_eq!(server.traffic_state, "ok");
+        assert_eq!(list.traffic_pool, None);
+        assert!(list.complete);
+    }
+
+    #[test]
+    fn traffic_fields_accept_the_contract_and_normalize_junk() {
+        let mut value = sample_server_json();
+        value["traffic_used_bytes"] = json!(123_456_789_u64);
+        value["traffic_limit_bytes"] = json!(1.5e9_f64);
+        value["traffic_reset_at"] = json!("2026-12-01T00:00:00Z");
+        value["traffic_state"] = json!("near");
+
+        let mut junk = sample_server_json();
+        junk["server_id"] = json!("srv_2");
+        junk["traffic_used_bytes"] = json!(-5);
+        junk["traffic_limit_bytes"] = json!("nope");
+        junk["traffic_reset_at"] = Value::Null;
+        junk["traffic_state"] = json!("weird");
+
+        let list = parse_server_list(&json!({ "servers": [value, junk] })).unwrap();
+        assert_eq!(list.servers.len(), 2);
+        assert_eq!(list.servers[0].traffic_used_bytes, 123_456_789);
+        assert_eq!(list.servers[0].traffic_limit_bytes, 1_500_000_000);
+        assert_eq!(list.servers[0].traffic_reset_at, "2026-12-01T00:00:00Z");
+        assert_eq!(list.servers[0].traffic_state, "near");
+        assert_eq!(list.servers[1].traffic_used_bytes, 0);
+        assert_eq!(list.servers[1].traffic_limit_bytes, 0);
+        assert_eq!(list.servers[1].traffic_reset_at, "");
+        assert_eq!(list.servers[1].traffic_state, "ok");
+    }
+
+    #[test]
+    fn one_broken_entry_does_not_hide_the_rest() {
+        let mut broken = sample_server_json();
+        broken["server_id"] = json!("srv_2");
+        broken["created_at"] = json!("not-a-date");
+
+        let list =
+            parse_server_list(&json!({ "servers": [sample_server_json(), broken] })).unwrap();
+        assert_eq!(list.servers.len(), 1);
+        assert_eq!(list.servers[0].server_id, "srv_1");
+        assert!(!list.complete, "跳过了条目就不能拿这份快照做收敛");
+    }
+
+    #[test]
+    fn the_account_traffic_pool_is_optional_and_lenient() {
+        let raw = json!({
+            "servers": [],
+            "traffic_pool": { "used_bytes": 10, "limit_bytes": 20 }
+        });
+        assert_eq!(
+            parse_server_list(&raw).unwrap().traffic_pool,
+            Some(TrafficPool {
+                used_bytes: 10,
+                limit_bytes: 20
+            })
+        );
+        let raw = json!({ "servers": [], "traffic_pool": { "used_bytes": 10 } });
+        assert_eq!(
+            parse_server_list(&raw).unwrap().traffic_pool,
+            Some(TrafficPool {
+                used_bytes: 10,
+                limit_bytes: 0
+            })
+        );
+        let raw = json!({ "servers": [], "traffic_pool": "nope" });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
+        let raw = json!({ "servers": [] });
+        assert_eq!(parse_server_list(&raw).unwrap().traffic_pool, None);
     }
 
     #[test]
@@ -1604,6 +1816,10 @@ mod tests {
             monthly_usd: 6.0,
             daily_price_cents: 20,
             transfer_gib: 1000,
+            traffic_used_bytes: 0,
+            traffic_limit_bytes: 0,
+            traffic_reset_at: String::new(),
+            traffic_state: default_traffic_state(),
             charged_cents: 0,
             refunded_cents: 0,
             paid_until: Some("2026-11-15T08:00:00Z".into()),

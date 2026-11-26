@@ -107,6 +107,81 @@ describe("按天计费的归一化", () => {
   });
 });
 
+describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
+  it("缺字段时补 0 / 空串 / ok，条目仍保留", async () => {
+    invoke.mockResolvedValueOnce({ servers: [SERVER] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers).toHaveLength(1);
+    expect(list.servers[0].traffic_used_bytes).toBe(0);
+    expect(list.servers[0].traffic_limit_bytes).toBe(0);
+    expect(list.servers[0].traffic_reset_at).toBe("");
+    expect(list.servers[0].traffic_state).toBe("ok");
+    expect(list.traffic_pool).toBeUndefined();
+  });
+
+  it("脏值逐字段兜底，不影响同条其它字段与其它条目", async () => {
+    const good = {
+      ...SERVER,
+      traffic_used_bytes: 4_294_967_296,
+      traffic_limit_bytes: 32_212_254_720,
+      traffic_reset_at: "2026-12-01T00:00:00.000Z",
+      traffic_state: "near",
+    };
+    const dirty = {
+      ...SERVER,
+      server_id: "srv_2",
+      traffic_used_bytes: -1,
+      traffic_limit_bytes: "nope",
+      traffic_reset_at: null,
+      traffic_state: "weird",
+    };
+    invoke.mockResolvedValueOnce({ servers: [good, dirty] });
+
+    const list = await new TauriAgentBridge().myServerList();
+    expect(list.servers).toHaveLength(2);
+    expect(list.servers[0]).toMatchObject({
+      traffic_used_bytes: 4_294_967_296,
+      traffic_limit_bytes: 32_212_254_720,
+      traffic_reset_at: "2026-12-01T00:00:00.000Z",
+      traffic_state: "near",
+    });
+    expect(list.servers[1]).toMatchObject({
+      server_id: "srv_2",
+      state: "healthy",
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: 0,
+      traffic_reset_at: "",
+      traffic_state: "ok",
+    });
+  });
+
+  it("账号池可缺省；内层字段缺失按 0，非对象当没给", async () => {
+    invoke.mockResolvedValueOnce({
+      servers: [SERVER],
+      traffic_pool: { used_bytes: 1024, limit_bytes: 2048 },
+    });
+    expect((await new TauriAgentBridge().myServerList()).traffic_pool).toEqual({
+      usedBytes: 1024,
+      limitBytes: 2048,
+    });
+
+    invoke.mockResolvedValueOnce({
+      servers: [SERVER],
+      traffic_pool: { used_bytes: 1024 },
+    });
+    expect((await new TauriAgentBridge().myServerList()).traffic_pool).toEqual({
+      usedBytes: 1024,
+      limitBytes: 0,
+    });
+
+    invoke.mockResolvedValueOnce({ servers: [SERVER], traffic_pool: "nope" });
+    expect(
+      (await new TauriAgentBridge().myServerList()).traffic_pool,
+    ).toBeUndefined();
+  });
+});
+
 describe("结账返回订单（2.39.0）", () => {
   it("按订单归一化：保留 server_id，不读 charged_cents", async () => {
     invoke.mockResolvedValueOnce({

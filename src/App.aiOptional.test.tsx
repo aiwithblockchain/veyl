@@ -148,6 +148,10 @@ const READY_SERVER: MyServer = {
   billing_state: "active",
   grace_ends_at: null,
   transfer_gib: 1000,
+  traffic_used_bytes: 0,
+  traffic_limit_bytes: 0,
+  traffic_reset_at: "",
+  traffic_state: "ok",
   failure: null,
 };
 
@@ -536,6 +540,10 @@ describe("未配置 AI 的动作入口", () => {
       billing_state: "pending",
       grace_ends_at: null,
       transfer_gib: 1000,
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: 0,
+      traffic_reset_at: "",
+      traffic_state: "ok",
       failure: {
         stage: "verifying",
         code: "install_failed",
@@ -653,6 +661,10 @@ const TOKYO_SERVER: MyServer = {
   billing_state: "active",
   grace_ends_at: null,
   transfer_gib: 1000,
+  traffic_used_bytes: 0,
+  traffic_limit_bytes: 0,
+  traffic_reset_at: "",
+  traffic_state: "ok",
   failure: null,
 };
 
@@ -766,6 +778,10 @@ const FAILED_SERVER: MyServer = {
   billing_state: "pending",
   grace_ends_at: null,
   transfer_gib: 1000,
+  traffic_used_bytes: 0,
+  traffic_limit_bytes: 0,
+  traffic_reset_at: "",
+  traffic_state: "ok",
   failure: {
     stage: "verifying",
     code: "install_failed",

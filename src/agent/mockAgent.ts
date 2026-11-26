@@ -282,6 +282,9 @@ export class MockAgentBridge implements AgentBridge {
       // demo：造一台「余额不足停机」的墓碑，指向当前配置的第一个节点。
       // 验收：先加节点，再 window.dispatchEvent(new Event("veyl:seed-tombstone"))，然后刷新。
       window.addEventListener("veyl:seed-tombstone", () => this.seedTombstoneDemo());
+      // demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。
+      // 验收：window.dispatchEvent(new Event("veyl:seed-traffic"))，然后刷新。
+      window.addEventListener("veyl:seed-traffic", () => this.seedTrafficDemo());
     }
   }
 
@@ -644,6 +647,11 @@ export class MockAgentBridge implements AgentBridge {
     } catch {
       // demo 用，失败就当没发生。
     }
+  }
+
+  /** demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。 */
+  seedTrafficDemo(): void {
+    this.myServers.seedTrafficDemo();
   }
 
   /** demo：模拟免费节点到期（先把 mock 的试用状态切成 expired，再发事件）。 */

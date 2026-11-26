@@ -421,16 +421,20 @@ pub async fn my_server_catalog(
 
 #[tauri::command]
 pub async fn my_server_list(state: State<'_, Arc<AppState>>) -> Result<Value, Value> {
-    match crate::control_plane::servers::list().await {
-        Ok(servers) => {
-            log::debug!("我的服务器：列表成功 count={}", servers.len());
+    match crate::control_plane::servers::list_with_pool().await {
+        Ok(list) => {
+            log::debug!(
+                "我的服务器：列表成功 count={} pool={}",
+                list.servers.len(),
+                if list.traffic_pool.is_some() { "yes" } else { "no" }
+            );
             // 列表对齐后顺手收敛「服务器没了、节点还在」的残留（正常情况下零请求）。
             super::server_watch::reconcile_orphan_owned_nodes(
                 Arc::clone(&state.services),
-                &servers,
+                &list.servers,
             )
             .await;
-            Ok(json!({ "servers": servers }))
+            Ok(serde_json::to_value(list).unwrap_or(Value::Null))
         }
         Err(error) => {
             log::warn!(

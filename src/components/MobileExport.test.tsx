@@ -178,6 +178,10 @@ function server(over: Partial<MyServer> = {}): MyServer {
     billing_state: "active",
     grace_ends_at: null,
     transfer_gib: 1000,
+    traffic_used_bytes: 0,
+    traffic_limit_bytes: 0,
+    traffic_reset_at: "",
+    traffic_state: "ok",
     failure: null,
     ...over,
   };

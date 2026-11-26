@@ -11,6 +11,7 @@ import type {
   MyServerEvents,
   MyServerFailure,
   MyServerLoginTicket,
+  MyServerList,
   MyServerOrder,
   MyServerPlan,
   MyServerRebuildResult,
@@ -18,6 +19,7 @@ import type {
   MyServerSshCredentials,
   MyServerState,
   MyServerTopup,
+  MyServerTrafficState,
   MyServerWallet,
 } from "../agent/bridge";
 
@@ -180,7 +182,7 @@ function readStore(): Store {
       const parsed = JSON.parse(raw) as Partial<Store>;
       if (Array.isArray(parsed.servers) && Array.isArray(parsed.orders)) {
         return {
-          servers: parsed.servers as StoredServer[],
+          servers: (parsed.servers as StoredServer[]).map(withTrafficDefaults),
           orders: parsed.orders as MyServerOrder[],
           next_id: typeof parsed.next_id === "number" ? parsed.next_id : 1,
           balance_cents:
@@ -207,6 +209,83 @@ function writeStore(store: Store): void {
 function copyServer(server: StoredServer): MyServer {
   const { started_at: _started, idempotency_key: _key, ...rest } = server;
   return { ...rest, failure: rest.failure ? { ...rest.failure } : null };
+}
+
+const GIB = 1024 ** 3;
+
+/** 本周期清零点：下个 UTC 月 1 日 00:00（契约 2.78.0）。 */
+function nextTrafficResetAt(now = Date.now()): string {
+  const date = new Date(now);
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1),
+  ).toISOString();
+}
+
+/** 一等额度（字节）：第一天释放当天份额，界面不会显示成「0 / 未知」。 */
+function releasedBytes(transferGib: number): number {
+  return transferGib > 0 ? Math.round((transferGib * GIB) / 30) : 0;
+}
+
+/**
+ * demo 用流量样例：ok / near / over / 额度未知各一台。
+ * 第三段（界面）照这四台验渲染，不必自己造数。
+ */
+const TRAFFIC_SAMPLES: Array<{
+  server_id: string;
+  name: string;
+  region: string;
+  used: number;
+  limit: number;
+  state: MyServerTrafficState;
+}> = [
+  {
+    server_id: "srv_traffic_ok",
+    name: "流量充足 · 新加坡 1",
+    region: "sgp1",
+    used: 4 * GIB,
+    limit: 30 * GIB,
+    state: "ok",
+  },
+  {
+    server_id: "srv_traffic_near",
+    name: "接近额度 · 纽约 1",
+    region: "nyc1",
+    used: 26 * GIB,
+    limit: 30 * GIB,
+    state: "near",
+  },
+  {
+    server_id: "srv_traffic_over",
+    name: "已超额度 · 旧金山 2",
+    region: "sfo2",
+    used: 34 * GIB,
+    limit: 30 * GIB,
+    state: "over",
+  },
+  {
+    server_id: "srv_traffic_unknown",
+    name: "额度未知 · 班加罗尔 1",
+    region: "blr1",
+    used: 512 * 1024 ** 2,
+    limit: 0,
+    state: "ok",
+  },
+];
+
+/** 旧存档没有四个流量字段：补齐默认值，界面与账号池都拿不到 undefined。 */
+function withTrafficDefaults(server: StoredServer): StoredServer {
+  return {
+    ...server,
+    traffic_used_bytes: Number.isFinite(server.traffic_used_bytes)
+      ? server.traffic_used_bytes
+      : 0,
+    traffic_limit_bytes: Number.isFinite(server.traffic_limit_bytes)
+      ? server.traffic_limit_bytes
+      : 0,
+    traffic_reset_at:
+      typeof server.traffic_reset_at === "string" ? server.traffic_reset_at : "",
+    traffic_state: server.traffic_state ?? "ok",
+  };
 }
 
 function failStage(): string | null {
@@ -316,20 +395,70 @@ export class MockMyServerService {
     };
   }
 
-  list(): { servers: MyServer[] } {
+  list(): MyServerList {
     if (readFlag(DOWN_KEY) === "1") providerDown();
     const store = readStore();
     advance(store);
+    const servers = store.servers
+      // 控制面只保留「余额不足停机」的墓碑行；手动销毁的行不再出现。
+      .filter(
+        (server) =>
+          server.state !== "destroyed" || server.failure?.code === "billing_unpaid",
+      )
+      .map(copyServer);
     return {
-      servers: store.servers
-        // 控制面只保留「余额不足停机」的墓碑行；手动销毁的行不再出现。
-        .filter(
-          (server) =>
-            server.state !== "destroyed" ||
-            server.failure?.code === "billing_unpaid",
-        )
-        .map(copyServer),
+      servers,
+      // 账号池（2.79.0）演示口径：按各台已释放额度求和；真实控制面按存在秒数池化。
+      traffic_pool: {
+        usedBytes: servers.reduce((sum, server) => sum + server.traffic_used_bytes, 0),
+        limitBytes: servers.reduce(
+          (sum, server) => sum + server.traffic_limit_bytes,
+          0,
+        ),
+      },
     };
+  }
+
+  /**
+   * demo：造四台流量样例（ok / near / over / 额度未知），第三段验界面用。
+   * 验收：控制台 `window.dispatchEvent(new Event("veyl:seed-traffic"))` 后刷新。
+   */
+  seedTrafficDemo(): MyServer[] {
+    if (readFlag(DOWN_KEY) === "1") providerDown();
+    const store = readStore();
+    const now = Date.now();
+    TRAFFIC_SAMPLES.forEach((sample, index) => {
+      if (store.servers.some((server) => server.server_id === sample.server_id)) {
+        return;
+      }
+      store.servers.push({
+        server_id: sample.server_id,
+        name: sample.name,
+        region: sample.region,
+        plan: DEFAULT_PLAN.id,
+        state: "healthy",
+        created_at: new Date(now - 12 * 3_600_000).toISOString(),
+        ip: `203.0.113.${20 + index}`,
+        port: 8388,
+        node_id: `nd_${sample.server_id}`,
+        local_node_id: null,
+        hourly_usd: DEFAULT_PLAN.hourly_usd,
+        monthly_usd: DEFAULT_PLAN.monthly_usd,
+        daily_price_cents: DEFAULT_PLAN.daily_price_cents,
+        transfer_gib: DEFAULT_PLAN.transfer_gib,
+        traffic_used_bytes: sample.used,
+        traffic_limit_bytes: sample.limit,
+        traffic_reset_at: nextTrafficResetAt(now),
+        traffic_state: sample.state,
+        paid_until: new Date(now + 86_400_000).toISOString(),
+        billing_state: "active",
+        grace_ends_at: null,
+        failure: null,
+        started_at: now,
+      });
+    });
+    writeStore(store);
+    return this.list().servers;
   }
 
   /**
@@ -357,6 +486,10 @@ export class MockMyServerService {
       billing_state: "expired",
       grace_ends_at: null,
       transfer_gib: DEFAULT_PLAN.transfer_gib,
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: releasedBytes(DEFAULT_PLAN.transfer_gib),
+      traffic_reset_at: nextTrafficResetAt(now),
+      traffic_state: "ok",
       failure: {
         stage: "active",
         code: "billing_unpaid",
@@ -580,6 +713,10 @@ export class MockMyServerService {
       monthly_usd: plan.monthly_usd,
       daily_price_cents: plan.daily_price_cents,
       transfer_gib: plan.transfer_gib,
+      traffic_used_bytes: 0,
+      traffic_limit_bytes: releasedBytes(plan.transfer_gib),
+      traffic_reset_at: nextTrafficResetAt(),
+      traffic_state: "ok",
       paid_until: null,
       billing_state: "pending",
       grace_ends_at: null,

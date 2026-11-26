@@ -49,6 +49,9 @@ import type {
   MyServerEvent,
   MyServerEventCode,
   MyServerEvents,
+  MyServerList,
+  MyServerTrafficState,
+  TrafficPool,
   MyServerFailure,
   MyServerIdentity,
   MyServerLoginTicket,
@@ -767,6 +770,20 @@ const MY_SERVER_STATES = new Set<MyServerState>([
   "gone",
 ]);
 
+const MY_SERVER_TRAFFIC_STATES = new Set<MyServerTrafficState>([
+  "ok",
+  "near",
+  "over",
+  "unpaid",
+]);
+
+/** 字节字段宽松兜底：缺失、负数、非数值都按 0，绝不让这一条被丢掉。 */
+function readBytes(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : 0;
+}
+
 const MY_SERVER_ORDER_STATES = new Set<MyServerOrderState>([
   "pending_payment",
   "paid",
@@ -906,6 +923,16 @@ function normalizeServerSyncFailures(value: unknown): ServerSyncFailure[] {
   });
 }
 
+/** 账号池宽松解析：不是对象就当没给；对象内缺字段按 0（与 Rust 侧一致）。 */
+function normalizeTrafficPool(value: unknown): TrafficPool | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    usedBytes: readBytes(raw.used_bytes),
+    limitBytes: readBytes(raw.limit_bytes),
+  };
+}
+
 function normalizeMyServer(raw: unknown): MyServer | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
@@ -976,6 +1003,15 @@ function normalizeMyServer(raw: unknown): MyServer | null {
     billing_state: billingState,
     grace_ends_at: grace as string | null,
     transfer_gib: transfer as number,
+    traffic_used_bytes: readBytes(value.traffic_used_bytes),
+    traffic_limit_bytes: readBytes(value.traffic_limit_bytes),
+    traffic_reset_at:
+      typeof value.traffic_reset_at === "string" ? value.traffic_reset_at : "",
+    traffic_state:
+      typeof value.traffic_state === "string" &&
+      MY_SERVER_TRAFFIC_STATES.has(value.traffic_state as MyServerTrafficState)
+        ? (value.traffic_state as MyServerTrafficState)
+        : "ok",
     charged_cents: readCents(value.charged_cents) ?? undefined,
     refunded_cents: readCents(value.refunded_cents) ?? undefined,
     failure: normalizeMyServerFailure(value.failure),
@@ -1689,13 +1725,17 @@ export class TauriAgentBridge implements AgentBridge {
     );
   }
 
-  async myServerList(): Promise<{ servers: MyServer[] }> {
-    const raw = await call<{ servers?: unknown }>("my_server_list");
+  async myServerList(): Promise<MyServerList> {
+    const raw = await call<{ servers?: unknown; traffic_pool?: unknown }>(
+      "my_server_list",
+    );
     if (!Array.isArray(raw?.servers)) serverDataError();
     const servers = raw.servers
       .map((value) => normalizeMyServer(value))
       .filter((server): server is MyServer => server !== null);
-    return { servers };
+    // 账号池是可选字段：控制面没给时整条缺省，不按 0 处理。
+    const pool = normalizeTrafficPool(raw.traffic_pool);
+    return pool ? { servers, traffic_pool: pool } : { servers };
   }
 
   async myServerSync(): Promise<ServerSyncData> {
