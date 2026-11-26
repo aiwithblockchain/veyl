@@ -99,6 +99,22 @@ describe("充值弹层", () => {
     expect(onRefreshBalance).toHaveBeenCalledTimes(1);
   });
 
+  it("余额是钱包数字块，5 个档位都在", () => {
+    renderTopUp(async () => TOPUP, () => {}, () => {}, {
+      ...WALLET,
+      denominations_cents: [600, 1000, 2500, 5000, 10000],
+    });
+
+    expect(screen.getByText("当前余额")).toBeTruthy();
+    const amount = screen.getByText("$1.00");
+    expect(amount.className).toContain("myservers-topup__balance-amount");
+    expect(amount.className).toContain("num");
+
+    for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
+      expect(screen.getByRole("button", { name }), name).toBeTruthy();
+    }
+  });
+
   it("checkout_url 为空：保留直接到账提示，不关闭弹窗", async () => {
     const onClose = vi.fn();
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({

@@ -1041,7 +1041,6 @@ export const en: Record<MessageKey, string> = {
   "topup.retry": "Retry",
   "topup.none": "No top-up options are available right now.",
   "topup.refresh": "Refresh",
-  "topup.pick": "Pick an amount.",
   "topup.custom.label": "Custom amount",
   "topup.custom.placeholder": "36",
   "topup.custom.hint": "$6–$300, whole dollars",

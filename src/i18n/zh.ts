@@ -991,7 +991,6 @@ export const zh = {
   "topup.retry": "重试",
   "topup.none": "现在没有可用的充值档位。",
   "topup.refresh": "刷新",
-  "topup.pick": "选一档充值。",
   "topup.custom.label": "自定义金额",
   "topup.custom.placeholder": "36",
   "topup.custom.hint": "$6–$300，整美元",

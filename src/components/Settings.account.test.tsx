@@ -93,7 +93,8 @@ describe("设置 › 账户", () => {
     expect(amount.className).toContain("settings-account__amount");
     expect(amount.className).toContain("num");
 
-    expect(screen.getByRole("button", { name: "充值" })).toBeTruthy();
+    const topUp = screen.getByRole("button", { name: "充值" });
+    expect(topUp.className).toContain("btn--primary");
     expect(screen.queryByText("在其它设备上使用")).toBeNull();
   });
 

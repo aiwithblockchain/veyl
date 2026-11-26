@@ -166,13 +166,15 @@ export function MyServerTopUp({
         </header>
 
         <div className="myservers-login__body">
-          <p className="myservers__hint">
-            {tr("topup.balance")}{" "}
-            <span className="num">
+          <div className="myservers-topup__balance">
+            <span className="myservers-topup__balance-label">
+              {tr("topup.balance")}
+              {loading ? ` · ${tr("topup.refreshing")}` : null}
+            </span>
+            <span className="myservers-topup__balance-amount num">
               {wallet ? formatUsdCents(wallet.balance_cents) : "—"}
             </span>
-            {loading ? ` · ${tr("topup.refreshing")}` : null}
-          </p>
+          </div>
 
           {!wallet && loading ? (
             <p className="myservers__hint" role="status">
@@ -192,23 +194,20 @@ export function MyServerTopUp({
           ) : wallet ? (
             <>
               {denominations.length > 0 ? (
-                <>
-                  <p className="myservers__hint">{tr("topup.pick")}</p>
-                  <div className="myservers-topup__grid">
-                    {denominations.map((cents) => (
-                      <button
-                        key={cents}
-                        type="button"
-                        className="btn btn--ghost myservers-topup__option num"
-                        disabled={busy || waiting}
-                        aria-busy={busyCents === cents || undefined}
-                        onClick={() => void start(cents)}
-                      >
-                        {wholeDollar(cents)}
-                      </button>
-                    ))}
-                  </div>
-                </>
+                <div className="myservers-topup__grid">
+                  {denominations.map((cents) => (
+                    <button
+                      key={cents}
+                      type="button"
+                      className="btn btn--ghost myservers-topup__option num"
+                      disabled={busy || waiting}
+                      aria-busy={busyCents === cents || undefined}
+                      onClick={() => void start(cents)}
+                    >
+                      {wholeDollar(cents)}
+                    </button>
+                  ))}
+                </div>
               ) : null}
               <div className="myservers-topup__custom">
                 <label

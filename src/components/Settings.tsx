@@ -2902,7 +2902,7 @@ export function Settings({
                       )}
                       <button
                         type="button"
-                        className="btn btn--ghost"
+                        className="btn btn--primary"
                         onClick={onTopUp}
                         disabled={!onTopUp}
                       >
