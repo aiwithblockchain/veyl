@@ -252,7 +252,7 @@ describe("服务器详情", () => {
     expect(facts?.textContent).toContain("每天 $0.20");
   });
 
-  it("分区顺序固定：状态块 → 事实块 → 创建记录 → 危险块", () => {
+  it("分区顺序固定：状态块 → 事实块 → 危险块", () => {
     for (const state of ["healthy", "installing", "error"] as const) {
       renderDetail({ state });
       const children = [
@@ -260,46 +260,21 @@ describe("服务器详情", () => {
       ].map((node) => node.className);
       expect(children[0]).toContain("myservers__block");
       expect(children[1]).toContain("myservers__facts");
-      expect(children[2]).toContain("myservers__events");
-      expect(children[3]).toContain("myservers__footer");
+      expect(children[2]).toContain("myservers__footer");
+      expect(children).toHaveLength(3);
       cleanup();
     }
   });
 
-  it("创建记录排在事实区与危险块之间；墓碑视图不渲染", async () => {
-    const props = {
-      bridge: {
-        myServerEvents: vi.fn(async () => ({
-          events: [{ at: Date.now(), code: "machine.created" as const }],
-          has_more: false,
-        })),
-      } as unknown as AgentBridge,
-      regionLabel: "新加坡 1",
-      onCreateAnother: vi.fn(),
-      onChanged: () => {},
-      onRebuilt: () => {},
-      onGone: vi.fn(),
-      onForget: async () => {},
-    };
-    const view = render(
-      <MyServerDetail {...props} server={server({ state: "healthy" })} />,
-    );
-    await screen.findByText("1 条");
-    const children = [
-      ...(document.querySelector(".myservers__detail")?.children ?? []),
-    ].map((node) => node.className);
-    expect(children[1]).toContain("myservers__facts");
-    expect(children[2]).toContain("myservers__events");
-    expect(children[3]).toContain("myservers__footer");
-    view.unmount();
+  it("创建时间在事实区：本地日 + 时分；不再有创建记录块", () => {
+    renderDetail({
+      created_at: new Date(2026, 10, 26, 14, 3, 0).toISOString(),
+    });
 
-    render(
-      <MyServerDetail
-        {...props}
-        server={server({ state: "destroyed", billing_state: "expired" })}
-      />,
-    );
+    expect(screen.getByText("创建于")).toBeTruthy();
+    expect(screen.getByText("11月26日 14:03")).toBeTruthy();
     expect(screen.queryByText("创建记录")).toBeNull();
+    expect(document.querySelector(".myservers__events")).toBeNull();
   });
 
   it("就绪后扣费余额不够：写明没开通没扣费，给去充值与重新建一台", () => {
@@ -397,13 +372,13 @@ describe("服务器详情", () => {
     expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
   });
 
-  it("停机中与已销毁：事实区只剩地区", () => {
+  it("停机中与已销毁：事实区只剩地区与创建时间", () => {
     for (const state of ["destroying", "gone"] as const) {
       renderDetail({ state });
       const labels = [
         ...document.querySelectorAll(".myservers__facts dt"),
       ].map((dt) => dt.textContent);
-      expect(labels).toEqual(["地区"]);
+      expect(labels).toEqual(["地区", "创建于"]);
       cleanup();
     }
   });
@@ -1972,7 +1947,7 @@ describe("流量行（2.78.0）", () => {
       });
 
       const dd = screen.getByText(/Used 37 GiB/).closest("dd");
-      expect(dd?.textContent).toContain("GiB Resets December 1");
+      expect(dd?.textContent).toContain("GiB Resets Dec 1");
       expect(dd?.textContent).not.toMatch(/released|over|limit by/i);
     } finally {
       setLanguage("zh");

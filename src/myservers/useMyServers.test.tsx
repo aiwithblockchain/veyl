@@ -265,7 +265,7 @@ describe("「已下单但认不出新机器」的生命周期", () => {
 });
 
 describe("开通中的轮询", () => {
-  it("开通中每 2 秒一次，详情跟着刷新，就绪后停止", async () => {
+  it("开通中每 5 秒一次，详情跟着刷新，就绪后停止", async () => {
     vi.useFakeTimers();
     const list: { current: MyServer[] } = {
       current: [{ ...SERVER_A, state: "creating" }],
@@ -284,18 +284,17 @@ describe("开通中的轮询", () => {
     const listBase = listMock.mock.calls.length;
     const getBase = getMock.mock.calls.length;
 
-    // 开通中不按兜底退避：每一拍都是 2 秒。
+    // 开通中不按兜底退避：每一拍都是 5 秒。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4900);
     });
-    expect(listMock.mock.calls.length).toBe(listBase + 1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1900);
-    });
-    expect(listMock.mock.calls.length).toBe(listBase + 1);
+    expect(listMock.mock.calls.length).toBe(listBase);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(listBase + 2);
 
@@ -305,7 +304,7 @@ describe("开通中的轮询", () => {
     // 状态就绪：下一拍刷新看到 healthy，之后不再轮询。
     list.current = [{ ...SERVER_A, state: "healthy" as const }];
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     const stopped = listMock.mock.calls.length;
     await act(async () => {
@@ -333,9 +332,13 @@ describe("开通中的轮询", () => {
     const listMock = vi.mocked(bridge.myServerList);
     const listBase = listMock.mock.calls.length;
 
-    // 销毁中不再等用户重进页面：第一拍 2 秒就自己去拉列表。
+    // 销毁中不再等用户重进页面：第一拍 5 秒就自己去拉列表。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4900);
+    });
+    expect(listMock.mock.calls.length).toBe(listBase);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
     });
     expect(listMock.mock.calls.length).toBe(listBase + 1);
 
@@ -352,7 +355,7 @@ describe("开通中的轮询", () => {
     view.unmount();
     vi.useRealTimers();
   });
-  it("拉取失败时按兜底退避，不在 2 秒上死循环", async () => {
+  it("拉取失败仍按 5 秒重试，不拿旧列表当开通中", async () => {
     vi.useFakeTimers();
     const list: { current: MyServer[] } = {
       current: [{ ...SERVER_A, state: "creating" }],
@@ -369,14 +372,13 @@ describe("开通中的轮询", () => {
     const listMock = vi.mocked(bridge.myServerList);
     const base = listMock.mock.calls.length;
 
-    // 之后每次都失败：旧列表仍写着 creating，但不能拿它压 2 秒。
+    // 之后每次都失败：旧列表仍写着 creating，但每一拍都是 5 秒。
     listMock.mockRejectedValue({ code: "NETWORK", message: "连不上。" });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(base + 1);
 
-    // 失败后退到 5 秒。
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4999);
     });
@@ -386,14 +388,14 @@ describe("开通中的轮询", () => {
     });
     expect(listMock.mock.calls.length).toBe(base + 2);
 
-    // 恢复成功、仍开通中：这一拍成功，下一拍回到 2 秒。
+    // 恢复成功、仍开通中：下一拍继续 5 秒。
     listMock.mockResolvedValue({ servers: list.current });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(base + 3);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(base + 4);
 
@@ -401,7 +403,7 @@ describe("开通中的轮询", () => {
     vi.useRealTimers();
   });
 
-  it("离开开通态后回到 5 秒节奏（销毁中的机器继续轮询）", async () => {
+  it("开通结束后只剩销毁中：轮询继续按 5 秒走", async () => {
     vi.useFakeTimers();
     const list: { current: MyServer[] } = {
       current: [
@@ -421,13 +423,13 @@ describe("开通中的轮询", () => {
     const listMock = vi.mocked(bridge.myServerList);
     const base = listMock.mock.calls.length;
 
-    // 开通中：两拍都是 2 秒。
+    // 开通中：两拍都是 5 秒。
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(base + 1);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(listMock.mock.calls.length).toBe(base + 2);
 
@@ -437,12 +439,12 @@ describe("开通中的轮询", () => {
       { ...SERVER_B, state: "destroying" },
     ];
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     const after = listMock.mock.calls.length;
     expect(after).toBe(base + 3);
 
-    // 回到兜底节奏：5 秒内不再刷新，到点才刷一次。
+    // 还在销毁：5 秒内不再刷新，到点才刷一次。
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4999);
     });

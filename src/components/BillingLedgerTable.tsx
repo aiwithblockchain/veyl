@@ -11,7 +11,7 @@ import { errorText } from "../i18n/errorText";
 import { formatUsdCents } from "../myservers/labels";
 
 const WINDOW_DAYS = 30;
-/** 折叠行只给摘要：40 条先够看，再往上每次多 100 条。 */
+/** 第一次展开只给摘要：40 条先够看，再往上每次多 100 条。 */
 const INITIAL_ROWS = 40;
 const MORE_ROWS = 100;
 
@@ -88,8 +88,8 @@ export function amountLabel(cents: number): string {
 }
 
 /**
- * 最近 30 天账单：默认折叠成一行摘要，展开后是三列表格（机器名挂在类别下）。
- * 打开即请求，不等展开；滚动交给账户弹层的 body，表头 sticky。
+ * 近 30 天账单：默认只留一行入口，第一次展开才请求。
+ * 折叠行不露合计；同一打开周期里再折叠 / 展开沿用已经取到的结果。
  */
 export function BillingLedgerTable({
   bridge,
@@ -99,42 +99,102 @@ export function BillingLedgerTable({
   language: Language;
 }) {
   const t = useT();
-  const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [expanded, setExpanded] = useState(false);
+  /** null = 还没请求过；请求发出后才会出现 loading。 */
+  const [phase, setPhase] = useState<Phase | null>(null);
+  const inFlightRef = useRef(false);
 
   const load = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setPhase({ kind: "loading" });
     try {
       const ledger = await bridge.myServerBillingLedger(WINDOW_DAYS);
       setPhase({ kind: "ready", ledger });
     } catch (error) {
       setPhase({ kind: "failed", message: billingFailureText(error) });
+    } finally {
+      inFlightRef.current = false;
     }
   }, [bridge]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && phase === null) void load();
+  };
+  const summary =
+    phase?.kind === "ready"
+      ? t("billing.summary", {
+          topup: formatUsdCents(phase.ledger.totals.topup_cents),
+          charge: formatUsdCents(phase.ledger.totals.charge_cents),
+        })
+      : null;
 
-  if (phase.kind === "loading") {
-    return (
-      <div className="billing-disclosure" role="status">
-        <span className="billing-disclosure__text">{t("billing.loading")}</span>
+  return (
+    <div className="billing-inline">
+      <button
+        type="button"
+        className="billing-disclosure billing-disclosure--toggle"
+        aria-expanded={expanded}
+        aria-controls="account-billing-details"
+        onClick={toggle}
+      >
+        <span className="billing-disclosure__text">
+          {t("settings.account.bills")}
+          {expanded && summary ? <> · {summary}</> : null}
+        </span>
+        <span className="billing-disclosure__action">
+          {expanded ? t("billing.hideDetails") : t("billing.showDetails")}
+          <span
+            className={`billing-disclosure__chevron${expanded ? " is-open" : ""}`}
+            aria-hidden="true"
+          />
+        </span>
+      </button>
+
+      {/* 常驻容器：aria-controls 在折叠时也必须有目标；收起时 inert。 */}
+      <div
+        className={`billing-reveal${expanded ? " is-open" : ""}`}
+        id="account-billing-details"
+        inert={!expanded}
+        aria-hidden={!expanded || undefined}
+      >
+        <div className="billing-reveal__inner">
+          <div className="billing-reveal__body">
+            {phase === null ? null : phase.kind === "loading" ? (
+              <BillingSkeleton />
+            ) : phase.kind === "failed" ? (
+              <div className="billing-status billing-status--failed" role="alert">
+                <span>{phase.message}</span>
+                <button
+                  type="button"
+                  className="settings-link"
+                  onClick={() => void load()}
+                >
+                  {t("account.retry")}
+                </button>
+              </div>
+            ) : (
+              <BillingLedgerBody ledger={phase.ledger} language={language} />
+            )}
+          </div>
+        </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
-  if (phase.kind === "failed") {
-    return (
-      <div className="billing-disclosure billing-disclosure--failed" role="alert">
-        <span className="billing-disclosure__text">{phase.message}</span>
-        <button type="button" className="settings-link" onClick={() => void load()}>
-          {t("account.retry")}
-        </button>
-      </div>
-    );
-  }
-
-  return <BillingLedgerBody ledger={phase.ledger} language={language} />;
+function BillingSkeleton() {
+  const t = useT();
+  return (
+    <div className="billing-skeleton" role="status">
+      <span className="sr-only">{t("billing.loading")}</span>
+      <span className="billing-skeleton__row" />
+      <span className="billing-skeleton__row" />
+      <span className="billing-skeleton__row" />
+    </div>
+  );
 }
 
 function BillingLedgerBody({
@@ -145,9 +205,8 @@ function BillingLedgerBody({
   language: Language;
 }) {
   const t = useT();
-  const [expanded, setExpanded] = useState(false);
   const [visible, setVisible] = useState(INITIAL_ROWS);
-  const detailsRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   /** 「显示更多」之后要聚焦的第一条新行；渲染完成再取节点。 */
   const pendingFocusRef = useRef<string | null>(null);
 
@@ -156,16 +215,12 @@ function BillingLedgerBody({
     if (!id) return;
     pendingFocusRef.current = null;
     const row =
-      detailsRef.current?.querySelector<HTMLElement>(`tr[data-entry-id="${id}"]`) ??
+      bodyRef.current?.querySelector<HTMLElement>(`tr[data-entry-id="${id}"]`) ??
       null;
     row?.focus();
     row?.scrollIntoView?.({ block: "nearest" });
   }, [visible]);
 
-  const summary = t("billing.summary", {
-    topup: formatUsdCents(ledger.totals.topup_cents),
-    charge: formatUsdCents(ledger.totals.charge_cents),
-  });
   const empty = ledger.entries.length === 0;
   const shown = ledger.entries.slice(0, visible);
 
@@ -175,86 +230,59 @@ function BillingLedgerBody({
     setVisible((count) => count + MORE_ROWS);
   };
 
-  if (empty) {
-    return (
-      <div className="billing-disclosure billing-disclosure--empty">
-        <span className="billing-disclosure__text">{summary}</span>
-        <span className="billing-disclosure__note">{t("billing.empty")}</span>
-      </div>
-    );
-  }
-
   return (
-    <div className="billing-inline">
-      <button
-        type="button"
-        className="billing-disclosure billing-disclosure--toggle"
-        aria-expanded={expanded}
-        aria-controls="account-billing-details"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <span className="billing-disclosure__text">{summary}</span>
-        <span className="billing-disclosure__action">
-          {t("billing.showDetails")}
-          <span
-            className={`billing-disclosure__chevron${expanded ? " is-open" : ""}`}
-            aria-hidden="true"
-          />
-        </span>
-      </button>
-
-      {/* 常驻 DOM：aria-controls 在折叠时也必须有目标。 */}
-      <div
-        className="billing-details"
-        id="account-billing-details"
-        ref={detailsRef}
-        hidden={!expanded}
-      >
-          <table className="billing-table">
-            <thead>
-              <tr>
-                <th scope="col">{t("billing.column.kind")}</th>
-                <th scope="col">{t("billing.column.date")}</th>
-                <th scope="col" className="billing-table__amount-head">
-                  {t("billing.column.amount")}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((entry) => (
-                <tr key={entry.id} data-entry-id={entry.id} tabIndex={-1}>
-                  <td className="billing-table__kind">
-                    {t(KIND_LABELS[entry.kind])}
-                    {entry.server && SERVER_KINDS.has(entry.kind) ? (
+    <div className="billing-body" ref={bodyRef}>
+      {empty ? (
+        <p className="billing-empty">{t("billing.empty")}</p>
+      ) : (
+        <table className="billing-table">
+          <thead>
+            <tr>
+              <th scope="col">{t("billing.column.kind")}</th>
+              <th scope="col">{t("billing.column.date")}</th>
+              <th scope="col" className="billing-table__amount-head">
+                {t("billing.column.amount")}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((entry) => (
+              <tr key={entry.id} data-entry-id={entry.id} tabIndex={-1}>
+                <td className="billing-table__kind">
+                  {t(KIND_LABELS[entry.kind])}
+                  {entry.server && SERVER_KINDS.has(entry.kind) ? (
+                    <>
+                      {" "}
                       <span
                         className="billing-table__server"
                         title={serverLabel(entry.server)}
                       >
                         {serverLabel(entry.server)}
                       </span>
-                    ) : null}
-                  </td>
-                  <td className="billing-table__date num">
-                    {formatBillingDay(entry.at, language)}
-                  </td>
-                  <td className="billing-table__amount num">
-                    {amountLabel(entry.amount_cents)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {ledger.truncated ? (
-            <p className="billing-footnote">{t("billing.truncated")}</p>
-          ) : null}
-          {visible < ledger.entries.length ? (
-            <div className="billing-more">
-              <button type="button" className="btn btn--ghost" onClick={showMore}>
-                {t("billing.showMore")}
-              </button>
-            </div>
-          ) : null}
-      </div>
+                    </>
+                  ) : null}
+                </td>
+                <td className="billing-table__date num">
+                  {formatBillingDay(entry.at, language)}
+                </td>
+                <td className="billing-table__amount num">
+                  {amountLabel(entry.amount_cents)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {ledger.truncated ? (
+        <p className="billing-footnote">{t("billing.truncated")}</p>
+      ) : null}
+      {visible < ledger.entries.length ? (
+        <div className="billing-more">
+          <button type="button" className="btn btn--ghost" onClick={showMore}>
+            {t("billing.showMore")}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

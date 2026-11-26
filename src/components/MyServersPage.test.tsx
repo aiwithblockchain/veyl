@@ -810,7 +810,15 @@ describe("我的服务器 destination", () => {
     const facts = [...document.querySelectorAll(".myservers__facts dt")].map(
       (node) => node.textContent,
     );
-    expect(facts).toEqual(["地区", "IP", "sing-box", "节点", "费用", "流量"]);
+    expect(facts).toEqual([
+      "地区",
+      "IP",
+      "sing-box",
+      "节点",
+      "费用",
+      "流量",
+      "创建于",
+    ]);
     expect(screen.getByText("45.76.20.100")).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制 IP" })).toBeTruthy();
     expect(screen.queryByText("1 核 · 1 GB")).toBeNull();

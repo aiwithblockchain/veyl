@@ -82,6 +82,10 @@ export function AccountSurface({
   const [recoverError, setRecoverError] = useState<string | null>(null);
   const [pointedRow, setPointedRow] = useState<string | null>(null);
   const pointTimerRef = useRef<number | null>(null);
+  /** 充值档位默认收起；主按钮在余额行，展开后才出现。 */
+  const [topupOpen, setTopupOpen] = useState(false);
+  const topupRef = useRef<HTMLDivElement>(null);
+  const topupButtonRef = useRef<HTMLButtonElement>(null);
 
   const refreshWalletRef = useRef(onRefreshWallet);
   refreshWalletRef.current = onRefreshWallet;
@@ -101,9 +105,15 @@ export function AccountSurface({
     /** 明天账号会新增的额度；逐台增量之和，不是账号余额。 */
     tomorrowBytes: number;
   } | null>(null);
+  /** 每天在扣的合计与台数：余额下面的那句「每天约 X · N 台服务器」。 */
+  const [daily, setDaily] = useState<{
+    cents: number;
+    count: number;
+  } | null>(null);
   useEffect(() => {
     if (!open || account?.logged_in !== true) {
       setTraffic(null);
+      setDaily(null);
       return;
     }
     if (typeof bridge.myServerList !== "function") return;
@@ -112,6 +122,18 @@ export function AccountSurface({
       .myServerList()
       .then((list) => {
         if (cancelled) return;
+        const billable = list.servers.filter(
+          (server) =>
+            server.billing_state === "active" ||
+            server.billing_state === "past_due",
+        );
+        setDaily({
+          cents: billable.reduce(
+            (sum, server) => sum + server.daily_price_cents,
+            0,
+          ),
+          count: billable.length,
+        });
         // 后一次结果没有 pool：清掉旧值，别让上一个账号/上一次的汇总留着。
         if (!list.traffic_pool) {
           setTraffic(null);
@@ -128,8 +150,11 @@ export function AccountSurface({
         });
       })
       .catch(() => {
-        // 旧控制面 / 读取失败：整行不渲染，不在账户弹层里报错。
-        if (!cancelled) setTraffic(null);
+        // 旧控制面 / 读取失败：流量整行不渲染，余额下退回固定说明，不在弹层里报错。
+        if (!cancelled) {
+          setTraffic(null);
+          setDaily(null);
+        }
       });
     return () => {
       cancelled = true;
@@ -142,16 +167,30 @@ export function AccountSurface({
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (trapPaused || event.key !== "Escape") return;
+      // 充值展开时 Esc 只收面板；再按一次才关账户层。
+      if (topupOpen) {
+        event.preventDefault();
+        setTopupOpen(false);
+        topupButtonRef.current?.focus();
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, trapPaused, onClose]);
+  }, [open, trapPaused, onClose, topupOpen]);
+
+  // 展开后焦点进第一个档位；收起由 Esc 或主按钮负责送回。
+  useEffect(() => {
+    if (!topupOpen) return;
+    topupRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [topupOpen]);
 
   // AI 指路：滚到目标块并高亮 2 秒。
   useEffect(() => {
     if (!open || !point?.row) return;
     const row = point.row;
+    if (row === "account.topup") setTopupOpen(true);
     const target =
       dialogRef.current?.querySelector<HTMLElement>(`[data-point="${row}"]`) ?? null;
     if (!target) return;
@@ -257,14 +296,22 @@ export function AccountSurface({
     traffic && traffic.resetAt !== ""
       ? formatTrafficReset(traffic.resetAt, getLanguage())
       : null;
+  /** 有服务器才给动态估算；读不到列表就退回固定说明。 */
+  const dailyLabel =
+    daily !== null && daily.count > 0
+      ? tr("account.daily", {
+          amount: formatUsdCents(daily.cents),
+          count: daily.count,
+        })
+      : null;
   /** 进度条只做视觉比例，不写百分比文字；超额时铺满。 */
   const trafficRatio =
     traffic !== null && traffic.pool.limitBytes > 0
       ? traffic.pool.usedBytes / traffic.pool.limitBytes
       : 0;
   const trafficBarWidth = Number.isFinite(trafficRatio)
-    ? `${Math.min(100, Math.max(0, trafficRatio * 100))}%`
-    : "0%";
+    ? `${Math.min(100, Math.max(0, trafficRatio * 100)).toFixed(2)}%`
+    : "0.00%";
 
   const pointAttrs = (row: string) => ({
     "data-point": row,
@@ -367,92 +414,107 @@ export function AccountSurface({
 
           {account?.logged_in ? (
             <>
-              <div className="account-surface__row" {...pointAttrs("account.login")}>
-                <div className="account-surface__identity">
-                  <span className="account-surface__label">
-                    {tr("settings.account.email")}
-                  </span>
-                  <span
-                    className="account-surface__email"
-                    title={account.email ?? undefined}
-                  >
-                    {account.email ?? tr("settings.account.signedIn")}
-                  </span>
-                </div>
-                {account.email ? (
-                  <div className="account-surface__aside">
-                    <button
-                      type="button"
-                      className="settings-link"
-                      onClick={copyEmail}
-                    >
-                      {copy === "ok"
-                        ? tr("chat.copy.copied")
-                        : copy === "error"
-                          ? tr("chat.copy.failed")
-                          : tr("detail.copy")}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-
               {blockedIdentity ? null : (
-                <div className="account-surface__row" {...pointAttrs("account.balance")}>
-                  <div className="account-surface__main">
-                    <div className="account-surface__label">
-                      {tr("settings.account.balance")}
-                    </div>
-                    {walletError ? (
-                      <p className="account-surface__error">
-                        {tr("account.walletError")}
-                        <button
-                          type="button"
-                          className="settings-link"
-                          onClick={() => onRefreshWallet?.("retry")}
-                          disabled={!onRefreshWallet}
-                        >
-                          {tr("account.retry")}
-                        </button>
-                      </p>
-                    ) : (
-                      <div className="account-surface__amount num">
-                        {walletLoading
-                          ? tr("settings.account.loading")
-                          : wallet
-                            ? formatUsdCents(wallet.balance_cents)
-                            : "—"}
+                <>
+                  <div
+                    className="account-surface__balance"
+                    {...pointAttrs("account.balance")}
+                  >
+                    <div className="account-surface__balance-main">
+                      <div className="account-surface__balance-head">
+                        <span className="account-surface__label">
+                          {tr("settings.account.balance")}
+                        </span>
+                        {walletError ? null : (
+                          <button
+                            type="button"
+                            className="settings-link"
+                            onClick={onForceRefresh}
+                            disabled={!onForceRefresh || walletRefreshing}
+                          >
+                            {walletRefreshing
+                              ? tr("settings.account.refreshing")
+                              : tr("settings.account.refresh")}
+                          </button>
+                        )}
                       </div>
-                    )}
-                    <p className="settings-note">
-                      {tr("settings.account.billingNote")}
-                    </p>
-                    {walletStale && wallet && !walletError ? (
-                      <p className="settings-note">{tr("account.stale")}</p>
+                      {walletError ? (
+                        <p className="account-surface__error">
+                          {tr("account.walletError")}
+                          <button
+                            type="button"
+                            className="settings-link"
+                            onClick={() => onRefreshWallet?.("retry")}
+                            disabled={!onRefreshWallet}
+                          >
+                            {tr("account.retry")}
+                          </button>
+                        </p>
+                      ) : (
+                        <div className="account-surface__amount num">
+                          {walletLoading
+                            ? tr("settings.account.loading")
+                            : wallet
+                              ? formatUsdCents(wallet.balance_cents)
+                              : "—"}
+                        </div>
+                      )}
+                      <p className="account-surface__daily">
+                        {dailyLabel ?? tr("settings.account.billingNote")}
+                      </p>
+                      {walletStale && wallet && !walletError ? (
+                        <p className="settings-note">{tr("account.stale")}</p>
+                      ) : null}
+                    </div>
+                    {onTopUp ? (
+                      <button
+                        ref={topupButtonRef}
+                        type="button"
+                        className="btn btn--primary"
+                        aria-expanded={topupOpen}
+                        aria-controls="account-topup"
+                        onClick={() => setTopupOpen((value) => !value)}
+                      >
+                        {topupOpen
+                          ? tr("account.topUp.collapse")
+                          : tr("account.topUp")}
+                      </button>
                     ) : null}
                   </div>
-                  <div className="account-surface__aside">
-                    {walletError ? null : (
-                      <button
-                        type="button"
-                        className="settings-link"
-                        onClick={onForceRefresh}
-                        disabled={!onForceRefresh || walletRefreshing}
-                      >
-                        {walletRefreshing
-                          ? tr("settings.account.refreshing")
-                          : tr("settings.account.refresh")}
-                      </button>
-                    )}
-                  </div>
-                </div>
+
+                  {/* 充值档位默认收起：首次点「充值」才展开，内容常驻以便收动画。 */}
+                  {onTopUp ? (
+                    <div
+                      ref={topupRef}
+                      id="account-topup"
+                      className={`account-surface__reveal account-surface__topup${
+                        topupOpen ? " is-open" : ""
+                      }`}
+                      {...pointAttrs("account.topup")}
+                      inert={!topupOpen}
+                      aria-hidden={!topupOpen || undefined}
+                    >
+                      <div className="account-surface__reveal-inner">
+                        <div className="account-surface__topup-body">
+                          <MyServerTopUp
+                            wallet={wallet}
+                            onTopUp={onTopUp}
+                            onCheckoutOpened={() => onCheckoutOpened?.()}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               )}
 
               {blockedIdentity ? null : traffic ? (
-                <div
-                  className="account-surface__row"
-                  {...pointAttrs("account.traffic")}
-                >
-                  <div className="account-surface__traffic">
+                <>
+                  <div className="account-surface__hair" aria-hidden="true" />
+                  <div
+                    className="account-surface__traffic-block"
+                    {...pointAttrs("account.traffic")}
+                  >
                     <div className="account-surface__traffic-head">
                       <span className="account-surface__label">
                         {tr("account.traffic.title")}
@@ -463,16 +525,6 @@ export function AccountSurface({
                         </span>
                       ) : null}
                     </div>
-                    <p className="account-surface__traffic-line num">
-                      {trafficState === "unknown"
-                        ? tr("account.traffic.unknown", {
-                            used: formatTrafficGib(traffic.pool.usedBytes),
-                          })
-                        : tr("account.traffic.summary", {
-                            used: formatTrafficGibValue(traffic.pool.usedBytes),
-                            limit: formatTrafficGibValue(traffic.pool.limitBytes),
-                          })}
-                    </p>
                     {trafficState === "unknown" ? null : (
                       <div
                         className="account-surface__traffic-bar"
@@ -484,60 +536,69 @@ export function AccountSurface({
                         />
                       </div>
                     )}
-                    {trafficState === "over" ? (
-                      <p className="account-surface__traffic-note account-surface__traffic-over">
-                        {tr("account.traffic.over", {
-                          over: formatTrafficGib(trafficOver),
-                        })}
-                      </p>
-                    ) : trafficState !== "unknown" &&
-                      (traffic.tomorrowBytes > 0 || trafficState === "near") ? (
-                      <p className="account-surface__traffic-note">
-                        {traffic.tomorrowBytes > 0
-                          ? tr("account.traffic.tomorrow", {
-                              amount: formatTrafficGib(traffic.tomorrowBytes),
-                            })
-                          : null}
-                        {traffic.tomorrowBytes > 0 && trafficState === "near"
-                          ? " · "
-                          : null}
-                        {trafficState === "near" ? (
-                          <span className="account-surface__traffic-near">
-                            {tr("account.traffic.near")}
-                          </span>
-                        ) : null}
-                      </p>
-                    ) : null}
+                    <p className="account-surface__traffic-line">
+                      {trafficState === "unknown"
+                        ? tr("account.traffic.unknown", {
+                            used: formatTrafficGib(traffic.pool.usedBytes),
+                          })
+                        : (
+                          <>
+                            {tr("account.traffic.summary", {
+                              used: formatTrafficGibValue(traffic.pool.usedBytes),
+                              limit: formatTrafficGibValue(traffic.pool.limitBytes),
+                            })}
+                            {trafficState === "over" ? (
+                              <>
+                                {" · "}
+                                <span className="account-surface__traffic-over">
+                                  {tr("account.traffic.over", {
+                                    over: formatTrafficGib(trafficOver),
+                                  })}
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                {traffic.tomorrowBytes > 0 ? (
+                                  <>
+                                    {" · "}
+                                    {tr("account.traffic.tomorrow", {
+                                      amount: formatTrafficGib(
+                                        traffic.tomorrowBytes,
+                                      ),
+                                    })}
+                                  </>
+                                ) : null}
+                                {trafficState === "near" ? (
+                                  <>
+                                    {" · "}
+                                    <span className="account-surface__traffic-near">
+                                      {tr("account.traffic.near")}
+                                    </span>
+                                  </>
+                                ) : null}
+                              </>
+                            )}
+                          </>
+                        )}
+                    </p>
                   </div>
-                </div>
+                </>
               ) : null}
 
               {blockedIdentity ? null : (
-                <section className="account-surface__section" {...pointAttrs("account.topup")}>
-                  <div className="account-surface__label">{tr("account.topUp")}</div>
-                  {onTopUp ? (
-                    <MyServerTopUp
-                      wallet={wallet}
-                      onTopUp={onTopUp}
-                      onCheckoutOpened={() => onCheckoutOpened?.()}
-                    />
-                  ) : null}
-                </section>
-              )}
-
-              {blockedIdentity ? null : (
-                <section className="account-surface__section" {...pointAttrs("account.bills")}>
-                  <div className="account-surface__section-head">
-                    <div className="account-surface__label">
-                      {tr("settings.account.bills")}
-                    </div>
+                <>
+                  <div className="account-surface__hair" aria-hidden="true" />
+                  <div
+                    className="account-surface__bills-block"
+                    {...pointAttrs("account.bills")}
+                  >
+                    <BillingLedgerTable bridge={bridge} language={getLanguage()} />
                   </div>
-                  <BillingLedgerTable bridge={bridge} language={getLanguage()} />
-                </section>
+                </>
               )}
             </>
           ) : (
-            <div className="account-surface__row" {...pointAttrs("account.login")}>
+            <div className="account-surface__signed-out" {...pointAttrs("account.login")}>
               <div>
                 <div className="account-surface__label">
                   {tr("settings.account.signedOut")}
@@ -556,33 +617,67 @@ export function AccountSurface({
           )}
         </div>
 
-        {/* 退出登录固定在 footer：不随正文滚走。 */}
-        {account?.logged_in && !blockedIdentity ? (
+        {/* 邮箱与退出登录同在最底：不随正文滚走，也不画线。 */}
+        {account?.logged_in ? (
           <footer className="account-surface__footer">
-            <div className="account-surface__footer-main">
-              {logoutError ? (
-                <p className="settings-feedback settings-feedback--error" role="alert">
-                  {logoutError}{" "}
-                  <button
-                    type="button"
-                    className="settings-link"
-                    disabled={loggingOut}
-                    onClick={() => void logout()}
-                  >
-                    {tr("account.retry")}
-                  </button>
-                </p>
-              ) : null}
+            {logoutError && !blockedIdentity ? (
+              <p className="account-surface__footer-error" role="alert">
+                {logoutError}{" "}
+                <button
+                  type="button"
+                  className="settings-link"
+                  disabled={loggingOut}
+                  onClick={() => void logout()}
+                >
+                  {tr("account.retry")}
+                </button>
+              </p>
+            ) : null}
+            <div className="account-surface__footer-row">
+              <div
+                className="account-surface__who"
+                {...pointAttrs("account.login")}
+              >
+                <span
+                  className="account-surface__email"
+                  title={account.email ?? undefined}
+                >
+                  {account.email ?? tr("settings.account.signedIn")}
+                </span>
+                {account.email ? (
+                  <>
+                    <span
+                      className="account-surface__who-sep"
+                      aria-hidden="true"
+                    >
+                      ·
+                    </span>
+                    <button
+                      type="button"
+                      className="account-surface__copy"
+                      onClick={copyEmail}
+                    >
+                      {copy === "ok"
+                        ? tr("chat.copy.copied")
+                        : copy === "error"
+                          ? tr("chat.copy.failed")
+                          : tr("detail.copy")}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              {blockedIdentity ? null : (
+                <button
+                  type="button"
+                  className="account-surface__logout"
+                  disabled={loggingOut || !onLogout}
+                  aria-busy={loggingOut || undefined}
+                  onClick={() => void logout()}
+                >
+                  {loggingOut ? tr("account.loggingOut") : tr("account.logout")}
+                </button>
+              )}
             </div>
-            <button
-              type="button"
-              className="btn btn--danger-ghost"
-              disabled={loggingOut || !onLogout}
-              aria-busy={loggingOut || undefined}
-              onClick={() => void logout()}
-            >
-              {loggingOut ? tr("account.loggingOut") : tr("account.logout")}
-            </button>
           </footer>
         ) : null}
       </div>

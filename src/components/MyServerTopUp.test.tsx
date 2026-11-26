@@ -20,6 +20,10 @@ const TOPUP: MyServerTopup = {
 
 afterEach(cleanup);
 
+function openCustom() {
+  fireEvent.click(screen.getByRole("button", { name: "其他" }));
+}
+
 function renderPanel(
   onTopUp: (cents: number) => Promise<MyServerTopup> = async () => TOPUP,
   onCheckoutOpened: () => void = () => {},
@@ -36,11 +40,12 @@ function renderPanel(
 }
 
 describe("充值面板（账户弹层内嵌）", () => {
-  it("5 个价格档位都在，档位是整美元", () => {
+  it("5 个价格档位都在，另有「其他」入口，档位是整美元", () => {
     renderPanel();
-    for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
+    for (const name of ["$6", "$10", "$25", "$50", "$100", "其他"]) {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
     }
+    expect(screen.queryByLabelText("自定义金额")).toBeNull();
   });
 
   it("打开收银台：交给外层关面板，不进入等待态", async () => {
@@ -114,6 +119,7 @@ describe("充值面板（账户弹层内嵌）", () => {
     const onCheckoutOpened = vi.fn();
     renderPanel(onTopUp, onCheckoutOpened);
 
+    openCustom();
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "36" },
     });
@@ -129,14 +135,16 @@ describe("充值面板（账户弹层内嵌）", () => {
 
   it("空输入：按钮写「充值」且禁用", () => {
     renderPanel();
+    openCustom();
 
     const submit = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    expect(screen.getByText("$6–$300，整美元")).toBeTruthy();
+    expect(screen.getByText(/付款在浏览器里完成/)).toBeTruthy();
   });
 
   it("非法输入：输入时不报错，失焦后才提示并置 aria-invalid", () => {
     renderPanel();
+    openCustom();
     const input = screen.getByLabelText("自定义金额");
 
     fireEvent.change(input, { target: { value: "3" } });
@@ -149,7 +157,7 @@ describe("充值面板（账户弹层内嵌）", () => {
 
     // 清空后回到中性提示。
     fireEvent.change(input, { target: { value: "" } });
-    expect(screen.getByText("$6–$300，整美元")).toBeTruthy();
+    expect(screen.getByText(/付款在浏览器里完成/)).toBeTruthy();
     expect(input.getAttribute("aria-invalid")).toBeNull();
   });
 
@@ -161,6 +169,7 @@ describe("充值面板（账户弹层内嵌）", () => {
       max_topup_cents: 2000,
     });
 
+    openCustom();
     const input = screen.getByLabelText("自定义金额");
     fireEvent.change(input, { target: { value: "6" } });
     const invalid = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
@@ -169,8 +178,7 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(onTopUp).not.toHaveBeenCalled();
     expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
 
-    fireEvent.change(input, { target: { value: "10" } });
-    const submit = screen.getByRole("button", {
+    fireEvent.change(input, { target: { value: "10" } });    const submit = screen.getByRole("button", {
       name: "充值 $10",
     }) as HTMLButtonElement;
     expect(submit.disabled).toBe(false);
@@ -185,6 +193,7 @@ describe("充值面板（账户弹层内嵌）", () => {
       checkout_url: null,
     }));
     renderPanel(onTopUp);
+    openCustom();
     const input = screen.getByLabelText("自定义金额");
     const submit = () => screen.getByRole("button", { name: /^充值/ }) as HTMLButtonElement;
 
@@ -213,6 +222,7 @@ describe("充值面板（账户弹层内嵌）", () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
     renderPanel(onTopUp);
 
+    openCustom();
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "06" },
     });
@@ -227,6 +237,7 @@ describe("充值面板（账户弹层内嵌）", () => {
   it("自定义金额：超长数字提交被拦", () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
     renderPanel(onTopUp);
+    openCustom();
     fireEvent.change(screen.getByLabelText("自定义金额"), {
       target: { value: "999999999999999999999" },
     });
@@ -255,6 +266,8 @@ describe("充值面板（账户弹层内嵌）", () => {
   it("没有钱包时不渲染档位，只看自定义输入", () => {
     renderPanel(async () => TOPUP, () => {}, null);
     expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+    expect(screen.getByRole("button", { name: "其他" })).toBeTruthy();
+    openCustom();
     expect(screen.getByLabelText("自定义金额")).toBeTruthy();
   });
 });

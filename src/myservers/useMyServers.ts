@@ -49,8 +49,8 @@ const DETAIL_ERROR_AFTER_MS = 10_000;
 export const WALLET_REFRESH_GATE_MS = 30_000;
 /** 反复开合账号菜单时的短下限：上一次 open_menu 刷新不足这么久就跳过。 */
 export const WALLET_OPEN_MENU_MIN_MS = 5_000;
-/** 开通中的阶段在真机上可能只有几秒：列表轮询压到 2 秒，别让 5 秒一跳整段漏掉。 */
-const PROVISIONING_POLL_MS = 2000;
+/** 开通要 1–3 分钟：5 秒一拍仍够灵敏，也不会整段看到同一个阶段。 */
+const PROVISIONING_POLL_MS = 5000;
 
 /**
  * 谁触发了这次余额刷新。设计文档点名的来源之外，顺带刷新余额的用户动作
@@ -694,8 +694,8 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
   const hasProvisioning = servers.some((server) => isProvisioning(server.state));
   const shouldPollList =
     hasProvisioning || servers.some((server) => server.state === "destroying");
-  // 列表刷新本来就会顺带重取详情（refresh 撞 revision）；开通中把节奏压到 2 秒，
-  // 一个周期仍是「列表 + 详情」两个请求，离开开通态回到原节奏。
+  // 列表刷新本来就会顺带重取详情（refresh 撞 revision）；开通中固定 5 秒一拍，
+  // 一个周期仍是「列表 + 详情」两个请求，离开开通态回到兜底节奏。
   const triesRef = useRef(0);
   useEffect(() => {
     // 事件只是加速；只要还有机器在开通中或销毁中就必须轮询——事件可能漏。
@@ -709,13 +709,19 @@ export function useMyServers(bridge: AgentBridge, { active, rootSignal }: Option
       const fallback =
         FALLBACK_DELAYS[Math.min(triesRef.current, FALLBACK_DELAYS.length - 1)];
       // 用刚拉到的列表判断：这一拍已经是就绪态就直接回落，不等下一次渲染。
-      // 上一次拉取失败时列表是旧的，按兜底节奏退避；成功一次后自然回到 2 秒。
+      // 上一次拉取失败时列表是旧的，按兜底节奏退避；成功一次后自然回到 5 秒。
       const provisioning =
         refreshOkRef.current &&
         fetchedServersRef.current.some((server) =>
           isProvisioning(server.state),
         );
-      const delay = provisioning ? PROVISIONING_POLL_MS : fallback;
+      // 销毁中同样是过渡态，跟着开通态一起按 5 秒；只有失败才走兜底退避。
+      const destroying =
+        refreshOkRef.current &&
+        fetchedServersRef.current.some(
+          (server) => server.state === "destroying",
+        );
+      const delay = provisioning || destroying ? PROVISIONING_POLL_MS : fallback;
       timer = window.setTimeout(async () => {
         await refresh();
         if (cancelled) return;

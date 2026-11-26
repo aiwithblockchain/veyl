@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentBridge, MyServer, MyServerState } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { ServerProgress } from "./ServerProgress";
-import { ServerEvents } from "./ServerEvents";
 import { IconPencil } from "./icons";
 import {
   billingNoticeText,
@@ -23,7 +22,7 @@ import {
 import { rotateNodeCredentials } from "../myservers/rotateCredentials";
 import { copyText } from "../ui/clipboard";
 import { t, useLanguage, useT } from "../i18n";
-import type { MessageKey } from "../i18n";
+import type { Language, MessageKey } from "../i18n";
 import { errorText as describeError, failureText } from "../i18n/errorText";
 
 interface Props {
@@ -66,6 +65,27 @@ function errorText(error: unknown): string {
     ? t("detail.error.noChangeRetry")
     : t("detail.error.noChange");
   return `${describeError(problem, t("detail.error.incomplete"))}${tail}`;
+}
+
+/** 本地日 + 时分，与账单弹层同一套 Intl 口径；按语言各缓存一份。 */
+const CREATED_FORMATTERS: Record<Language, Intl.DateTimeFormat> = {
+  zh: new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }),
+  en: new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }),
+};
+
+function formatCreatedAt(iso: string, language: Language): string | null {
+  const at = Date.parse(iso);
+  return Number.isFinite(at) ? CREATED_FORMATTERS[language].format(at) : null;
 }
 
 /** 检查升级的就地反馈：一次只落一条，换服务器时收回。 */
@@ -120,6 +140,7 @@ export function MyServerDetail({
 }: Props) {
   const tr = useT();
   const language = useLanguage();
+  const createdAt = formatCreatedAt(server.created_at, language);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -754,6 +775,12 @@ export function MyServerDetail({
               </dd>
             </div>
           ) : null}
+          {createdAt ? (
+            <div>
+              <dt>{tr("detail.createdAt")}</dt>
+              <dd className="num">{createdAt}</dd>
+            </div>
+          ) : null}
         </dl>
         {canUpgrade && upgradePhase.kind === "running" ? (
           <p className="myservers__hint" role="status">
@@ -779,9 +806,6 @@ export function MyServerDetail({
 
       {/* 重建端点当前不可用（rebuild_not_supported）：入口先隐藏，保留实现等后端。 */}
       {void rebuild}
-
-      {/* 第四块：创建记录。墓碑视图在上面的分支里提前返回，不渲染这一块。 */}
-      <ServerEvents key={server.server_id} bridge={bridge} server={server} />
 
       <div className="myservers__footer">
         <div className="myservers__danger">

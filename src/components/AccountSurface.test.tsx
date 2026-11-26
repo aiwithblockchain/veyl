@@ -102,11 +102,15 @@ describe("账户弹层", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(force).toHaveBeenCalledTimes(1);
 
-    // 充值就地：5 档直接摊在余额下面。
+    // 充值默认收起：先点主按钮，档位才出现。
+    const topup = screen.getByRole("button", { name: "充值" });
+    expect(topup.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(topup);
+    expect(topup.getAttribute("aria-expanded")).toBe("true");
     for (const name of ["$6", "$10", "$25", "$50", "$100"]) {
       expect(screen.getByRole("button", { name }), name).toBeTruthy();
     }
-    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /明细/ })).toBeTruthy();
   });
 
   it("打开就刷新一次余额（走门禁），未登录不发", () => {
@@ -173,6 +177,7 @@ describe("账户弹层", () => {
     const onTopUp = vi.fn(async () => TOPUP);
     renderSurface({ onCheckoutOpened, onTopUp });
 
+    fireEvent.click(screen.getByRole("button", { name: "充值" }));
     fireEvent.click(await screen.findByRole("button", { name: "$10" }));
     await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(1000));
     expect(onCheckoutOpened).toHaveBeenCalledTimes(1);
@@ -190,36 +195,41 @@ describe("账户弹层", () => {
       onTopUp: async () => ({ ...TOPUP, checkout_url: null }),
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "充值" }));
     fireEvent.click(await screen.findByRole("button", { name: "$10" }));
     expect(await screen.findByText("已充值 $10.00。")).toBeTruthy();
     expect(onCheckoutOpened).not.toHaveBeenCalled();
   });
 
-  it("账单默认折叠；展开后就地显示合计与行，不再弹第二层", async () => {
-    renderSurface();
+  it("账单默认不请求；展开后才显示合计与行，不再弹第二层", async () => {
+    const load = vi.fn(async () => LEDGER);
+    renderSurface({ bridge: makeBridge({ myServerBillingLedger: load }) });
 
-    const toggle = await screen.findByRole("button", { name: /明细/ });
-    expect(toggle.textContent).toContain("充值 $120.00");
-    expect(toggle.textContent).not.toContain("余额");
+    const toggle = screen.getByRole("button", { name: /明细/ });
+    expect(toggle.textContent).toContain("近 30 天账单");
+    expect(toggle.textContent).not.toContain("充值 $120.00");
+    expect(load).not.toHaveBeenCalled();
     expect(screen.queryByRole("table")).toBeNull();
 
     fireEvent.click(toggle);
-    expect(screen.getByText("+$120.00")).toBeTruthy();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("+$120.00")).toBeTruthy();
     // 金额固定两位小数、负号用 −：列宽再紧也不能只剩一位。
     expect(screen.getByText("−$0.20")).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "近 30 天账单" })).toBeNull();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
   });
 
-  it("账单空时摘要与空态都在，且不可展开", async () => {
+  it("账单空：展开后才请求，给空态", async () => {
     renderSurface({
       bridge: makeBridge({
         myServerBillingLedger: vi.fn(async () => ({ ...LEDGER, entries: [] })),
       }),
     });
+    expect(screen.queryByText("最近 30 天没有消费")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /明细/ }));
     expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
     expect(screen.getByText(/充值 \$120\.00/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
   });
 
   it("账单失败就在块内给原因与重试", async () => {
@@ -229,9 +239,10 @@ describe("账户弹层", () => {
       .mockResolvedValueOnce(LEDGER);
     renderSurface({ bridge: makeBridge({ myServerBillingLedger: load }) });
 
+    fireEvent.click(screen.getByRole("button", { name: /明细/ }));
     expect(await screen.findByText("账单服务没有按时返回。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
+    expect(await screen.findByRole("table")).toBeTruthy();
   });
 
   it("退出登录固定在 footer，正文是唯一滚动容器", async () => {
@@ -245,10 +256,9 @@ describe("账户弹层", () => {
     expect(body.contains(logout)).toBe(false);
     expect(footer.contains(logout)).toBe(true);
 
-    fireEvent.click(await screen.findByRole("button", { name: /明细/ }));
-    expect(container.querySelector(".billing-details table")).toBeTruthy();
-    // 表体没有自己的滚动容器：只有账户 body 在滚。
-    expect(container.querySelector(".billing-body")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /明细/ }));
+    expect(await screen.findByRole("table")).toBeTruthy();
+    expect(container.querySelector(".billing-body table")).toBeTruthy();
   });
 
   it("退出登录：成功后关闭账户层；失败原位给错误与重试", async () => {
@@ -357,6 +367,57 @@ describe("账户弹层", () => {
   });
 });
 
+describe("充值折叠", () => {
+  it("默认收起；点开后档位出现，焦点进第一个档位", () => {
+    renderSurface();
+
+    const toggle = screen.getByRole("button", { name: "充值" });
+    const panel = document.getElementById("account-topup") as HTMLElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("account-topup");
+    expect(panel.getAttribute("aria-hidden")).toBe("true");
+    expect(panel.hasAttribute("inert")).toBe(true);
+    expect(screen.queryByRole("button", { name: "$10" })).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(panel.hasAttribute("aria-hidden")).toBe(false);
+    expect(panel.hasAttribute("inert")).toBe(false);
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe("$6");
+  });
+
+  it("Esc 先收充值面板，不关账户层，焦点回到主按钮", () => {
+    const onClose = vi.fn();
+    renderSurface({ onClose });
+
+    const toggle = screen.getByRole("button", { name: "充值" });
+    fireEvent.click(toggle);
+    expect(document.activeElement?.textContent).toBe("$6");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("再点主按钮收起；AI 指路会先展开", () => {
+    const first = renderSurface();
+    const toggle = screen.getByRole("button", { name: "充值" });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    first.unmount();
+
+    const pointed = renderSurface({ point: { row: "account.topup", nonce: 1 } });
+    const panel = pointed.container.querySelector(
+      '[data-point="account.topup"]',
+    ) as HTMLElement;
+    expect(panel.getAttribute("aria-hidden")).toBeNull();
+    expect(screen.getByRole("button", { name: "$10" })).toBeTruthy();
+  });
+});
+
 const GIB = 1024 ** 3;
 
 function listServer(over: Partial<MyServer> = {}): MyServer {
@@ -401,9 +462,9 @@ describe("账号流量（2.79.0）", () => {
     const view = renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("本月流量")).toBeTruthy();
-    expect(screen.getByText("已用 300 GiB / 共 400 GiB")).toBeTruthy();
+    const line = screen.getByText(/^已用 300 GiB \/ 共 400 GiB/);
     // 1000 GiB 月额度、已释放 60 GiB：明天加 min(1000/28, 940) ≈ 35.7 GiB。
-    expect(screen.getByText("明天 +35.7 GiB")).toBeTruthy();
+    expect(line.textContent).toContain("明天 +35.7 GiB");
     expect(screen.queryByText(/已用 50 /)).toBeNull();
     expect(screen.queryByText("流量快用完了")).toBeNull();
 
@@ -412,6 +473,44 @@ describe("账号流量（2.79.0）", () => {
     ) as HTMLElement;
     expect(fill.className).toContain("is-ok");
     expect(fill.style.width).toBe("75%");
+    const bar = view.container.querySelector(
+      ".account-surface__traffic-bar",
+    ) as HTMLElement;
+    expect(bar.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("已用为 0：轨道照常渲染，填充宽度 0", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [],
+      traffic_pool: { usedBytes: 0, limitBytes: 400 * GIB },
+    }));
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText("已用 0 GiB / 共 400 GiB")).toBeTruthy();
+    const bar = view.container.querySelector(
+      ".account-surface__traffic-bar",
+    ) as HTMLElement;
+    expect(bar).toBeTruthy();
+    expect(bar.getAttribute("aria-hidden")).toBe("true");
+    const fill = bar.querySelector(
+      ".account-surface__traffic-fill",
+    ) as HTMLElement;
+    expect(fill.style.width).toBe("0%");
+    expect(fill.className).toContain("is-ok");
+  });
+
+  it("进度条宽度只留两位小数", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [],
+      traffic_pool: { usedBytes: 100 * GIB, limitBytes: 117 * GIB },
+    }));
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText(/^已用 100 GiB \/ 共 117 GiB/)).toBeTruthy();
+    const fill = view.container.querySelector(
+      ".account-surface__traffic-fill",
+    ) as HTMLElement;
+    expect(fill.style.width).toBe("85.47%");
   });
 
   it("near：整好 80% 就提示；明天增量为 0 时不写「明天 +」", async () => {
@@ -449,7 +548,7 @@ describe("账号流量（2.79.0）", () => {
     expect(screen.queryByText(/明天 \+/)).toBeNull();
   });
 
-  it("over：扣费句独占一行并顶掉「明天 +X」，进度条铺满", async () => {
+  it("over：扣费句接在汇总后并顶掉「明天 +X」，进度条铺满", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
       traffic_pool: { usedBytes: 450 * GIB, limitBytes: 400 * GIB },
@@ -458,8 +557,9 @@ describe("账号流量（2.79.0）", () => {
 
     const over = await screen.findByText("超出 50 GiB，按 $0.02/GiB 扣余额");
     expect(over.className).toContain("account-surface__traffic-over");
-    expect(over.closest("p")?.textContent).toBe("超出 50 GiB，按 $0.02/GiB 扣余额");
-    expect(screen.getByText("已用 450 GiB / 共 400 GiB")).toBeTruthy();
+    const line = over.closest("p");
+    expect(line?.textContent).toContain("已用 450 GiB / 共 400 GiB");
+    expect(line?.textContent).toContain("超出 50 GiB，按 $0.02/GiB 扣余额");
     expect(screen.queryByText(/明天 \+/)).toBeNull();
 
     const fill = view.container.querySelector(
@@ -500,6 +600,41 @@ describe("账号流量（2.79.0）", () => {
     renderSurface({ bridge: makeBridge({ myServerList }) });
 
     expect(await screen.findByText("12月1日重置")).toBeTruthy();
+  });
+
+  it("余额下写每天合计与台数，只算在扣费的机器", async () => {
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({ daily_price_cents: 30 }),
+        listServer({
+          server_id: "srv_2",
+          billing_state: "past_due",
+          daily_price_cents: 30,
+        }),
+        listServer({
+          server_id: "srv_3",
+          billing_state: "pending",
+          daily_price_cents: 99,
+        }),
+        listServer({
+          server_id: "srv_4",
+          state: "destroyed",
+          billing_state: "expired",
+          daily_price_cents: 50,
+        }),
+      ],
+      traffic_pool: { usedBytes: 0, limitBytes: 10 * GIB },
+    }));
+    renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    expect(await screen.findByText("每天约 $0.60 · 2 台服务器")).toBeTruthy();
+  });
+
+  it("列表读不到时余额下退回固定说明", () => {
+    renderSurface();
+    expect(
+      screen.getByText("余额按天扣费，每台服务器单独计费。"),
+    ).toBeTruthy();
   });
 
   it("列表读取失败：整行不渲染，弹层照常可用", async () => {

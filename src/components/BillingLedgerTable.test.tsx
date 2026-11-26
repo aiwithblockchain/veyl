@@ -86,45 +86,62 @@ function expand() {
   fireEvent.click(screen.getByRole("button", { name: /明细/ }));
 }
 
-describe("近 30 天账单", () => {
-  it("默认折叠：摘要可见，详情容器在 DOM 里但 hidden", async () => {
-    renderTable(makeBridge(async () => ledger()));
+async function expandAndWait() {
+  expand();
+  await screen.findByRole("table");
+}
 
-    const toggle = await screen.findByRole("button", { name: /明细/ });
+describe("近 30 天账单", () => {
+  it("默认折叠：不请求，也不显示合计", () => {
+    const load = vi.fn(async () => ledger());
+    renderTable(makeBridge(load));
+
+    const toggle = screen.getByRole("button", { name: /明细/ });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("account-billing-details");
+    expect(toggle.textContent).toBe("近 30 天账单明细");
+    expect(toggle.textContent).not.toContain("充值");
+    expect(load).not.toHaveBeenCalled();
+    expect(screen.queryByRole("table")).toBeNull();
+
     const details = document.getElementById("account-billing-details") as HTMLElement;
     expect(details).toBeTruthy();
-    expect(details.hasAttribute("hidden")).toBe(true);
-    expect(toggle.getAttribute("aria-controls")).toBe(
-      "account-billing-details",
-    );
-
-    fireEvent.click(toggle);
-    expect(
-      screen.getByRole("button", { name: /明细/ }).getAttribute("aria-expanded"),
-    ).toBe("true");
-    expect(details.hasAttribute("hidden")).toBe(false);
-    expect(screen.getByRole("table")).toBeTruthy();
-    expect(screen.getByText("+$120.00")).toBeTruthy();
+    expect(details.getAttribute("aria-hidden")).toBe("true");
+    expect(details.hasAttribute("inert")).toBe(true);
   });
 
-  it("摘要只用 totals，且不重复余额", async () => {
-    renderTable(makeBridge(async () => ledger()));
+  it("第一次展开才请求：先骨架，再表格与合计", async () => {
+    const load = vi.fn(async () => ledger());
+    renderTable(makeBridge(load));
 
-    const toggle = await screen.findByRole("button", { name: /明细/ });
-    const summary = toggle.textContent ?? "";
-    expect(summary).toContain("充值 $120.00 · 扣费 $2.94");
-    // entries 求和会得到 $122.00 / $1.45；余额在上方余额行，摘要里不再出现。
-    expect(summary).not.toContain("$122.00");
-    expect(summary).not.toContain("$1.45");
-    expect(summary).not.toContain("余额");
-    expect(summary).not.toContain("$118.06");
+    expand();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("读取中…")).toBeTruthy();
+    expect(await screen.findByRole("table")).toBeTruthy();
+    expect(screen.getByText("+$120.00")).toBeTruthy();
+    const toggle = screen.getByRole("button", { name: /收起/ });
+    expect(toggle.textContent).toContain("充值 $120.00 · 扣费 $2.94");
+    expect(screen.queryByText("读取中…")).toBeNull();
+  });
+
+  it("同一打开周期内折叠再展开不重取", async () => {
+    const load = vi.fn(async () => ledger());
+    renderTable(makeBridge(load));
+    const toggle = screen.getByRole("button", { name: /明细/ });
+
+    fireEvent.click(toggle);
+    await screen.findByRole("table");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByRole("table")).toBeTruthy();
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it("展开后五种类别都有中文标签；机器费 / 流量超支 / 退款补机器标识", async () => {
     renderTable(makeBridge(async () => ledger()));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
 
     await screen.findByText("机器费");
     expect(screen.getByText("充值")).toBeTruthy();
@@ -138,8 +155,7 @@ describe("近 30 天账单", () => {
 
   it("三列表头；机器名挂在类别格第二行，充值行不留空格子", async () => {
     renderTable(makeBridge(async () => ledger()));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
 
     await screen.findByText("机器费");
     expect(
@@ -156,7 +172,7 @@ describe("近 30 天账单", () => {
     const machine = rows.find((row) => row.textContent?.includes("机器费"))!;
     const machineCells = within(machine).getAllByRole("cell");
     expect(machineCells[0].textContent).toBe(
-      "机器费新加坡 1 · s-1vcpu-1gb / sgp1",
+      "机器费 新加坡 1 · s-1vcpu-1gb / sgp1",
     );
     expect(
       within(machineCells[0]).getByText("新加坡 1 · s-1vcpu-1gb / sgp1").className,
@@ -165,8 +181,7 @@ describe("近 30 天账单", () => {
 
   it("金额带正负号、固定两位小数；零金额不带号", async () => {
     renderTable(makeBridge(async () => ledger()));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
     await screen.findByText("+$120.00");
 
     expect(screen.getByText("−$0.20")).toBeTruthy();
@@ -191,8 +206,7 @@ describe("近 30 天账单", () => {
         }),
       ),
     );
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
     expect(await screen.findByText("$0.00")).toBeTruthy();
     expect(screen.queryByText("+$0.00")).toBeNull();
     expect(screen.queryByText("−$0.00")).toBeNull();
@@ -200,26 +214,26 @@ describe("近 30 天账单", () => {
 
   it("日期按本地日显示，毫秒当毫秒用", async () => {
     renderTable(makeBridge(async () => ledger()));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
     await screen.findByText("11月5日");
     expect(screen.getByText("11月4日")).toBeTruthy();
     expect(formatBillingDay(AT, "en")).toMatch(/^Nov\s+5$/);
   });
 
-  it("空账本：摘要 + 空态，不给箭头也不可展开", async () => {
-    renderTable(makeBridge(async () => ledger({ entries: [] })));
+  it("空账本：展开后给合计与空态", async () => {
+    const load = vi.fn(async () => ledger({ entries: [] }));
+    renderTable(makeBridge(load));
 
+    expand();
     expect(await screen.findByText("最近 30 天没有消费")).toBeTruthy();
     expect(screen.getByText(/充值 \$120\.00/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
     expect(screen.queryByRole("table")).toBeNull();
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it("被截断时表格底部有一行脚注", async () => {
     renderTable(makeBridge(async () => ledger({ truncated: true })));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
     await screen.findByText("只显示最近 1000 笔");
   });
 
@@ -233,8 +247,7 @@ describe("近 30 天账单", () => {
       note: null,
     }));
     renderTable(makeBridge(async () => ledger({ entries })));
-    await screen.findByRole("button", { name: /明细/ });
-    expand();
+    await expandAndWait();
 
     const rows = () => screen.getAllByRole("row").slice(1);
     expect(rows()).toHaveLength(40);
@@ -248,18 +261,20 @@ describe("近 30 天账单", () => {
     expect(screen.queryByRole("button", { name: "显示更多" })).toBeNull();
   });
 
-  it("失败态：一行短错误 + 独立重试，点重试重新读取", async () => {
+  it("失败态：展开后才请求，给原因与重试", async () => {
     const load = vi
       .fn()
       .mockRejectedValueOnce({ code: "TIMEOUT", message: "" })
       .mockResolvedValueOnce(ledger());
     renderTable(makeBridge(load as unknown as () => Promise<BillingLedger>));
 
+    expect(screen.queryByText("账单服务没有按时返回。")).toBeNull();
+    expand();
     expect(await screen.findByText("账单服务没有按时返回。")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
+    expect(screen.queryByRole("table")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    expect(await screen.findByRole("button", { name: /明细/ })).toBeTruthy();
+    expect(await screen.findByRole("table")).toBeTruthy();
     expect(load).toHaveBeenCalledTimes(2);
   });
 
@@ -269,6 +284,7 @@ describe("近 30 天账单", () => {
         throw { code: "PERMISSION_DENIED", message: "" };
       }),
     );
+    expand();
     await screen.findByText("没有权限做这个操作。");
     cleanup();
 
@@ -281,6 +297,7 @@ describe("近 30 天账单", () => {
         };
       }),
     );
+    expand();
     await screen.findByText("账单暂时打不开。");
     expect(screen.queryByText("账单服务暂时连不上。")).toBeNull();
   });
@@ -291,6 +308,7 @@ describe("近 30 天账单", () => {
         throw { code: "UNAUTHENTICATED", message: "" };
       }),
     );
+    expand();
     await screen.findByText("需要先登录才能看账单。");
     cleanup();
 
@@ -303,13 +321,16 @@ describe("近 30 天账单", () => {
         };
       }),
     );
+    expand();
     await screen.findByText("账单数据不完整。");
   });
 
-  it("读取中只有一行状态，不可展开", () => {
+  it("读取中只有静态骨架与状态句", () => {
     renderTable(makeBridge(() => new Promise<BillingLedger>(() => {})));
+    expect(screen.queryByText("读取中…")).toBeNull();
+    expand();
     expect(screen.getByText("读取中…")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /明细/ })).toBeNull();
+    expect(document.querySelector(".billing-skeleton")).toBeTruthy();
     expect(screen.queryByRole("table")).toBeNull();
   });
 });

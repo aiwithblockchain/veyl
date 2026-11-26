@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MyServerTopup, MyServerWallet } from "../agent/bridge";
 import { toBridgeError } from "../agent/errors";
 import { errorText } from "../i18n/errorText";
@@ -42,10 +42,11 @@ function wholeDollar(cents: number): string {
   return cents % 100 === 0 ? `$${cents / 100}` : formatUsdCents(cents);
 }
 
-/** 充值面板：就地展开在账户弹层里；档位直接来自 wallet 的 denominations_cents。 */
+/** 充值面板：就地在账户弹层里展开；档位来自 wallet，末尾固定一个「其他」。 */
 export function MyServerTopUp({ wallet, onTopUp, onCheckoutOpened }: Props) {
   const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
   const [custom, setCustom] = useState("");
   /** 失焦或点过提交后才报格式错：输入过程中不打断。 */
   const [touched, setTouched] = useState(false);
@@ -57,6 +58,11 @@ export function MyServerTopUp({ wallet, onTopUp, onCheckoutOpened }: Props) {
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const busyRef = useRef(false);
+  const customInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (customOpen) customInputRef.current?.focus();
+  }, [customOpen]);
 
   const start = async (cents: number) => {
     if (busyRef.current) return;
@@ -108,71 +114,83 @@ export function MyServerTopUp({ wallet, onTopUp, onCheckoutOpened }: Props) {
 
   return (
     <div className="myservers-topup">
-      {denominations.length > 0 ? (
-        <div className="myservers-topup__grid">
-          {denominations.map((cents) => (
-            <button
-              key={cents}
-              type="button"
-              className="btn btn--ghost myservers-topup__option num"
+      <div className="myservers-topup__grid">
+        {denominations.map((cents) => (
+          <button
+            key={cents}
+            type="button"
+            className="myservers-topup__denom num"
+            disabled={busy}
+            aria-busy={busyCents === cents || undefined}
+            onClick={() => void start(cents)}
+          >
+            {wholeDollar(cents)}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={`myservers-topup__denom${customOpen ? " is-open" : ""}`}
+          aria-expanded={customOpen}
+          aria-controls="myservers-topup-custom"
+          disabled={busy}
+          onClick={() => setCustomOpen((value) => !value)}
+        >
+          {tr("topup.other")}
+        </button>
+      </div>
+
+      {/* 「其他」才展开输入框；收起时整块不占位。 */}
+      {customOpen ? (
+        <div className="myservers-topup__custom" id="myservers-topup-custom">
+          <label className="sr-only" htmlFor="myservers-topup-custom-input">
+            {tr("topup.custom.label")}
+          </label>
+          <div className="myservers-topup__custom-row">
+            <input
+              id="myservers-topup-custom-input"
+              ref={customInputRef}
+              className="myservers-topup__input num"
+              type="text"
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder={tr("topup.custom.placeholder")}
+              value={custom}
               disabled={busy}
-              aria-busy={busyCents === cents || undefined}
-              onClick={() => void start(cents)}
+              aria-invalid={showInvalid || undefined}
+              aria-describedby="myservers-topup-custom-hint"
+              onChange={(event) => {
+                setCustom(event.target.value);
+                setTouched(false);
+              }}
+              onBlur={() => setTouched(true)}
+            />
+            <button
+              type="button"
+              className="btn btn--ghost myservers-topup__submit"
+              disabled={busy || custom.trim() === ""}
+              aria-busy={busyCents === customCents || undefined}
+              onClick={() => {
+                setTouched(true);
+                if (customValid) void start(customCents);
+              }}
             >
-              {wholeDollar(cents)}
+              {customSubmitLabel}
             </button>
-          ))}
+          </div>
         </div>
-      ) : wallet ? (
-        <p className="myservers__hint">{tr("topup.none")}</p>
       ) : null}
 
-      <div className="myservers-topup__custom">
-        <label
-          className="myservers-topup__custom-label"
-          htmlFor="myservers-topup-custom"
-        >
-          {tr("topup.custom.label")}
-        </label>
-        <div className="myservers-topup__custom-row">
-          <input
-            id="myservers-topup-custom"
-            className="myservers-topup__input"
-            type="text"
-            inputMode="numeric"
-            autoComplete="off"
-            placeholder={tr("topup.custom.placeholder")}
-            value={custom}
-            disabled={busy}
-            aria-invalid={showInvalid || undefined}
-            aria-describedby="myservers-topup-custom-hint"
-            onChange={(event) => {
-              setCustom(event.target.value);
-              setTouched(false);
-            }}
-            onBlur={() => setTouched(true)}
-          />
-          <button
-            type="button"
-            className="btn btn--primary myservers-topup__submit"
-            disabled={busy || custom.trim() === ""}
-            aria-busy={busyCents === customCents || undefined}
-            onClick={() => {
-              setTouched(true);
-              if (customValid) void start(customCents);
-            }}
-          >
-            {customSubmitLabel}
-          </button>
-        </div>
-        <p
-          id="myservers-topup-custom-hint"
-          className={showInvalid ? "myservers__error" : "myservers__hint"}
-          role={showInvalid ? "alert" : undefined}
-        >
-          {showInvalid ? tr("topup.custom.invalid") : tr("topup.custom.hint")}
-        </p>
-      </div>
+      <p
+        id="myservers-topup-custom-hint"
+        className={showInvalid ? "myservers__error" : "myservers-topup__hint"}
+        role={showInvalid ? "alert" : undefined}
+      >
+        {showInvalid ? tr("topup.custom.invalid") : tr("topup.custom.hint")}
+      </p>
+
+      {wallet && denominations.length === 0 ? (
+        <p className="myservers-topup__hint">{tr("topup.none")}</p>
+      ) : null}
 
       {failure ? (
         <>

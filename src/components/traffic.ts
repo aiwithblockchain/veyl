@@ -55,8 +55,9 @@ export function trafficPoolTomorrowBytes(
 }
 
 const RESET_FORMATTERS: Record<Language, Intl.DateTimeFormat> = {
-  zh: new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }),
-  en: new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric" }),
+  // 与账单、创建时间同一口径：英文统一 short month，避免同页混排 Dec / December。
+  zh: new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }),
+  en: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }),
 };
 
 /**

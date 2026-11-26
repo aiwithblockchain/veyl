@@ -40,7 +40,7 @@ describe("流量单位与清零点", () => {
 
     const at = new Date(2026, 11, 1, 0, 0, 0).toISOString();
     expect(formatTrafficReset(at, "zh")).toBe("12月1日");
-    expect(formatTrafficReset(at, "en")).toBe("December 1");
+    expect(formatTrafficReset(at, "en")).toBe("Dec 1");
   });
 });
 
