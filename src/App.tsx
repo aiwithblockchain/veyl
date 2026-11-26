@@ -2884,7 +2884,6 @@ export default function App() {
       aiProviderName={aiProviderName}
       hasEverConnected={hasEverConnected}
       hasConfigs={vpn.configs.length > 0}
-      presetsVisible={uiScreen === "client" || uiScreen === "no_nodes"}
       onSelectSession={handleSelectSession}
       onNewSession={() => dispatch({ type: "new_session" })}
       onRenameSession={handleRenameSession}
@@ -3086,14 +3085,6 @@ export default function App() {
               onEnsureIdentity={myServers.ensureIdentity}
               onTopUp={myServers.openTopUp}
               onAuthRequired={myServers.openLogin}
-              onAskAi={
-                aiReady
-                  ? () => {
-                      lastActionRef.current = { id: "new_node.ask_ai" };
-                      askAiInPanel(t("assistant.prompt.pickRegion"));
-                    }
-                  : undefined
-              }
               aiSelection={stageSelect}
               initialSelection={newNodeSelection}
               onBusyChange={(busy) => {
