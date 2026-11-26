@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>账户弹层 · 充值就地化（单层）高保真原型</title>
+<style>
+  :root {
+    --canvas: #FAFAF8;
+    --card: #FFFFFF;
+    --ink: #14161C;
+    --ink-2: #5B5850;
+    --ink-3: #6E6A62;
+    --hair: rgba(20, 22, 28, 0.10);
+    --hair-strong: rgba(20, 22, 28, 0.18);
+    --green: #1B7A4E;
+    --amber: #946200;
+    --red: #A8382D;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 32px 64px;
+    background: var(--canvas); color: var(--ink);
+    font-family: var(--font); font-size: 14px; line-height: 1.55;
+  }
+  .grid { display: flex; flex-direction: column; gap: 34px; align-items: center; }
+  .frame { width: min(720px, 100%); flex: none; }
+  .frame > h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+  .frame > p.note { margin: 0 0 12px; font-size: 12px; color: var(--ink-3); }
+  .modal {
+    background: var(--card); border: 1px solid var(--hair-strong);
+    border-radius: 14px; box-shadow: 0 24px 64px rgba(20,22,28,.16);
+    padding: 22px 28px 24px;
+  }
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+  .head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+  .head .x { color: var(--ink-3); font-size: 16px; }
+
+  .label { font-size: 12px; color: var(--ink-3); }
+  .hair { height: 1px; background: var(--hair); margin: 22px 0; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .money { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+  .amount { margin: 6px 0 0; font-family: var(--mono); font-size: 34px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+  .sub { margin: 8px 0 0; font-size: 12px; color: var(--ink-3); }
+
+  /* 主按钮：实心，全屏只有一个 */
+  .btn-primary {
+    flex: none; padding: 9px 22px; border: 0; border-radius: 8px;
+    background: var(--ink); color: var(--canvas);
+    font-family: var(--font); font-size: 13px; font-weight: 500; cursor: pointer;
+  }
+  /* 收起：描边。展开充值后主按钮让位给「充值 $X」 */
+  .btn-quiet {
+    flex: none; padding: 8px 18px; border: 1px solid var(--hair-strong); border-radius: 8px;
+    background: transparent; color: var(--ink-2);
+    font-family: var(--font); font-size: 13px; cursor: pointer;
+  }
+  .btn-ghost {
+    padding: 7px 14px; border: 1px solid var(--hair-strong); border-radius: 8px;
+    background: transparent; color: var(--ink-2);
+    font-family: var(--font); font-size: 12px; cursor: pointer;
+  }
+  .link-quiet {
+    border: 0; background: none; padding: 0;
+    font-family: var(--font); font-size: 12px; color: var(--ink-3); cursor: pointer;
+  }
+
+  .meter-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .bar { height: 6px; border-radius: 999px; background: rgba(20, 22, 28, 0.08); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: inherit; background: var(--ink-2); }
+  .meter-note { margin: 10px 0 0; font-size: 13px; color: var(--ink-2); }
+
+  .disclosure {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 0; border: 0; background: none;
+    font-family: var(--font); font-size: 13px; color: var(--ink-2); cursor: pointer;
+  }
+  .disclosure .right { color: var(--ink-3); font-size: 12px; }
+
+  /* 充值：展开态 */
+  .topup { margin-top: 16px; }
+  .denoms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .denom {
+    padding: 12px 0; border: 1px solid var(--hair-strong); border-radius: 10px;
+    background: var(--card); font-family: var(--mono); font-size: 15px; color: var(--ink);
+    cursor: pointer;
+  }
+  .denom.is-open { border-color: var(--ink); }
+  .custom { display: flex; gap: 8px; margin-top: 8px; }
+  .custom input {
+    flex: 1; padding: 10px 12px; border: 1px solid var(--ink);
+    border-radius: 10px; font-family: var(--mono); font-size: 14px; color: var(--ink);
+  }
+  .hint { margin: 8px 0 0; font-size: 12px; color: var(--ink-3); }
+
+  /* 充值：等待付款 */
+  .wait { padding: 14px 16px 12px; border-radius: 10px; background: rgba(20, 22, 28, 0.035); }
+  .wait-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  .wait-title { font-size: 13px; color: var(--ink); }
+  .wait-amt { font-size: 13px; color: var(--ink-2); }
+  .wait-note { margin: 6px 0 0; font-size: 12px; color: var(--ink-3); }
+  .wait-actions { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+
+  /* 充值：已到账 */
+  .paid { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+  .dot { width: 6px; height: 6px; border-radius: 2px; background: var(--green); flex: none; }
+
+  /* 充值：失败 */
+  .error { margin: 0; font-size: 13px; color: var(--red); }
+  .err-actions { display: flex; gap: 14px; align-items: center; margin-top: 10px; }
+
+  .footer { display: flex; align-items: center; justify-content: space-between; margin-top: 22px; }
+  .who { font-size: 12px; color: var(--ink-3); }
+  .who b { font-weight: 400; color: var(--ink-2); }
+  .link-btn { border: 0; background: none; padding: 0; font-family: var(--font); font-size: 13px; color: var(--red); cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="grid">
+
+  <!-- ① 展开选择 -->
+  <div class="frame">
+    <h2>① 展开充值（自定义输入中）</h2>
+    <p class="note">「收起」降为描边，主按钮让位给「充值 $22」——全屏只有这一个实心按钮。</p>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.70 · 2 台服务器</p>
+        </div>
+        <button class="btn-quiet">收起</button>
+      </div>
+
+      <div class="topup">
+        <div class="denoms">
+          <button class="denom">$6</button>
+          <button class="denom">$10</button>
+          <button class="denom">$25</button>
+          <button class="denom">$50</button>
+          <button class="denom">$100</button>
+          <button class="denom is-open">其他</button>
+        </div>
+        <div class="custom">
+          <input value="22" readonly>
+          <button class="btn-primary">充值 $22</button>
+        </div>
+        <p class="hint">$6–$300，整美元。付款在浏览器里完成，回来余额会自动更新。</p>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12月1日重置</span>
+      </div>
+      <div class="bar"><i style="width:0.4%"></i></div>
+      <p class="meter-note">本月流量额度 536 GiB · 已用 2.1 GiB · 明天再涨 53.6 GiB</p>
+
+      <div class="hair"></div>
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ② 等待付款 -->
+  <div class="frame">
+    <h2>② 已打开收银台（面板不关，就地等待）</h2>
+    <p class="note">档位收起，换成一条等待状态。没有任何控件被置灰；「改金额」是回到①的退路。</p>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.70 · 2 台服务器</p>
+        </div>
+        <button class="btn-quiet">收起</button>
+      </div>
+
+      <div class="topup">
+        <div class="wait">
+          <div class="wait-head">
+            <span class="wait-title">已在浏览器打开收付款页</span>
+            <span class="wait-amt num">$25</span>
+          </div>
+          <p class="wait-note">付款完成后余额会自动更新，不用回来点刷新。</p>
+          <div class="wait-actions">
+            <button class="btn-ghost">重新打开收付款页</button>
+            <button class="link-quiet">改金额</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12月1日重置</span>
+      </div>
+      <div class="bar"><i style="width:0.4%"></i></div>
+      <p class="meter-note">本月流量额度 536 GiB · 已用 2.1 GiB · 明天再涨 53.6 GiB</p>
+
+      <div class="hair"></div>
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ③ 已到账 -->
+  <div class="frame">
+    <h2>③ 回到 App，余额已更新</h2>
+    <p class="note">余额一变了就把等待态换成到账确认，不自动收起——不让东西自己消失。</p>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$71.80</p>
+          <p class="sub">每天约 $0.70 · 2 台服务器</p>
+        </div>
+        <button class="btn-quiet">收起</button>
+      </div>
+
+      <div class="topup">
+        <p class="paid"><span class="dot"></span>已到账 $25 · 余额 $71.80</p>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12月1日重置</span>
+      </div>
+      <div class="bar"><i style="width:0.4%"></i></div>
+      <p class="meter-note">本月流量额度 536 GiB · 已用 2.1 GiB · 明天再涨 53.6 GiB</p>
+
+      <div class="hair"></div>
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ④ 打开失败 -->
+  <div class="frame">
+    <h2>④ 收银台没打开</h2>
+    <p class="note">失败也留在原地：给原因，给重试；拿得到链接时再给「打开」与「复制链接」。档位仍可重选。</p>
+    <div class="modal">
+      <div class="head"><h3>账户</h3><span class="x">×</span></div>
+
+      <div class="money">
+        <div>
+          <div class="label">余额</div>
+          <p class="amount">$46.80</p>
+          <p class="sub">每天约 $0.70 · 2 台服务器</p>
+        </div>
+        <button class="btn-quiet">收起</button>
+      </div>
+
+      <div class="topup">
+        <p class="error">收银台暂时打不开，稍后再试。</p>
+        <div class="err-actions">
+          <button class="btn-ghost">重试</button>
+          <button class="link-quiet">打开收付款页</button>
+          <button class="link-quiet">复制链接</button>
+        </div>
+      </div>
+
+      <div class="hair"></div>
+
+      <div class="meter-head">
+        <span class="label">本月流量</span>
+        <span class="label">12月1日重置</span>
+      </div>
+      <div class="bar"><i style="width:0.4%"></i></div>
+      <p class="meter-note">本月流量额度 536 GiB · 已用 2.1 GiB · 明天再涨 53.6 GiB</p>
+
+      <div class="hair"></div>
+      <button class="disclosure"><span>近 30 天账单</span><span class="right">明细 ›</span></button>
+
+      <div class="footer">
+        <span class="who"><b>ribencong@gmail.com</b> · 复制</span>
+        <button class="link-btn">退出登录</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
