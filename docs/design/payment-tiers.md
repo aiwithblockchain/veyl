@@ -127,23 +127,25 @@
 ## 5. UI
 
 - 充值弹层显示：
-  - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`；
-  - 一个自定义金额输入框：`$6–$300`，整美元；
-  - 提交按钮：`充值 $X`。
+  - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`（整美元，不带 `.00`）；
+  - 一个自定义金额输入框：`$6–$300`，整美元，占位符 `36`；
+  - 提交按钮：空输入时为 `充值`（禁用）；合法时为 `充值 $X`（整额不带 `.00`）。
 - 没有分组、没有套餐 tab、没有划线价、没有「约一年」或天数文案。
 - 自定义输入校验：
   - 只允许整数美元（`^\d+$`，不接受小数点、负号、空值）；
   - `6 <= 金额 <= 300`；
-  - 不合法时按钮禁用并显示「$6–$300，整美元」；不发起请求。
-- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开，弹层立即关闭（沿用现有行为）。
-- 支付成功后账号菜单打开自动刷新余额；没有新手档卡片、没有年度组、没有「首次专享」。
+  - 输入过程中不报错；失焦后或点过提交且值非法才显示「请输入 $6–$300 的整美元金额」并置 `aria-invalid`；清空回到中性 hint；不发起请求。
+- 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开后**保留弹层**，原位 `role="status"` 显示「已在浏览器打开收款页。付完款后点「刷新」查看余额。」；等待期间快捷档、输入与提交都禁用，底部动作行只留 `刷新`（强制刷新，不受 30 秒门禁限制）与 `关闭`（避免重复建单吃掉频控额度）。
+- 支付成功后由等待态的 `刷新` 强制刷新余额；窗口重新聚焦时也会补刷（受 30 秒门禁）。没有新手档卡片、没有年度组、没有「首次专享」。
 - 旧客户端只显示 5 个快捷按钮，仍可正常充值；新客户端多一个自定义输入框。
 - 文案 key（中英同批）：
   - `topup.custom.label`：自定义金额 / Custom amount
-  - `topup.custom.placeholder`：6–300 / 6–300
+  - `topup.custom.placeholder`：36 / 36
   - `topup.custom.hint`：$6–$300，整美元 / $6–$300, whole dollars
   - `topup.custom.invalid`：请输入 $6–$300 的整美元金额 / Enter a whole-dollar amount from $6 to $300
   - `topup.custom.submit`：充值 {amount} / Top up {amount}
+  - `topup.submit`：充值 / Top up
+  - `topup.waiting`：已在浏览器打开收款页。付完款后点「刷新」查看余额。/ Checkout is open in your browser. After paying, click Refresh to update your balance.
 - Checkout 侧：`product_data.name = "Veyl Service Credits"`，description 用现有的 `Prepaid credits for Veyl cloud servers. Use within Veyl only; non-refundable.`
 
 ---

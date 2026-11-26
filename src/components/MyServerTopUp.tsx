@@ -15,6 +15,8 @@ interface Props {
   onRetry: () => void;
   onTopUp: (denominationCents: number) => Promise<MyServerTopup>;
   onClose: () => void;
+  /** 等待收银台时手动补刷余额：不受 30 秒门禁限制；未接线就不显示按钮。 */
+  onRefreshBalance?: () => void;
   /** 叠在设置之上：用嵌套遮罩；关掉后回到设置页。 */
   nested?: boolean;
 }
@@ -43,6 +45,11 @@ function topupError(error: unknown): string {
   return errorText(error, t("topup.failed"));
 }
 
+/** 快捷档是整美元：显示 $6 而不是 $6.00；非整额才退回两位小数。 */
+function wholeDollar(cents: number): string {
+  return cents % 100 === 0 ? `$${cents / 100}` : formatUsdCents(cents);
+}
+
 /** 充值模态：档位直接来自 wallet 的 denominations_cents。 */
 export function MyServerTopUp({
   wallet,
@@ -51,12 +58,17 @@ export function MyServerTopUp({
   onRetry,
   onTopUp,
   onClose,
+  onRefreshBalance,
   nested = false,
 }: Props) {
   const tr = useT();
   const [busyCents, setBusyCents] = useState<number | null>(null);
   const [custom, setCustom] = useState("");
+  /** 失焦或点过提交后才报格式错：输入过程中不打断。 */
+  const [touched, setTouched] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** 收银台已打开：挡住第二次建单，避免重复扣频控额度；只留「关闭」。 */
+  const [waiting, setWaiting] = useState(false);
   const [failure, setFailure] = useState<{
     message: string;
     url: string | null;
@@ -80,12 +92,14 @@ export function MyServerTopUp({
     busyRef.current = true;
     setBusyCents(cents);
     setNotice(null);
+    setWaiting(false);
     setFailure(null);
     try {
       const result = await onTopUp(cents);
       if (result.checkout_url) {
-        // 收银台已在外部浏览器打开，档位弹窗不再保留。
-        onClose();
+        // 收银台已在外部浏览器打开：弹层保留，等用户付完回来关掉。
+        setNotice(tr("topup.waiting"));
+        setWaiting(true);
         return;
       }
       setNotice(
@@ -118,9 +132,10 @@ export function MyServerTopUp({
     : Number.NaN;
   const customValid =
     Number.isSafeInteger(customCents) && customCents >= minCents && customCents <= maxCents;
-  const customSubmitLabel = tr("topup.custom.submit", {
-    amount: Number.isSafeInteger(customCents) ? formatUsdCents(customCents) : "—",
-  });
+  const showInvalid = touched && custom.trim() !== "" && !customValid;
+  const customSubmitLabel = customValid
+    ? tr("topup.custom.submit", { amount: wholeDollar(customCents) })
+    : tr("topup.submit");
 
   return (
     <div
@@ -184,12 +199,12 @@ export function MyServerTopUp({
                       <button
                         key={cents}
                         type="button"
-                        className="btn btn--ghost myservers-topup__option"
-                        disabled={busy}
+                        className="btn btn--ghost myservers-topup__option num"
+                        disabled={busy || waiting}
                         aria-busy={busyCents === cents || undefined}
                         onClick={() => void start(cents)}
                       >
-                        {formatUsdCents(cents)}
+                        {wholeDollar(cents)}
                       </button>
                     ))}
                   </div>
@@ -211,17 +226,22 @@ export function MyServerTopUp({
                     autoComplete="off"
                     placeholder={tr("topup.custom.placeholder")}
                     value={custom}
-                    disabled={busy}
-                    aria-invalid={custom.length > 0 && !customValid ? true : undefined}
+                    disabled={busy || waiting}
+                    aria-invalid={showInvalid || undefined}
                     aria-describedby="myservers-topup-custom-hint"
-                    onChange={(event) => setCustom(event.target.value)}
+                    onChange={(event) => {
+                      setCustom(event.target.value);
+                      setTouched(false);
+                    }}
+                    onBlur={() => setTouched(true)}
                   />
                   <button
                     type="button"
                     className="btn btn--primary myservers-topup__submit"
-                    disabled={busy || !customValid}
+                    disabled={busy || waiting || custom.trim() === ""}
                     aria-busy={busyCents === customCents || undefined}
                     onClick={() => {
+                      setTouched(true);
                       if (customValid) void start(customCents);
                     }}
                   >
@@ -230,16 +250,10 @@ export function MyServerTopUp({
                 </div>
                 <p
                   id="myservers-topup-custom-hint"
-                  className={
-                    custom.length > 0 && !customValid
-                      ? "myservers__error"
-                      : "myservers__hint"
-                  }
-                  role={custom.length > 0 && !customValid ? "alert" : undefined}
+                  className={showInvalid ? "myservers__error" : "myservers__hint"}
+                  role={showInvalid ? "alert" : undefined}
                 >
-                  {custom.length > 0 && !customValid
-                    ? tr("topup.custom.invalid")
-                    : tr("topup.custom.hint")}
+                  {showInvalid ? tr("topup.custom.invalid") : tr("topup.custom.hint")}
                 </p>
               </div>
             </>
@@ -309,6 +323,15 @@ export function MyServerTopUp({
           ) : null}
 
           <div className="myservers__login-actions">
+            {waiting && onRefreshBalance ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={onRefreshBalance}
+              >
+                {tr("settings.account.refresh")}
+              </button>
+            ) : null}
             <button type="button" className="btn btn--ghost" disabled={busy} onClick={onClose}>
               {tr("common.close")}
             </button>

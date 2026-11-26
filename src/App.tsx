@@ -3290,6 +3290,9 @@ export default function App() {
           onRetry={() => void myServers.refreshWallet({ trigger: "retry" })}
           onTopUp={myServers.topup}
           onClose={myServers.closeTopUp}
+          onRefreshBalance={() =>
+            void myServers.refreshWallet({ force: true, trigger: "manual" })
+          }
           nested={settingsOpen}
         />
       ) : null}
