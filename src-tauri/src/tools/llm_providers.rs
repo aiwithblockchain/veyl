@@ -12,6 +12,10 @@ use super::display::Changed;
 use super::envelope::{self, AivpnError, ToolOutcome};
 use super::services::VpnToolServices;
 
+/// 用名称当 id 时模型只能靠这句话自纠：让它不带参数再取一次真正的 id。
+pub(crate) const PROVIDER_NOT_FOUND_MESSAGE: &str =
+    "没有这个 id 的服务商；先不带参数调用，用 providers[].id 里的值";
+
 /// 契约里服务商只露这些字段；`provider_id` 改名为 `id`，其余内部字段一律不出。
 fn visible_provider(provider: &Value) -> Option<Value> {
     let id = provider
@@ -91,6 +95,7 @@ fn summarise(data: &Value) -> String {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let key = if has_key { "已保存密钥" } else { "未保存密钥" };
+        let id = provider.get("id").and_then(Value::as_str).unwrap_or("-");
         let mark = if active.is_some()
             && active == provider.get("id").and_then(Value::as_str)
         {
@@ -98,7 +103,8 @@ fn summarise(data: &Value) -> String {
         } else {
             ""
         };
-        lines.push(format!("- {name}{mark} | 模型 {model} | {key}"));
+        // 模型只读得到 content：id 必须出现在这里，它才有办法去测连接。
+        lines.push(format!("- {name}{mark} [id: {id}] | 模型 {model} | {key}"));
     }
     if let Some(result) = data.get("last_result") {
         let name = data
@@ -151,10 +157,11 @@ impl Tool for LlmProvidersTool {
         "列出已保存的 AI 服务商与当前项，可选测一次连接。只读，不改任何配置。\
          传 test_provider_id 会对该服务商发一次真实请求，结果放进它的 last_result；\
          id 不存在回 NOT_FOUND。要测某一项时，先不带参数调用拿到 providers 里的 id，\
-         再用这个 id 去测；不要凭名字猜 id。永远不返回 API Key，只有 has_key。\
+         再用这个 id 去测；不要凭名字猜 id。id 形如 deepseek 或 p_xxx，是调用用的，\
+         不要念给用户。永远不返回 API Key，只有 has_key。\
          保存、删除、切换服务商只能由用户在设置里操作，不要替用户改；\
          DeepseekSaveKey 只覆盖 DeepSeek。\n\
-         说服务商名称与模型；不出现 provider id、base_url 或任何密钥。"
+         说服务商名称与模型；不出现 base_url 或任何密钥。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -298,6 +305,28 @@ mod tests {
         assert!(provider.get("is_builtin").is_none(), "{provider}");
         assert!(provider.get("api_key").is_none(), "{provider}");
         assert!(provider.get("masked").is_none(), "{provider}");
+    }
+
+    #[test]
+    fn the_summary_lists_each_id_for_calling() {
+        let data = json!({
+            "active_provider_id": "deepseek",
+            "providers": [
+                {
+                    "provider_id": "deepseek", "name": "DeepSeek",
+                    "model": "deepseek-flash", "has_key": true,
+                },
+                {
+                    "provider_id": "p_1a2b", "name": "Ollama", "model": "qwen", "has_key": false,
+                },
+            ],
+        });
+        let summary = success_outcome(&data).summary;
+        assert!(
+            summary.contains("- DeepSeek（当前） [id: deepseek]"),
+            "{summary}"
+        );
+        assert!(summary.contains("- Ollama [id: p_1a2b]"), "{summary}");
     }
 
     #[test]

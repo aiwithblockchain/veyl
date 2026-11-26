@@ -1,9 +1,9 @@
 # 契约：P1 工具清单
 
-> 契约版本：`3.34.0`
-> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段，工具数不变）。**第 5 组完成，工具面 38。**
+> 契约版本：`3.35.0`
+> 状态：部分落地——已落第 2 组（删三个旧分流工具，43 → 40，3.27.0）、第 3 组（节点写入三工具合并为 `NodeImport`，40 → 38，3.28.0）、第 4 组（`CatalogOptions` 改名 `ServerOptions`，38 不变，3.29.0）、前置批：工具去重（删 `RuntimeStart` / `RuntimeStop`，38 → 36，3.30.0；不占组号）与第 5 组（3.31.0 新增 `MyServerWallet`，36 → 37；3.32.0 新增 `LlmProviders`，37 → 38；3.34.0 给 `MyServers` 补 `paid_until` / `billing_state` 两个计费字段；3.35.0 在 `LlmProviders` 的 content 里补 service provider id，工具数均不变）。**第 5 组完成，工具面 38。**
 >
-> ⚠️ 本文件 3.34.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
+> ⚠️ 本文件 3.35.0 落地的工具面是 **38 个**：第 2 组删 `RouteTargetsSet` / `CategoryList` / `RulesStatus`；第 3 组把三个节点写入工具合并为 `NodeImport`；第 4 组把 `CatalogOptions` 改名 `ServerOptions`；前置批（工具去重，不占组号）删掉与 `VpnConnect` / `VpnDisconnect` 重复的 `RuntimeStart` / `RuntimeStop`，并从 `ConfigUpdate` 去掉 `routing_mode`；第 5 组两片新增只读工具 `MyServerWallet`（§4.58）与 `LlmProviders`（§4.60）。§4.59 是已撤回的提案（`TrialStatus`），不属于本版；工具集合与数字以 §3 及实现侧 `vpn_tools()` 为准（分批计划见 `docs/design/ai-tools-decisions.md` §0）。
 > 上游：`docs/contracts/commands.md`、`docs/contracts/runtime.md`（版本以各自文件头为准）、`docs/capabilities.md`
 > 实现方：Rust（Host，实现 Claurst `Tool` trait）
 > 使用方：Agent（模型）与 UI（工具卡片渲染）
@@ -2334,11 +2334,11 @@ type LlmProvidersData = {
 ```
 
 - `PermissionLevel::ReadOnly`；数据源与界面同一份 `llm_provider_list`（`commands.md` §9.4），不自行推算。
-- `test_provider_id` 必须是**已保存**的服务商 id：只测这一项、复用 `llm_provider_test` 的判定，不落库、不改任何配置；不存在 → `NOT_FOUND`。
+- `test_provider_id` 必须是**已保存**的服务商 id：只测这一项、复用 `llm_provider_test` 的判定，不落库、不改任何配置；不存在 → `NOT_FOUND`。**传名称不算命中**（不做名称模糊匹配），返回 `NOT_FOUND`，message 提示先取 id。
 - **永不返回 Key**，也不返回令牌与请求头；`base_url` 去掉 userinfo（`https://sk-xxx@…` 的密钥不进模型上下文）。
 - `last_result.error` 已经过 `llm::redact_secrets`（`llm.rs:608`）：`sk-` 开头且长度 ≥8 的片段替换为 `sk-***`；错误文本本身不含 Key 原文。非 `sk-` 开头的凭据不由这层兜底。
 - **不提供保存 / 删除 / 切换**：写配置与输入密钥只走界面；`DeepseekSetupKey` / `DeepseekSaveKey` 维持现状，只覆盖 DeepSeek，描述里写「换服务商请让用户到设置里改」。
-- **`content` 必须给**：当前服务商与模型、共有几个服务商；带 `test_provider_id` 时给该项的成功 / 失败原因（失败原因为脱敏后的结果）。
+- **`content` 必须给**：当前服务商与模型、共有几个服务商；**每个服务商一行，行内必须带 service provider 的 id**（形如 `deepseek` 或 `p_xxx`）——模型只能读 `content`，拿不到 id 就没法传 `test_provider_id`。id 仅供调用，不要念给用户。带 `test_provider_id` 时给该项的成功 / 失败原因（失败原因为脱敏后的结果）。
 - **待回填**：`id` 枚举与内置项的呈现规则以实现的服务商注册表为准。
 
 错误：`NOT_FOUND`、`INTERNAL`。
@@ -2441,6 +2441,12 @@ type LlmProvidersData = {
 ---
 
 ## 8. 变更记录
+
+### 3.35.0（未发布，2026-11-26：`LlmProviders` 的 `content` 每行带 service provider id）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 版本升到 `3.35.0`；§4.60 `LlmProviders` 的 `content` 要求补一条：每个服务商一行，行内必须带 service provider 的 id（形如 `deepseek` 或 `p_xxx`），`id` 仅供调用、不要念给用户；`test_provider_id` **传名称不算命中**，返回 `NOT_FOUND` 且 message 提示先取 id。`data`、权限与行为不变；工具总数不变（38） | 内容口径 | 模型只能读 `content`，拿不到 id 就无法传 `test_provider_id` |
 
 ### 3.34.0（未发布，2026-11-26：`MyServers` 补 `paid_until` / `billing_state`）
 

@@ -198,7 +198,10 @@ impl VpnToolServices for FakeServices {
         self.rec
             .record(format!("llm_providers({test_provider_id:?})"));
         if let Some(code) = self.llm_error {
-            return Err(anyhow::anyhow!("{code}: 服务商不存在"));
+            return Err(anyhow::anyhow!(
+                "{code}: {}",
+                super::llm_providers::PROVIDER_NOT_FOUND_MESSAGE
+            ));
         }
         Ok(self.data.clone())
     }
@@ -598,7 +601,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.34.0",
+                env["contract_version"], "3.35.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1361,6 +1364,10 @@ async fn llm_providers_schema_and_projection_keep_keys_out() {
     let content = env["summary"].as_str().unwrap_or("");
     assert!(content.contains("DeepSeek"), "{content}");
     assert!(content.contains("当前"), "{content}");
+    assert!(
+        content.contains("[id: deepseek]"),
+        "模型只能读 content，id 必须写在里面才测得了连接：{content}"
+    );
     assert!(!content.contains("sk-secret"), "{content}");
 }
 
@@ -1403,14 +1410,20 @@ async fn llm_providers_tests_one_provider_and_reports_not_found() {
         "{env}"
     );
 
+    // 冒烟 4.6：模型把名称当 id（"DeepSeek"）传进来，必须整次失败并告诉它怎么取 id。
     let (svc, _) = FakeServices::with_llm_error("NOT_FOUND", json!({}));
     let (is_error, env) = run(
         tool(&tools(svc), "LlmProviders"),
-        json!({ "test_provider_id": "nope" }),
+        json!({ "test_provider_id": "DeepSeek" }),
     )
     .await;
     assert!(is_error, "{env}");
     assert_eq!(env["error"]["code"], "NOT_FOUND", "{env}");
+    let message = env["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("providers[].id"),
+        "错误要说清下一步怎么取 id，模型才能自纠：{message}"
+    );
     assert!(
         !env["summary"].as_str().unwrap_or("").contains("测试结果"),
         "不存在要整个失败，不能折成一次测试结果：{env}"

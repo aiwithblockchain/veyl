@@ -6183,7 +6183,7 @@ impl VpnToolServices for WiredServices {
                 .ok_or_else(|| {
                     svc_error_with_details(
                         "NOT_FOUND",
-                        "服务商不存在",
+                        crate::tools::llm_providers::PROVIDER_NOT_FOUND_MESSAGE,
                         json!({ "reason": "provider_not_found" }),
                     )
                 })?;
