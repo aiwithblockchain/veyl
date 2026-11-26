@@ -828,7 +828,7 @@ export const en: Record<MessageKey, string> = {
   "assistant.prompt.connectDiagnosis":
     "The connection failed. Here is what the local diagnosis collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; don't guess and don't ask me to upload logs.\n{context}",
   "assistant.prompt.nodeUnreachable":
-    "Node \"{name}\" failed its test this time. First use a tool to check whether it can recover intelligently (change the connection password); recover it if you can, and only suggest destroying and rebuilding if it can't be recovered. Don't make up tool results; if tools aren't available, say so honestly.",
+    "Node \"{name}\" failed its test this time. Run diagnostics first to determine whether the problem is on this machine (runtime, proxy, DNS) or with the node itself, then explain the cause and the next step. You may suggest changing the connection password or rebuilding, but only perform the change after the user explicitly agrees. Don't make up tool results; if tools aren't available, say so honestly.",
 
   // Settings › Advanced › Language
   "settings.language.label": "Language",
@@ -923,7 +923,7 @@ export const en: Record<MessageKey, string> = {
   "account.topUp": "Top up",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
   "account.traffic.title": "This month's traffic",
-  "account.traffic.summary": "Used {used} / {limit} GiB",
+  "account.traffic.summary": "Used {used} GiB / {limit} GiB total",
   "account.traffic.unknown": "Used {used} · limit unknown",
   "account.traffic.tomorrow": "Tomorrow +{amount}",
   "account.traffic.near": "Traffic is almost used up",
@@ -1640,7 +1640,6 @@ export const en: Record<MessageKey, string> = {
   "settings.account.billingNote": "Balance is charged per day, separately for each server.",
   "billing.summary": "Top-up {topup} · charges {charge}",
   "billing.column.kind": "Type",
-  "billing.column.server": "Server",
   "billing.column.date": "Date",
   "billing.column.amount": "Amount",
   "billing.kind.topup": "Top-up",
@@ -1992,5 +1991,5 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.probeError.ioError": "The probe program failed.",
   "diagnosis.probeError.generic": "The probe couldn't run.",
   "assistant.prompt.nodeDiagnosis":
-    "Here is what the node diagnosis panel collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; never mention passwords, tokens, or full links.\n{context}",
+    "Here is what the node diagnosis panel collected. Read the product docs and FAQ first, then explain the likely cause and what I should do next; never mention passwords, tokens, full links, or internal ids.\n{context}",
 };

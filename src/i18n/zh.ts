@@ -788,7 +788,7 @@ export const zh = {
   "assistant.prompt.connectDiagnosis":
     "连接失败了，这是本地智能诊断收集到的信息。先读产品说明与 FAQ，再判断原因，告诉我下一步该做什么；不要猜，也不要让我上传日志。\n{context}",
   "assistant.prompt.nodeUnreachable":
-    "节点「{name}」这次测不通。请先调用工具确认它能否智能恢复（更换连接密码），能恢复就先恢复；确认无法恢复再建议销毁重建。不要编造工具结果，工具不可用时如实说明。",
+    "节点「{name}」这次测不通。先运行诊断，判断问题出在本机（运行时、代理、DNS）还是这台节点本身，再说明原因和下一步。可以建议更换连接密码或重建，但更换要等用户明确同意后再执行。不要编造工具结果，工具不可用时如实说明。",
 
   // 设置 › 高级 › 语言
   "settings.language.label": "语言",
@@ -878,7 +878,7 @@ export const zh = {
   "account.topUp": "充值",
   "account.stale": "没刷新成功，显示的是上次的余额。",
   "account.traffic.title": "本月流量",
-  "account.traffic.summary": "已用 {used} / {limit} GiB",
+  "account.traffic.summary": "已用 {used} GiB / 共 {limit} GiB",
   "account.traffic.unknown": "已用 {used} · 额度未知",
   "account.traffic.tomorrow": "明天 +{amount}",
   "account.traffic.near": "流量快用完了",
@@ -1560,7 +1560,6 @@ export const zh = {
   "settings.account.billingNote": "余额按天扣费，每台服务器单独计费。",
   "billing.summary": "充值 {topup} · 扣费 {charge}",
   "billing.column.kind": "类别",
-  "billing.column.server": "机器",
   "billing.column.date": "日期",
   "billing.column.amount": "金额",
   "billing.kind.topup": "充值",
@@ -1887,7 +1886,7 @@ export const zh = {
   "diagnosis.probeError.ioError": "探测程序出错，没能完成。",
   "diagnosis.probeError.generic": "探测没能执行。",
   "assistant.prompt.nodeDiagnosis":
-    "这是节点诊断面板收集到的信息。先读产品说明与 FAQ，再判断原因，告诉我下一步该做什么；不要提密码、令牌或完整链接。\n{context}",
+    "这是节点诊断面板收集到的信息。先读产品说明与 FAQ，再判断原因，告诉我下一步该做什么；不要提密码、令牌、完整链接或内部 id。\n{context}",
 };
 
 export type MessageKey = keyof typeof zh;

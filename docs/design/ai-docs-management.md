@@ -1,7 +1,7 @@
 # AI 文档管理：入口、内容与三份文档的加载与版本
 
 > 日期：2026-11-21
-> 最后核对：2026-11-24，对照 `108e6e5`
+> 最后核对：2026-11-26，对照 `1c64162`
 > 状态：**部分定稿**。§7 的 D1/D2 已定并已落地，D7 随 D2 解决；§6 中 D3–D6、D8 仍待讨论；§8 已落地（两段下发，`108e6e5`），replace 模式受子模块不可改约束作废。§2–§5 是清点与设计记录，不代表全部已实现。**工具清单是 2026-11-21 快照，不再逐版维护；工具面以 `docs/contracts/tools.md` §3 为准。**
 > 依据：`resources/prompts/{zh,en}/{system,kickoff,product,faq}.md`、`src-tauri/src/claurst_session/prompts.rs`、`src-tauri/src/claurst_session/mod.rs`、`src-tauri/src/tools/mod.rs`、`src/App.tsx`、`src/components/*`、`docs/design/ai-first-product.md`、`docs/design/settings-advanced.md`。
 
@@ -30,14 +30,14 @@
 | # | 界面位置 | 按钮文案 | 发送给 AI 的内容 | 附带上下文 | 代码 |
 |---|---|---|---|---|---|
 | 1 | 连接页 · 接管方式 / 流量范围旁边 | `问 AI` | 「我在 Veyl 的连接页看接管方式和流量范围。当前是 {Tun/Proxy} + {智能/全局}…」 | 当前接管方式、当前流量范围 | `StageQuickToggles.tsx:340`、`ai/advancedPrompts.ts:5` |
-| 2 | 连接失败时 · hero 主按钮 | `让 AI 检查` | 「连接失败了。请先跑一次诊断…」 | 无（AI 自己调 `DiagRun`） | `ConnectionStage.tsx:329,523`、`App.tsx:2506`、`ui/assistantPrompts.ts:15` |
+| 2 | 连接失败时 · hero「智能诊断」打开的面板 · 「去问 AI」（2026-11-26 按现状改写：hero 本身不再直接发给 AI） | `去问 AI` | 「连接失败了，这是本地智能诊断收集到的信息…」+ 结构化清单 | 本地诊断清单（不含地址、端口与凭据） | `DiagnosisPanel.tsx`、`App.tsx:2581`、`ui/assistantPrompts.ts:16` |
 | 3 | 设置页 · 咨询 AI | `咨询 AI` | 带当前分区的实际值开口：先读 `product.md` 的设置部分，再用一两句话说明这一区最主要的两三项；跨分区时才提醒换过去 | 当前分区名 + 该区事实（不含 API Key） | `Settings.tsx`、`ai/settingsConsult.ts:7` |
 | 4 | 设置 › 高级 · 报告问题 | `报告问题` | 契约化开场：先说隐私声明，再问两个问题，然后调 `IssueReport` | 特殊会话标记 `report: true` | `App.tsx:1705`、`ui/issueReport.ts:10` |
 | 5 | 我的服务器 › 详情页 · 创建失败 | `AI 定位` | 「这台服务器创建失败了。请读取这次失败的结构化信息…」 | `serverId`，会话带 `lastAction: servers.ai_locate` | `MyServerDetail.tsx:598`、`App.tsx:2567`、`ui/assistantPrompts.ts:10` |
 | 6 | 「我的服务器」左栏「在其它设备上使用」→ 弹层页脚 | `不会操作？问 AI` | 「我在 Veyl 的『在其它设备上使用』里…请只讲两点…」 | 无 | `MobileExport.tsx:734`、`ai/advancedPrompts.ts:18` |
 | 7 | 右栏 AI 空态 · 预设问题 | 6 条预设问句 | 整句发送，不加前缀：「连上了，但网页打不开」「怎么换成更快的节点」等 | 无 | `AiPanel.tsx:76` |
-| 8 | 连接页 · 节点列表 · 测速结果为「测不通」时 | 自有节点 `智能分析` / 非自有与手动导入 `问 AI` | 自有节点先开诊断面板；非自有走「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:656,700`、`ui/assistantPrompts.ts:22` |
-| 9 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接） | `DiagnosisPanel.tsx:327`、`useNodeDiagnosis.ts:635`、`App.tsx:2310` |
+| 8 | 连接页 · 节点列表 · 测速结果为「测不通」时（仅自有节点；非自有与手动导入节点的入口已移除，2026-11-26 核对） | 自有节点：`智能诊断`（打开诊断面板，面板里再由「去问 AI」发给模型）；自有但服务器不可诊断（过期、欠费或出错）时行内 `问 AI`；非自有与手动导入无入口 | 前者先本地诊断；后者发「节点「{节点名}」这次测不通…」的固定句 | 节点名；仅限自建节点、未到期、非悬挂 | `ConnectionStage.tsx:996-1003`、`App.tsx:2169-2172`、`ui/assistantPrompts.ts:21` |
+| 9 | 诊断面板 · 结论之后 | `去问 AI` | 「这是节点诊断面板收集到的信息…」+ 结构化清单 | `DiagnosisContext`（不含密码、令牌与完整链接；清单不含节点内部 id、端口与本机日志路径） | `DiagnosisPanel.tsx`、`useNodeDiagnosis.ts`、`App.tsx:2386`、`ui/assistantPrompts.ts:27` |
 
 > 2026-11-22 更正：#2 的 hero 主按钮**仍在**，只在**非免费节点**连接失败时出现（`canDiagnose = failed && onDiagnose && !failedOnSeed`）；免费节点失败退成「重新连接」（`6a455d6`）。#8 拆成两条：自有节点先走「智能分析」面板，AI 是面板最后一步的兜底，不再是测不通时的第一动作。
 

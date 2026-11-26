@@ -78,7 +78,7 @@ export interface DiagnosisFacts {
 
 /**
  * 交给 AI 的清单（`node-diagnosis-flow.md` §5）。
- * 任何密码、令牌、完整导出链接都不能进入这个对象。
+ * 任何密码、令牌、完整导出链接都不能进入这个对象；内部 id、端口与本地日志路径也不进。
  */
 export interface DiagnosisContext {
   server: {
@@ -88,8 +88,6 @@ export interface DiagnosisContext {
     state: string;
   };
   node: {
-    local_id: string | null;
-    port: number | null;
     in_use: boolean;
   };
   connectivity: {
@@ -124,7 +122,6 @@ export interface DiagnosisContext {
   client: {
     app_version: string;
     platform: string;
-    ui_log_path: string | null;
   };
 }
 
@@ -395,7 +392,8 @@ interface Collected {
   rotateTimedOut: boolean;
 }
 
-function emptyCollected(): Collected {
+/** 导出给单测：用空值起步再覆盖要验的字段。 */
+export function emptyCollected(): Collected {
   return {
     icmp: null,
     tcp: null,
@@ -660,14 +658,11 @@ function buildConnectionContext(
   };
 }
 
-function buildContext(
+/** 导出给单测：守住「这三项不进 AI 清单」不被悄悄改回去。 */
+export function buildContext(
   facts: DiagnosisFacts,
   collected: Collected,
-): DiagnosisContext {  const port =
-    collected.rotatePort ??
-    collected.syncPortAfter ??
-    facts.port ??
-    null;
+): DiagnosisContext {
   const portChanged =
     collected.syncPortAfter !== null && facts.port !== null
       ? collected.syncPortAfter !== facts.port
@@ -680,8 +675,6 @@ function buildContext(
       state: facts.state,
     },
     node: {
-      local_id: facts.localNodeId,
-      port,
       in_use: facts.nodeInUse,
     },
     connectivity: {
@@ -712,7 +705,6 @@ function buildContext(
     client: {
       app_version: facts.appVersion,
       platform: facts.platform,
-      ui_log_path: facts.uiLogPath ?? null,
     },
   };
 }

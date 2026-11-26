@@ -2160,6 +2160,7 @@ export default function App() {
   };
 
   // 连接页行内「问 AI」（非自有节点）：只发固定提示，不做修复。
+  // `_nodeId` 刻意不用：入口只发不含 id 的固定提示，节点标识不进 AI 上下文。
   const handleAskAiAboutNode = (_nodeId: string, prompt: string) => {
     askAiInPanel(prompt);
   };
