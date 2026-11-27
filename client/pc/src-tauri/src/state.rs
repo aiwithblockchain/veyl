@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::connection::ConnectionManager;
 use crate::error::AppResult;
 use crate::secrets::{self, SecretStore};
 use crate::store::Store;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub store: Store,
     pub secrets: Arc<dyn SecretStore>,
     pub http: reqwest::Client,
+    pub connection: ConnectionManager,
 }
 
 impl AppState {
@@ -23,21 +25,27 @@ impl AppState {
         let _ = crate::fsutil::remove_dir_if_exists(&data_dir.join(STAGING_DIR));
         let secrets = secrets::open(&data_dir, service);
         let http = crate::fetch::client()?;
+        let session = Arc::new(veyl_tun::session::TunSession::new(veyl_tun::privilege::select()));
+        let connection = ConnectionManager::new(session, http.clone());
         Ok(Self {
             data_dir,
             store,
             secrets,
             http,
+            connection,
         })
     }
 
     #[cfg(test)]
     pub fn for_tests(data_dir: PathBuf) -> Self {
         crate::tun_identity::install();
+        let http = crate::fetch::client().expect("测试网络客户端可用");
+        let session = Arc::new(veyl_tun::session::TunSession::new(veyl_tun::privilege::select()));
         Self {
             store: Store::new(&data_dir).expect("测试目录可写"),
             secrets: Arc::new(secrets::MemoryStore::new()),
-            http: crate::fetch::client().expect("测试网络客户端可用"),
+            connection: ConnectionManager::new(session, http.clone()),
+            http,
             data_dir,
         }
     }

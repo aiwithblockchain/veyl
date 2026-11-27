@@ -1,4 +1,4 @@
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub mod assemble;
 pub mod commands;
@@ -41,6 +41,13 @@ pub fn run() {
                 .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
             let service = app.config().identifier.clone();
             let state = state::AppState::new(data_dir, &service)?;
+            {
+                // 连接状态一变就推给界面；命令层不再各自发事件。
+                let handle = app.handle().clone();
+                state.connection.set_observer(std::sync::Arc::new(move |snapshot| {
+                    let _ = handle.emit("connection-changed", snapshot.clone());
+                }));
+            }
             app.manage(state);
             Ok(())
         })
@@ -55,6 +62,10 @@ pub fn run() {
             commands::profile_rename,
             commands::profile_remove,
             commands::profile_detail,
+            commands::connect,
+            commands::disconnect,
+            commands::connection_status,
+            commands::switch_node,
         ])
         .run(tauri::generate_context!())
         .expect("veyl-cli: failed to launch");

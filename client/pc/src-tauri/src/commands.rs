@@ -13,6 +13,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::assemble::{self, ConnectParams};
+use crate::connection::ConnectionSnapshot;
 use crate::error::{AppError, AppResult};
 use crate::fetch::{self, FetchOutcome, MAX_BODY_BYTES};
 use crate::kernel_check::{self, KernelCheck as KernelOutcome};
@@ -837,11 +838,16 @@ mod tests {
         let body = sample_config().to_string();
         let addr = serve(move |_| ok_json(&body));
         let data = tempfile::tempdir().unwrap();
+        let http = crate::fetch::client().unwrap();
         let state = AppState {
             data_dir: data.path().to_path_buf(),
             store: Store::new(data.path()).unwrap(),
             secrets: Arc::new(FailingStore),
-            http: crate::fetch::client().unwrap(),
+            connection: crate::connection::ConnectionManager::new(
+                Arc::new(veyl_tun::session::TunSession::new(veyl_tun::privilege::select())),
+                http.clone(),
+            ),
+            http,
         };
 
         let error = import_url(&state, &url_for(addr)).await.unwrap_err();
@@ -976,4 +982,43 @@ mod tests {
         assert_eq!(after.node_count, 0);
         assert!(!runtime.exists(), "零节点不能留着上一次的预览");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 连接
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn connect(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<ConnectionSnapshot> {
+    let app_state = state.inner();
+    let profile = app_state
+        .store
+        .get(&id)?
+        .ok_or_else(|| AppError::not_found("这套配置已经不存在了").with_hint("刷新列表。"))?;
+    let raw = app_state.store.read_raw(&id)?.ok_or_else(|| {
+        AppError::new("CONFIG_MISSING", "找不到这套配置的内容")
+            .with_hint("重新导入一次。")
+    })?;
+    app_state.connection.connect(&profile, &raw).await
+}
+
+#[tauri::command]
+pub async fn disconnect(state: State<'_, AppState>) -> AppResult<ConnectionSnapshot> {
+    state.inner().connection.disconnect().await
+}
+
+#[tauri::command]
+pub fn connection_status(state: State<'_, AppState>) -> ConnectionSnapshot {
+    state.inner().connection.snapshot()
+}
+
+#[tauri::command]
+pub async fn switch_node(
+    state: State<'_, AppState>,
+    tag: String,
+) -> AppResult<ConnectionSnapshot> {
+    state.inner().connection.switch_node(&tag).await
 }

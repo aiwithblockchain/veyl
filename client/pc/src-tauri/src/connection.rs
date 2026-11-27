@@ -195,7 +195,8 @@ impl ConnectionManager {
     pub async fn connect(&self, profile: &Profile, raw: &str) -> AppResult<ConnectionSnapshot> {
         let _guard = self.op.lock().await;
 
-        match self.inner.lock().unwrap().state.clone() {
+        let current = { self.inner.lock().unwrap().state.clone() };
+        match current {
             ConnectionState::Connecting { .. } | ConnectionState::Disconnecting => {
                 return Err(AppError::new("BUSY", "上一次连接还没结束")
                     .with_hint("等它完成，或者先断开。"));
