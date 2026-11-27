@@ -27,7 +27,7 @@
 | 创建记录时间线：审计为主 + 阶段时间戳补里程碑（契约 2.63.0 §7.31）、控制面 `GET /v1/servers/{id}/events` 与迁移 0013、Host `my_server_events`、详情页第四块；dev 已于 2026-11-24 部署（Worker `45470206`）。**2026-11-26 界面已下线**：面板、组件、i18n 与样式删除，建机时刻改由事实区「创建于」承担；命令与端点暂时保留 | `7c912f3`、`86b3ff7`、`ebbee8b`、`924f679` |
 | 建机页重做：版心 960、单列吸底动作栏 / ≥900 两栏摘要、标题与分区层级、AI 入口移到标题行且未配 AI 不显示、删系统信息、风险说明块换中性色并写全计费与可达性口径 | `6f97697`、`a41b3a8` |
 | 节点流量计量与扣费：agent nft 出站计数与事件触发上报、控制面 `POST /v1/agent/traffic` 去重/周期归属/超额扣费、迁移 0014；交叉评审 0 P1、P2 全闭合 | `390d017`、`9a96d2d` |
-| AI 工具梳理收口：删三个分流旧工具（40）、合并节点写入为 `NodeImport`（38）、`ServerOptions` 改名、前置批删 `RuntimeStart`/`RuntimeStop` 与 `ConfigUpdate.routing_mode`（36）、第 5 组补 `MyServerWallet` / `LlmProviders` 与 `MyServers` 计费字段（38），契约 tools.md 3.35.0 / commands.md 2.77.0；第 5 组冒烟 4.1–4.6 实测通过 | `051bc8d`、`6645206`、`eb46606`、`ce46f2b`、`ed366dd`、`4509717` |
+| AI 工具梳理收口：删三个分流旧工具（40）、合并节点写入为 `NodeImport`（38）、`ServerOptions` 改名、前置批删 `RuntimeStart`/`RuntimeStop` 与 `ConfigUpdate.routing_mode`（36）、第 5 组补 `MyServerWallet` / `LlmProviders` 与 `MyServers` 计费字段（38），契约 tools.md 3.38.0 / commands.md 2.83.0；第 5 组冒烟 4.1–4.6 实测通过；3.37.0 / 3.38.0 已提交，4.3 已复测通过（2026-11-27） | `051bc8d`、`6645206`、`eb46606`、`ce46f2b`、`ed366dd`、`4509717`、`2a94f6b`、`27149fb` |
 
 **AI 工具这一项已完成**：Read / Edit / Write / Bash / Glob / Grep 已注册进会话，能力清单从提示词移除；不再需要额外的「只读文档工具」（原 D7 关闭）。
 

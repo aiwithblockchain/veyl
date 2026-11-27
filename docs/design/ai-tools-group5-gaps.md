@@ -1,7 +1,7 @@
 # AI 工具第 5 组：补缺口决策单
 
 > 日期：2026-11-25
-> 状态：**已落地**（第 5 组 = 3.31.0 `MyServerWallet` + 3.32.0 `LlmProviders`；后续修订 3.34.0 给 `MyServers` 补 `paid_until` / `billing_state`、3.35.0 `LlmProviders` 每行带 service provider id；工具面 38）。
+> 状态：**已落地**（第 5 组 = 3.31.0 `MyServerWallet` + 3.32.0 `LlmProviders`；后续修订 3.34.0 给 `MyServers` 补 `paid_until` / `billing_state`、3.35.0 `LlmProviders` 每行带 service provider id、3.37.0 `MyServers` 透出流量四字段与账号池 `traffic_pool`、3.38.0 修正 `MyServers` 的 content 计费与流量措辞并统一 GiB；工具面 38）。
 > 依据：`docs/design/ai-tools-inventory.md` §3.4（G1 / G2 / G3 / G4 / G7 / G8）、§4 待定点第 9、10 条。
 > 范围：只回答「该不该给 AI」，并写到能派活为止；实现细节留给工具实现。
 
@@ -49,8 +49,8 @@
 
 ### 2.3 节点 / 服务器到期：**不给新工具，扩 `MyServers` 字段**
 
-- 理由：用户问的「到期」其实是三类东西——付费服务器「本期有效至」（`paid_until` + `billing_state`）、免费节点试用到期（已由 2.2 覆盖）、自建 / 导入节点（没有到期概念）。前一类是 `MyServers` 的输出缺字段，不是缺工具。
-- 方案（**已落地，3.34.0**）：`MyServers` 的每台服务器补 `paid_until`、`billing_state` 两个字段（`daily_price_cents` 已有；界面显示的就是这组值）；白名单 10 → 12，`tools.md` 的可见字段表与 `content` 要求同步（服务中时追加「本期有效至 …」）。
+- 理由：用户问的「到期」其实是三类东西——付费服务器的「已付至」（`paid_until` + `billing_state`）、免费节点试用到期（已由 2.2 覆盖）、自建 / 导入节点（没有到期概念）。前一类是 `MyServers` 的输出缺字段，不是缺工具。
+- 方案（**已落地，3.34.0**）：`MyServers` 的每台服务器补 `paid_until`、`billing_state` 两个字段（`daily_price_cents` 已有；界面显示的就是这组值）；白名单 10 → 12，`tools.md` 的可见字段表与 `content` 要求同步（服务中时追加「已付至 {until}（每天自动续扣；扣不到即停机）」，3.38.0）。
 - 不做：不给「到期提醒 / 账单预测」这类派生值——产品已拍板不推算「约可运行 N 天」。
 - 流量（2026-11-26 补）：`traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state` 与账号池 `traffic_pool` 已随 3.37.0 透出给模型（不新增工具，同样不推算天数与金额，账号池不得由 `servers[]` 求和）。
 - 权限：不变（`MyServers` 现有级别）。
@@ -114,7 +114,7 @@
 2. 「试用还剩几天 / 过期没有」→ `DefaultProfileStatus` 的 content 答 `state` + 剩余天数（没有精确 `expires_at`，不要编）。
 3. 「我这台服务器什么时候扣费 / 本期到哪天」→ `MyServers` 的 `paid_until` + `billing_state`；`active` 且已过时间的口径仍按「本期已过，服务正常」。
 4. 「帮我把所有节点测一遍」→ 模型明确拒绝长跑，引导到节点卡的测速入口；单点仍可用 `NodeProbe`。
-5. 「手机上怎么用」→ 讲步骤并把用户带到设置 › 账户 › 在手机上使用；**不出现任何令牌或链接**。
+5. 「手机上怎么用」→ 讲步骤并把用户带到「我的服务器」左栏的「在其它设备上使用」；**不出现任何令牌或链接**。
 6. 「我现在用的哪个服务商 / 帮我测一下连接」→ `LlmProviders` 列出当前服务商并给测试结果；「换一个服务商」引导到设置。
 7. 工具数 38（**两片已落地后的终值**：3.31.0 后为 37，3.32.0 后为 38）；`tools.md` §3 与 `TOOL_COPY` 逐名相等；`toolDisplay.test.ts` 绿。
 
