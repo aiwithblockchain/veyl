@@ -273,7 +273,12 @@ async fn send_json(
     let status = response.status().as_u16();
     // 拿到 HTTP 响应（含 401 / 5xx）就说明控制面可达。
     note_control_plane_reachable();
-    let text = response.text().await.unwrap_or_default();
+    // 响应体读到一半断开是传输失败，不是「格式不对」：必须可重试，
+    // 否则刷新丢响应会被判成 invalid_response，跳过自动重试又被踢下线。
+    let text = response.text().await.map_err(|error| {
+        super::client::warn_transport("auth", "POST", path, &error);
+        CpError::network(error.is_timeout())
+    })?;
     Ok((status, text))
 }
 
@@ -337,6 +342,72 @@ async fn refresh(
     }
     store_tokens(&tokens)?;
     Ok(tokens)
+}
+
+/// 刷新遇到可重试错误后，隔多久再试一次。
+///
+/// **只重试一次**：服务端对每枚旧 refresh 的宽限赎回只允许一次（`redeemed_count < 1`），
+/// 第一次重试**可能**用掉这一次（仅当第一次请求已到达服务端并完成轮换——客户端分不清
+/// 「没发出去」和「到了、回程丢了」）；若再失败后第三次还拿同一枚旧令牌去换，会被判
+/// 重放、整族作废。所以不做多轮退避。测试里不真等，`cfg(test)` 下是 0。
+#[cfg(not(test))]
+const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const REFRESH_RETRY_DELAY: Duration = Duration::ZERO;
+
+/// 从发第一次请求起，最多等这么久；超过就放弃重试、原样返回第一次的错误。
+///
+/// 预算覆盖「第一次请求 + 等待」的**总耗时**：第一次请求自身最长可能耗 10 秒
+/// （`client.rs` 的请求超时），服务端的宽限又是从轮换发生的那一刻开始算、比第一次
+/// 请求更早。睡眠还可能被系统挂起 / App Nap 拉长成几分钟。超过预算后再用旧令牌重试
+/// 大概率已越过 60 秒宽限，只会把「重放」坐实、作废整族；50 秒是给宽限留 10 秒余量
+/// 与时钟误差。
+const REFRESH_RETRY_MAX_WAITED: Duration = Duration::from_secs(50);
+
+/// 刷新一次；可重试错误（网络 / 5xx / 429）固定等 `REFRESH_RETRY_DELAY` 再试一次。
+///
+/// 「服务端已轮换、回程响应却被网络重置」时，客户端只看到连接错误、本地仍是旧 refresh。
+/// 若等到下一次触发再刷（可能几十分钟后），早已越过服务端 60 秒宽限，会被判重放并
+/// 作废整族；立刻重试一次能在宽限内完成赎回。会话已失效的错误绝不重试。
+async fn refresh_with_retry(
+    base_url: &str,
+    http: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<TokenSet, CpError> {
+    // 从第一次请求发出前开始计时：50 秒预算要覆盖「第一次请求 + 等待」的总耗时，
+    // 只算睡眠的话，10 秒请求超时加 50 秒等待正好擦着服务端 60 秒宽限。
+    let started = std::time::Instant::now();
+    let error = match refresh(base_url, http, refresh_token).await {
+        Ok(tokens) => return Ok(tokens),
+        Err(error) if error.retryable && !session_is_dead(&error) => error,
+        Err(error) => return Err(error),
+    };
+    log::debug!(
+        "鉴权：刷新可重试失败，{} 毫秒后重试一次 code={} reason={}",
+        REFRESH_RETRY_DELAY.as_millis(),
+        error.code,
+        error.reason().unwrap_or("-")
+    );
+    tokio::time::sleep(REFRESH_RETRY_DELAY).await;
+    if started.elapsed() > REFRESH_RETRY_MAX_WAITED {
+        log::debug!(
+            "鉴权：刷新重试等待过久（{} 毫秒），放弃重试以免越过宽限",
+            started.elapsed().as_millis()
+        );
+        return Err(error);
+    }
+    match refresh(base_url, http, refresh_token).await {
+        Ok(tokens) => Ok(tokens),
+        Err(error) => {
+            log::debug!(
+                "鉴权：刷新重试仍失败 code={} reason={} retryable={}",
+                error.code,
+                error.reason().unwrap_or("-"),
+                error.retryable
+            );
+            Err(error)
+        }
+    }
 }
 
 /// 刷新被拒后该怎么办。401（无效 / 过期 / 重放）→ 用 `device_secret` 重新注册；
@@ -729,7 +800,7 @@ pub async fn ensure_access(
                 account_label(&tokens),
                 tokens.account_kind
             );
-            match refresh(base_url, http, &tokens.refresh_token).await {
+            match refresh_with_retry(base_url, http, &tokens.refresh_token).await {
                 Ok(tokens) => {
                     log::debug!(
                         "鉴权：刷新成功 account={} account_kind={}",
@@ -807,6 +878,8 @@ mod tests {
     /// 全进程的库（正式启动时由 `lib.rs` 装）；`install_global` 先到先得。
     /// 账户标记读写的是 `store::global()`，测试里必须先装一个，否则永远读不到。
     fn test_store() {
+        // 凭据库也要先装：并行跑单个用例时别指望别人先初始化（`OnceLock` 只做一次）。
+        crate::test_support::install_test_secrets();
         static STORE: std::sync::OnceLock<std::sync::Arc<crate::store::Store>> =
             std::sync::OnceLock::new();
         crate::store::install_global(
@@ -1259,5 +1332,206 @@ mod tests {
             }
             _ => panic!("429 必须是可重试错误"),
         }
+    }
+
+    /// 脚本化本地桩：按顺序处理每个连接。`Drop` 表示读完请求直接断开——
+    /// 与服务端已处理、回程响应被网络重置时客户端看到的现象一致。
+    enum StubReply {
+        Drop,
+        Http(u16, &'static str),
+        /// 头里声明更长的 `Content-Length`，正文只发一部分就断开：模拟「响应体读到一半」。
+        Truncated(&'static str),
+    }
+
+    fn spawn_scripted_stub(
+        script: Vec<StubReply>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { return };
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf);
+                match script.get(index) {
+                    Some(StubReply::Drop) | None => drop(socket),
+                    Some(StubReply::Http(status, body)) => {
+                        let response = format!(
+                            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes());
+                    }
+                    Some(StubReply::Truncated(body)) => {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len() + 64
+                        );
+                        let _ = socket.write_all(head.as_bytes());
+                        let _ = socket.write_all(body.as_bytes());
+                    }
+                }
+            }
+        });
+        (addr, hits)
+    }
+
+    /// 刷新成功响应里的新令牌；`refresh_with_retry` 必须把它落盘。
+    const REFRESHED_TOKENS: &str = r#"{"account_id":"acct_1","device_id":"dev_1","access_token":"access-2","access_expires_at":"2099-01-01T00:00:00Z","refresh_token":"refresh-2","refresh_expires_at":"2099-01-01T00:00:00Z","account_kind":"device"}"#;
+
+    fn expired_tokens() -> TokenSet {
+        // access 已过期，`ensure_access` 才会走刷新分支。
+        tokens("2020-01-01T00:00:00Z")
+    }
+
+    fn block_on_ensure_access(addr: &str, http: &reqwest::Client) -> Result<String, CpError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(ensure_access(&format!("http://{addr}"), http, None))
+    }
+
+    fn clean_up_auth_state() {
+        clear_tokens();
+        forget_account();
+        let _ = crate::secrets::delete_secret(DEVICE_KEY);
+        note_control_plane_reachable();
+    }
+
+    /// 服务端已轮换、回程响应被重置：立刻重试一次就能在 60 秒宽限内完成赎回。
+    #[test]
+    fn a_reset_refresh_is_retried_once_and_succeeds() {
+        let _state = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _auth = auth_state_lock();
+        test_store();
+        let (addr, hits) = spawn_scripted_stub(vec![
+            StubReply::Drop,
+            StubReply::Http(200, REFRESHED_TOKENS),
+        ]);
+        store_device_for_test("dev_1");
+        store_tokens(&expired_tokens()).unwrap();
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let access = block_on_ensure_access(&addr, &http).expect("第二次刷新应成功");
+
+        assert_eq!(access, "access-2");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "断连后只重试一次");
+        assert_eq!(
+            load_tokens().expect("新令牌必须落盘").refresh_token,
+            "refresh-2"
+        );
+        clean_up_auth_state();
+    }
+
+    /// 响应体读到一半断开：要按传输失败重试，不能当成 invalid_response（不可重试）。
+    #[test]
+    fn a_truncated_refresh_body_is_retried() {
+        let _state = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _auth = auth_state_lock();
+        test_store();
+        let (addr, hits) = spawn_scripted_stub(vec![
+            StubReply::Truncated(REFRESHED_TOKENS),
+            StubReply::Http(200, REFRESHED_TOKENS),
+        ]);
+        store_device_for_test("dev_1");
+        store_tokens(&expired_tokens()).unwrap();
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let access = block_on_ensure_access(&addr, &http).expect("第二次刷新应成功");
+
+        assert_eq!(access, "access-2");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "响应体截断必须重试");
+        assert_eq!(
+            load_tokens().expect("新令牌必须落盘").refresh_token,
+            "refresh-2"
+        );
+        clean_up_auth_state();
+    }
+
+    /// 会话已失效（401）绝不重试：重试只会把「旧令牌重放」坐实。
+    #[test]
+    fn a_dead_session_is_not_retried() {
+        let _state = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _auth = auth_state_lock();
+        test_store();
+        let (addr, hits) = spawn_scripted_stub(vec![StubReply::Http(
+            401,
+            r#"{"code":"UNAUTHENTICATED","details":{"reason":"refresh_reused"},"retryable":false}"#,
+        )]);
+        store_device_for_test("dev_1");
+        let mut email = expired_tokens();
+        email.account_kind = "email".into();
+        email.email = Some("a@example.com".into());
+        store_tokens(&email).unwrap();
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let error = block_on_ensure_access(&addr, &http).unwrap_err();
+
+        assert_eq!(error.code, "UNAUTHENTICATED");
+        assert_eq!(error.reason(), Some("token_invalid"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "会话失效不能重试");
+        clean_up_auth_state();
+    }
+
+    /// 可重试错误连续两次：只尝试两次就停，本地令牌保留，等下次触发再刷。
+    #[test]
+    fn two_retryable_failures_stop_after_one_retry() {
+        let _state = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _auth = auth_state_lock();
+        test_store();
+        let (addr, hits) = spawn_scripted_stub(vec![StubReply::Drop, StubReply::Drop]);
+        store_device_for_test("dev_1");
+        store_tokens(&expired_tokens()).unwrap();
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let error = block_on_ensure_access(&addr, &http).unwrap_err();
+
+        assert!(error.retryable, "{error:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "最多尝试两次，不做多轮退避");
+        assert_eq!(
+            load_tokens()
+                .expect("可重试失败不能清本地令牌")
+                .refresh_token,
+            "refresh",
+            "旧令牌必须原样保留"
+        );
+        clean_up_auth_state();
+    }
+
+    /// 403 设备停用：不是可重试错误，不重试。
+    #[test]
+    fn a_revoked_device_is_not_retried() {
+        let _state = CONTROL_PLANE_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _auth = auth_state_lock();
+        test_store();
+        let (addr, hits) = spawn_scripted_stub(vec![StubReply::Http(
+            403,
+            r#"{"code":"FORBIDDEN","details":{"reason":"device_revoked"}}"#,
+        )]);
+        store_device_for_test("dev_1");
+        store_tokens(&expired_tokens()).unwrap();
+
+        let http = super::super::client::http_client(Duration::from_secs(2)).unwrap();
+        let error = block_on_ensure_access(&addr, &http).unwrap_err();
+
+        assert_eq!(error.code, "PERMISSION_DENIED");
+        assert_eq!(error.reason(), Some("device_revoked"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "设备停用不能重试");
+        clean_up_auth_state();
     }
 }
