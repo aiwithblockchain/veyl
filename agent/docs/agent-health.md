@@ -161,6 +161,10 @@ key -> { count, last_at, last_error }
 
 ## 5. 建议三：双钥匙与运维 worker
 
+> **2026-11-27 实测更正，先读这一段。** Cloudflare Worker **连不到 agent**：`fetch` 连裸 IP 被 Cloudflare 自己的 1003 拦掉（请求没出网），`node:tls` 用 `{socket}` 报类型不兼容、用 `{host, port}` 报 `proxy request failed`。所以下面 5.3/5.5 里「运维 worker 直接调 `get_status`」**不成立**。
+>
+> 改为：由能固定证书的**原生客户端**（桌面 / 手机 App）直连 `IP:32100`，worker 只负责登录、读清单、签只读票。证书侧改用统一根证书，见 `certificates.md`。
+
 目标：让运维平台直接调用 `get_status`，且它拿到的凭据不能执行写操作；运维与业务的信任链彻底分开。
 
 ### 5.1 两把钥匙，编译进 agent

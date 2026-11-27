@@ -1,7 +1,7 @@
 # 证书体系：根证书、叶证书与浏览器信任
 
 > 日期：2026-11-27
-> 状态：**草案**。尚未实现。
+> 状态：**草案，未实现**。技术前提已在本地 workerd 验证通过（§8），实现拆分见 §9。
 > 相关：`agent/src/cert.rs`（当前实现）、`agent/docs/agent-health.md`（运维平台）
 
 ---
@@ -91,4 +91,72 @@
 - 公网 IP 按设计不变——变了，客户端配置里的地址也就失效了，节点事实上已经不可用；
 - 唯一会触发重签的场景是「启动时元数据服务没答复、IP 稍后才探测到」。那时 enroll 已经成功，控制面必然可达；
 - 叶证书是持久化的，正常重启走本地存档，不会触发重签。
+
+---
+
+## 8. 验证记录（2026-11-27）
+
+### 8.1 环境与方法
+
+| 项 | 值 |
+|---|---|
+| 运行时 | 本地 `wrangler dev`（workerd），**与生产同一运行时**，全程没有部署 |
+| 库 | `@peculiar/x509` 3.1.0 + `reflect-metadata` |
+| 密钥 | ECDSA P-256（WebCrypto 原生支持；agent 侧 rcgen 同样支持） |
+| CSR | rcgen 0.14 真实生成，`CN=veyl-node-agent`，SAN 含 IPv4 `139.59.99.76` |
+
+### 8.2 结果：四件事全部成立
+
+worker 收到 CSR 后解析、用一张临时 CA 签发、把结果读回来：
+
+```
+csrSubject        = CN=veyl-node-agent
+csrExtensionCount = 1                                  ← 扩展请求（SAN）解析成功
+leafSubject       = CN=veyl-node-agent                 ← 主体来自 CSR
+leafIssuer        = CN=veyl-test-root                  ← 由 CA 签，不是自签
+leafSan           = [{"type":"ip","value":"139.59.99.76"}]  ← IP SAN 完整传递
+```
+
+结论：
+
+1. **Workers 能签 X.509**：WebCrypto 提供 P-256 签名，`@peculiar/x509` 负责 DER 编码。
+2. **能读懂 rcgen 的 CSR**：Rust 生成的 DER 在 Worker 侧解析无误。
+3. **CA 签发可用**：不是自签，`issuer` 与 `subject` 正确分离。
+4. **SAN 传递正确**：agent 的公网 IP 完整进入叶证书——这正是浏览器和客户端要校验的东西。
+
+另外单独验过：`@peculiar/x509` 在 workerd 里能正常 `createSelfSigned`（早期只有这个测试时就返回过合法的 448 字节 PEM）。
+
+### 8.3 尚未验证
+
+- **浏览器实际安装根证书后的行为**：要等真的装一次、真的打开一台节点才知道。
+- **证书轮换**：换根、重签全部叶证书的流程没有跑过。
+- **agent 侧的持久化与重启复用**：属于实现，尚未动工。
+
+---
+
+## 9. 实现拆分
+
+### A. 控制面（签发方）
+
+- 根证书与私钥放 Cloudflare secret（PEM）。**私钥不进仓库、不进日志。**
+- enroll 时接收 agent 的 CSR，用 `@peculiar/x509` 签出叶证书并返回。
+- 继续往 `servers` 写 `cert_fingerprint`（叶证书）与 `ca_pem`（根证书）。
+
+> 注意：`@peculiar/x509` 的依赖应该加在**控制面**，不是 admin worker。验证阶段加在 admin 只是因为两边同一个运行时，方便跑。
+
+### B. agent（被签方）
+
+- `cert.rs`：不再生成 CA。有叶证书就读本地存档；没有就生成密钥 + CSR。
+- enroll 请求带上 CSR，拿回叶证书写盘。
+- `identity.rs`：去掉本地重签路径（见 §7 的说明）。
+- rcgen 0.14 已经支持 `serialize_request`，不需要新依赖。
+
+### C. 现有客户端
+
+**不改。** 见 §6。
+
+### D. 运维看板
+
+浏览器装一次根证书即可，不涉及签发。剩下只有 CORS 这一件（agent 侧加一个只允许看板域名的白名单）。
+
 
