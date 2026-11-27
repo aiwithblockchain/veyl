@@ -1,7 +1,7 @@
 # Agent 流量计量：读取网卡
 
 > 日期：2026-11-27
-> 状态：`read_counter` 已保证二元结果（`c722c1f` 修掉解析失败被当成「表不存在」，本次修掉另外两处 `Ok(0)`）。**剩两处待验证项**，见 §5。
+> 状态：`read_counter` 只输出两种结果——`Ok` 是读到值，`Err` 是没读到。判定所依赖的 nft 输出格式已在真机验证，见 §5。
 > 代码：`agent/src/traffic.rs`、`agent/src/agent.rs`、`agent/src/config.rs`
 > 上游设计：`docs/design/traffic-billing.md` §6.2–§6.6；失败清单 `agent/docs/agent-metering-failures.md`
 
@@ -146,15 +146,32 @@ pending      = pending + delta
 
 ---
 
-## 5. 待验证项
+## 5. 判定所依赖的输出格式（已在真机验证）
 
-| # | 项 | 后果 | 处理 |
+2026-11-27 在节点 `veyl-iiIXYokol5Ss`（nft 1.0.9，`Old Doc Yak #3`）上实测，与代码里的假设一致：
+
+```
+$ nft -j list tables
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}]}
+
+$ nft list tables
+table inet veyl_meter
+```
+
+- `json_lists_table()` 只看 `nftables[].table.family == "inet"` 且 `name == "veyl_meter"`；`json_schema_version`、`handle` 这类额外字段被忽略。
+- `lists_table()` 匹配的是去掉首尾空白后**整行等于** `table inet veyl_meter`。
+
+判 `Missing` 的前提仍然是「**没有任何信号给出『表在』**」，共三种组合：
+
+| # | JSON 列表 | 文本列表 | 结果 |
 |---|---|---|---|
-| 1 | `nft -j list tables` 与 `nft list tables` 的真实输出**都未在真机验证过**（2026-11-27 起判定为 JSON 优先、文本兜底，任一信号说「表在」就不重建） | 只有**没有任何信号给出「表在」**时才判 `Missing`，共三种组合：① JSON 说没有 + 文本说没有；② JSON 拿不到 + 文本说没有；③ JSON 说没有 + 文本命令失败。后两种**只需一个信号出问题**（另一个是「没答案」而不是「假阴性」）。误判后果：每 30 秒重建一次表、计量实际停摆、**不自愈**；但每轮都报读失败，方向是**少收费**不是多收 | 在 Linux 节点上跑一次 `nft list tables` 和 `nft -j list tables`，把输出样例补进本节；与代码里的假设不符就按真实格式修正解析，然后删掉本行 |
+| ① | 说没有 | 说没有 | `Missing`（重建） |
+| ② | 拿不到 | 说没有 | `Missing`（重建） |
+| ③ | 说没有 | 命令失败 | `Missing`（重建，日志 `warn`） |
 
-判 `Missing` 之前会把两个列表的真实输出按路径打进 `info` 或 `warn` 日志，假设错了每轮都看得见。
+②③ 只需一个信号出问题——另一个是「没答案」，不是「假阴性」。误判的后果是每 30 秒重建一次表、计量实际停摆、**不自愈**；但每轮都报读失败，方向是**少收费**不是多收。判 `Missing` 前会把两个列表的真实输出按路径打进 `info` 或 `warn`，格式真变了也看得见。
 
-这一项与「二元结果」正交，单独开待办，不绑在同一次评审和回滚里。
+**这条验证只覆盖一种 nft 版本。** 换发行版或内核版本后，若输出格式变化，需要重跑上面两条命令确认；代码的两个信号互相兜底，单边失效不会直接导致重建。
 
 ---
 

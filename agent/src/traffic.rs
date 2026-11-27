@@ -674,10 +674,10 @@ mod tests {
         )
     }
 
-    /// What `nft -j list tables` is assumed to print for a node that has our
-    /// table. This shape is unverified on a real Linux host.
+    /// Verbatim `nft -j list tables` from a real node (nft 1.0.9, "Old Doc
+    /// Yak #3"); see `agent/docs/traffic-metering.md` §5.
     fn nft_tables_json() -> String {
-        r#"{"nftables":[{"metainfo":{"version":"1.0.9","release_name":"x"}},{"table":{"family":"inet","name":"veyl_meter"}}]}"#.to_string()
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}]}"#.to_string()
     }
 
     fn nft_calls(host: &FakeHost) -> Vec<Vec<String>> {
