@@ -1169,6 +1169,50 @@ describe("DO 侧已删除的机器（用户在 DO 后台直接删 droplet）", (
     ).toHaveLength(1);
   });
 
+  it("并发：标记已被另一轮写下时不再写第二条审计，也不扣费", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(404, { id: "not_found" });
+    // 模拟另一轮 Cron 在探测之后、落标记之前先写了（UPDATE 的守卫会挡下这一次）。
+    db.beforeProviderGoneMark = () => {
+      db.rows("servers")[0].provider_gone_at = Date.now();
+    };
+
+    const report = await runBilling(env as never);
+
+    // 结论仍是 gone：这一轮不扣钱。
+    expect(report.providerGone).toBe(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    // 但没改到行，就不写审计——否则事故时审计会多出一倍。
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.provider_gone"),
+    ).toHaveLength(0);
+  });
+
+  it("报告里有「当前未销毁的冻结台数」：事故过去后仍看得见", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(404, { id: "not_found" });
+
+    const first = await runBilling(env as never);
+    expect(first.providerGone).toBe(1);
+    expect(first.providerGoneActive).toBe(1);
+
+    // 已冻结又已销毁的行不算存量：它已经不占额度、不再需要盯。
+    db.rows("servers").push({
+      ...db.rows("servers")[0],
+      id: "srv_dead_gone",
+      provider_id: "999999",
+      state: "destroyed",
+      destroyed_at: Date.now(),
+    });
+    const next = await runBilling(env as never);
+    expect(next.providerGone).toBe(0);
+    expect(next.providerGoneActive).toBe(1);
+  });
+
   it("心跳静默 + DO 200：机器还在，agent 挂了也照常扣（计费不看在线）", async () => {
     const db = new FakeD1();
     const env = envWith(db);

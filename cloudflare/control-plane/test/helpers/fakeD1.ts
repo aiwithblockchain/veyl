@@ -55,6 +55,8 @@ export class FakeD1 {
   beforeCredentialInsert?: () => void;
   /** 测试钩子：结算失败认领订单前触发，用来模拟「并发结算已经把订单置 ready」。 */
   beforeSettleClaim?: () => void;
+  /** 测试钩子：写 `provider_gone_at` 前触发，用来模拟「另一轮 Cron 已经先写过标记」。 */
+  beforeProviderGoneMark?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -2067,6 +2069,12 @@ export class FakeD1 {
           updated_at: row.updated_at ?? 0,
         }));
     }
+    if (sql.startsWith("select id from servers where provider_gone_at is not null")) {
+      // 报告里的「当前未销毁的冻结台数」：只数还没有 destroyed_at 的行。
+      return this.tables.servers
+        .filter((row) => row.provider_gone_at != null && row.destroyed_at == null)
+        .map((row) => ({ id: row.id }));
+    }
     if (
       sql.startsWith(
         "select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers where account_id",
@@ -2549,6 +2557,12 @@ export class FakeStatement {
         .find((entry) => entry.server_id === serverId && entry.cycle_id === cycleId);
       changes =
         row && this.db.rows("wallet_ledger").some((w) => w.id === ledgerId) ? 1 : 0;
+    } else if (sql.startsWith("update servers set provider_gone_at")) {
+      // 标记语句自带 `provider_gone_at IS NULL` 守卫：并发双例只有一个能改到行。
+      this.db.beforeProviderGoneMark?.();
+      const id = this.statement.args[2];
+      const row = this.db.rows("servers").find((s) => s.id === id);
+      changes = row && row.provider_gone_at == null ? 1 : 0;
     }
     this.db.exec(this.statement);
     return { success: true, meta: { changes } };

@@ -62,6 +62,11 @@ export interface BillingReport {
   providerProbed: number;
   /** 心跳静默但 DO 查询没给出结论（超时/5xx/无令牌）的台数：下一轮再查，仍照常扣。 */
   providerUnknown: number;
+  /**
+   * 当前被冻结、还没被用户销毁的台数（`provider_gone_at` 非空且未销毁）。
+   * `providerGone` 只计本轮新增，事故过去后从报告里看不出来；这个数才是存量。
+   */
+  providerGoneActive: number;
   pastDue: number;
   expired: number;
   rebuilt: number;
@@ -103,7 +108,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -223,6 +228,16 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   report.serversPruned = await pruneDestroyedServers(env, now);
   report.tokensPruned = await pruneRefreshTokens(env, now);
   report.accountsPruned = await pruneOrphanAccounts(env, now);
+  // 事故可见性：`providerGone` 只记本轮新增，事故过去后就看不出冻了多少台。
+  // 只读计数，查失败不影响这一轮计费。
+  try {
+    const gone = await db
+      .prepare("SELECT id FROM servers WHERE provider_gone_at IS NOT NULL AND destroyed_at IS NULL")
+      .all<{ id: string }>();
+    report.providerGoneActive = (gone.results ?? []).length;
+  } catch (error) {
+    console.warn(`[billing] provider_gone_count_failed error=${String(error)}`);
+  }
   return report;
 }
 
@@ -457,15 +472,21 @@ async function markProviderGone(
   if (droplet.status !== 404) return { verdict: "unknown", probed: true };
 
   // 写入失败不能静默：标记没落库就等于这台继续扣费，下一轮还会重来。
-  await db
+  const marked = await db
     .prepare(
       "UPDATE servers SET provider_gone_at = ?, updated_at = ? WHERE id = ? AND provider_gone_at IS NULL",
     )
     .bind(now, now, server.id)
     .run()
-    .catch((error) =>
-      console.warn(`[billing] provider_gone_write_failed server=${server.id} error=${String(error)}`),
-    );
+    .catch((error) => {
+      console.warn(`[billing] provider_gone_write_failed server=${server.id} error=${String(error)}`);
+      return null;
+    });
+  // 只有真改了这一行才写审计：并发双例会重复写，写失败时审计也没有依据。
+  // 两种情况都不影响本轮结论——探测已经看到 404，这一轮不扣钱，下一轮自然重来。
+  if (marked === null || Number(marked.meta?.changes ?? 0) !== 1) {
+    return { verdict: "gone", probed: true };
+  }
   await db
     .prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.provider_gone', ?)",
