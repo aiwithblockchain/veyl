@@ -4,6 +4,7 @@ pub mod assemble;
 pub mod error;
 pub mod fetch;
 pub mod fsutil;
+pub mod kernel_check;
 pub mod models;
 pub mod platform;
 pub mod secrets;
