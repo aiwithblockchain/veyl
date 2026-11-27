@@ -1,0 +1,5 @@
+# 随包产物：构建时由 scripts/lib/tun-macos.sh 复用仓库根已下载的副本，
+# 或调用 scripts/runtime/fetch-runtime.mjs、scripts/rules/fetch-rules.mjs 生成。
+# 与仓库根对 src-tauri/resources/{runtime,rules} 的处理保持一致：只入库许可证与来源说明。
+src-tauri/resources/runtime/*
+src-tauri/resources/rules/*.tar.zst
