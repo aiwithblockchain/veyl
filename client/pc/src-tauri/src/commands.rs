@@ -80,12 +80,16 @@ struct Prepared {
     raw: serde_json::Value,
     nodes: Vec<NodeBrief>,
     kernel: KernelCheck,
+    /// 装配后的运行时配置；零节点时是 `None`，调用方要顺手删掉旧预览。
+    runtime: Option<serde_json::Value>,
 }
 
-/// 解析 → 结构校验 → 装配预览 → 内核校验。
+/// 解析 → 结构校验 → 装配 → 内核校验。
 ///
-/// 任一步失败都不落盘（装配预览会先写 `runtime.json`，失败时删掉）。
-async fn prepare(state: &AppState, raw_text: &str, id: &str) -> AppResult<Prepared> {
+/// **全程不碰正式路径**：内核校验写在 `staging/` 的临时文件上，校验完就删。
+/// 是否落盘由调用方在拿到结果之后决定——这样任何一步失败都不会留下一个
+/// 含节点凭据的孤儿 `runtime.json`，也不会毁掉上一次可用的预览。
+async fn prepare(state: &AppState, raw_text: &str) -> AppResult<Prepared> {
     let raw = assemble::parse(raw_text)?;
     assemble::validate_structure(&raw)?;
     let nodes = assemble::nodes_of(&raw);
@@ -95,16 +99,19 @@ async fn prepare(state: &AppState, raw_text: &str, id: &str) -> AppResult<Prepar
             raw,
             nodes,
             kernel: KernelCheck::Unavailable,
+            runtime: None,
         });
     }
 
     let assembled = assemble::assemble(&raw, &preview_params())?;
-    state.store.write_runtime(id, &assembled.runtime)?;
-    let runtime_path = state.store.runtime_path(id)?;
-    let outcome = kernel_check::check(&state.data_dir, &runtime_path).await;
+    let staging_dir = state.data_dir.join(crate::state::STAGING_DIR);
+    crate::fsutil::ensure_private_dir(&staging_dir)?;
+    let staging = staging_dir.join(format!("{}.json", store::new_id()));
+    crate::fsutil::write_json(&staging, &assembled.runtime)?;
+    let outcome = kernel_check::check(&state.data_dir, &staging).await;
+    let _ = crate::fsutil::remove_file_if_exists(&staging);
 
     if let KernelOutcome::Failed(message) = &outcome {
-        let _ = state.store.remove_runtime(id);
         return Err(AppError::new("KERNEL_CHECK_FAILED", "内核不认这份配置")
             .with_reason(message.clone())
             .with_hint("重新导入一次；反复出现就回桌面端重新导出配置。"));
@@ -115,7 +122,12 @@ async fn prepare(state: &AppState, raw_text: &str, id: &str) -> AppResult<Prepar
         _ => KernelCheck::Unavailable,
     };
 
-    Ok(Prepared { raw, nodes, kernel })
+    Ok(Prepared {
+        raw,
+        nodes,
+        kernel,
+        runtime: Some(assembled.runtime),
+    })
 }
 
 fn commit(
@@ -131,6 +143,11 @@ fn commit(
     let raw_text = serde_json::to_string(&prepared.raw)
         .map_err(|error| AppError::internal(format!("保存配置失败：{error}")))?;
     store.write_raw(id, &raw_text)?;
+    // 零节点要显式删掉预览：留着上一次的 runtime.json 与「0 个节点」自相矛盾。
+    match &prepared.runtime {
+        Some(runtime) => store.write_runtime(id, runtime)?,
+        None => store.remove_runtime(id)?,
+    }
 
     let profile = Profile {
         id: id.to_string(),
@@ -197,9 +214,10 @@ pub async fn import_url(state: &AppState, raw_url: &str) -> AppResult<Profile> {
     };
 
     let id = store::new_id();
-    let prepared = prepare(state, &body, &id).await?;
+    let prepared = prepare(state, &body).await?;
 
     // 链接先写密钥存储：写不进去就不落配置——否则会留下一个永远刷不了的配置。
+    // 此时还没有创建配置目录，失败也不会留下任何东西。
     secret_set(&state.secrets, &id, url.as_str())?;
     let result = commit(
         &state.store,
@@ -212,7 +230,9 @@ pub async fn import_url(state: &AppState, raw_url: &str) -> AppResult<Profile> {
         None,
     );
     if result.is_err() {
+        // 回滚：密钥与可能已建出的目录都清掉，别留下界面看不见的残留。
         secret_delete(&state.secrets, &id);
+        let _ = state.store.remove(&id);
     }
     result
 }
@@ -239,27 +259,33 @@ pub async fn import_file(state: &AppState, path: &str) -> AppResult<Profile> {
     }
 
     let text = crate::fsutil::read_text(&path)?;
-    let id = store::new_id();
-    let prepared = prepare(state, &text, &id).await?;
-
+    // 名称先校验：不合格就不必再做装配与内核校验（那些会写 staging 文件）。
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| "本地配置".to_string());
+    let name = validate_name(&name)?;
+
+    let id = store::new_id();
+    let prepared = prepare(state, &text).await?;
 
     let stored_path = state.store.raw_path(&id)?;
-    commit(
+    let result = commit(
         &state.store,
         &id,
         &prepared,
-        validate_name(&name)?,
+        name,
         ProfileSource::File {
             path: stored_path.to_string_lossy().into_owned(),
         },
         SyncState::Never,
         None,
         None,
-    )
+    );
+    if result.is_err() {
+        let _ = state.store.remove(&id);
+    }
+    result
 }
 
 pub async fn refresh(state: &AppState, id: &str) -> AppResult<Profile> {
@@ -295,12 +321,16 @@ pub async fn refresh(state: &AppState, id: &str) -> AppResult<Profile> {
     };
 
     match fetch::fetch_profile(&state.http, &url).await {
-        FetchOutcome::Ok(body) => match prepare(state, &body, id).await {
+        FetchOutcome::Ok(body) => match prepare(state, &body).await {
             Ok(prepared) => {
                 let mut updated = profile;
                 let raw_text = serde_json::to_string(&prepared.raw)
                     .map_err(|error| AppError::internal(error.to_string()))?;
                 state.store.write_raw(id, &raw_text)?;
+                match &prepared.runtime {
+                    Some(runtime) => state.store.write_runtime(id, runtime)?,
+                    None => state.store.remove_runtime(id)?,
+                }
                 updated.node_count = prepared.nodes.len();
                 updated.last_synced_at = Some(now_millis());
                 updated.sync_state = SyncState::Ok;
@@ -369,8 +399,11 @@ pub fn rename(state: &AppState, id: &str, name: &str) -> AppResult<Profile> {
 }
 
 pub fn remove(state: &AppState, id: &str) -> AppResult<()> {
+    // 先删记录与目录、最后删密钥：反过来的话，写清单失败会变成
+    // 「配置还在、链接没了」，界面只会让用户重新粘贴，查不出原因。
+    state.store.remove(id)?;
     secret_delete(&state.secrets, id);
-    state.store.remove(id)
+    Ok(())
 }
 
 pub fn detail(state: &AppState, id: &str) -> AppResult<ProfileDetail> {
@@ -716,5 +749,132 @@ mod tests {
         assert_eq!(detail.nodes[0].tag, "node-a");
         let json = serde_json::to_string(&detail).unwrap();
         assert!(!json.contains("server_port"));
+    }
+
+    fn profile_dirs(data: &std::path::Path) -> Vec<std::path::PathBuf> {
+        match std::fs::read_dir(data.join("profiles")) {
+            Ok(reader) => reader.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 名称不合格必须在装配与校验之前就拒绝——否则会留下一个没人认领的预览文件。
+    #[tokio::test]
+    async fn a_too_long_file_name_leaves_nothing_behind() {
+        let data = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir
+            .path()
+            .join(format!("{}.json", "x".repeat(61)));
+        std::fs::write(&source, sample_config().to_string()).unwrap();
+        let state = AppState::for_tests(data.path().to_path_buf());
+
+        let error = import_file(&state, &source.to_string_lossy())
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("名称最多"), "{}", error.message);
+        assert!(state.store.list().unwrap().is_empty());
+        assert!(profile_dirs(data.path()).is_empty(), "不该留下配置目录");
+    }
+
+    /// 密钥写不进去时不能留下任何东西：目录、预览、元数据都不该出现。
+    #[tokio::test]
+    async fn a_failed_secret_write_leaves_no_profile() {
+        struct FailingStore;
+        impl crate::secrets::SecretStore for FailingStore {
+            fn get(&self, _account: &str) -> Result<Option<String>, String> {
+                Err("boom".to_string())
+            }
+            fn set(&self, _account: &str, _value: &str) -> Result<(), String> {
+                Err("boom".to_string())
+            }
+            fn delete(&self, _account: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let body = sample_config().to_string();
+        let addr = serve(move |_| ok_json(&body));
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState {
+            data_dir: data.path().to_path_buf(),
+            store: Store::new(data.path()).unwrap(),
+            secrets: Arc::new(FailingStore),
+            http: crate::fetch::client().unwrap(),
+        };
+
+        let error = import_url(&state, &url_for(addr)).await.unwrap_err();
+        assert!(error.message.contains("保存订阅链接失败"), "{}", error.message);
+        assert!(state.store.list().unwrap().is_empty());
+        assert!(profile_dirs(data.path()).is_empty(), "不该留下配置目录");
+        assert!(
+            !data.path().join("staging").exists()
+                || std::fs::read_dir(data.path().join("staging")).unwrap().next().is_none(),
+            "不该留下临时配置",
+        );
+    }
+
+    #[cfg(unix)]
+    fn install_failing_kernel(data: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = data.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join("sing-box");
+        std::fs::write(&path, "#!/bin/sh\necho 'FATAL bad config' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// 刷新时新配置被内核拒绝：旧配置与旧预览都要原样保留。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_kernel_check_keeps_the_previous_preview() {
+        let body = sample_config().to_string();
+        let addr = serve(move |_| ok_json(&body));
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests(data.path().to_path_buf());
+
+        let profile = import_url(&state, &url_for(addr)).await.unwrap();
+        let runtime = state.store.runtime_path(&profile.id).unwrap();
+        let before = std::fs::read_to_string(&runtime).unwrap();
+
+        install_failing_kernel(data.path());
+        let after = refresh(&state, &profile.id).await.unwrap();
+        assert_eq!(after.sync_state, SyncState::Failed);
+        assert!(after.sync_error.unwrap().contains("内核不认"));
+
+        assert!(runtime.exists(), "刷新失败不该删掉上一次的预览");
+        assert_eq!(std::fs::read_to_string(&runtime).unwrap(), before);
+        assert!(state.store.read_raw(&profile.id).unwrap().is_some());
+    }
+
+    /// 刷新到零节点：旧预览必须消失，不能和「0 个节点」并存。
+    #[tokio::test]
+    async fn refreshing_to_zero_nodes_drops_the_stale_preview() {
+        let good = sample_config().to_string();
+        let empty = serde_json::json!({
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "route": {"final": "direct"}
+        })
+        .to_string();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+        let addr = serve(move |_| {
+            let count = hits_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                ok_json(&good)
+            } else {
+                ok_json(&empty)
+            }
+        });
+
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests(data.path().to_path_buf());
+        let profile = import_url(&state, &url_for(addr)).await.unwrap();
+        let runtime = state.store.runtime_path(&profile.id).unwrap();
+        assert!(runtime.exists());
+
+        let after = refresh(&state, &profile.id).await.unwrap();
+        assert_eq!(after.node_count, 0);
+        assert!(!runtime.exists(), "零节点不能留着上一次的预览");
     }
 }

@@ -7,6 +7,9 @@ use crate::error::AppResult;
 use crate::secrets::{self, SecretStore};
 use crate::store::Store;
 
+/// 内核校验用的临时目录。启动时清一次：崩溃可能在里面留下含节点密码的配置。
+pub const STAGING_DIR: &str = "staging";
+
 pub struct AppState {
     pub data_dir: PathBuf,
     pub store: Store,
@@ -17,6 +20,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(data_dir: PathBuf, service: &str) -> AppResult<Self> {
         let store = Store::new(&data_dir)?;
+        let _ = crate::fsutil::remove_dir_if_exists(&data_dir.join(STAGING_DIR));
         let secrets = secrets::open(&data_dir, service);
         let http = crate::fetch::client()?;
         Ok(Self {
