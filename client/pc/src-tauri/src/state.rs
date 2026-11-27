@@ -1,6 +1,7 @@
 //! 进程内共享状态：配置存储、密钥存储、HTTP 客户端、数据目录。
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::connection::ConnectionManager;
@@ -17,6 +18,8 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     pub http: reqwest::Client,
     pub connection: ConnectionManager,
+    /// 退出流程是否已经开始：`RunEvent::ExitRequested` 会再来一次，不能重复拦。
+    pub shutdown_started: AtomicBool,
 }
 
 impl AppState {
@@ -33,6 +36,7 @@ impl AppState {
             secrets,
             http,
             connection,
+            shutdown_started: AtomicBool::new(false),
         })
     }
 
@@ -47,6 +51,7 @@ impl AppState {
             connection: ConnectionManager::new(session, http.clone()),
             http,
             data_dir,
+            shutdown_started: AtomicBool::new(false),
         }
     }
 }

@@ -30,7 +30,7 @@ fn app_info() -> AppInfo {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 身份最先注入：连接路径一碰 TUN 就会读它。
@@ -49,6 +49,14 @@ pub fn run() {
                 }));
             }
             app.manage(state);
+
+            // 上一次 App 没拆干净时，helper 可能还在跑隧道：启动就把状态接过来，
+            // 否则界面会显示「未连接」而流量还在隧道里。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = handle.state::<state::AppState>();
+                state.connection.adopt_existing();
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -67,6 +75,32 @@ pub fn run() {
             commands::connection_status,
             commands::switch_node,
         ])
-        .run(tauri::generate_context!())
-        .expect("veyl-cli: failed to launch");
+        .build(tauri::generate_context!())
+        .expect("veyl-cli: failed to build app");
+
+    app.run(|handle, event| {
+        // 显式退出/关窗退出前先拆隧道：关掉进程却留着隧道是最坏的一种「已断开」。
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            let already = handle
+                .state::<state::AppState>()
+                .shutdown_started
+                .swap(true, std::sync::atomic::Ordering::SeqCst);
+            if already {
+                return;
+            }
+            api.prevent_exit();
+            let handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<state::AppState>();
+                // 清理最多等 15 秒；helper 的停止预算本身是 10 秒。
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    state.connection.disconnect(),
+                )
+                .await;
+                drop(state);
+                handle.exit(0);
+            });
+        }
+    });
 }

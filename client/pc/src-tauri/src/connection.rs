@@ -171,6 +171,37 @@ impl ConnectionManager {
         }
     }
 
+    /// 启动时接手已在运行的隧道（上次 App 没拆干净、或崩溃残留）。
+    ///
+    /// helper 只记 pid / Clash / since，不记是哪套配置，所以这里只如实报告
+    /// 「在跑」，`config_id` 留空、节点未知——界面据此显示已连接并可断开，
+    /// 但不会假装知道连接的是哪一套。
+    pub fn adopt_existing(&self) -> Option<ConnectionSnapshot> {
+        if !matches!(self.inner.lock().unwrap().state, ConnectionState::Idle) {
+            return None;
+        }
+        let TunState::Running { pid } = self.session.status() else {
+            return None;
+        };
+        let since = self.session.connected_since().unwrap_or_default();
+
+        {
+            let mut inner = self.inner.lock().unwrap();
+            // 探测期间可能有别的命令把状态推进了，别覆盖。
+            if !matches!(inner.state, ConnectionState::Idle) {
+                return None;
+            }
+            inner.state = ConnectionState::Connected {
+                config_id: String::new(),
+                pid,
+                since,
+                node: None,
+            };
+        }
+        self.emit();
+        Some(self.snapshot())
+    }
+
     /// 记住用户选的节点（未连接时只改内存）。
     pub fn select_node(&self, tag: &str) {
         {
@@ -625,6 +656,8 @@ mod tests {
         stops: AtomicUsize,
         restores: AtomicUsize,
         running: AtomicBool,
+        /// 后端报告的在跑 pid（0 = 没在跑）；接手用例用。
+        running_pid: std::sync::atomic::AtomicU32,
     }
 
     impl FakeBackend {
@@ -634,6 +667,7 @@ mod tests {
                 stops: AtomicUsize::new(0),
                 restores: AtomicUsize::new(0),
                 running: AtomicBool::new(false),
+                running_pid: std::sync::atomic::AtomicU32::new(0),
             })
         }
     }
@@ -667,11 +701,12 @@ mod tests {
         }
 
         fn status(&self) -> Result<TunSnapshot, TunError> {
+            let pid = self.running_pid.load(Ordering::SeqCst);
             Ok(TunSnapshot {
                 running: self.running.load(Ordering::SeqCst),
-                pid: None,
+                pid: (pid > 0).then_some(pid),
                 clash_api: None,
-                since: None,
+                since: (pid > 0).then(|| "2026-11-27T00:00:00Z".to_string()),
                 last_error: None,
                 dns_hijack: DnsHijack::default(),
                 helper_build: None,
@@ -688,7 +723,6 @@ mod tests {
     /// 进程内的假 Clash 控制口。
     struct FakeClash {
         addr: SocketAddr,
-        healthy: Arc<AtomicBool>,
         now: Arc<std::sync::Mutex<String>>,
         puts: Arc<AtomicUsize>,
     }
@@ -730,12 +764,7 @@ mod tests {
                 let _ = stream.flush();
             }
         });
-        FakeClash {
-            addr,
-            healthy,
-            now,
-            puts,
-        }
+        FakeClash { addr, now, puts }
     }
 
     fn read_request(stream: &mut TcpStream) -> String {
@@ -829,6 +858,40 @@ mod tests {
         assert!(matches!(snapshot.state, ConnectionState::Connected { pid: 4242, .. }));
         assert!(snapshot.uptime_seconds.is_some());
         assert_eq!(backend.stops.load(Ordering::SeqCst), 0);
+    }
+
+    /// 上一次 App 没拆干净时，新实例启动要如实报告「隧道在跑」。
+    #[tokio::test]
+    async fn an_existing_tunnel_is_adopted_at_startup() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        backend.running.store(true, Ordering::SeqCst);
+        backend.running_pid.store(4242, Ordering::SeqCst);
+        let manager = manager(backend.clone(), &clash);
+
+        let snapshot = manager.adopt_existing().expect("应当接手已在跑的隧道");
+        match &snapshot.state {
+            ConnectionState::Connected {
+                pid, config_id, ..
+            } => {
+                assert_eq!(*pid, 4242);
+                assert!(config_id.is_empty(), "接手时不知道是哪套配置，别假装知道");
+            }
+            other => panic!("期望已连接，拿到 {other:?}"),
+        }
+        assert!(snapshot.uptime_seconds.is_some());
+        // 只接手一次。
+        assert!(manager.adopt_existing().is_none());
+    }
+
+    /// 没在跑就保持 Idle，不要凭空造一个已连接。
+    #[tokio::test]
+    async fn nothing_is_adopted_when_no_tunnel_runs() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        let manager = manager(backend, &clash);
+        assert!(manager.adopt_existing().is_none());
+        assert!(matches!(manager.snapshot().state, ConnectionState::Idle));
     }
 
     #[tokio::test]

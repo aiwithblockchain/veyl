@@ -848,6 +848,7 @@ mod tests {
                 http.clone(),
             ),
             http,
+            shutdown_started: std::sync::atomic::AtomicBool::new(false),
         };
 
         let error = import_url(&state, &url_for(addr)).await.unwrap_err();
