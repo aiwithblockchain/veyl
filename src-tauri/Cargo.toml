@@ -132,6 +132,8 @@ libc = "0.2"
 tokio = { version = "1", features = ["test-util"] }
 # 测试进程不走 run()，需要一个静态初始化器补注入 TUN 身份（见 tun_identity.rs）。
 ctor = "0.2"
+# 测试要直接摆出 TUN 连接状态；这些方法只在 test-hooks 下存在。
+veyl-tun = { path = "../crates/veyl-tun", features = ["test-hooks"] }
 
 # TUN 提权：SMAppService 只在 macOS 13+ 存在，按需引入。
 [target.'cfg(target_os = "macos")'.dependencies]

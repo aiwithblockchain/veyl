@@ -2472,34 +2472,18 @@ mod tests {
     /// 以后把目标改成 `100.64.x` / `198.18.x` 也必须让测试红。
     #[test]
     fn the_takeover_address_is_not_in_any_fixed_exclude() {
-        let excludes = fixed_excludes_from_source();
-        assert!(excludes.len() >= 10, "排除表解析失败：{excludes:?}");
+        // 排除表现在与 helper 在同一个共享 crate 里，直接读常量，不再解析源码。
+        let excludes = veyl_tun::FIXED_EXCLUDES;
+        assert!(excludes.len() >= 10, "排除表看起来不对：{excludes:?}");
         let target: std::net::Ipv4Addr = SYSTEM_DNS_TARGET.parse().unwrap();
         for entry in excludes {
-            if let Some(hit) = cidr_contains_v4(&entry, target) {
+            if let Some(hit) = cidr_contains_v4(entry, target) {
                 assert!(
                     !hit,
                     "目标地址 {SYSTEM_DNS_TARGET} 落在排除段 {entry} 里：查询会出隧道，整台机器解析超时"
                 );
             }
         }
-    }
-
-    /// helper 刻意不链 `veyl_lib`，测试只能从源码里读固定排除表。
-    fn fixed_excludes_from_source() -> Vec<String> {
-        const SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tun/mod.rs"));
-        let start = SOURCE
-            .find("pub const FIXED_EXCLUDES: [&str; 15] = [")
-            .expect("固定排除表改了形状，测试要跟着改");
-        let body = &SOURCE[start..];
-        let body = &body[body.find('[').expect("缺少数组起始")..];
-        let end = body.find("];").expect("固定排除表没有结束");
-        body[..end]
-            .split('"')
-            .skip(1)
-            .step_by(2)
-            .map(str::to_string)
-            .collect()
     }
 
     fn cidr_contains_v4(cidr: &str, ip: std::net::Ipv4Addr) -> Option<bool> {

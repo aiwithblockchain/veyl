@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::privilege::{
+use crate::privilege::{
     HelperStatus, PrivilegeError, ERR_HELPER_INSTALL_FAILED, ERR_HELPER_MISSING, ERR_TUN_DENIED,
     ERR_TUN_START_FAILED,
 };
@@ -33,7 +33,7 @@ pub const TUN_REPLY_DEADLINE_START: Duration = Duration::from_secs(90);
 ///
 /// macOS 上是真实 XPC 连接；其它平台暂时没有租约机制，留空类型占位。
 #[cfg(target_os = "macos")]
-pub type TunLease = crate::tun::xpc::Lease;
+pub type TunLease = crate::xpc::Lease;
 #[cfg(not(target_os = "macos"))]
 pub struct TunLease;
 
@@ -340,9 +340,9 @@ mod macos {
     use std::time::Instant;
 
     use super::*;
-    use crate::tun::privilege::{app_location_hint, Registration};
-    use crate::tun::protocol::mach_service;
-    use crate::tun::xpc::{self, Reply, XpcError};
+    use crate::privilege::{app_location_hint, Registration};
+    use crate::protocol::mach_service;
+    use crate::xpc::{self, Reply, XpcError};
 
     /// `start` 超时后核对真实状态的宽限：helper 可能只差几秒就完成。
     /// 超时不能直接判失败——2026-11-11 真机就是「界面报失败、隧道已经起来」。

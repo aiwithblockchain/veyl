@@ -4,9 +4,8 @@
 //! 复制到 `%ProgramData%\Veyl\runtime\<sha256>\` 后再执行。用户可写的位置
 //! （per-user 应用目录、`%TEMP%`）永远不参与。
 //!
-//! 哈希在构建时由 `build.rs` 编进二进制（`VEYL_RUNTIME_SHA256` /
-//! `VEYL_WINTUN_SHA256`），请求方说了不算。任何一个对不上就失败关闭，
-//! 不降级、不找替代文件。
+//! 哈希由各 APP 的 build script 算好后随身份注入（[`crate::identity`]），
+//! 请求方说了不算。任何一个对不上就失败关闭，不降级、不找替代文件。
 
 use std::path::{Path, PathBuf};
 
@@ -14,15 +13,6 @@ use sha2::{Digest, Sha256};
 
 pub const SING_BOX: &str = "sing-box.exe";
 pub const WINTUN: &str = "wintun.dll";
-
-const RUNTIME_SHA256: &str = match option_env!("VEYL_RUNTIME_SHA256") {
-    Some(value) => value,
-    None => "",
-};
-const WINTUN_SHA256: &str = match option_env!("VEYL_WINTUN_SHA256") {
-    Some(value) => value,
-    None => "",
-};
 
 /// 与契约 §4.2 的 wire 码一致：`runtime_missing` / `tun_start_failed`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +39,12 @@ impl RuntimeError {
 
 /// 解析（必要时 staging）出可执行的 `sing-box.exe`。
 pub fn resolve(install_root: &Path, data_root: &Path) -> Result<PathBuf, RuntimeError> {
-    resolve_with(install_root, data_root, RUNTIME_SHA256, WINTUN_SHA256)
+    resolve_with(
+        install_root,
+        data_root,
+        crate::identity::runtime_sha256(),
+        crate::identity::wintun_sha256(),
+    )
 }
 
 /// 可注入哈希的版本：测试不必依赖构建时有没有那 78 MB 运行时。

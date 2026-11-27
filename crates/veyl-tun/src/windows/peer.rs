@@ -31,13 +31,11 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// 发布构建通过环境变量把允许的证书指纹 / 发布者编进服务（`build.rs` 转发）。
-const PINNED_THUMBPRINTS: Option<&str> = option_env!("VEYL_WIN_CERT_THUMBPRINTS");
-const PINNED_PUBLISHER: Option<&str> = option_env!("VEYL_WIN_PUBLISHER");
-
-/// 开发开关：允许未签名客户端连接。**编译期环境变量、默认关闭、
+/// 允许的证书指纹 / 发布者由各 APP 的 build script 算好后随身份注入
+/// （[`crate::identity`]）。
+///
+/// 开发开关（`win_allow_unsigned_dev`）：允许未签名客户端连接，**默认关闭、
 /// 只在 debug 构建生效**；发布构建即使设置也无效。每次放行都会写 warn 日志。
-const ALLOW_UNSIGNED_DEV: Option<&str> = option_env!("VEYL_WIN_ALLOW_UNSIGNED_DEV");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureInfo {
@@ -181,9 +179,9 @@ fn query_image(process: HANDLE, pid: u32) -> Result<String, PeerError> {
 }
 
 fn check_signature(image: &str, path: &Path) -> Result<SignatureInfo, PeerError> {
-    let pins = PINNED_THUMBPRINTS.unwrap_or_default();
+    let pins = crate::identity::win_cert_thumbprints().unwrap_or_default();
     // 证书的 simple display name 通常只有 CN 的值（不含 "CN="），两种写法都接受。
-    let publisher = PINNED_PUBLISHER
+    let publisher = crate::identity::win_publisher()
         .map(normalize_publisher)
         .filter(|value| !value.is_empty());
     let pinned = !pins.trim().is_empty() || publisher.is_some();
@@ -254,7 +252,7 @@ fn normalize_publisher(value: &str) -> &str {
 }
 
 fn dev_unsigned_enabled() -> bool {
-    ALLOW_UNSIGNED_DEV
+    crate::identity::win_allow_unsigned_dev()
         .map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }

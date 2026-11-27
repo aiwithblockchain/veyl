@@ -15,10 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::backend::{TunBackend, TunLease};
-
-/// helper 可执行文件名（与 `Contents/MacOS/veyl-helper` 一致）。
-pub const HELPER_BINARY_NAME: &str = "veyl-helper";
+use crate::backend::{TunBackend, TunLease};
 
 const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -146,7 +143,7 @@ impl HelperUpdater {
             #[cfg(target_os = "macos")]
             admin_restart: Arc::new(macos::run_admin_restart),
             #[cfg(target_os = "macos")]
-            in_app_bundle: Mutex::new(crate::tun::privilege::smappservice::runs_in_app_bundle()),
+            in_app_bundle: Mutex::new(crate::privilege::smappservice::runs_in_app_bundle()),
             #[cfg(test)]
             poll_timeout: POLL_TIMEOUT,
             #[cfg(test)]
@@ -229,7 +226,7 @@ impl HelperUpdater {
     /// 随包的 helper 路径：与主程序同目录。
     pub fn expected_helper_path() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
-        let path = exe.parent()?.join(HELPER_BINARY_NAME);
+        let path = exe.parent()?.join(crate::identity::helper_binary_name());
         path.is_file().then_some(path)
     }
 
@@ -674,7 +671,7 @@ pub fn cdhash_eq(left: &str, right: &str) -> bool {
         && left.trim().eq_ignore_ascii_case(right.trim())
 }
 
-fn wire_code(error: &super::backend::TunError) -> Option<&str> {
+fn wire_code(error: &crate::backend::TunError) -> Option<&str> {
     error
         .detail
         .as_ref()
@@ -682,11 +679,11 @@ fn wire_code(error: &super::backend::TunError) -> Option<&str> {
         .and_then(|code| code.as_str())
 }
 
-fn is_bad_request(error: &super::backend::TunError) -> bool {
+fn is_bad_request(error: &crate::backend::TunError) -> bool {
     wire_code(error) == Some("bad_request")
 }
 
-fn is_precondition_failed(error: &super::backend::TunError) -> bool {
+fn is_precondition_failed(error: &crate::backend::TunError) -> bool {
     wire_code(error) == Some("precondition_failed")
 }
 
@@ -897,8 +894,8 @@ mod macos {
     fn helper_requirement() -> String {
         format!(
             "anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{}\"",
-            super::HELPER_BINARY_NAME,
-            crate::tun::protocol::team_id()
+            crate::identity::helper_binary_name(),
+            crate::protocol::team_id()
         )
     }
 
@@ -1024,8 +1021,8 @@ mod macos {
             let build = info.and_then(|info| {
                 let identifier = dict_string(info, "identifier");
                 let team = dict_string(info, "teamid");
-                let matches = identifier.as_deref() == Some(super::HELPER_BINARY_NAME)
-                    && team.as_deref() == Some(crate::tun::protocol::team_id());
+                let matches = identifier.as_deref() == Some(crate::identity::helper_binary_name())
+                    && team.as_deref() == Some(crate::protocol::team_id());
                 if matches {
                     unique_hex(info)
                 } else {
@@ -1084,15 +1081,15 @@ mod tests {
     /// 旧 helper 的 `bad_request` 必须被识别成版本协商，不是内部错误。
     #[test]
     fn a_bad_request_marks_an_old_helper() {
-        let error = super::super::backend::TunError::new(
-            super::super::backend::TunErrorCode::BadRequest,
+        let error = crate::backend::TunError::new(
+            crate::backend::TunErrorCode::BadRequest,
             "未知方法 restart",
         )
         .with_detail(serde_json::json!({ "wire_code": "bad_request" }));
         assert!(is_bad_request(&error));
 
-        let other = super::super::backend::TunError::new(
-            super::super::backend::TunErrorCode::TunStartFailed,
+        let other = crate::backend::TunError::new(
+            crate::backend::TunErrorCode::TunStartFailed,
             "启动失败",
         )
         .with_detail(serde_json::json!({ "wire_code": "tun_start_failed" }));
@@ -1102,8 +1099,8 @@ mod tests {
     /// helper 正在 start 时 restart 被拒：busy/可重试，绝不能当成需要管理员授权。
     #[test]
     fn precondition_failed_is_busy_not_an_admin_problem() {
-        let error = super::super::backend::TunError::new(
-            super::super::backend::TunErrorCode::TunStartFailed,
+        let error = crate::backend::TunError::new(
+            crate::backend::TunErrorCode::TunStartFailed,
             "正在启动连接",
         )
         .with_detail(serde_json::json!({ "wire_code": "precondition_failed" }));
@@ -1140,8 +1137,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod admin_restart_tests {
         use super::super::*;
-        use crate::tun::backend::{StartReply, TunError, TunErrorCode, TunSnapshot};
-        use crate::tun::privilege::HelperStatus;
+        use crate::backend::{StartReply, TunError, TunErrorCode, TunSnapshot};
+        use crate::privilege::HelperStatus;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 

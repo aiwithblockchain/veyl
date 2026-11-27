@@ -11,12 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::backend::{
+use crate::backend::{
     ClashApi, DnsHijack, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot,
     TUN_REPLY_DEADLINE_CONTROL,
 };
-use super::privilege::{HelperStatus, Registration};
-use crate::runtime::health::DataPlaneGate;
+use crate::privilege::{HelperStatus, Registration};
+use crate::gate::DataPlaneGate;
 
 /// 缓存中的 pid 超过这个间隔就向后端复核一次：helper 崩溃或被停掉时，
 /// 界面不能一直报「已连接」。测试里缩短，避免用例等 5 秒。
@@ -244,7 +244,7 @@ impl TunSession {
         {
             let _ = registration;
             Self::with_backend(
-                Arc::new(super::backend::WinPipeBackend::new()),
+                Arc::new(crate::backend::WinPipeBackend::new()),
                 "windows_pipe",
             )
         }
@@ -253,11 +253,11 @@ impl TunSession {
             let kind = registration.kind();
             #[cfg(target_os = "macos")]
             let backend: Arc<dyn TunBackend> =
-                Arc::new(super::backend::MacXpcBackend::new(registration));
+                Arc::new(crate::backend::MacXpcBackend::new(registration));
             #[cfg(not(target_os = "macos"))]
             let backend: Arc<dyn TunBackend> = {
                 let _ = registration;
-                Arc::new(super::backend::UnsupportedBackend)
+                Arc::new(crate::backend::UnsupportedBackend)
             };
             Self::with_backend(backend, kind)
         }
@@ -724,7 +724,7 @@ impl TunSession {
     }
 
     /// 测试用：摆出「正在跑 + 记得是哪套配置」，并可带一个 Clash 端点。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn force_running_with_clash_for_test(
         &self,
         pid: u32,
@@ -746,7 +746,7 @@ impl TunSession {
     }
 
     /// 测试用：直接摆出「正在跑 + 记得是哪套配置」的状态，不碰后端。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn force_running_for_test(&self, pid: u32, config_id: Option<&str>) {
         *self.launching.lock().unwrap() = None;
         *self.pid.lock().unwrap() = Some(pid);
@@ -766,7 +766,7 @@ impl TunSession {
     }
 
     /// 测试用：摆出「正在连、还没起来」的启动窗口，不碰后端。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn force_launching_for_test(&self, config_id: &str) {
         let seq = self.launch_seq.fetch_add(1, Ordering::SeqCst) + 1;
         *self.launching.lock().unwrap() = Some(Launching {
@@ -1029,8 +1029,8 @@ impl CleanupReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tun::backend::{ClashApi, TunErrorCode, TunSnapshot};
-    use crate::tun::privilege::{HelperStatus, PrivilegeError, ERR_TUN_DENIED};
+    use crate::backend::{ClashApi, TunErrorCode, TunSnapshot};
+    use crate::privilege::{HelperStatus, PrivilegeError, ERR_TUN_DENIED};
     use std::sync::atomic::AtomicUsize;
 
     /// 假注册：不碰系统，只按剧本成功或拒绝。

@@ -7,10 +7,10 @@
 use serde_json::{json, Value};
 
 use super::*;
-use crate::tun::windows::ipc::{Request, Response};
-use crate::tun::windows::pipe::{self, IpcError};
-use crate::tun::windows::scm::{self, ScmError};
-use crate::tun::windows::SERVICE_NAME;
+use crate::windows::ipc::{Request, Response};
+use crate::windows::pipe::{self, IpcError};
+use crate::windows::scm::{self, ScmError};
+use crate::windows::SERVICE_NAME;
 
 use windows_sys::Win32::System::Services::SERVICE_RUNNING;
 

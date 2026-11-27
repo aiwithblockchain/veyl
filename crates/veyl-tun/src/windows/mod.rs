@@ -96,11 +96,11 @@ fn normalize(path: &Path) -> String {
     parts.join("\\")
 }
 
-pub(crate) fn wide(value: &str) -> Vec<u16> {
+pub fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub(crate) fn from_wide(buffer: &[u16]) -> String {
+pub fn from_wide(buffer: &[u16]) -> String {
     let length = buffer
         .iter()
         .position(|unit| *unit == 0)
@@ -108,7 +108,7 @@ pub(crate) fn from_wide(buffer: &[u16]) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
-pub(crate) fn last_error() -> u32 {
+pub fn last_error() -> u32 {
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 

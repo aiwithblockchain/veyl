@@ -7,6 +7,12 @@ description = "Veyl 的 TUN 接管与提权协议层：主客户端与 veyl-cli 
 edition = "2021"
 rust-version = "1.77"
 
+[features]
+default = []
+# 各 APP 的测试需要直接摆出连接状态（TunSession::force_*_for_test）。
+# 只由 dev-dependency 打开；正常构建与发布构建里这些方法不存在。
+test-hooks = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
