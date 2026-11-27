@@ -101,7 +101,7 @@ export function ImportDialog({
             >
               从文件导入…
             </button>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="dialog__actions-right">
               <button type="button" className="btn" onClick={onClose} disabled={busy}>
                 取消
               </button>

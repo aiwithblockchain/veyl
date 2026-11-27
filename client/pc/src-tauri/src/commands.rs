@@ -30,6 +30,8 @@ pub const EVENT_SYNC_CHANGED: &str = "sync-changed";
 /// 本地文件导入的大小上限：与订阅正文同一口径。
 const MAX_FILE_BYTES: u64 = MAX_BODY_BYTES as u64;
 const MAX_NAME_CHARS: usize = 60;
+/// 同步错误进界面时截断：内核输出可能几百行，界面上放不下。
+const MAX_SYNC_ERROR_CHARS: usize = 200;
 
 // ---------------------------------------------------------------------------
 // 纯逻辑
@@ -57,10 +59,15 @@ fn preview_params() -> ConnectParams {
 fn source_label(profile: &Profile) -> String {
     match &profile.source {
         ProfileSource::Subscription { host } => host.clone(),
-        ProfileSource::File { path } => Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "本地文件".to_string()),
+        ProfileSource::File { path, name } => {
+            if !name.is_empty() {
+                return name.clone();
+            }
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "本地文件".to_string())
+        }
     }
 }
 
@@ -274,7 +281,12 @@ pub async fn import_file(state: &AppState, path: &str) -> AppResult<Profile> {
     }
 
     let text = crate::fsutil::read_text(&path)?;
-    // 名称先校验：不合格就不必再做装配与内核校验（那些会写 staging 文件）。
+    // 原文件名只用于展示；配置名取文件主名，先校验：不合格就不必再做装配与
+    // 内核校验（那些会写 staging 文件）。
+    let source_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -284,14 +296,14 @@ pub async fn import_file(state: &AppState, path: &str) -> AppResult<Profile> {
     let id = store::new_id();
     let prepared = prepare(state, &text).await?;
 
-    let stored_path = state.store.raw_path(&id)?;
     let result = commit(
         &state.store,
         &id,
         &prepared,
         name,
         ProfileSource::File {
-            path: stored_path.to_string_lossy().into_owned(),
+            path: store::raw_relative_path(&id),
+            name: source_name.clone(),
         },
         SyncState::Never,
         None,
@@ -398,7 +410,14 @@ fn mark_sync(
     sync_state: SyncState,
     sync_error: Option<String>,
 ) -> AppResult<Profile> {
-    profile.sync_state = sync_state;    profile.sync_error = sync_error;
+    profile.sync_state = sync_state;
+    profile.sync_error = sync_error.map(|text| {
+        if text.chars().count() > MAX_SYNC_ERROR_CHARS {
+            text.chars().take(MAX_SYNC_ERROR_CHARS).collect::<String>() + "…"
+        } else {
+            text
+        }
+    });
     state.store.upsert(&profile)?;
     Ok(profile)
 }
@@ -427,9 +446,15 @@ pub fn detail(state: &AppState, id: &str) -> AppResult<ProfileDetail> {
         .get(id)?
         .ok_or_else(|| AppError::not_found("这套配置已经不存在了").with_hint("刷新列表。"))?;
     let nodes = match state.store.read_raw(id)? {
-        Some(text) => assemble::parse(&text)
-            .map(|config| assemble::nodes_of(&config))
-            .unwrap_or_default(),
+        Some(text) => {
+            // 配置坏了要明确报错，不能显示成「0 个节点」——那会被当成真的没有节点。
+            let config = assemble::parse(&text).map_err(|error| {
+                AppError::new("CONFIG_INVALID", "这份配置读不出来")
+                    .with_reason(error.message)
+                    .with_hint("重新导入这份配置。")
+            })?;
+            assemble::nodes_of(&config)
+        }
         None => Vec::new(),
     };
     Ok(ProfileDetail {
@@ -576,10 +601,11 @@ mod tests {
         assert!(state.store.read_raw(&profile.id).unwrap().is_some());
 
         let stored_path = match &profile.source {
-            ProfileSource::File { path } => path.clone(),
+            ProfileSource::File { path, .. } => path.clone(),
             _ => panic!("来源应当是文件"),
         };
-        assert!(stored_path.starts_with(&data.path().to_string_lossy().to_string()));
+        assert_eq!(stored_path, format!("profiles/{}/profile.json", profile.id));
+        assert!(!stored_path.starts_with('/'), "元数据里不该出现绝对路径");
     }
 
     #[tokio::test]
@@ -860,6 +886,64 @@ mod tests {
         assert!(runtime.exists(), "刷新失败不该删掉上一次的预览");
         assert_eq!(std::fs::read_to_string(&runtime).unwrap(), before);
         assert!(state.store.read_raw(&profile.id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_file_import_keeps_its_original_name_for_display() {
+        let data = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("my-config.json");
+        std::fs::write(&source, sample_config().to_string()).unwrap();
+        let state = AppState::for_tests(data.path().to_path_buf());
+
+        let profile = import_file(&state, &source.to_string_lossy()).await.unwrap();
+        assert_eq!(profile.name, "my-config");
+        let detail = detail(&state, &profile.id).unwrap();
+        assert_eq!(detail.source_label, "my-config.json", "展示的应是原文件名");
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_stored_config_is_an_error_not_zero_nodes() {
+        let data = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = write_config(source_dir.path());
+        let state = AppState::for_tests(data.path().to_path_buf());
+        let profile = import_file(&state, &source.to_string_lossy()).await.unwrap();
+
+        state.store.write_raw(&profile.id, "{broken").unwrap();
+        let error = detail(&state, &profile.id).unwrap_err();
+        assert_eq!(error.code, "CONFIG_INVALID");
+        assert!(error.message.contains("读不出来"), "{}", error.message);
+    }
+
+    #[test]
+    fn sync_errors_are_truncated_before_they_reach_the_ui() {
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests(data.path().to_path_buf());
+        let mut profile = Profile {
+            id: "p1".into(),
+            name: "x".into(),
+            source: ProfileSource::Subscription {
+                host: "vpn.example.com".into(),
+            },
+            node_count: 1,
+            last_synced_at: None,
+            sync_state: SyncState::Ok,
+            sync_error: None,
+            created_at: 0,
+            kernel_check: KernelCheck::Passed,
+        };
+        state.store.upsert(&profile).unwrap();
+
+        let long = "错".repeat(500);
+        let updated = mark_sync(&state, profile.clone(), SyncState::Failed, Some(long)).unwrap();
+        let text = updated.sync_error.unwrap();
+        assert!(text.chars().count() <= MAX_SYNC_ERROR_CHARS + 1, "{}", text.chars().count());
+        assert!(text.ends_with('…'));
+
+        profile.sync_error = None;
+        let short = mark_sync(&state, profile, SyncState::Failed, Some("短".into())).unwrap();
+        assert_eq!(short.sync_error.as_deref(), Some("短"));
     }
 
     /// 刷新到零节点：旧预览必须消失，不能和「0 个节点」并存。

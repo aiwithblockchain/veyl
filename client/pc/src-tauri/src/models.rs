@@ -23,8 +23,16 @@ pub enum SyncState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProfileSource {
-    Subscription { host: String },
-    File { path: String },
+    Subscription {
+        host: String,
+    },
+    File {
+        /// 应用私有副本的路径（§6.1）。
+        path: String,
+        /// 导入时的原文件名，只用于展示；旧数据里没有这个字段。
+        #[serde(default)]
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +92,7 @@ mod tests {
             name: "我的订阅".into(),
             source: ProfileSource::File {
                 path: "/tmp/profile.json".into(),
+                name: "profile.json".into(),
             },
             node_count: 3,
             last_synced_at: Some(1_763_000_000_000),

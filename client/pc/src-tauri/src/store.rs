@@ -10,6 +10,7 @@
 //! 一切写入都是 0600 原子写。id 只允许 `[A-Za-z0-9-]`，避免被拼成路径穿越。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,9 @@ impl Default for ProfilesFile {
 
 pub struct Store {
     root: PathBuf,
+    /// 清单是「读-改-写」，两个命令并发（选择 + 刷新）会互相覆盖；
+    /// 写操作串行化，读操作不受影响（文件本身是原子写）。
+    lock: Mutex<()>,
 }
 
 impl Store {
@@ -57,7 +61,14 @@ impl Store {
         let root = root.into();
         fsutil::ensure_private_dir(&root)?;
         fsutil::ensure_private_dir(&root.join(PROFILES_DIR))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn root(&self) -> &Path {
@@ -90,6 +101,7 @@ impl Store {
     }
 
     pub fn set_active(&self, id: &str) -> AppResult<()> {
+        let _guard = self.guard();
         let mut file = self.read_file()?;
         if !file.profiles.iter().any(|profile| profile.id == id) {
             return Err(AppError::not_found("这套配置已经不存在了")
@@ -109,6 +121,7 @@ impl Store {
 
     /// 有则整体替换，无则追加到末尾。
     pub fn upsert(&self, profile: &Profile) -> AppResult<()> {
+        let _guard = self.guard();
         let mut file = self.read_file()?;
         match file.profiles.iter_mut().find(|item| item.id == profile.id) {
             Some(slot) => *slot = profile.clone(),
@@ -122,6 +135,7 @@ impl Store {
 
     /// 删元数据、删目录（原文件与装配预览一起消失）。
     pub fn remove(&self, id: &str) -> AppResult<()> {
+        let _guard = self.guard();
         let mut file = self.read_file()?;
         file.profiles.retain(|profile| profile.id != id);
         if file.active_id.as_deref() == Some(id) {
@@ -188,6 +202,12 @@ fn validate_id(id: &str) -> AppResult<()> {
     } else {
         Err(AppError::invalid("配置标识不合法"))
     }
+}
+
+/// 原文件在应用数据目录里的相对位置。元数据里只存这一段：
+/// 绝对路径会把家目录写进 `profiles.json`，而这段与 id 一起已经足够定位。
+pub fn raw_relative_path(id: &str) -> String {
+    format!("{PROFILES_DIR}/{id}/{RAW_FILE}")
 }
 
 /// 生成一个新的配置 id。

@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { Profile, SyncState } from "../api";
 
 const SYNC_LABEL: Record<SyncState, string> = {
@@ -20,9 +22,39 @@ type Props = {
   activeId: string | null;
   onSelect: (id: string) => void;
   onImport: () => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
 };
 
-export function ProfileList({ profiles, activeId, onSelect, onImport }: Props) {
+export function ProfileList({
+  profiles,
+  activeId,
+  onSelect,
+  onImport,
+  onRename,
+  onDelete,
+}: Props) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
+  const startEditing = (profile: Profile) => {
+    setDraft(profile.name);
+    setEditingId(profile.id);
+  };
+
+  const cancelEditing = () => {
+    setEditingId(null);
+    setDraft("");
+  };
+
+  const saveName = (profile: Profile) => {
+    const name = draft.trim();
+    setEditingId(null);
+    if (name === "" || name === profile.name) return;
+    onRename(profile.id, name);
+  };
+
   return (
     <aside className="rail">
       <div className="rail__head">
@@ -43,22 +75,115 @@ export function ProfileList({ profiles, activeId, onSelect, onImport }: Props) {
       ) : (
         <div className="rail__list">
           {profiles.map((profile) => (
-            <button
-              type="button"
-              key={profile.id}
-              className="profile-row"
-              aria-current={profile.id === activeId}
-              onClick={() => onSelect(profile.id)}
-            >
-              <span className={`dot dot--${profile.sync_state}`} aria-hidden />
-              <span className="profile-row__body">
-                <span className="profile-row__name">{profile.name}</span>
-                <span className="profile-row__meta">
-                  {profile.node_count} 个节点 · {sourceLabel(profile)} ·{" "}
-                  {syncLabel(profile.sync_state)}
+            <div key={profile.id}>
+              <div
+                className="profile-row"
+                role="button"
+                tabIndex={0}
+                aria-label={profile.name}
+                aria-current={profile.id === activeId}
+                onClick={() => onSelect(profile.id)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(profile.id);
+                  }
+                }}
+              >
+                <span className={`dot dot--${profile.sync_state}`} aria-hidden />
+                <span className="profile-row__body">
+                  {editingId === profile.id ? (
+                    <input
+                      className="profile-row__input"
+                      aria-label="配置名称"
+                      autoFocus
+                      value={draft}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onBlur={() => saveName(profile)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          saveName(profile);
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelEditing();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <span
+                      className="profile-row__name"
+                      onDoubleClick={() => startEditing(profile)}
+                    >
+                      {profile.name}
+                    </span>
+                  )}
+                  <span className="profile-row__meta">
+                    {profile.node_count} 个节点 · {sourceLabel(profile)} ·{" "}
+                    {syncLabel(profile.sync_state)}
+                  </span>
                 </span>
-              </span>
-            </button>
+                <span className="profile-row__actions">
+                  <button
+                    type="button"
+                    className="btn btn--icon"
+                    aria-label={`重命名 ${profile.name}`}
+                    title="重命名"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startEditing(profile);
+                    }}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--icon"
+                    aria-label={`删除 ${profile.name}`}
+                    title="删除"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setConfirmingId(
+                        confirmingId === profile.id ? null : profile.id,
+                      );
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              </div>
+
+              {confirmingId === profile.id ? (
+                <div
+                  className="profile-row__confirm"
+                  role="group"
+                  aria-label={`确认删除 ${profile.name}`}
+                >
+                  <span className="profile-row__confirm-text">
+                    删除后本机副本与已保存的链接都会消失。
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn--danger-ghost"
+                    onClick={() => {
+                      setConfirmingId(null);
+                      onDelete(profile.id);
+                    }}
+                  >
+                    确认删除
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => setConfirmingId(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : null}
+            </div>
           ))}
         </div>
       )}

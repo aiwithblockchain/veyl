@@ -131,6 +131,12 @@ export function ProfileDetail({ detail, busy, onRefresh, onRename, onDelete }: P
         </div>
       </header>
 
+      {confirmingDelete ? (
+        <p className="notice notice--error">
+          删除后，本机上的配置副本与已保存的订阅链接都会消失。
+        </p>
+      ) : null}
+
       <div className="detail__facts">
         <div>
           <div className="fact__label">节点</div>

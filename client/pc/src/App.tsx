@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
@@ -42,6 +43,39 @@ export default function App() {
     void reload();
   }, [reload]);
 
+  // 后端在每次改动后都会发事件：接上它，关窗后台刷新（M1-B）与多入口操作
+  // 才不会出现「数据变了、界面还停着」。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn[] = [];
+    void (async () => {
+      const offProfiles = await listen("profiles-changed", () => {
+        void reload();
+      });
+      const offSync = await listen<Profile>("sync-changed", (event) => {
+        const updated = event.payload;
+        setProfiles((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setDetail((current) =>
+          current && current.profile.id === updated.id
+            ? { ...current, profile: updated }
+            : current,
+        );
+      });
+      if (cancelled) {
+        offProfiles();
+        offSync();
+        return;
+      }
+      unlisten = [offProfiles, offSync];
+    })();
+    return () => {
+      cancelled = true;
+      unlisten.forEach((off) => off());
+    };
+  }, [reload]);
+
   const select = async (id: string) => {
     setActiveId(id);
     setError(null);
@@ -73,12 +107,11 @@ export default function App() {
     }
   };
 
-  const rename = async (name: string) => {
-    if (!activeId) return;
+  const renameProfile = async (id: string, name: string) => {
     setBusy(true);
     try {
-      await api.rename(activeId, name);
-      await reload(activeId);
+      await api.rename(id, name);
+      await reload(activeId ?? id);
     } catch (failure) {
       setError(await toCommandError(failure));
     } finally {
@@ -86,12 +119,11 @@ export default function App() {
     }
   };
 
-  const remove = async () => {
-    if (!activeId) return;
+  const removeProfile = async (id: string) => {
     setBusy(true);
     try {
-      await api.remove(activeId);
-      setDetail(null);
+      await api.remove(id);
+      if (activeId === id) setDetail(null);
       await reload(null);
     } catch (failure) {
       setError(await toCommandError(failure));
@@ -116,6 +148,8 @@ export default function App() {
         activeId={activeId}
         onSelect={(id) => void select(id)}
         onImport={() => setImporting(true)}
+        onRename={(id, name) => void renameProfile(id, name)}
+        onDelete={(id) => void removeProfile(id)}
       />
 
       <main className="main">
@@ -148,8 +182,8 @@ export default function App() {
               detail={detail}
               busy={busy}
               onRefresh={() => void refresh()}
-              onRename={(name) => void rename(name)}
-              onDelete={() => void remove()}
+              onRename={(name) => void renameProfile(detail.profile.id, name)}
+              onDelete={() => void removeProfile(detail.profile.id)}
             />
           </>
         )}

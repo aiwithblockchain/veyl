@@ -35,7 +35,8 @@ impl SubscriptionUrl {
 
         match url.scheme() {
             "https" => {}
-            "http" if is_loopback(&url) => {}
+            // 回环 http 只给本地测试夹具用：发布构建里连回环也要求 https。
+            "http" if cfg!(debug_assertions) && is_loopback(&url) => {}
             "http" => {
                 return Err(AppError::invalid("订阅链接必须用 https")
                     .with_reason("http 会把链接里的令牌明文发到网络上")

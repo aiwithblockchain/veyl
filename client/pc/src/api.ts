@@ -5,7 +5,7 @@ export type KernelCheck = "passed" | "unavailable";
 
 export type ProfileSource =
   | { kind: "subscription"; host: string }
-  | { kind: "file"; path: string };
+  | { kind: "file"; path: string; name?: string };
 
 export type Profile = {
   id: string;
