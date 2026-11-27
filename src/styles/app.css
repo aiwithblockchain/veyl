@@ -17,6 +17,7 @@
   --hair-strong: rgba(20, 22, 28, 0.18);
   /* 仪表轨道：比 hair 再淡一点，6px 条才像底槽而不是分隔线。 */
   --track: rgba(20, 22, 28, 0.08);
+  --traffic-accrued: rgba(20, 22, 28, 0.26);
 
   /* 新色板：强调只做装饰/进度；文字链接与聚焦分开。旧变量名继续指向粉色系。 */
   --accent: #F6537B;
@@ -115,6 +116,7 @@
     --hair: rgba(255, 255, 255, 0.1);
     --hair-strong: rgba(255, 255, 255, 0.16);
     --track: rgba(255, 255, 255, 0.1);
+    --traffic-accrued: rgba(255, 255, 255, 0.26);
 
     --accent: #F6537B;
     --accent-soft: rgba(246, 83, 123, 0.18);
@@ -1925,45 +1927,87 @@ body[data-resizing] {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
   margin-bottom: 10px;
 }
 
+.account-surface__traffic-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* 这一块唯一的强调：已用 ÷ 已累计。 */
+.account-surface__traffic-pct {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.account-surface__traffic-pct.is-warn {
+  color: var(--amber);
+}
+
 .account-surface__traffic-bar {
+  display: flex;
   height: 6px;
   border-radius: 999px;
   background: var(--track);
   overflow: hidden;
 }
 
-.account-surface__traffic-fill {
+.account-surface__traffic-used {
   display: block;
+  flex: none;
   height: 100%;
-  border-radius: inherit;
-  background: var(--ink-2);
+  min-width: 2px;
+  background: var(--ink);
 }
 
-.account-surface__traffic-fill.is-near,
-.account-surface__traffic-fill.is-over {
+.account-surface__traffic-used.is-warn {
   background: var(--amber);
 }
 
+.account-surface__traffic-accrued {
+  display: block;
+  flex: none;
+  height: 100%;
+  background: var(--traffic-accrued);
+}
+
 .account-surface__traffic-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
   margin: 10px 0 0;
   font-size: 13px;
   line-height: 1.5;
   color: var(--ink-2);
 }
 
-.account-surface__traffic-over,
-.account-surface__traffic-near {
-  color: var(--amber);
+.account-surface__traffic-figures {
+  min-width: 0;
 }
 
-.account-surface__traffic-reset {
+.account-surface__traffic-rate {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.account-surface__traffic-cap {
   flex: none;
   font-size: 12px;
   color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.account-surface__traffic-over {
+  flex: none;
+  font-size: 12px;
+  color: var(--amber);
+  white-space: nowrap;
 }
 
 .account-surface__error {

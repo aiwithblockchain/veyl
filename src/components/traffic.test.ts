@@ -6,6 +6,7 @@ import {
   formatTrafficGibValue,
   formatTrafficPercent,
   formatTrafficReset,
+  trafficMeterWidths,
   trafficPoolTomorrowBytes,
   trafficTomorrowBytes,
 } from "./traffic";
@@ -139,5 +140,43 @@ describe("明天新增额度", () => {
     ];
     // 只有第一台贡献 35.7 GiB：销毁与封顶都不加。
     expect(trafficPoolTomorrowBytes(servers)).toBeCloseTo((1000 * GIB) / 28);
+  });
+});
+
+describe("三段计量条", () => {
+  it("轨道取 max(上限, 已累计)，深色与中灰按字节切分", () => {
+    expect(trafficMeterWidths(300 * GIB, 400 * GIB, 1000 * GIB)).toEqual({
+      usedPercent: 30,
+      accruedPercent: 10,
+    });
+    // 上限小于已累计（旧数据 / 机器被销毁后池子仍在）：按已累计铺轨道。
+    expect(trafficMeterWidths(100 * GIB, 500 * GIB, 300 * GIB)).toEqual({
+      usedPercent: 20,
+      accruedPercent: 80,
+    });
+  });
+
+  it("极小用量仍给非零宽度；已用为 0 不画深色段", () => {
+    const tiny = trafficMeterWidths(3 * GIB, 500 * GIB, 1500 * GIB);
+    expect(tiny.usedPercent).toBeCloseTo(0.2);
+    expect(tiny.accruedPercent).toBeCloseTo((497 / 1500) * 100);
+    expect(trafficMeterWidths(0, 400 * GIB, 0)).toEqual({
+      usedPercent: 0,
+      accruedPercent: 100,
+    });
+  });
+
+  it("超额铺满；已累计为 0 或脏值不产生宽度", () => {
+    expect(trafficMeterWidths(450 * GIB, 400 * GIB, 0)).toEqual({
+      usedPercent: 100,
+      accruedPercent: 0,
+    });
+    expect(trafficMeterWidths(12 * GIB, 0, 0)).toEqual({
+      usedPercent: 0,
+      accruedPercent: 0,
+    });
+    expect(
+      trafficMeterWidths(Number.NaN, -5 * GIB, Number.POSITIVE_INFINITY),
+    ).toEqual({ usedPercent: 0, accruedPercent: 0 });
   });
 });

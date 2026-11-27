@@ -42,6 +42,30 @@ export function formatTrafficPercent(
 }
 
 /**
+ * 三段计量条的宽度（百分数，未四舍五入）：深色段是已用、中灰段是已累计但未用，
+ * 其余是浅灰轨道。轨道取 `max(上限, 已累计)`；超额时深色段铺满。
+ */
+export function trafficMeterWidths(
+  usedBytes: number,
+  accruedBytes: number,
+  capBytes: number,
+): { usedPercent: number; accruedPercent: number } {
+  const finite = (value: number) => (Number.isFinite(value) ? Math.max(0, value) : 0);
+  const used = finite(usedBytes);
+  const accrued = finite(accruedBytes);
+  const cap = finite(capBytes);
+  const track = Math.max(cap, accrued);
+  if (track <= 0) return { usedPercent: 0, accruedPercent: 0 };
+  if (accrued > 0 && used > accrued) {
+    return { usedPercent: 100, accruedPercent: 0 };
+  }
+  return {
+    usedPercent: (Math.min(used, accrued) / track) * 100,
+    accruedPercent: ((accrued - used) / track) * 100,
+  };
+}
+
+/**
  * 这台机器明天会新增的额度（字节）：`min(月额度 / 28, 月额度 − 已释放)`。
  * 已销毁不增长；到 28 天封顶（`traffic_limit_bytes` 追平月额度）贡献 0。
  */
