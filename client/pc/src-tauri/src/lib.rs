@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+pub mod assemble;
 pub mod error;
 pub mod fetch;
 pub mod fsutil;
