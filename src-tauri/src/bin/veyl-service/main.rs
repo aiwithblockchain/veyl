@@ -15,13 +15,10 @@ mod server;
 #[cfg(windows)]
 mod service;
 
-// 纯 IPv4 CIDR 计算：与主程序 `tun::cidr` 是**同一份源码**，
-// 用 `#[path]` 引用，不复制粘贴（两份 CIDR 判断迟早会分叉）。
-// 主程序要的 `remove_covering` 服务端用不到，不必逐条报死代码。
+// 纯 IPv4 CIDR 计算：从共享 crate 引入，不再 `#[path]` 内联同一份源码。
 #[cfg(windows)]
-#[allow(dead_code)]
-#[path = "../../tun/windows/cidr.rs"]
-mod cidr;
+#[allow(unused_imports)]
+pub(crate) use veyl_tun::cidr;
 
 #[cfg(windows)]
 // 这份模块是客户端与服务端共用的：服务二进制只用到服务端那一半，

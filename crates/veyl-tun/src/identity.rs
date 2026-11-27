@@ -78,6 +78,10 @@ pub fn try_identity() -> Option<&'static Identity> {
 
 /// 取身份。没注入时 panic——这是启动路径上的编程错误，不是运行期可恢复状态。
 pub fn identity() -> &'static Identity {
+    // 只有本 crate 自己的单元测试会自动装一份夹具；依赖方（主客户端、veyl-cli）
+    // 编译本 crate 时 `cfg(test)` 不成立，仍然必须显式注入。
+    #[cfg(test)]
+    test_fixture::install();
     INSTALLED.get().unwrap_or_else(|| {
         panic!(
             "veyl-tun: Identity 尚未注入。每个二进制都必须在任何 TUN/身份访问之前调用 \
@@ -85,6 +89,40 @@ pub fn identity() -> &'static Identity {
              service：main() 首句）。"
         )
     })
+}
+
+#[cfg(test)]
+mod test_fixture {
+    use super::*;
+    use std::sync::OnceLock;
+
+    /// crate 内测试用的身份。值取主客户端的 defaults，只为让纯计算与协议测试
+    /// 能跑；断言某个具体标识的用例要用 `*_for(...)` 形式的纯函数。
+    pub fn install() {
+        static ONCE: OnceLock<()> = OnceLock::new();
+        ONCE.get_or_init(|| {
+            let _ = super::install(Identity {
+                bundle_identifier: "com.example.veyl-tun-test",
+                team_id: "TESTTEAM12",
+                helper_binary_name: crate::defaults::HELPER_BINARY_NAME,
+                pipe_name: crate::defaults::PIPE_NAME,
+                service_name: crate::defaults::SERVICE_NAME,
+                service_display_name: crate::defaults::SERVICE_DISPLAY_NAME,
+                install_dir_name: crate::defaults::INSTALL_DIR_NAME,
+                mach_service: crate::defaults::MACH_SERVICE,
+                daemon_plist: crate::defaults::DAEMON_PLIST,
+                trust_root: crate::defaults::TRUST_ROOT,
+                tun_address_macos: crate::defaults::TUN_ADDRESS_MACOS,
+                tun_address_windows: crate::defaults::TUN_ADDRESS_WINDOWS,
+                runtime_sha256: "",
+                rules_archive_sha256: "",
+                wintun_sha256: "",
+                win_cert_thumbprints: None,
+                win_publisher: None,
+                win_allow_unsigned_dev: None,
+            });
+        });
+    }
 }
 
 pub fn bundle_identifier() -> &'static str {

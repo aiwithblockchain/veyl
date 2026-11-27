@@ -1,12 +1,6 @@
 //! IPv4 CIDR 的纯计算：排除网段是否覆盖了 TUN 自己的地址。
 //!
-//! 同一份源码被两棵模块树以 `#[path]` 引用：
-//! - 主程序：`tun/mod.rs` 声明成 `tun::cidr`；
-//! - 服务二进制：`bin/veyl-service/main.rs` 声明成 `crate::cidr`。
-//!
-//! **不放在 `tun/windows/mod.rs`**：那份文件已经被服务二进制整份引入，
-//! 在里面再声明一次会让主程序把同一份源码编两遍。这里没有 Windows API，
-//! 因此 macOS 上也能跑这些单元测试。
+//! 没有 Windows API，因此 macOS 上也能跑这些单元测试。
 
 use std::net::Ipv4Addr;
 

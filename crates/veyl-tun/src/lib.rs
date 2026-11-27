@@ -10,6 +10,8 @@
 //! 没注入时 [`identity::identity`] 会 panic，而不是回退到某个默认身份——
 //! 回退会让两个 APP 在 Windows 上抢同一个服务名。
 
+pub mod cidr;
 pub mod defaults;
 pub mod gate;
 pub mod identity;
+pub mod netcfg;
