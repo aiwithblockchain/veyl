@@ -8111,7 +8111,6 @@ impl VpnToolServices for WiredServices {
             } => {
                 let code = match reason {
                     crate::seed::OfflineReason::InvalidContent => "INVALID_ARGUMENT",
-                    crate::seed::OfflineReason::StaleSource => "UPSTREAM_ERROR",
                     crate::seed::OfflineReason::LocalWrite => "INTERNAL",
                     crate::seed::OfflineReason::Offline => "UPSTREAM_ERROR",
                 };
@@ -14974,12 +14973,24 @@ mod config_service_tests {
         set_trial(services, crate::store::now_ms() - 8 * DAY_MS, None);
     }
 
+    /// 真的跑到期清理事务，而不只是把状态改过期。
+    fn expire_and_clean(services: &WiredServices) {
+        expire_trial(services);
+        let conn = services.store.conn();
+        assert!(
+            crate::trial::expire_if_needed(&conn, crate::store::now_ms())
+                .unwrap()
+                .is_some(),
+            "前置条件：到期清理应当执行"
+        );
+    }
+
     fn activate_trial(services: &WiredServices) {
         set_trial(services, crate::store::now_ms() - DAY_MS, None);
     }
 
-    /// 两条种子缓存：`203.0.113.10` / `203.0.113.11`。
-    fn cache_two_seed_nodes(services: &WiredServices) {
+    /// 两条种子缓存：`203.0.113.10` / `203.0.113.11`。返回内容哈希。
+    fn cache_two_seed_nodes(services: &WiredServices) -> String {
         let body = r#"{
           "version": 1,
           "updated_at": "2026-11-17T00:00:00Z",
@@ -14996,7 +15007,7 @@ mod config_service_tests {
         crate::store::seed_cache::save(
             &conn,
             &crate::store::seed_cache::SeedCacheRow {
-                content_sha256: hash,
+                content_sha256: hash.clone(),
                 etag: None,
                 etag_source: None,
                 source_version: Some("1".into()),
@@ -15007,6 +15018,7 @@ mod config_service_tests {
             },
         )
         .unwrap();
+        hash
     }
 
     fn seed_node_id(name: &str, server: &str) -> String {
@@ -15447,6 +15459,117 @@ mod config_service_tests {
             .unwrap();
         assert_eq!(data["attached_node_ids"], serde_json::json!([]));
         assert_eq!(data["skipped_node_ids"], serde_json::json!([seed_node_id("免费 A", "203.0.113.10")]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 到期清理后本地不留种子数据：节点行、缓存元数据、密文都删；
+    /// 状态仍读得到 `expired`，缓存状态回落到空。
+    #[tokio::test]
+    async fn expiry_cleanup_purges_seed_rows_cache_and_secrets() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let hash = cache_two_seed_nodes(&services);
+        services.merge_seed_into_global().unwrap();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        assert!(
+            crate::secrets::get_secret(&crate::nodes::password_ref(&seed_id))
+                .unwrap()
+                .is_some(),
+            "前置条件：节点凭据已写入"
+        );
+
+        expire_and_clean(&services);
+
+        {
+            let conn = services.store.conn();
+            assert!(
+                configs::list_pool_nodes(&conn).unwrap().is_empty(),
+                "种子节点行必须删掉"
+            );
+            assert!(
+                crate::store::seed_cache::load(&conn).unwrap().is_none(),
+                "缓存元数据必须清空"
+            );
+        }
+        let status = services.default_profile_status().await.unwrap();
+        assert_eq!(status["node_count"], 0);
+        assert!(status["content_sha256"].is_null());
+        let trial = services.trial_status().await.unwrap();
+        assert_eq!(trial["state"], "expired");
+        assert_eq!(trial["seed_node_count"], 0);
+        assert!(
+            crate::secrets::get_secret(&crate::nodes::password_ref(&seed_id))
+                .unwrap()
+                .is_none(),
+            "节点凭据应删除"
+        );
+        assert!(
+            crate::secrets::get_secret(&format!("seed:{hash}"))
+                .unwrap()
+                .is_none(),
+            "缓存原文应删除"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后把原 seed id 绑回来：节点行已不存在，报 `NOT_FOUND` 而不是 `trial_expired`。
+    #[tokio::test]
+    async fn attaching_a_purged_seed_id_reports_node_not_found() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        services.merge_seed_into_global().unwrap();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        expire_and_clean(&services);
+
+        let error = services
+            .node_attach(None, Some(vec![seed_id]), None)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "NOT_FOUND");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "node_not_found");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后 `config_create(source="seed")`：试用判定先于 `seed_unavailable`。
+    #[tokio::test]
+    async fn config_create_from_seed_after_cleanup_is_trial_expired() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        expire_and_clean(&services);
+
+        let mut input = create_input("试用");
+        input.source = Some("seed".into());
+        let error = services.config_create(input).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let list = services.config_list().await.unwrap();
+        assert!(list["configs"].as_array().unwrap().is_empty(), "不能建出配置");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后 `node_attach(source="seed")` 报 `trial_expired`，不是「拿不到种子」。
+    #[tokio::test]
+    async fn attaching_seed_after_cleanup_is_trial_expired_not_unavailable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        expire_and_clean(&services);
+
+        let error = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_trial_expired(error);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

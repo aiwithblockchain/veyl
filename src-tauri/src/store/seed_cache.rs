@@ -69,6 +69,13 @@ pub fn save(conn: &Connection, row: &SeedCacheRow) -> StoreResult<()> {
     Ok(())
 }
 
+/// 删除缓存元数据，返回被删掉的那一行（调用方据此清掉原文密文）。
+pub fn clear(conn: &Connection) -> StoreResult<Option<SeedCacheRow>> {
+    let row = load(conn)?;
+    conn.execute("DELETE FROM seed_cache WHERE id = 1", [])?;
+    Ok(row)
+}
+
 /// 304 或内容没变：只更新最近检查时间与来源对应的 etag。
 pub fn touch(
     conn: &Connection,

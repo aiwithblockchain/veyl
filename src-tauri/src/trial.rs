@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::store::configs;
 use crate::store::db::{iso_from_ms, now_ms};
 use crate::store::error::StoreResult;
+use crate::store::seed_cache;
 
 pub const TRIAL_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -150,7 +151,7 @@ pub fn mark_started(conn: &Connection, at_ms: i64) -> StoreResult<bool> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expired {
     pub ended_at_ms: i64,
-    /// 从 `config_nodes` 移除的种子节点（去重）。
+    /// 本次清理删掉的种子节点 id（全部 `source = 'seed'` 行）。
     pub removed_node_ids: Vec<String>,
 }
 
@@ -160,7 +161,10 @@ impl Expired {
     }
 }
 
-/// 到期清理：一次事务里写排除、删关联、修当前节点、写 `ended_at`。
+/// 到期清理：一次事务里写排除、删关联、修当前节点、删节点行与缓存、写 `ended_at`。
+///
+/// 到期后本地不留任何可绑回的种子数据：节点行、缓存元数据都在事务里删掉，
+/// `secrets.enc` 里的条目在提交后 best-effort 删除。
 ///
 /// 返回 `None` 表示还没到期或已经清过；`Some` 只会在**第一次**写入
 /// `ended_at` 时返回一次，调用方据此保证 `trial-expired` 每台机器只发一次。
@@ -182,13 +186,18 @@ pub fn expire_if_needed(conn: &Connection, at_ms: i64) -> StoreResult<Option<Exp
         return Ok(None);
     }
 
-    // 1. 所有种子节点进排除表：刷新时不会被加回来。
-    let source_keys: Vec<String> = {
-        let mut statement = tx.prepare("SELECT source_key FROM nodes WHERE source = ?1")?;
-        let rows = statement.query_map(params![configs::SOURCE_SEED], |row| row.get(0))?;
+    // 1. 收齐种子节点（id / 去重键 / 凭据引用），再把去重键写进排除表。
+    // 排除表保留：即使将来有别的路径重新拉种子，也不会自动复活。
+    let seed_nodes: Vec<(String, String, String)> = {
+        let mut statement = tx.prepare(
+            "SELECT id, source_key, password_ref FROM nodes WHERE source = ?1",
+        )?;
+        let rows = statement.query_map(params![configs::SOURCE_SEED], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for key in &source_keys {
+    for (_, key, _) in &seed_nodes {
         tx.execute(
             "INSERT INTO seed_node_exclusions (source_key, created_at)
              VALUES (?1, ?2)
@@ -196,18 +205,12 @@ pub fn expire_if_needed(conn: &Connection, at_ms: i64) -> StoreResult<Option<Exp
             params![key, at_ms],
         )?;
     }
+    let removed_node_ids: Vec<String> = seed_nodes
+        .iter()
+        .map(|(id, _, _)| id.clone())
+        .collect();
 
-    // 2. 删掉所有种子节点的配置关联；节点行本身保留（供离线诊断）。
-    let removed_node_ids: Vec<String> = {
-        let mut statement = tx.prepare(
-            "SELECT DISTINCT n.id
-               FROM config_nodes cn
-               JOIN nodes n ON n.id = cn.node_id
-              WHERE n.source = ?1",
-        )?;
-        let rows = statement.query_map(params![configs::SOURCE_SEED], |row| row.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
+    // 2. 删掉所有种子节点的配置关联。
     tx.execute(
         "DELETE FROM config_nodes
           WHERE node_id IN (SELECT id FROM nodes WHERE source = ?1)",
@@ -215,6 +218,7 @@ pub fn expire_if_needed(conn: &Connection, at_ms: i64) -> StoreResult<Option<Exp
     )?;
 
     // 3. 当前节点被移除时落到剩余第一个；没有剩余则置 NULL。
+    // 必须排在删节点行之前：子查询还要读 `nodes`。
     tx.execute(
         "UPDATE configs
             SET current_node_id = (
@@ -230,13 +234,44 @@ pub fn expire_if_needed(conn: &Connection, at_ms: i64) -> StoreResult<Option<Exp
         params![at_ms, configs::SOURCE_SEED],
     )?;
 
-    // 4. 写结束时刻。只有这一次会写成功，后续扫描直接跳过。
+    // 4. 删掉种子节点行本身。到期后不再保留「供离线诊断」的节点，
+    // 否则 `node_attach({ nodeIds })` 还能把带旧密码的种子节点绑回来。
+    tx.execute(
+        "DELETE FROM nodes WHERE source = ?1",
+        params![configs::SOURCE_SEED],
+    )?;
+
+    // 5. 清种子缓存元数据。原文密文不在 SQLite 里，提交后单独删（见下）。
+    let cache_hash = seed_cache::clear(&tx)?.map(|row| row.content_sha256);
+
+    // 6. 写结束时刻。只有这一次会写成功，后续扫描直接跳过。
     tx.execute(
         "UPDATE trial_state SET ended_at = ?1 WHERE id = 1 AND ended_at IS NULL",
         params![at_ms],
     )?;
 
     tx.commit()?;
+
+    // 密文在提交后删，顺序不能反：
+    // - 先删密文再提交，一旦提交失败，库里会留下取不到密码的节点行；
+    // - 提交后删是 best-effort，失败只记 warn，不影响到期结果（节点行与缓存已经没了）。
+    // 崩溃窗口：进程若在提交后、删密文前退出，`secrets.enc` 会留下孤儿条目。
+    // 这些密钥没有任何 `nodes` / `seed_cache` 引用，不会进入任何读取路径，
+    // 只是占用加密文件的磁盘；本轮不做自动清扫（`secrets` 模块不能枚举键，
+    // 见 `data-model.md` §5.4）。
+    let mut secret_refs: Vec<String> = seed_nodes
+        .iter()
+        .map(|(_, _, password_ref)| password_ref.clone())
+        .collect();
+    if let Some(hash) = cache_hash {
+        secret_refs.push(crate::seed::secret_key(&hash));
+    }
+    for reference in secret_refs {
+        if let Err(error) = crate::secrets::delete_secret(&reference) {
+            log::warn!("到期清理删除种子凭据失败（不影响到期结果）：{reference}：{error}");
+        }
+    }
+
     Ok(Some(Expired {
         ended_at_ms: at_ms,
         removed_node_ids,
@@ -403,7 +438,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(excluded, 1);
-        // 只删关联，不删节点行。
+        // 只留用户自己的节点。
         let links: Vec<String> = {
             let mut statement = conn
                 .prepare("SELECT node_id FROM config_nodes WHERE config_id = ?1 ORDER BY position")
@@ -415,7 +450,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(links, vec!["node_own".to_string()]);
-        assert!(configs::get_node(&conn, "node_seed").unwrap().is_some());
+        assert!(configs::get_node(&conn, "node_seed").unwrap().is_none());
         // 当前节点落到剩余的第一个。
         let current: Option<String> = conn
             .query_row(
@@ -454,6 +489,77 @@ mod tests {
                 .unwrap();
             assert_eq!(current, None);
         }
+    }
+
+    /// 到期清理把种子留痕清干净：节点行、缓存元数据、密文都不留；
+    /// 二次扫描仍返回 `None`，不会因为节点已删而报错。
+    #[test]
+    fn expiry_purges_seed_nodes_cache_and_secrets() {
+        crate::test_support::install_test_secrets();
+        let (store, config_id) = store_with_config();
+        add_node(&store, &config_id, "node_seed", SOURCE_SEED, "seed-key");
+        let body = r#"{"nodes":[
+            {"name":"A","server":"203.0.113.10","port":8388,"method":"aes-256-gcm","password":"pw"}
+        ]}"#;
+        let hash = crate::seed::content_sha256(body.as_bytes());
+        {
+            let conn = store.conn();
+            crate::secrets::set_secret("node:node_seed", "pw-node").unwrap();
+            crate::secrets::set_secret(&crate::seed::secret_key(&hash), body).unwrap();
+            seed_cache::save(
+                &conn,
+                &seed_cache::SeedCacheRow {
+                    content_sha256: hash.clone(),
+                    etag: None,
+                    etag_source: None,
+                    source_version: Some("1".into()),
+                    source_updated_at: None,
+                    node_count: 1,
+                    fetched_at: 1,
+                    checked_at: 1,
+                },
+            )
+            .unwrap();
+        }
+        set_started(&store, now_ms() - TRIAL_DURATION_MS - 1);
+
+        {
+            let conn = store.conn();
+            assert_eq!(
+                expire_if_needed(&conn, now_ms())
+                    .unwrap()
+                    .unwrap()
+                    .removed_node_count(),
+                1
+            );
+            let seed_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM nodes WHERE source = ?1",
+                    params![SOURCE_SEED],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(seed_rows, 0, "种子节点行必须删掉");
+            assert!(seed_cache::load(&conn).unwrap().is_none(), "缓存元数据必须清空");
+            let status = status_json(&conn).unwrap();
+            assert_eq!(status["state"], "expired");
+            assert_eq!(status["seed_node_count"], 0);
+            assert!(
+                expire_if_needed(&conn, now_ms() + 1).unwrap().is_none(),
+                "第二次扫描不能再执行清理"
+            );
+        }
+
+        assert!(
+            crate::secrets::get_secret("node:node_seed").unwrap().is_none(),
+            "节点凭据应删除"
+        );
+        assert!(
+            crate::secrets::get_secret(&crate::seed::secret_key(&hash))
+                .unwrap()
+                .is_none(),
+            "缓存原文应删除"
+        );
     }
 
     #[test]

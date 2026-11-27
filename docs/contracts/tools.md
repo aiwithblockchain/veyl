@@ -1303,7 +1303,7 @@ type DefaultProfileStatusData = {
 - 若 `version` 为 `null`（文件没写），照常工作。
 - **只是免费节点缓存，不是用户的节点总量**：回答「我有几个节点 / 当前用哪个」必须用 `ConfigDetail`（2.45.5 起节点的 `source` 与 `unavailable_reason` 都在那里）。
 - **只回答免费节点缓存与试用状态**：不要用它回答「分流规则是否最新」——规则随应用预置，读不到版本。
-- **试用过期后仍可读（2.91.0）**：本工具不触发刷新；过期后它照常返回缓存元数据，`node_count` 是缓存里的数量，不是节点池里的数量。
+- **试用过期后仍可读（2.91.0）**：本工具不触发刷新。到期清理会删掉种子节点与缓存，所以过期后返回空的缓存形状（`node_count = 0`、`content_sha256 = null`）；`content` 固定先说「试用已到期、不再更新」，**不得提示去运行 `CatalogRefresh`**（那条会被闸门拒绝）。
 
 权限：`ReadOnly`。
 
@@ -2456,7 +2456,7 @@ type LlmProvidersData = {
 |---|---|---|---|
 | 1 | 版本升到 `3.40.0`；§4.48 `MyServers` 的 `content` 把「已释放」统一改为「已累计」（账号行「本月流量：已用 X / 已累计 Y」、逐台行「本月流量 已用 {used} / 已累计 {limit}」），账号行补一句「已累计按月逐日增长，不是整月一次性给满；账号级「上限」另算」，替掉「已释放不是本月上限」的说法。`data` 字段与工具总数（38）不变 | 内容口径 | 界面早就在说「已累计」，工具 content 却说「已释放」，用户对照时以为是两个量；`commands.md` 契约版本矩阵同步 |
 | 2 | §4.20 `CatalogRefresh`：试用到期后返回 `PRECONDITION_FAILED`（`retryable = false`）且不再更新，错误列表补该码、固定 `message` 与描述同步；不新增版本小节 | 语义新增 | `docs/design/trial-seed-expiry.md` |
-| 3 | §4.21 `DefaultProfileStatus`：注明试用过期后仍可读，它不触发刷新，`node_count` 是缓存数不是池内数 | 文档澄清 | 同上 |
+| 3 | §4.21 `DefaultProfileStatus`：注明试用过期后仍可读；到期清理会清空缓存，返回空形状；`content` 固定先说已过期、不再更新，不得提示去运行 `CatalogRefresh` | 文档澄清 | 同上 |
 | 4 | §4.25 `ConfigUpdate`：`node_ids` 含**未绑定的** seed 且试用到期时返回 `PRECONDITION_FAILED / trial_expired`，整个命令不落改动；错误列表补该码。工具数与权限不变 | 语义新增 | 同上 |
 
 ### 3.39.0（未发布，2026-11-27：`MyServers` 透出 `provider_gone`）

@@ -262,7 +262,7 @@ CREATE TABLE seed_cache (
     id                INTEGER PRIMARY KEY CHECK (id = 1),  -- 单行
     content_sha256    TEXT NOT NULL,     -- 变化判定的唯一依据
     etag              TEXT,              -- 条件请求用，可为空
-    etag_source       TEXT,              -- etag 来自哪个源；跨源不复用
+    etag_source       TEXT,              -- etag 来自哪个源；当前只有主源，保留为缓存自描述
     source_version    TEXT,              -- 文件里的 version，仅展示
     source_updated_at TEXT,              -- 文件里的 updated_at，仅展示
     node_count        INTEGER NOT NULL,
@@ -272,7 +272,7 @@ CREATE TABLE seed_cache (
 ```
 
 - 种子原文**不进本表**：含全部节点密码，整包加密存 `secrets.enc` 的 `seed:<content_sha256>`。
-- 更新判据是内容哈希；`etag` 只在同一来源内使用（`etag_source` 记来源），主源失败走兜底时不带主源 ETag。
+- 更新判据是内容哈希；`etag` 只在同一来源内使用（`etag_source` 记来源）。当前种子只有一个来源（控制面 Worker），所以 `etag_source` 恒为主源。
 - 种子里的节点**不会自动进入 `nodes`**。只有当用户创建 `source = "seed"` 的配置时，才解密种子并把节点物化进节点池（`source = 'seed'`），避免从未使用的种子在节点列表里出现。
 - 刷新时按 `source_key` upsert；新种子里不存在的 seed 节点被删除，其在配置里的关系随之级联。
 
@@ -413,8 +413,8 @@ CREATE TABLE trial_state (
 - **行可以不存在**：从未连过免费节点时没有这一行，读取一律按 `state = "available"`（`commands.md` §7.19）。
 - `started_at` 只写一次：只在「连接成功且本次连接的节点 `source = 'seed'`」时写；连自建节点不起算。
 - `expires_at` 是派生值（`started_at + 7d`），**不落库**——落库会与「改系统时间」产生两份互相矛盾的事实。
-- `ended_at` 写入即表示试用结束。到期清理同一个事务里还要：把**全库的**种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 把它们加回来）、删除这些节点在**所有配置**里的 `config_nodes` 关联、必要时把各配置的 `configs.current_node_id` 改到剩余节点或置 `null`。
-- **节点行本身不删**：`nodes(source = 'seed')` 保留，池子里看不见它们只是因为 `config_nodes` 关联没了；凭证仍在 `secrets.enc`，供离线诊断。
+- `ended_at` 写入即表示试用结束。到期清理同一个事务里还要：把**全库的**种子节点写进 `seed_node_exclusions`（防止下次 `default_profile_refresh` 把它们加回来）、删除这些节点在**所有配置**里的 `config_nodes` 关联、必要时把各配置的 `configs.current_node_id` 改到剩余节点或置 `null`，并**删掉 `nodes(source = 'seed')` 行与 `seed_cache` 行**。对应的 `secrets.enc` 条目（节点密码与 `seed:<hash>` 原文）在事务提交后 best-effort 删除：失败只记 warn，崩溃窗口会留下没有引用的孤儿密钥——不可用、不阻断，本轮不做自动清扫（§5.4）。
+- **过期后本地不留可绑回的种子数据**：节点行、缓存元数据与原文都不在了，`node_attach({ nodeIds })` 拿到旧 seed id 只会报 `NOT_FOUND`；排除表仍保留作兜底。这取代了早期「节点行保留供离线诊断、凭证仍在 `secrets.enc`」的口径。
 - 删除该行等于重置试用。**没有任何命令或工具能删它**；重装应用会连同数据库一起重建，这是唯一的重置途径，接受。
 
 ---
@@ -450,7 +450,7 @@ CREATE TABLE trial_state (
 |---|---|---|---|
 | `node:<node_id>` | 节点密码（明文，仅在加密文件内） | `node_create` / `node_import_url` / 种子物化 | 节点行删除后 |
 | `provider:<provider_id>` | AI 服务商 API Key | `llm_provider_save` / `deepseek_save_key` | provider 删除后 |
-| `seed:<content_sha256>` | 种子原文 JSON | 种子刷新 | 新哈希写入成功后删旧键 |
+| `seed:<content_sha256>` | 种子原文 JSON | 种子刷新 | 新哈希写入成功后删旧键；到期清空缓存时 |
 
 **只有这三类键。** 不允许把配置、日志、诊断包写进 `secrets.enc`——它是密钥容器，不是第二个数据库。
 
@@ -467,21 +467,19 @@ CREATE TABLE trial_state (
 | 操作 | 顺序 | 失败处理 |
 |---|---|---|
 | 创建节点 | ① 写 `secrets.enc` → ② 事务写 `nodes` + `config_nodes` | ② 失败 → 删除 ① 写的键；删除失败只记日志（孤儿密钥无害，见 §5.4） |
-| 删除节点 | ① 事务删 `nodes`（关系与 `current_node_id` 级联）→ ② 删 `secrets.enc` 的键 | ② 失败只记日志；下次启动清扫 |
+| 删除节点 | ① 事务删 `nodes`（关系与 `current_node_id` 级联）→ ② 删 `secrets.enc` 的键 | ② 失败只记日志；孤儿密钥没有引用、不可用，本轮不做自动清扫（§5.4） |
 | 种子刷新 | ① 写新 `seed:<hash>` → ② 事务改 `seed_cache`、upsert/删除 seed 节点 → ③ 删旧 `seed:<hash>` | 任一步失败保留旧缓存与旧键；不产生半新半旧 |
 | 删配置 | 单事务删 `configs`（关系、布局、问题、`secrets` 不涉及） | 节点与密码不动 |
 
-**永远先写不可回滚的一侧**：多一个孤儿密钥是可清理的；多一行指向不存在密钥的节点是用户会踩到的坏状态。
+**永远先写不可回滚的一侧**：多一个孤儿密钥没有引用、不可用（本轮不自动清理）；多一行指向不存在密钥的节点是用户会踩到的坏状态。
 
-### 5.4 孤儿密钥清扫
+### 5.4 孤儿密钥
 
-应用启动时（非关键路径）做一次：
+`secrets` 模块只有 set / get / delete，**不能枚举键**，应用也没有启动清扫。因此：
 
-- 枚举 `secrets.enc` 里 `node:` 前缀的键，凡是不在 `nodes.id` 中的删除。
-- 枚举 `seed:` 前缀，凡是不等于当前 `seed_cache.content_sha256` 的删除。
-- 失败只记日志，不阻塞启动。
-
-> 若 `secrets` 模块无法枚举键，则跳过清扫。孤儿密钥不暴露给任何人，只是占用磁盘；**不能为了清扫而阻塞或回滚启动**。
+- 删除节点、种子刷新换密文、到期清理时删密钥失败，或在提交后删密钥前崩溃，都会留下**没有任何 `nodes` / `seed_cache` 引用的密钥**。
+- 这些密钥不可用：没有任何读取路径会取到它们，也不暴露给界面或模型；只是占用加密文件的磁盘。
+- **本轮不做自动清扫**，也不为清扫在启动路径上加逻辑。将来若要清理，必须先给 `secrets` 增加枚举能力，并保持「不阻塞、不回滚启动」。
 
 ---
 
@@ -611,6 +609,13 @@ CREATE TABLE trial_state (
 ---
 
 ## 11. 变更记录
+
+### 试用到期清空本地种子数据（2026-11-27，schema 版本不变）
+
+| # | 变更 | 类型 |
+|---|---|---|
+| 1 | §3.12 到期清理语义变更：同一事务删除 `nodes(source = 'seed')` 与 `seed_cache` 行；提交后 best-effort 删除对应 `secrets.enc` 条目（节点密码、`seed:<hash>`）。排除表、`ended_at` 幂等与清理触发时机不变。无 DDL 变更，schema 版本仍为 9 | 语义变更 |
+| 2 | §5.1 `seed:<hash>` 的删除时机补「到期清空缓存时」；上游同步 `commands.md` 2.91.0、`tools.md` 3.40.0、`design/trial-seed-expiry.md` | 元数据 |
 
 ### 9（2026-11-17，`seed_cache.etag_source`）
 

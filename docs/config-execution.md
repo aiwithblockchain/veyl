@@ -174,11 +174,10 @@ Method    aes-256-gcm
 **决定：不随包，只从种子 URL 拉。**
 
 ```
-https://veyl.dessage.xyz/v1/seed                    # 主源：控制面 Worker 直出（2026-11-17 起）
-https://meshnetprotocol.github.io/veyl_seed.json    # 兜底源：主源失败时才用
+https://veyl.dessage.xyz/v1/seed                    # 唯一来源：控制面 Worker 直出（2026-11-17 起；2026-11-27 起取消 Pages 兜底）
 ```
 
-主源的数据就是 control-plane Worker 源码里的 `src/seed.ts`，改完部署即生效；两源用同一份内容哈希判定更新。设计见 `docs/design/seed-publishing.md`。
+种子数据就是 control-plane Worker 源码里的 `src/seed.ts`，改完部署即生效；更新只按内容哈希判定。设计见 `docs/design/seed-publishing.md`。
 
 > **术语（不要混用）**：对外统一叫**「Veyl 免费节点」**（选项里写「Veyl 免费节点（仅供试用）」）——它只供试用，稳定性和长期可用性都不承诺，产品方向是用户自建节点与供应商接入。代码里的机制名仍是「种子」「默认节点」（`veyl_seed.json`、`default_profile.rs`、日志「默认节点刷新」、`ConfigCreate(source: "seed")`），**不改名**，本文提到机制时也沿用这些名字。两个名字指同一批服务器，别把机制名当成对外叫法。
 

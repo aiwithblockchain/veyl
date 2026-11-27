@@ -27,7 +27,7 @@
 | 2 | 只拦 `nodes.source = "seed"` 的种子链路。窗口拖放与 `import_seed_file` 一并删除（§4.2）；`config_create(source="seed")`、`config_create({nodeIds})`、`node_attach(source="seed")`、`node_attach({nodeIds})`、`config_update({nodeIds})` 都按候选来源接同一闸门（§4 第 11–15 行）。**过期后无法新增 seed 节点行，也无法把未绑定的 seed 节点绑回任何配置；已绑定的 seed 节点允许保留 / 编辑**；`manual` / `owned` / `url` 与 URL 导入、手动节点、托管节点不碰。 |
 | 3 | 过期后设置页该行：标题 `更新试用节点`，值 `试用节点已过期`，右侧 `检查更新` 按钮**不渲染**（不是禁用）。 |
 | 4 | 后端返回稳定错误：`PRECONDITION_FAILED` + `details.reason = "trial_expired"`，`retryable = false`。不新增错误码。 |
-| 5 | 已有缓存与库里的节点保留（包括删除手动导入通道之前已导入的 seed 节点），只停止刷新；不删本地种子缓存。 |
+| 5 | 到期清理**清空本地种子数据**：种子节点行、`seed_cache` 与 `secrets.enc` 条目一并删除；用户自己的节点与托管节点保留。删除手动导入通道之前已导入的 seed 节点也在清理范围内。 |
 | 6 | 判定读不出来（数据库异常）时**放行**并记 warn：闸门是防续期，不是安全边界，不能因为读状态失败让正常用户更新不了。 |
 
 ---
@@ -64,7 +64,7 @@
 
 | 机制 | 作用 |
 |---|---|
-| `trial::expire_if_needed`（`trial.rs:136`） | 到期瞬间删一次种子节点关联、写排除表、修 `current_node_id`、写 `ended_at` |
+| `trial::expire_if_needed`（`trial.rs`） | 到期瞬间删种子节点关联、**节点行与 `seed_cache`**、写排除表、修 `current_node_id`、写 `ended_at`；提交后 best-effort 删种子密文 |
 | `seed::refresh` 闸门（本文） | 到期后刷新不再把种子加回来；六条 seed 写入路径共用同一闸门（§3.5） |
 
 排除表仍保留：它是「用户主动移除某个种子节点」的长期机制，也是闸门失效时的第二道防线。
@@ -132,6 +132,12 @@ pub enum RefreshOutcome {
 - 不改 `seed_cache.checked_at` / `fetched_at`；
 - 不删旧密文（但删掉本次 `apply_fetch` 刚写入的新密文）；
 - 不调用 `merge_seed_into_global_quietly`。
+
+> **运行时刷新不会清空缓存；真正的清空在到期清理事务里**：`expire_if_needed` 在同一事务删掉
+> `nodes(source = 'seed')` 行与 `seed_cache`，提交后 best-effort 删除节点密码与
+> `seed:<hash>` 原文。两者不冲突：刷新被拒只是「不加回来」，清理负责「把已有的拿走」。
+> `apply_fetch` 在写 `seed_cache` 之前用同一把连接守卫再复查一次试用：若清理刚在
+> `sync_seed_nodes` 提交后执行，就删掉本次新写的密文并返回 `TrialExpired`，不会把缓存行写回来。
 
 **刷新成功后的 merge 拒绝不吞掉**：`default_profile_refresh` 在 `Updated` / `Unchanged` 后调用
 `merge_seed_into_global`；若它返回 `trial_expired`（按 `ServiceError` 的 code + reason 识别），
@@ -227,9 +233,12 @@ pub enum RefreshOutcome {
 ### 4.1 过期后的可见后果（有意为之）
 
 - 启动后不再自动拉种子；新装/重装且已过期的用户不会重新获得试用节点。
-- 种子缓存与密文仍在本地，`default_profile_status` 仍能报出旧节点数；
-  它不代表可刷新，也不代表节点仍在池里（`trial_status.seed_node_count = 0`）。
-- 删除手动导入通道之前已经加进池里的 seed 节点、URL/手动节点、托管节点照常可用。
+- 到期清理会把种子节点行、`seed_cache` 与 `secrets.enc` 里的种子条目一起删除：
+  过期后池里没有 seed 节点，`default_profile_status` 返回空形状（`node_count = 0`、
+  `content_sha256 = null`），`node_attach({ nodeIds })` 拿旧 seed id 只会得到
+  `NOT_FOUND / node_not_found`。它不代表可刷新。
+- 删除手动导入通道之前已经加进池里的 seed 节点、URL/手动节点、托管节点照常可用；
+  其中 seed 节点会被到期清理一并删除（见 §7.2 第 4 条）。
 
 ### 4.2 删除窗口拖放与 `import_seed_file`
 
@@ -468,25 +477,24 @@ const expired = trial?.state === "expired" || phase.kind === "expired";
 3. **AI / 诊断文案仍叫「免费节点」**：`tools/net.rs` 的 `trial_sentence`、
    `services.rs:2573` 的 `seed_checks`、试用卡 `trial.*` 等未改名。
    本轮只改设置页这一行，是否全局统一见 §11。
-4. **升级前手动导入的 seed 节点不会被清理**：删除命令不会删数据；已经通过拖放
-   `import_seed_file` 加进池里的 `source = "seed"` 节点继续存在。若用户当时已到期，
-   `ended_at` 已写，`expire_if_needed` 不会二次执行。是否补一次清理见 §11。
+4. **升级前已经到期的用户不会被补清理**：`expire_if_needed` 只在第一次写 `ended_at` 时执行。
+   本版之前就已到期的用户 `ended_at` 已写，其残留的 `source = "seed"` 节点行不会被再次清空；
+   新到期的用户会被完整清空。是否补一次数据清理见 §11。
 5. **缓存物化与绑回旁路（本批已封堵）**：五条路径都接 `ensure_seed_trial_active`（§3.5）：
    `config_create(source="seed")`、`config_create({nodeIds})`、`node_attach(source="seed")`、
    `node_attach({nodeIds})`、`config_update({nodeIds})`。过期返回
    `PRECONDITION_FAILED / trial_expired`，不建配置、不 upsert 节点行、不绑定、不替换关联、
    不撤销排除；`available` / `active` 放行。
-   - 到期清理只删 `config_nodes` 关联、保留节点行（`trial.rs:169`–`184`），所以只拦
-     `source="seed"` 不够：`node_attach({nodeIds:[seedId]})`（`services.rs:7326`–`7356`，
-     `attach_nodes` 直接 INSERT）与 `config_update({nodeIds})`（`services.rs:6721` →
-     `replace_nodes`，`configs.rs:804`–`838`，且 `:6734` 会撤销排除）都能把旧 seed 节点绑回。
+   - **到期清理（本版起）会删掉 `nodes(source='seed')` 行与 `seed_cache`**，因此清理之后
+     `node_attach({nodeIds:[旧 seed id]})` 先报 `NOT_FOUND / node_not_found`，绑回路径自然消失。
+     闸门仍然必要：在「按时间已过期、清理事务还没提交」的窗口里节点行还在，只靠清理拦不住。
    - **只拦新增的 seed 节点**：候选 `seed` 与当前已绑定集合求差，差集非空才拒。已绑定的 seed
-     节点允许保留 / 编辑（只改名但显式带上现有 seed id 不应被拒）；`manual` / `owned` / `url` 照常。
-   - 代码事实：`node_attach(source="seed")` 会先 `add_parsed_nodes(None, ...)` upsert 节点行/密码，
-     再把候选 `attach_nodes` 到全局配置（`services.rs:7352`–`7354`），**能绑定**，不是
-     「只重写行、不绑定」。
-   - **结论：过期后无法新增 seed 节点行，也无法把未绑定的 seed 节点绑回任何配置；
-     已绑定的 seed 节点仍可保留 / 编辑 / 连接。** 旧 seed 节点不删，见第 4 条。
+     节点（清理前）允许保留 / 编辑（只改名但显式带上现有 seed id 不应被拒）；
+     `manual` / `owned` / `url` 照常。
+   - 代码事实：`node_attach(source="seed")` 会先 upsert 节点行/密码，再把候选 `attach_nodes`
+     到全局配置（同一事务），**能绑定**，不是「只重写行、不绑定」。
+   - **结论：清理后本地没有种子节点可绑回；清理前的窗口由闸门拦新增 seed。
+     已绑定的 seed 节点在清理前仍可保留 / 编辑 / 连接。**
 
 ---
 
@@ -530,6 +538,12 @@ const expired = trial?.state === "expired" || phase.kind === "expired";
 | 24 | 过期、无全局配置时调 `config_create({nodeIds:[seedId]})` | `Err`；`trial_expired`；不建配置、不绑定 |
 | 25 | 过期、候选 seed 已绑定且只改名时调 `config_update({nodeIds:[已绑定的 seedId], name})` | **成功**：改名生效，绑定与排除不变（只拦新增，不拦保留） |
 | 26 | 过期、候选 seed 已绑定时调 `node_attach({nodeIds:[已绑定的 seedId]})` | **成功**：幂等跳过，`attached_node_ids` 为空（不误伤保留） |
+| 27 | 真的跑到期清理事务（有种子节点 + 缓存 + 密文） | `nodes(source='seed')` 为 0、`seed_cache` 为空、对应 `secret` 取不到；`trial_status` 仍是 `expired` 且 `seed_node_count = 0`；二次 `expire_if_needed` 返回 `None` |
+| 28 | 清理后调 `node_attach({nodeIds:[原 seed id]})` | `NOT_FOUND / node_not_found`（不是 `trial_expired`——节点行已不存在） |
+| 29 | 清理后调 `config_create(source="seed")` | `PRECONDITION_FAILED / trial_expired`（试用判定先于 `seed_unavailable`） |
+| 30 | 清理后调 `default_profile_status` / AI 工具 `DefaultProfileStatus` | 返回空缓存形状；`content` 先说明试用已到期、不再更新，不出现 `CatalogRefresh` 提示 |
+| 31 | 密文删除失败 | 不阻断到期事务（best-effort，记 warn）；实现没有注入失败点的入口，作为已知窗口记录，不做自动化断言 |
+| — | `apply_fetch` 写 `seed_cache` 前的试用复查（§3.3） | **无自动化用例**：这是「`sync_seed_nodes` 提交之后、写缓存之前到期清理插入」的毫秒窗口，构造成本高于收益；该顺序靠评审推演覆盖，不加注入点 |
 
 > 现有 `config_create` / `node_attach` 测试没有写 `trial_state` 行，本身就是 `available` 的回归；
 > 新增用例只补 `expired` 与 `active` 两侧，不改旧用例的构造。
@@ -608,7 +622,7 @@ const expired = trial?.state === "expired" || phase.kind === "expired";
 | `docs/contracts/commands.md` | §4.1.2（约 749–776） | 删除整个「窗口拖放不走本命令」引用块与「为什么窗口拖放不迁移」整段，含两条入口分工；边界表删掉「不接受窗口拖放事件」那一行；`:778` 的大小上限对比改为只提 URL 拉取 |
 | `docs/contracts/commands.md` | §7.19 | 增一条：`state = "expired"` 同时是种子刷新与六条 seed 写入路径的闸门唯一依据；Host 在 `seed::refresh`、`config_create` / `node_attach` 的 seed 分支、`config_create({nodeIds})`、`node_attach({nodeIds})`、`config_update({nodeIds})` 硬拦，与清理事务是否提交无关；界面隐藏按钮不构成拦截 |
 | `docs/contracts/commands.md` | §8.1 | 增一句：过期后仍可读状态，它不表示可以刷新，`node_count` 是缓存数不是池内数 |
-| `docs/contracts/commands.md` | §8.2 | 增「试用到期后停止更新」段：不联网、不读写缓存、不合并节点；返回 `PRECONDITION_FAILED / trial_expired`，`retryable = false`；`force = true` 不能绕过；已有缓存保留但不再刷新 |
+| `docs/contracts/commands.md` | §8.2 | 增「试用到期后停止更新」段：不联网、不读写缓存、不合并节点；返回 `PRECONDITION_FAILED / trial_expired`，`retryable = false`；`force = true` 不能绕过；到期清理会清空缓存，清理提交前的短暂窗口里旧缓存仍在但不刷新 |
 | `docs/contracts/commands.md` | §8.3 | 整节删除；`SeedImportResult` 类型随之删除 |
 | `docs/contracts/commands.md` | §12.1 第 8 行 | 决策表里的「保留」改为「已删除（2.91.0）」，或删除该行 |
 | `docs/contracts/commands.md` | §15 契约版本矩阵（`:3298`） | 矩阵里的 `2.90.0` 与描述同步到 `2.91.0`，并把试用闸门、`config_create` / `node_attach` / `config_update` 的 `trial_expired` 前置条件、删除 #24 / §8.3 写进该行 |
@@ -629,6 +643,9 @@ const expired = trial?.state === "expired" || phase.kind === "expired";
 | `docs/shadowsocks.md` | §5.2 整节 + `:18` + `:296` 改写；补 `:146`、`:152`、`:156–157`、`:166–167`、`:177` | 标注窗口拖放与 `import_seed_file` 已退役；历史叙述不改写 |
 | `docs/acceptance-p1-report.md` | — | **不改写**：历史验收报告，保留当时状态 |
 | `docs/review-checklist.md` | 旧名 grep 模式 | 可选：从 `import_seed_file` 的旧名清单里移除，避免此后永远报旧名 |
+| `docs/contracts/commands.md` | §7.19 / §8.1–8.2 | 到期清理连种子节点行、`seed_cache` 与密文一起清空；过期后 `node_attach` 旧 seed id 报 `NOT_FOUND`；`default_profile_status` 过期返回空形状。并入未推送的 2.91.0 |
+| `docs/contracts/tools.md` | §4.21 `DefaultProfileStatus` | 过期后返回空缓存形状；`content` 固定先说已过期、不再更新，不提示 `CatalogRefresh`。并入未发布的 3.40.0 |
+| `docs/data-model.md` | §3.12 / §5.1 / §11 | 到期清理删除 `nodes(source='seed')`、`seed_cache`，提交后删密文；无 DDL 变更，schema 版本仍为 9 |
 
 ---
 
@@ -659,9 +676,8 @@ const expired = trial?.state === "expired" || phase.kind === "expired";
    其余界面（试用卡 `trial.*`、诊断项 `services.rs:2573` `seed_checks`、AI 工具描述
    `tools/net.rs` / `description.rs`）仍叫「免费节点」；是否另开一批全局统一，
    并同步修改 `servers-trial-hint.md` 与 `veyl-ui` skill 的固定用词，需要 PM 决定。
-2. **升级前手动导入的 seed 节点**：删除命令不会清数据，已经通过拖放导入的
-   `source = "seed"` 节点会留在池里；已到期用户的 `ended_at` 已写，不会再清理。
-   是否补一次数据清理，还是接受这些存量节点继续可用？默认接受、不清理。
+2. **升级前已经到期的 seed 节点**：`ended_at` 已写，`expire_if_needed` 不会二次执行，
+   这些残留节点不会被补清理。默认接受、不补数据迁移；是否做一次性清理由 PM 决定。
 3. **后台循环空转**：默认保留 6 小时循环，过期时只读一次数据库。若希望彻底停掉，
    需要接受本地重置试用后必须重启应用才恢复刷新。
 4. **错误码**：默认 `PRECONDITION_FAILED / trial_expired`。若产品要求独立码

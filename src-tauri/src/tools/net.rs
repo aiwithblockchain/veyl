@@ -294,6 +294,10 @@ fn trial_sentence(trial: Option<&Value>) -> Option<String> {
 
 /// 试用状态 + 缓存状态两句话。模型只看得到 `content`，两份事实都要落在这里。
 fn default_profile_summary(data: &Value, trial: Option<&Value>) -> String {
+    let expired = trial
+        .and_then(|trial| trial.get("state"))
+        .and_then(Value::as_str)
+        == Some("expired");
     let cache = if data.get("content_sha256").and_then(Value::as_str).is_some() {
         let count = data.get("node_count").and_then(Value::as_i64).unwrap_or(0);
         match data.get("checked_at").and_then(Value::as_i64) {
@@ -303,6 +307,9 @@ fn default_profile_summary(data: &Value, trial: Option<&Value>) -> String {
             },
             None => format!("缓存里 {count} 个，检查时间未知。"),
         }
+    } else if expired {
+        // 到期清理会连缓存一起删；这时不能提示去刷新——刷新已经被闸门拒绝。
+        "种子缓存已在到期时清空，不再更新。".into()
     } else {
         "还没有 Veyl 免费节点缓存，先运行 CatalogRefresh。".into()
     };
@@ -329,7 +336,7 @@ impl Tool for DefaultProfileStatusTool {
     fn description(&self) -> &str {
         "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间，以及免费节点试用状态\
          （阶段、剩余天数、池内免费节点数）。回答「试用还剩几天 / 是不是到期了」用它；\
-         试用到期后仍可读，它不触发刷新；\
+         试用到期后仍可读（缓存已在到期时清空），它不触发刷新；\
          缓存里的节点数不等于池内节点数，也不是用户的节点总量——「我有几个节点」要用 ConfigDetail。\
          只回答免费节点缓存与试用状态；不要用它回答分流规则是否最新——规则随应用预置，读不到版本。"
     }
@@ -350,6 +357,12 @@ impl Tool for DefaultProfileStatusTool {
                     .and_then(Value::as_str)
                     .is_some();
                 let trial = self.services.trial_status().await;
+                let expired = trial
+                    .as_ref()
+                    .ok()
+                    .and_then(|trial| trial.get("state"))
+                    .and_then(Value::as_str)
+                    == Some("expired");
                 let summary = match trial.as_ref() {
                     Ok(trial) => default_profile_summary(&data, Some(trial)),
                     Err(error) => {
@@ -366,6 +379,9 @@ impl Tool for DefaultProfileStatusTool {
                         FactKey::NetFreeNodeCount,
                         json!({ "count": count }),
                     )]
+                } else if expired {
+                    // 到期清理连缓存一起删了：这不等于「播放器没缓存」，不该推缺失提示。
+                    vec![]
                 } else {
                     vec![Fact::new(FactKey::NetFreeCacheMissing)]
                 };
@@ -486,6 +502,26 @@ mod tests {
             text.starts_with("免费节点试用还没有开始：第一次连上免费节点起算。池内免费节点 2 个。"),
             "{text}"
         );
+    }
+
+    /// 到期后缓存已被清理：不能提示模型去跑 CatalogRefresh（那条会被闸门拒绝）。
+    #[test]
+    fn an_expired_trial_without_cache_does_not_tell_the_model_to_refresh() {
+        let trial = json!({
+            "state": "expired",
+            "expires_at": "2026-11-20T00:00:00Z",
+            "remaining_ms": 0,
+            "seed_node_count": 0,
+        });
+        let text = default_profile_summary(&json!({}), Some(&trial));
+        assert!(
+            text.starts_with(
+                "免费节点试用已到期：节点已从节点池移除，刷新不会加回。池内免费节点 0 个。"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("种子缓存已在到期时清空，不再更新。"), "{text}");
+        assert!(!text.contains("CatalogRefresh"), "{text}");
     }
 
     #[test]
