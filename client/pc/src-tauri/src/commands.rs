@@ -164,22 +164,37 @@ fn commit(
     Ok(profile)
 }
 
-fn secret_set(secrets: &Arc<dyn SecretStore>, id: &str, value: &str) -> AppResult<()> {
-    secrets.set(id, value).map_err(|error| {
+/// 密钥读写都走阻塞线程池：release 默认后端是系统钥匙串，读写可能弹系统授权
+/// 框，直接在 async 命令里同步调用会占住 tokio worker，把其他命令一起卡住。
+async fn secret_set(
+    secrets: Arc<dyn SecretStore>,
+    id: &str,
+    value: &str,
+) -> AppResult<()> {
+    let id = id.to_string();
+    let value = value.to_string();
+    let result = tauri::async_runtime::spawn_blocking(move || secrets.set(&id, &value))
+        .await
+        .map_err(|error| AppError::internal(format!("保存订阅链接失败：{error}")))?;
+    result.map_err(|error| {
         AppError::internal(format!("保存订阅链接失败：{error}"))
             .with_hint("重试一次；仍然失败就检查系统钥匙串/应用目录权限。")
     })
 }
 
-fn secret_get(secrets: &Arc<dyn SecretStore>, id: &str) -> AppResult<Option<String>> {
-    secrets.get(id).map_err(|error| {
-        AppError::internal(format!("读取订阅链接失败：{error}"))
-            .with_hint("重新粘贴一次链接。")
+async fn secret_get(secrets: Arc<dyn SecretStore>, id: &str) -> AppResult<Option<String>> {
+    let id = id.to_string();
+    let result = tauri::async_runtime::spawn_blocking(move || secrets.get(&id))
+        .await
+        .map_err(|error| AppError::internal(format!("读取订阅链接失败：{error}")))?;
+    result.map_err(|error| {
+        AppError::internal(format!("读取订阅链接失败：{error}")).with_hint("重新粘贴一次链接。")
     })
 }
 
-fn secret_delete(secrets: &Arc<dyn SecretStore>, id: &str) {
-    let _ = secrets.delete(id);
+async fn secret_delete(secrets: Arc<dyn SecretStore>, id: &str) {
+    let id = id.to_string();
+    let _ = tauri::async_runtime::spawn_blocking(move || secrets.delete(&id)).await;
 }
 
 fn fetch_error(outcome: FetchOutcome) -> AppError {
@@ -218,7 +233,7 @@ pub async fn import_url(state: &AppState, raw_url: &str) -> AppResult<Profile> {
 
     // 链接先写密钥存储：写不进去就不落配置——否则会留下一个永远刷不了的配置。
     // 此时还没有创建配置目录，失败也不会留下任何东西。
-    secret_set(&state.secrets, &id, url.as_str())?;
+    secret_set(state.secrets.clone(), &id, url.as_str()).await?;
     let result = commit(
         &state.store,
         &id,
@@ -231,7 +246,7 @@ pub async fn import_url(state: &AppState, raw_url: &str) -> AppResult<Profile> {
     );
     if result.is_err() {
         // 回滚：密钥与可能已建出的目录都清掉，别留下界面看不见的残留。
-        secret_delete(&state.secrets, &id);
+        secret_delete(state.secrets.clone(), &id).await;
         let _ = state.store.remove(&id);
     }
     result
@@ -299,7 +314,7 @@ pub async fn refresh(state: &AppState, id: &str) -> AppResult<Profile> {
             .with_hint("要换内容就重新导入一份文件。"));
     }
 
-    let Some(raw_url) = secret_get(&state.secrets, id)? else {
+    let Some(raw_url) = secret_get(state.secrets.clone(), id).await? else {
         return mark_sync(
             state,
             profile,
@@ -398,11 +413,11 @@ pub fn rename(state: &AppState, id: &str, name: &str) -> AppResult<Profile> {
     Ok(profile)
 }
 
-pub fn remove(state: &AppState, id: &str) -> AppResult<()> {
+pub async fn remove(state: &AppState, id: &str) -> AppResult<()> {
     // 先删记录与目录、最后删密钥：反过来的话，写清单失败会变成
     // 「配置还在、链接没了」，界面只会让用户重新粘贴，查不出原因。
     state.store.remove(id)?;
-    secret_delete(&state.secrets, id);
+    secret_delete(state.secrets.clone(), id).await;
     Ok(())
 }
 
@@ -505,8 +520,8 @@ pub fn profile_rename(
 }
 
 #[tauri::command]
-pub fn profile_remove(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
-    remove(state.inner(), &id)?;
+pub async fn profile_remove(app: AppHandle, state: State<'_, AppState>, id: String) -> AppResult<()> {
+    remove(state.inner(), &id).await?;
     emit_profiles(&app, state.inner());
     Ok(())
 }

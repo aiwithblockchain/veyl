@@ -70,6 +70,26 @@ pub fn validate_structure(config: &Value) -> AppResult<()> {
         }
     }
 
+    // 规则里的 outbound 同样必须是存在的出站：没有内核时这是最后一道网。
+    if let Some(rules) = config
+        .get("route")
+        .and_then(|route| route.get("rules"))
+        .and_then(Value::as_array)
+    {
+        for outbound in rules
+            .iter()
+            .filter_map(|rule| rule.get("outbound").and_then(Value::as_str))
+        {
+            if !tags.contains(&outbound) {
+                return Err(AppError::new(
+                    "CONFIG_INVALID",
+                    format!("route.rules 指向了不存在的出站：{outbound}"),
+                )
+                .with_hint("这份配置在服务端就已经不一致，联系支持或重新导出。"));
+            }
+        }
+    }
+
     if let Some(servers) = config
         .get("dns")
         .and_then(|dns| dns.get("servers"))
@@ -175,6 +195,9 @@ fn tun_inbound(config: &Value) -> Value {
     if !inbound.contains_key("tag") {
         inbound.insert("tag".into(), Value::String("tun-in".into()));
     }
+    // 模板可能带 interface_name。写死名字在 macOS 上是 `bad tun name`（主客户端
+    // 实测结论）：留空让系统分配 utunN，Windows 交给 Wintun 自己命名。
+    inbound.remove("interface_name");
     inbound.insert(
         "address".into(),
         Value::Array(vec![Value::String(platform::tun_address().into())]),
@@ -227,7 +250,7 @@ mod tests {
             },
             "inbounds": [
                 {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 7890},
-                {"type": "tun", "tag": "server-tun", "address": ["172.19.0.1/30"], "stack": "mixed", "dns_address": ["172.18.0.2", "fdfe:dcba:9876::2"]}
+                {"type": "tun", "tag": "server-tun", "address": ["172.19.0.1/30"], "stack": "mixed", "interface_name": "utun9", "dns_address": ["172.18.0.2", "fdfe:dcba:9876::2"]}
             ],
             "outbounds": [
                 {"type": "selector", "tag": "proxy", "outbounds": ["node-a"], "default": "node-a"},
@@ -267,6 +290,8 @@ mod tests {
         // 服务端模板宣告的 DNS 地址属于它自己的网段，必须换掉，且不再带 IPv6。
         assert_eq!(inbounds[0]["dns_address"], json!([platform::dns_address()]));
         assert!(!inbounds[0]["dns_address"].to_string().contains("172.18.0.2"));
+        // 模板里的 interface_name 要丢掉：写死名字在 macOS 上 bad tun name。
+        assert!(inbounds[0].get("interface_name").is_none());
     }
 
     #[test]
@@ -333,6 +358,14 @@ mod tests {
         config["route"]["final"] = json!("missing");
         let error = validate_structure(&config).unwrap_err();
         assert!(error.message.contains("route.final"));
+    }
+
+    #[test]
+    fn dangling_rule_outbound_is_rejected() {
+        let mut config = sample();
+        config["route"]["rules"][0]["outbound"] = json!("missing");
+        let error = validate_structure(&config).unwrap_err();
+        assert!(error.message.contains("route.rules"), "{}", error.message);
     }
 
     #[test]
