@@ -4,7 +4,7 @@ Veyl 的轻量级 PC 客户端：只做「导入配置 → 连节点 → 建隧�
 
 需求与技术设计见 [`../docs/client-apps.md`](../docs/client-apps.md) 与 [`../docs/client-apps-technical.md`](../docs/client-apps-technical.md)。
 
-## 当前状态：M1-A（导入与装配）
+## 当前状态：M1-B（macOS 连接闭环）
 
 这是一个**可独立构建、可独立启动**的 Tauri 2 应用。已实现：
 
@@ -15,12 +15,16 @@ Veyl 的轻量级 PC 客户端：只做「导入配置 → 连节点 → 建隧�
 - **持久化**：`profiles.json` 存元数据（不含链接），原始配置与装配预览存 `profiles/<id>/`，均 0600 原子写；令牌进系统钥匙串（debug 默认本地加密文件，可用 `VEYL_CLI_SECRET_BACKEND` 切换）；
 - **界面**：配置列表 + 导入弹层 + 详情（节点列表、同步状态、重命名/删除/刷新），沿用主客户端的 token 与字号。
 
+- **连接（仅 macOS）**：随包 sing-box 与规则归档、特权 helper 与 LaunchDaemon、连接 / 断开 / 就绪判定 / 状态与计时器、节点热切；
+- macOS 的 `dev.sh` / `release-dmg.sh` 会把 helper、`Contents/Library/LaunchDaemons/com.veyl.cli.helper.plist`、`Contents/Resources/runtime/sing-box` 与规则装进包，并按「嵌套 Mach-O → .app」签名。
+
+**TUN 需要真实签名证书**：SMAppService 只认签名 `.app`；helper 验对端签名，随包 runtime 也必须由同一 Team 签过。脚本会按证书主体的 OU 选证书（默认 Team `2XYK8RBB6M`），没有匹配证书时退回 ad-hoc——那种构建能看界面，但连不上。
+
 **尚未包含**（下一阶段）：
 
-- 隧道层：接入 `crates/veyl-tun`、随包 sing-box、privileged helper / Windows 服务；
-- 连接 / 断开、节点热切；
 - 菜单栏常驻与后台运行：关闭主界面只隐藏、进程与隧道继续，从菜单栏唤回；显式退出才断开（技术设计 §3.4）；
-- 开机自启、日志页。
+- 开机自启、日志页；
+- Windows 服务与安装包。
 
 ## 前置
 
