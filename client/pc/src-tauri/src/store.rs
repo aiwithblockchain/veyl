@@ -27,6 +27,9 @@ const LIST_VERSION: u32 = 1;
 struct ProfilesFile {
     #[serde(default = "list_version")]
     version: u32,
+    /// 当前选中的配置。M1-B 连接时要用它，先在这里落盘。
+    #[serde(default)]
+    active_id: Option<String>,
     #[serde(default)]
     profiles: Vec<Profile>,
 }
@@ -39,6 +42,7 @@ impl Default for ProfilesFile {
     fn default() -> Self {
         Self {
             version: LIST_VERSION,
+            active_id: None,
             profiles: Vec::new(),
         }
     }
@@ -78,42 +82,66 @@ impl Store {
     }
 
     pub fn list(&self) -> AppResult<Vec<Profile>> {
-        let file: Option<ProfilesFile> = fsutil::read_json(&self.list_path()).map_err(|error| {
-            AppError::internal(format!("配置清单读不出来：{error}"))
-                .with_hint("重试一次；仍然失败就检查应用数据目录。")
-        })?;
-        Ok(file.map(|file| file.profiles).unwrap_or_default())
+        Ok(self.read_file()?.profiles)
+    }
+
+    pub fn active_id(&self) -> AppResult<Option<String>> {
+        Ok(self.read_file()?.active_id)
+    }
+
+    pub fn set_active(&self, id: &str) -> AppResult<()> {
+        let mut file = self.read_file()?;
+        if !file.profiles.iter().any(|profile| profile.id == id) {
+            return Err(AppError::not_found("这套配置已经不存在了")
+                .with_hint("刷新列表后重新选择。"));
+        }
+        file.active_id = Some(id.to_string());
+        self.write_file(&file)
     }
 
     pub fn get(&self, id: &str) -> AppResult<Option<Profile>> {
-        Ok(self.list()?.into_iter().find(|profile| profile.id == id))
+        Ok(self
+            .read_file()?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id))
     }
 
     /// 有则整体替换，无则追加到末尾。
     pub fn upsert(&self, profile: &Profile) -> AppResult<()> {
-        let mut profiles = self.list()?;
-        match profiles.iter_mut().find(|item| item.id == profile.id) {
+        let mut file = self.read_file()?;
+        match file.profiles.iter_mut().find(|item| item.id == profile.id) {
             Some(slot) => *slot = profile.clone(),
-            None => profiles.push(profile.clone()),
+            None => file.profiles.push(profile.clone()),
         }
-        self.save_list(&profiles)
+        if file.active_id.is_none() {
+            file.active_id = Some(profile.id.clone());
+        }
+        self.write_file(&file)
     }
 
     /// 删元数据、删目录（原文件与装配预览一起消失）。
     pub fn remove(&self, id: &str) -> AppResult<()> {
-        let mut profiles = self.list()?;
-        profiles.retain(|profile| profile.id != id);
-        self.save_list(&profiles)?;
+        let mut file = self.read_file()?;
+        file.profiles.retain(|profile| profile.id != id);
+        if file.active_id.as_deref() == Some(id) {
+            file.active_id = file.profiles.first().map(|profile| profile.id.clone());
+        }
+        self.write_file(&file)?;
         fsutil::remove_dir_if_exists(&self.profile_dir(id)?)?;
         Ok(())
     }
 
-    fn save_list(&self, profiles: &[Profile]) -> AppResult<()> {
-        let file = ProfilesFile {
-            version: LIST_VERSION,
-            profiles: profiles.to_vec(),
-        };
-        fsutil::write_json(&self.list_path(), &file)?;
+    fn read_file(&self) -> AppResult<ProfilesFile> {
+        let file: Option<ProfilesFile> = fsutil::read_json(&self.list_path()).map_err(|error| {
+            AppError::internal(format!("配置清单读不出来：{error}"))
+                .with_hint("重试一次；仍然失败就检查应用数据目录。")
+        })?;
+        Ok(file.unwrap_or_default())
+    }
+
+    fn write_file(&self, file: &ProfilesFile) -> AppResult<()> {
+        fsutil::write_json(&self.list_path(), file)?;
         Ok(())
     }
 

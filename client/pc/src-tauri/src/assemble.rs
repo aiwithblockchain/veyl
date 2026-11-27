@@ -13,8 +13,9 @@ use crate::error::{AppError, AppResult};
 use crate::models::NodeBrief;
 use crate::platform;
 
-/// `outbounds` 里这些类型不是「节点」。
-const NON_NODE_TYPES: [&str; 3] = ["direct", "block", "dns"];
+/// `outbounds` 里这些类型不是「节点」：出口、拦截、DNS，以及两个把别人编组的
+/// 出站（selector / urltest）。节点数指真正能承载流量的节点。
+const NON_NODE_TYPES: [&str; 5] = ["direct", "block", "dns", "selector", "urltest"];
 
 pub struct ConnectParams {
     pub clash_port: u16,
@@ -282,8 +283,8 @@ mod tests {
     fn counts_only_proxy_nodes() {
         let nodes = nodes_of(&sample());
         let tags: Vec<&str> = nodes.iter().map(|node| node.tag.as_str()).collect();
-        assert_eq!(tags, vec!["proxy", "node-a", "node-b"]);
-        assert_eq!(nodes[1].kind, "vless");
+        assert_eq!(tags, vec!["node-a", "node-b"]);
+        assert_eq!(nodes[0].kind, "vless");
     }
 
     #[test]
