@@ -245,6 +245,36 @@ describe("POST /v1/agent/traffic", () => {
     expect(server.failure_code).toBe("traffic_overage");
   });
 
+  it("零额度的存量机器上报时不是停机对象：真正有额度的机器才停", async () => {
+    const doFetch = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", doFetch);
+    const db = new FakeD1();
+    // A 是零额度存量行，余额为 0；B 有额度，超支是账号池口径算出来的。
+    await seedServer(db, { balance: 0, transferGib: 0 });
+    await addServer(db, SECOND, { transferGib: 500 }, SECOND_TOKEN);
+    const env = envWith(db);
+
+    const first = await handleTraffic(
+      trafficRequest(TOKEN, { seq: 1, delta_bytes: 100 * GIB }),
+      env,
+    );
+    expect(first?.status).toBe(200);
+    // 销毁 A 既减不了超支，也会把它的未用整天退回去：A 不动，也不打 DO。
+    expect(db.rows("servers")[0].state).toBe("active");
+    expect(db.rows("servers")[0].failure_code ?? null).toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
+
+    // 有额度的 B 一上报就轮到自己停机。
+    const second = await handleTraffic(
+      trafficRequest(SECOND_TOKEN, { seq: 1, delta_bytes: 0 }),
+      env,
+    );
+    expect(second?.status).toBe(200);
+    expect(db.rows("servers")[0].state).toBe("active");
+    expect(db.rows("servers")[1].state).toBe("destroyed");
+    expect(db.rows("servers")[1].failure_code).toBe("traffic_overage");
+  });
+
   it("并发同一 seq：只有一次记账", async () => {
     const db = new FakeD1();
     await seedServer(db);
