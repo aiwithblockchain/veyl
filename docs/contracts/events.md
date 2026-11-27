@@ -622,7 +622,7 @@ type DefaultProfileUpdatedPayload = {
 };
 ```
 
-触发：`veyl_seed.json` 被应用（首次拉取、刷新、或 `import_seed_file` 合并）之后。**不打断在线连接**：事件只通知「节点层变了」，真正生效发生在下一次连接。
+触发：`veyl_seed.json` 被应用（首次拉取或刷新）之后。**不打断在线连接**：事件只通知「节点层变了」，真正生效发生在下一次连接。
 
 > 名称保留 `default-profile-*`：它对应能力 C 组的「官方默认配置」，与命令 `default_profile_*` 同名。2.0 只改载荷字段，不改事件名——事件名与命令名必须能互相找到。
 >
@@ -1366,7 +1366,7 @@ type MyServerRenamedPayload = {
 > 2. `catalog_list_nodes` / `profile_import_node` / `vpn_connect` / `vpn_disconnect` 从未在 `invoke_handler` 注册（「文档有、代码没有」）。
 > 3. `chat_history` / `deepseek_key_status` / `deepseek_save_key` / `deepseek_clear_key` 已实现但从未入契约（「代码有、文档没有」）。
 >
-> 2.0 起命令表以 `commands.md` 为唯一来源；`import_seed_file` 的完整语义见 `commands.md` §8.3。
+> 2.0 起命令表以 `commands.md` 为唯一来源；`import_seed_file` 命令已于 2.91.0 删除（与窗口拖放一并退役）。
 
 ---
 

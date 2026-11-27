@@ -112,7 +112,7 @@ pub struct ToolResult {
 
 ```ts
 type ToolEnvelope = {
-  contract_version: "3.38.0";
+  contract_version: "3.40.0";
   ok: boolean;
   summary: string;                       // 与 ToolResult.content 一致
   data: Record<string, unknown> | null;  // 成功时的结构化结果
@@ -896,7 +896,7 @@ type DiagCheck = {
 };
 
 type DiagReport = {
-  contract_version: "3.38.0";
+  contract_version: "3.40.0";
   generated_at: string;
   app_version: string;
   platform: "darwin" | "windows" | "linux";
@@ -1100,7 +1100,7 @@ type DeepseekSaveKeyData = {
 
 ```ts
 type Job = {
-  contract_version: "3.38.0";
+  contract_version: "3.40.0";
   job_id: string;
   kind: "core_install" | "core_upgrade" | "diag";
   origin: "ui" | "agent";   // 任务发起方；旧记录按 "ui"
@@ -1262,6 +1262,8 @@ type CatalogRefreshData = {
 - **有可用缓存时，拉取失败不算错误**：返回 `ok`、`offline = true`、`changed = false`，`detail` 写成「离线，沿用本地缓存（上次更新 X 天前）」。这是需求 R13「不打扰用户」的落点。
 - **无任何可用缓存且拉取失败** → 返回错误 `UPSTREAM_ERROR`，`retryable = true`，`details.hint` 必须用需求 R20 的话术：**「现在无法访问默认配置源，这在未连接时是正常的。请先导入本地配置文件并连接，再检查更新。」**
 - `force = true` 时跳过「6 小时内不重复拉取」的节流。
+- **试用到期后不再更新（2.91.0）**：`trial_status.state = "expired"` 时本工具返回 `PRECONDITION_FAILED`（`retryable = false`），不联网、不写缓存、不合并节点；`force = true` 不能绕过。工具描述同步补一句「试用到期后不再更新」。
+- **到期错误固定句**：`message = "试用节点已过期，不再更新。换用自己的节点，或新建一台服务器。"`。工具信封当前只透出 `code` + `message`（`tool_error` 按 `Display` 拆 `CODE: message`，不带 `details`），模型看到的就是这个码与这句话。
 - **`package_hash` 不是哈希**，实测是发布方的版本标签（如 `seed-dynamic-tag-test-20260313`）。**不要用它做校验，也不要在日志或返回值里写「哈希校验通过」**。完整性判断用客户端对**原始响应体**算的 `content_sha256`（只用于「与上次是否相同」，不可对外展示）。
 - 结构校验：必填字段齐全；`status != "active"` 的包拒绝应用（需求 §6.4）。
 
@@ -1269,7 +1271,7 @@ type CatalogRefreshData = {
 
 权限：`Write`（改本地缓存与加密包，不改系统网络）。
 
-错误：`UPSTREAM_ERROR`、`INVALID_ARGUMENT`（包结构不符，`details.reason = "package_invalid"`）、`SECRET_STORE`。
+错误：`UPSTREAM_ERROR`、`INVALID_ARGUMENT`（包结构不符，`details.reason = "package_invalid"`）、`PRECONDITION_FAILED`（`details.reason = "trial_expired"`；工具信封只透出 `code` 与固定 `message`）、`SECRET_STORE`。
 
 ---
 
@@ -1301,6 +1303,7 @@ type DefaultProfileStatusData = {
 - 若 `version` 为 `null`（文件没写），照常工作。
 - **只是免费节点缓存，不是用户的节点总量**：回答「我有几个节点 / 当前用哪个」必须用 `ConfigDetail`（2.45.5 起节点的 `source` 与 `unavailable_reason` 都在那里）。
 - **只回答免费节点缓存与试用状态**：不要用它回答「分流规则是否最新」——规则随应用预置，读不到版本。
+- **试用过期后仍可读（2.91.0）**：本工具不触发刷新；过期后它照常返回缓存元数据，`node_count` 是缓存里的数量，不是节点池里的数量。
 
 权限：`ReadOnly`。
 
@@ -1412,11 +1415,12 @@ type DefaultProfileStatusData = {
 - **`routing_mode` 已删除（3.30.0）**：schema 不再接受；传入 → `INVALID_ARGUMENT / unknown_argument`。分流只留 `RouteSetMode` 一个写入口（`proxy_selected` 已下线，旧值仍可按 `RouteGet` 读取）。
 - `targets` **已删除（3.27.0）**：schema 不再接受；传入 → `INVALID_ARGUMENT / unknown_argument`。数据库列 `route_targets_json` 保留，供旧数据读取。
 - `node_ids` 是**整体替换**，不是增量追加；顺序即新顺序。
+- **`node_ids` 新增 seed 节点时受试用闸门约束（2.91.0）**：候选里含**未绑定的** `source="seed"` 且试用已到期 → `PRECONDITION_FAILED`（`details.reason = "trial_expired"`，`retryable = false`），整个命令不落改动。已绑定的 seed 可随改名 / 改 DNS 一起提交；`manual` / `owned` / `url` 不受影响。工具数与权限不变。
 - 修改不打断当前连接，下一次连接生效。
 - 意图是「换节点」而不是「换节点集」时，用 `NodeSwitch`，不要用本工具。
 - **`content` 必须说明改了哪些字段、值是什么、何时生效**；只写「配置已更新」不够。
 
-错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`UNSUPPORTED`。
+错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`PRECONDITION_FAILED`（`trial_expired`）、`UNSUPPORTED`。
 
 ---
 
@@ -2440,17 +2444,20 @@ type LlmProvidersData = {
 
 **无。** 工具层的开放问题已全部收敛。
 
-其他契约的开放项：`runtime.md` §10.2 只剩一个**待实测**项（`POST /close` 是否在 sing-box 1.14 可用，Bob W1 验证，不是待拍板）；`catalog.md` §11.2 为「无」；`commands.md` §13 还剩 `seed_id` 命名与 `import_seed_file` 保留两条建议。
+其他契约的开放项：`runtime.md` §10.2 只剩一个**待实测**项（`POST /close` 是否在 sing-box 1.14 可用，Bob W1 验证，不是待拍板）；`catalog.md` §11.2 为「无」；`commands.md` §13 还剩 `seed_id` 命名一条建议（`import_seed_file` 与窗口拖放已于 2.91.0 删除）。
 
 ---
 
 ## 8. 变更记录
 
-### 3.40.0（未发布，2026-11-27：`MyServers` 流量用词与界面统一为「已累计」）
+### 3.40.0（未发布，2026-11-27：`MyServers` 流量用词统一；试用到期停更）
 
 | # | 变更 | 类型 | 决议来源 |
 |---|---|---|---|
 | 1 | 版本升到 `3.40.0`；§4.48 `MyServers` 的 `content` 把「已释放」统一改为「已累计」（账号行「本月流量：已用 X / 已累计 Y」、逐台行「本月流量 已用 {used} / 已累计 {limit}」），账号行补一句「已累计按月逐日增长，不是整月一次性给满；账号级「上限」另算」，替掉「已释放不是本月上限」的说法。`data` 字段与工具总数（38）不变 | 内容口径 | 界面早就在说「已累计」，工具 content 却说「已释放」，用户对照时以为是两个量；`commands.md` 契约版本矩阵同步 |
+| 2 | §4.20 `CatalogRefresh`：试用到期后返回 `PRECONDITION_FAILED`（`retryable = false`）且不再更新，错误列表补该码、固定 `message` 与描述同步；不新增版本小节 | 语义新增 | `docs/design/trial-seed-expiry.md` |
+| 3 | §4.21 `DefaultProfileStatus`：注明试用过期后仍可读，它不触发刷新，`node_count` 是缓存数不是池内数 | 文档澄清 | 同上 |
+| 4 | §4.25 `ConfigUpdate`：`node_ids` 含**未绑定的** seed 且试用到期时返回 `PRECONDITION_FAILED / trial_expired`，整个命令不落改动；错误列表补该码。工具数与权限不变 | 语义新增 | 同上 |
 
 ### 3.39.0（未发布，2026-11-27：`MyServers` 透出 `provider_gone`）
 

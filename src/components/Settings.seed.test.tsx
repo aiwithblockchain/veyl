@@ -1,12 +1,14 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBridge, DefaultProfileStatus } from "../agent/bridge";
+import type { AgentBridge, DefaultProfileStatus, TrialStatusData } from "../agent/bridge";
 import { emptyRuntimeView } from "../agent/bridge";
+import { setLanguage } from "../i18n";
 import { Settings, seedAgeLabel, seedSummary } from "./Settings";
 
 afterEach(() => {
   cleanup();
+  setLanguage("zh");
   vi.useRealTimers();
 });
 
@@ -72,6 +74,7 @@ function renderSettings(
   options: {
     profile?: DefaultProfileStatus | null;
     connected?: boolean;
+    trial?: TrialStatusData | null;
   } = {},
 ) {
   const runtime = options.connected
@@ -90,14 +93,13 @@ function renderSettings(
       onRestoreNetwork={() => {}}
       onAskAi={() => {}}
       initialSection="network"
+      trial={options.trial}
     />,
   );
 }
 
 function seedRow(): HTMLElement {
-  return screen
-    .getByText("更新 Veyl 免费节点", { selector: ".settings-row__label" })
-    .closest(".settings-row") as HTMLElement;
+  return document.querySelector(".seed-refresh") as HTMLElement;
 }
 
 function deferred<T>() {
@@ -131,7 +133,7 @@ describe("免费节点纯函数", () => {
         nodeCount: 0,
         checkedAt: null,
       } as unknown as DefaultProfileStatus),
-    ).toBe("还没有 Veyl 免费节点 · 从未检查过");
+    ).toBe("还没有试用节点 · 从未检查过");
   });
 });
 
@@ -139,7 +141,7 @@ describe("设置页免费节点行", () => {
   it("连接页展示免费节点与检查更新，不再有问 AI 与地址行", async () => {
     renderSettings(makeBridge(async () => profile()));
 
-    expect(await screen.findByText("更新 Veyl 免费节点")).toBeTruthy();
+    expect(await screen.findByText("更新试用节点")).toBeTruthy();
     expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
     expect(
       seedRow().querySelector(".settings-row__value")?.textContent,
@@ -261,7 +263,7 @@ describe("设置页免费节点行", () => {
     renderSettings(bridge);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
-    expect(await screen.findByText("拿不到 Veyl 免费节点，请检查网络。")).toBeTruthy();
+    expect(await screen.findByText("拿不到试用节点，请检查网络。")).toBeTruthy();
     expect(screen.queryByText(/已经是最新/)).toBeNull();
   });
 
@@ -338,5 +340,84 @@ describe("设置页免费节点行", () => {
     expect(
       await screen.findByText("原来的「香港 01」已下架，这套配置现在没有节点"),
     ).toBeTruthy();
+  });
+});
+
+const EXPIRED: TrialStatusData = {
+  state: "expired",
+  started_at: new Date(NOW - 8 * 86_400_000).toISOString(),
+  expires_at: new Date(NOW - 86_400_000).toISOString(),
+  remaining_ms: 0,
+  seed_node_count: 0,
+};
+
+const ACTIVE: TrialStatusData = {
+  state: "active",
+  started_at: new Date(NOW - 3_600_000).toISOString(),
+  expires_at: new Date(NOW + 6 * 86_400_000).toISOString(),
+  remaining_ms: 6 * 86_400_000,
+  seed_node_count: 12,
+};
+
+describe("设置页试用节点行 · 到期", () => {
+  it("试用已过期：只显示过期文案，没有按钮与状态行", async () => {
+    renderSettings(makeBridge(async () => profile()), { trial: EXPIRED });
+
+    const row = await screen.findByText("更新试用节点");
+    expect(row).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("试用节点已过期");
+    expect(within(seedRow()).queryByRole("button", { name: "检查更新" })).toBeNull();
+    expect(seedRow().querySelector(".seed-refresh__status")).toBeNull();
+  });
+
+  it("试用中与今天一致：摘要加检查更新按钮", async () => {
+    renderSettings(makeBridge(async () => profile()), { trial: ACTIVE });
+
+    expect(await screen.findByText("更新试用节点")).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("12 个节点 · 3 小时前检查过");
+    expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
+  });
+
+  it("trial 为 null 按未过期处理：按钮仍在", async () => {
+    renderSettings(makeBridge(async () => profile()), { trial: null });
+
+    expect(await screen.findByText("更新试用节点")).toBeTruthy();
+    expect(within(seedRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
+  });
+
+  it("刷新被 trial_expired 拒绝时转成过期态，不显示网络失败句", async () => {
+    const bridge = makeBridge(async () => {
+      throw {
+        code: "PRECONDITION_FAILED",
+        message: "",
+        details: { reason: "trial_expired" },
+      };
+    });
+    renderSettings(bridge, { trial: ACTIVE });
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+    await waitFor(() =>
+      expect(
+        seedRow().querySelector(".settings-row__value")?.textContent,
+      ).toBe("试用节点已过期"),
+    );
+    expect(within(seedRow()).queryByRole("button", { name: "检查更新" })).toBeNull();
+    expect(screen.queryByText("拿不到试用节点，请检查网络。")).toBeNull();
+  });
+
+  it("英文行内不再出现 free nodes", async () => {
+    setLanguage("en");
+    renderSettings(makeBridge(async () => profile()), { trial: EXPIRED });
+
+    expect(await screen.findByText("Update trial nodes")).toBeTruthy();
+    expect(
+      seedRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("Trial nodes expired");
+    expect(seedRow().textContent).not.toMatch(/free nodes/i);
   });
 });

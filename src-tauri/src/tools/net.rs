@@ -203,7 +203,8 @@ impl Tool for CatalogRefreshTool {
     fn description(&self) -> &str {
         "拉取并应用 Veyl 免费节点（veyl_seed.json）。有本地缓存时离线不算错误；\
          按内容哈希判断是否变化，不依赖 version 字段。\n\
-         用户明确选过节点来源之前，不得凭本工具拉取并应用免费节点；没问过就先问。"
+         用户明确选过节点来源之前，不得凭本工具拉取并应用免费节点；没问过就先问。\
+         试用到期后不再更新：返回 PRECONDITION_FAILED，换用用户自己的节点。"
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -328,6 +329,7 @@ impl Tool for DefaultProfileStatusTool {
     fn description(&self) -> &str {
         "读取 Veyl 免费节点缓存状态（不联网）：节点数、内容哈希、检查时间，以及免费节点试用状态\
          （阶段、剩余天数、池内免费节点数）。回答「试用还剩几天 / 是不是到期了」用它；\
+         试用到期后仍可读，它不触发刷新；\
          缓存里的节点数不等于池内节点数，也不是用户的节点总量——「我有几个节点」要用 ConfigDetail。\
          只回答免费节点缓存与试用状态；不要用它回答分流规则是否最新——规则随应用预置，读不到版本。"
     }

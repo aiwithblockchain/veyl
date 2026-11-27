@@ -211,6 +211,7 @@ export const ERROR_REASON_TEXT: Record<string, ReasonEntry> = {  // 登录 / 账
   duplicate_name: "error.reason.duplicateName",
   invalid_cidr: "error.reason.invalidCidr",
   seed_unavailable: "error.reason.seedUnavailable",
+  trial_expired: "settings.seed.expired",
   source_required: "vpn.error.sourceRequired",
   use_config_set_mode: "error.reason.useConfigSetMode",
   insecure_url: "error.reason.insecureUrl",

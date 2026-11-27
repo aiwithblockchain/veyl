@@ -14,7 +14,6 @@ import type {
   CoreInfo,
   DeepSeekKeyState,
   DefaultProfileStatus,
-  ImportSeedResult,
   IssueReportPreference,
   NodeProbeAllData,
   NodeProbeResult,
@@ -2058,14 +2057,6 @@ export class MockAgentBridge implements AgentBridge {
   async deleteSession(_sessionId: string): Promise<void> {
     // mock 没有本地库：会话状态由前端 reducer 维护，这里只模拟成功。
     await sleep(150);
-  }
-
-  async importSeedFile(_path: string): Promise<ImportSeedResult> {
-    // 浏览器通道没有窗口级拖拽事件，也没有本地文件系统。
-    throw {
-      code: "UNSUPPORTED",
-      message: "浏览器通道不支持拖拽导入，请在桌面应用里试",
-    };
   }
 
   async getChatHistory(_sessionId?: string): Promise<ChatHistory> {

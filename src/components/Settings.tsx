@@ -13,6 +13,7 @@ import type {
   NetworkForceResetResult,
   NetworkForceResetStep,
   SyncIntervalMinutes,
+  TrialStatusData,
 } from "../agent/bridge";
 import { DEFAULT_PROXY_PORT, isHttpUrl, isLocalEndpoint } from "../agent/bridge";
 import type {
@@ -95,6 +96,8 @@ interface Props {
   syncIntervalUnsaved?: boolean;
   /** 最近一次成功同步的时刻（Unix 毫秒）；null = 尚未同步。 */
   lastSyncedAt?: number | null;
+  /** 试用状态；null = 尚未读到或旧后端，按未过期处理。 */
+  trial?: TrialStatusData | null;
 }
 
 type SectionId = "ai" | "network" | "advanced";
@@ -315,6 +318,7 @@ type SeedPhase =
   | { kind: "offline"; at: number | null }
   | { kind: "invalid"; reason: string | null; message: string | null }
   | { kind: "local_write" }
+  | { kind: "expired" }
   | { kind: "failed"; message: string };
 
 export function seedTimestamp(value: string | number | null | undefined): number | null {
@@ -399,6 +403,8 @@ function seedStatusText(phase: SeedPhase, connected: boolean, nodeCount: number)
       return translate("settings.seed.invalid");
     case "local_write":
       return translate("settings.seed.localWrite");
+    case "expired":
+      return null;
     case "failed":
       return translate("settings.seed.failed");
     default:
@@ -419,6 +425,8 @@ function seedStatusTone(phase: SeedPhase): string {
     case "local_write":
     case "failed":
       return "is-error";
+    case "expired":
+      return "";
     default:
       return "";
   }
@@ -430,12 +438,14 @@ function SeedRefreshRow({
   onInfo,
   connected,
   open,
+  trial,
 }: {
   bridge: AgentBridge;
   info: SeedRefreshInfo | null;
   onInfo: (next: SeedRefreshInfo) => void;
   connected: boolean;
   open: boolean;
+  trial: TrialStatusData | null;
 }) {
   const t = useT();
   const [phase, setPhase] = useState<SeedPhase>({ kind: "idle" });
@@ -488,7 +498,12 @@ function SeedRefreshRow({
         setPhase({ kind: "latest" });
       }
     } catch (failure) {
-      setPhase({ kind: "failed", message: toBridgeError(failure).message });
+      // 试用到期不是网络失败：后端硬拦后进入本地过期态，隐藏按钮。
+      if (toBridgeError(failure).details?.reason === "trial_expired") {
+        setPhase({ kind: "expired" });
+      } else {
+        setPhase({ kind: "failed", message: toBridgeError(failure).message });
+      }
     } finally {
       busy.current = false;
     }
@@ -514,13 +529,16 @@ function SeedRefreshRow({
 
   const status = seedStatusText(phase, connected, info?.nodeCount ?? 0);
   const checking = phase.kind === "checking";
+  const expired = trial?.state === "expired" || phase.kind === "expired";
 
   return (
     <div className="settings-row seed-refresh">
       <div className="seed-refresh__main">
         <div className="settings-row__label">{t("settings.seed.rowLabel")}</div>
-        <div className="settings-row__value">{withMonoDigits(seedSummary(info))}</div>
-        {status ? (
+        <div className="settings-row__value">
+          {expired ? t("settings.seed.expired") : withMonoDigits(seedSummary(info))}
+        </div>
+        {!expired && status ? (
           <p
             className={`seed-refresh__status ${seedStatusTone(phase)}`}
             role="status"
@@ -530,7 +548,7 @@ function SeedRefreshRow({
             {status}
           </p>
         ) : null}
-        {removedNotice ? (
+        {!expired && removedNotice ? (
           <p className="seed-refresh__note">
             {removedNotice.to
               ? `${t("settings.seed.replaced", {
@@ -540,7 +558,7 @@ function SeedRefreshRow({
               : t("settings.seed.removedNoNodes", { from: removedNotice.from })}
           </p>
         ) : null}
-        {phase.kind === "invalid" ? (
+        {!expired && phase.kind === "invalid" ? (
           <button
             type="button"
             className="seed-refresh__copy"
@@ -555,16 +573,18 @@ function SeedRefreshRow({
         ) : null}
       </div>
 
-      <div className="settings-row__aside seed-refresh__actions">
-        <button
-          type="button"
-          className="btn btn--ghost"
-          disabled={checking}
-          onClick={() => void refresh()}
-        >
-          {checking ? t("settings.seed.checkingShort") : t("settings.seed.check")}
-        </button>
-      </div>
+      {expired ? null : (
+        <div className="settings-row__aside seed-refresh__actions">
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={checking}
+            onClick={() => void refresh()}
+          >
+            {checking ? t("settings.seed.checkingShort") : t("settings.seed.check")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -690,6 +710,7 @@ export function Settings({
   syncResultAt = null,
   syncIntervalUnsaved = false,
   lastSyncedAt = null,
+  trial = null,
 }: Props) {
   const t = useT();
   const connected = runtime.state === "running" || runtime.state === "degraded";
@@ -2399,6 +2420,7 @@ export function Settings({
                 onInfo={setSeedInfo}
                 connected={connected}
                 open={open}
+                trial={trial}
               />
             ) : null}
 
@@ -2926,41 +2948,4 @@ export function describeKeyError(error: unknown): string {
   }
 
   return errorText(error, translate("settings.key.saveFailed"));
-}
-
-export function describeImportError(error: unknown): string {
-  const bridgeError = toBridgeError(error);
-  const reason = bridgeError.details?.reason;
-
-  switch (reason) {
-    case "not_json_file":
-      return translate("settings.import.notJson");
-    case "file_too_large":
-      return translate("settings.import.tooLarge");
-    case "file_unreadable":
-      return translate("settings.import.unreadable");
-    case "invalid_json":
-      return translate("settings.import.invalidJson");
-    case "no_importable_nodes": {
-      const skipped = bridgeError.details?.skipped;
-      return typeof skipped === "number"
-        ? translate("settings.import.allSkipped", { count: skipped })
-        : translate("settings.import.noSupported");
-    }
-    default:
-      break;
-  }
-
-  if (bridgeError.code === "UNSUPPORTED") {
-    const method = bridgeError.details?.method;
-    return typeof method === "string"
-      ? translate("settings.import.methodUnsupportedWith", { method })
-      : translate("settings.import.methodUnsupported");
-  }
-
-  if (bridgeError.code === "SECRET_STORE") {
-    return translate("settings.import.secretStore");
-  }
-
-  return errorText(error, translate("settings.import.failed"));
 }

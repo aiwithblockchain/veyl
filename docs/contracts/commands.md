@@ -1,6 +1,6 @@
 # 契约：UI → Host 命令（invoke）
 
-> 契约版本：`2.90.0`
+> 契约版本：`2.91.0`
 > 状态：已定稿（批 0 + 批 3，2026-11-04）
 > 上游：`docs/implementation-plan.md` 批 1、`docs/configs-and-nav.md`、`docs/config-execution.md`、`docs/center-panel.md` §2.5.1、`docs/issue-management.md`、`docs/capabilities.md`
 > 相关：`events.md`（Host → UI 的反向通道）、`data-model.md`（SQLite 表与 `secrets.enc` 关系）、`runtime.md`、`tools.md`
@@ -175,6 +175,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 连接 / 接管 | `tun_start_failed` | `tun_start_failed`（接管校验失败，已回滚）/ `node_server_unresolved`（当前节点域名解析失败，连接没有开始） | `detail.reason` |
 | 配置 / 节点 | `INVALID_ARGUMENT` | `invalid_cidr` / `seed_unavailable` / `source_required` / `use_config_set_mode` / `insecure_url` / `fetch_failed` / `not_node_text` / `unsupported_method` / `invalid_argument` | — |
 | 配置 / 节点 | `CONFLICT` | `duplicate_name` | — |
+| 试用节点 | `PRECONDITION_FAILED` | `trial_expired` | — |
 | 配置 / 节点 | `NOT_FOUND` | `node_not_in_config` | — |
 | 设置 | `INVALID_ARGUMENT` | `invalid_port` / `invalid_language` / `invalid_interval` / `invalid_action` | — |
 | 移动端导出 | `PRECONDITION_FAILED` | `login_required` / `insecure_profile_origin` | — |
@@ -195,8 +196,8 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | # | 命令 | 入参 | 返回 | 状态 |
 |---|---|---|---|---|
 | 1 | `config_list` | `{}` | `ConfigListData` | **2.0 新增** |
-| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`；2.18.0 来源必填** |
-| 3 | `config_update` | `{ configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`** |
+| 2 | `config_create` | `{ name, connectMode, routingMode, targets?, source?, nodeIds?, dns?, tunExcludes? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`；2.18.0 来源必填**；**2.91.0 起候选含未绑定的 `source="seed"` 且试用到期返回 `PRECONDITION_FAILED / trial_expired`** |
+| 3 | `config_update` | `{ configId, name?, routingMode?, targets?, dns?, tunExcludes?, nodeIds? }` | `ConfigDetail` | **2.0 新增；2.12.0 移除 `listenPort`**；**2.91.0 起 `nodeIds` 含未绑定的 `source="seed"` 且试用到期返回 `PRECONDITION_FAILED / trial_expired`** |
 | 4 | `config_delete` | `{ configId }` | `ConfigDeleteData` | **2.0 新增** |
 | 5 | `config_activate` | `{ configId }` | `ConfigActivateData` | **2.0 新增；2.20.0 起只改 active，不再断开/重连** |
 | 6 | `config_detail` | `{ configId }` | `ConfigDetail` | **2.0 新增** |
@@ -216,8 +217,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 20 | `runtime_stop` | `{}` | `RuntimeSnapshot` | 保留 |
 | 21 | `net_repair` | `{ action, port? }` | `NetRepairResult` | 保留 |
 | 22 | `default_profile_status` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
-| 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改） |
-| 24 | `import_seed_file` | `{ path }` | `SeedImportResult` | 保留；**目标状态：UI 不再使用**。设置页的粘贴 / 订阅 / 文件入口已改走 `node_import_text` / `node_import_url` / `node_import_file`。**当前唯一 UI 调用方：窗口级拖放**（只收种子 `.json`）；拖放**不随批 B 迁移**，等种子分发退场再定（§4.1.2、§8.3） |
+| 23 | `default_profile_refresh` | `{}` | `DefaultProfileResult` | 保留（语义 2.0 改）；**2.91.0 起试用到期返回 `PRECONDITION_FAILED / trial_expired`，`force = true` 不能绕过** |
 | 25 | `ai_send_message` | `{ sessionId, text?, hidden?, context? }` | `{ request_id }` | 保留（2.3 增 `hidden`，删 `attachments`；2.36.0 增 `context`、`text` 可省略） |
 | 26 | `ai_cancel` | `{ requestId }` | `{ cancelled: boolean }` | 保留 |
 | 27 | `chat_history` | `{ sessionId? }` | `ChatHistory` | 保留 |
@@ -288,7 +288,7 @@ Host 在每个命令入口自动注入 `source = "ui"`，UI **不能**在参数�
 | 92 | `config_set_mode` | `{ configId, mode }` | `ConfigSetModeData`（`{ config_id, mode, previous_mode, changed, connected, restored, confirmation }`） | **2.34.0 新增**；在线切换接管方式（会断开重连）；AI 侧经 `ConfigSetMode` 工具且必须确认 |
 | 93 | `quit_decision` | `{ action }` | `{ accepted: boolean }` | **2.35.0 新增（仅 UI）**；应用内退出确认的决策回执，只有第一次生效 |
 | 94 | `trial_status` | `{}` | `TrialStatusData`（`{ state, started_at, expires_at, remaining_ms, seed_node_count }`） | **2.36.0 新增（仅 UI）**；免费节点 7 天试用状态，只读本地 |
-| 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id, runtime_rebuild }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id`；**2.42.0 起返回 `runtime_rebuild`**（§4.0.1） |
+| 95 | `node_attach` | `{ source?, nodeIds?, configId? }` | `NodeAttachData`（`{ config_id, created_config, attached_node_ids, skipped_node_ids, node_count, current_node_id, runtime_rebuild }`） | **2.37.0 新增（仅 UI）**；把已存在的节点绑进全局配置，空库时懒创建；幂等；永不改 `current_node_id`；**2.42.0 起返回 `runtime_rebuild`**（§4.0.1）；**2.91.0 起候选含未绑定的 `source="seed"` 且试用到期返回 `PRECONDITION_FAILED / trial_expired`** |
 | 96 | `my_server_rename` | `{ serverId, name }` | `MyServer` | **2.40.0 新增（仅 UI）；只能改自己的、允许重名；名字 trim 后按 Unicode 码点校验 1–24** |
 | 97 | `node_forget` | `{ nodeId }` | `{ removed: boolean }` | **2.44.0 新增（仅 UI）；删除本地节点（余额不足停机的墓碑只能这样清）；级联清配置绑定与 `current_node_id`；先让控制面忽略墓碑，失败则整体失败、本地不动（2.45.0）** |
 | 98 | `ui_log` | `{ level, target, message }` | `null` | **2.49.0 新增（仅 UI）**；前端排障日志；target 白名单、脱敏 + 换行替换 + 300 字符截断、每秒 50 条上限（§7.24） |
@@ -424,6 +424,7 @@ type ConfigListData = {
 规则：
 
 - **已有全局配置 → `CONFLICT / config_exists`**，不建新行（2.37.0）：界面与 AI 都不得再新建配置；加节点走 `node_attach`（§4.0）或导入命令。**参数校验先于本判断**——非法参数仍按各自的错误报，不会被 `config_exists` 盖掉。全局配置的唯一创建路径是懒创建（§3.1）。
+- **试用到期闸门（2.91.0）**：`source = "seed"`，或 `nodeIds` 候选里有 `source = "seed"` 的节点，且 `trial_status.state = "expired"` → `PRECONDITION_FAILED`，`details.reason = "trial_expired"`、`retryable = false`；不建配置、不物化、不绑定任何节点行。判定顺序写死为 **参数校验 → `CONFLICT / config_exists` → 试用判定 → `seed_unavailable`**：过期 + 无配置 → `trial_expired`；过期 + 已有配置 → `CONFLICT / config_exists`。`nodeIds` 候选在新配置里全部视为新增（新配置没有已绑定集合）；`available` / `active` 照常。
 - `source = "seed"` 且种子为空 → `PRECONDITION_FAILED`，`details.reason = "seed_unavailable"`，`details.hint = "先刷新 Veyl 免费节点或手动添加节点"`。
 - `nodeIds` 里有不存在的 id → `NOT_FOUND`，`details.node_ids` 列出全部无效项（一次报全，不让用户试错）。
 - **`source` 与非空 `nodeIds` 必须给一个**：`source = "seed"`，或至少一个有效节点 id。
@@ -469,9 +470,10 @@ type ConfigListData = {
 - 修改**不打断当前连接**：新值只写库；下一次连接或下一次切换节点时生效。UI 需要提示「下次连接生效」时，用返回值与当前 `RuntimeSnapshot` 自行比较，Host 不额外发信号。
 - 改的是 active 配置且当前已连接 → `runtime_status.config_hash` 与新配置不一致，但**不自动重连**。
 - 幂等：参数与现状完全一致时仍返回同一份 `ConfigDetail`，不发事件。
+- **试用到期闸门（2.91.0）**：`nodeIds` 在写任何 patch（名称 / DNS / 分流）与 `replace_nodes` 之前，按**候选 seed 与 `current_node_ids` 的差集**判定；差集非空且 `trial_status.state = "expired"` → `PRECONDITION_FAILED / trial_expired`（`retryable = false`）。**整个命令不落改动**：名称 / DNS / 分流不写，节点关联不替换，也不 `remove_seed_exclusion`。已绑定的 seed 与 `manual` / `owned` / `url` 照常——只改名但显式带上现有 seed id 不会被拒。
 - 成功后发 `config-changed`（`change = "updated"`）。
 
-错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`UNSUPPORTED`、`INTERNAL`。
+错误：`INVALID_ARGUMENT`、`NOT_FOUND`、`CONFLICT`、`PRECONDITION_FAILED`（`trial_expired` / `route_targets_empty`）、`UNSUPPORTED`、`INTERNAL`。
 
 ### 3.4 `config_delete { configId }` → `ConfigDeleteData`
 
@@ -583,7 +585,7 @@ type ConfigSetModeData = {
 
 ### 4.0 `node_attach { source?, nodeIds?, configId? }` → `NodeAttachData`（仅 UI，2.37.0）
 
-把**已存在的节点**绑进全局配置。不联网、不解析、不读密码——只做绑定。种子节点由 `default_profile_refresh` 落进 `nodes`，自建服务器节点由 `my_server_credentials` 落库，两者都经本命令进池。
+把节点绑进全局配置。`nodeIds` 分支不联网、不解析、不读密码——节点必须已经存在；`source = "seed"` 分支会从**本地种子缓存** upsert 节点行与密码再绑定（不联网）。种子节点由 `default_profile_refresh` 落进缓存，自建服务器节点由 `my_server_credentials` 落库，两者都经本命令进池。
 
 ```ts
 type NodeAttachData = {
@@ -606,6 +608,10 @@ type NodeAttachData = {
 规则：
 
 - **二选一校验**：两个都没给 → `INVALID_ARGUMENT / source_required`；两个都给 → `INVALID_ARGUMENT / source_and_node_ids_conflict`；`source` 不是 `"seed"` → `INVALID_ARGUMENT / invalid_source`。
+- **试用到期闸门（2.91.0）**：
+  - `source = "seed"`：`source` 校验之后、读种子缓存与任何 upsert / 绑定之前判定；`trial_status.state = "expired"` → `PRECONDITION_FAILED / trial_expired`，不 upsert 节点行、不绑定。判定先于 `seed_unavailable`。
+  - `nodeIds`：`missing_nodes` 之后、`attach_nodes` 之前，按**候选节点来源与当前已绑定集合的差集**判定；差集里有 `seed` 且过期 → `trial_expired`，不绑定。已绑定的 seed 与 `manual` / `owned` / `url` 照常（服务器节点静默入池依赖这条路径）。
+  - 判定与写入在同一连接守卫内：写入过程中到期也不会漏。
 - **懒创建**：库里没有配置时，用 `name = "默认配置"`、`connect_mode = "system_proxy"`、`routing_mode = "direct"`、`dns = auto`、`tun_excludes = []`、`current_node_id = null` 建唯一配置，`created_config = true`。并发靠 `configs.name UNIQUE`（`INSERT … ON CONFLICT DO NOTHING` 后回查），不得先查后插。
 - **幂等**：已绑定的节点进 `skipped_node_ids`，不重复插入、不报错；同一批里的重复 id 只算第一次。
 - **永不改 `current_node_id`**：当前节点为空也保持为空。要改当前节点只能调 `node_switch`（§4.3）。
@@ -619,7 +625,7 @@ type NodeAttachData = {
 - **与切换接管方式互斥**：同一配置正有 `config_set_mode` 在跑 → `CONFLICT / switch_in_progress`，`retryable: true`。
 - 成功且确有新增时发 `node-list-changed`（`reason = "bindings_changed"`，`config_id` = 全局配置）+ `config-changed(change = "updated")`；全部跳过时不发事件。
 
-错误：`INVALID_ARGUMENT`（`source_required` / `source_and_node_ids_conflict` / `invalid_source`）、`NOT_FOUND`（`node_not_found`，`details.node_ids` 一次列全）、`PRECONDITION_FAILED`（`seed_unavailable`）、`CONFLICT`（`not_global_config` / `switch_in_progress`）、`INTERNAL`。
+错误：`INVALID_ARGUMENT`（`source_required` / `source_and_node_ids_conflict` / `invalid_source`）、`NOT_FOUND`（`node_not_found`，`details.node_ids` 一次列全）、`PRECONDITION_FAILED`（`seed_unavailable` / `trial_expired`）、`CONFLICT`（`not_global_config` / `switch_in_progress`）、`INTERNAL`。
 
 ### 4.0.1 `runtime_rebuild`：连接中新增节点时重建运行配置（2.42.0；2.42.1 曾增 `cancelled`，2.42.3 撤回；2.43.1 增 `failed / user_disconnected`）
 
@@ -746,36 +752,21 @@ type ImportSkipReason =
 
 用户从本地文件导入节点（设置 › 连接 ›「添加节点」的文件入口）。**仅 UI，不注册为 AI 工具**——AI 侧继续走 `NodeImport`（`source = "text"`），不给模型读本地文件的能力。
 
-> **窗口级拖放不走本命令。** 它只收种子文件，当前仍由 `import_seed_file`（#24）承担，本批不迁移——理由见下方「为什么窗口拖放不迁移」。
-
 > 与 §4.1.1 **共用同一个解析实现**：返回形状、跳过原因、去重键、来源、事件完全一致，只是输入从文本换成文件路径。
 
-**为什么不复用 `import_seed_file`**：
+**为什么不复用当时的种子导入命令**：
 
-1. **格式不同**：它只接受 `veyl_seed.json`（`{ version, updated_at, nodes[] }`）且扩展名必须是 `.json`；用户的普通节点列表（`.txt`、多行 `ss://`）会被直接拒绝。
-2. **语义不同**：它把节点以 `source = "seed"` 并入种子池、发 `seed_refreshed`；用户文件应落 `source = "manual"`、走文本解析与 `manual_create`。复用等于同时改语义和调用方。
-3. **它还有活路径**：窗口级拖放当前仍在调用（§8.3），拖进来的是种子文件（`{ version, updated_at, nodes[] }`），与本命令的逐行 `ss://` 是两种格式。不能标成废弃，也不该为了新格式去动它的返回与来源。
+1. **格式不同**：种子导入只接受 `veyl_seed.json`（`{ version, updated_at, nodes[] }`）且扩展名必须是 `.json`；用户的普通节点列表（`.txt`、多行 `ss://`）会被直接拒绝。
+2. **语义不同**：种子导入把节点以 `source = "seed"` 并入种子池、发 `seed_refreshed`；用户文件应落 `source = "manual"`、走文本解析与 `manual_create`。复用等于同时改语义和调用方。
+3. **当时它还有活路径**：窗口级拖放当时仍在调用它，拖进来的是种子文件（`{ version, updated_at, nodes[] }`），与本命令的逐行 `ss://` 是两种格式。不能标成废弃，也不该为了新格式去动它的返回与来源。（该命令与窗口拖放已于 2.91.0 一并删除。）
 4. **新增的代价可控**：两处 handler 注册、一个版本位、一个契约条目；换来文本/文件两条通道共用解析，错误码 `not_node_text` 与四种 `skipped.reason` 全部复用，只新增路径相关的三个 reason。
-
-**为什么窗口拖放不迁移（2026-11-11 决议）**
-
-窗口拖放继续走 `import_seed_file`，只收 `.json` 种子文件；设置页的文件入口走本命令。两条入口**按用途分开**，不是两个半成品：
-
-| 理由 | 说明 |
-|---|---|
-| 能力不能丢 | 种子文件是当前内测分发方式（`shadowsocks.md` §5.6）。把拖放切到逐行 `ss://`，等于让用户拖入一份可用文件却被判成「没有可用的节点」 |
-| 不让临时格式塑造永久契约 | 种子随计费上线退场。若本命令按文件首字节分派（JSON → 种子、否则 → 节点文本），这个分支会留在一个长期命令里，且种子分支的 `configId` 无意义、事件是 `seed_refreshed` 而不是 `manual_create`——一条命令携带两套来源与事件 |
-| 返回形状虽然同形，语义不同 | `import_seed_file` 也返回 `{ imported, skipped[], nodes[] }`，但 `skipped` 恒为空、来源写死 `source = "seed"`。同形不等于同义，不能靠形状判断 |
-| 迁移成本没有变高 | 种子退场时把 `App.tsx` 的 `importPath` 从 `importSeedFile` 换成 `nodeImportFile` 即可，不需要分派分支；届时拖放才真正只需要一种格式 |
-
-**两条入口的分工（用户可见）**：窗口拖入 = 种子文件（`.json`）；设置 › 添加节点 › 选择文件 = 节点文本。拖入非 `.json` 时的提示要指向设置页，例如「窗口拖入只支持 .json 种子文件；节点文本请到 设置 › 连接 › 添加节点导入」，**不要只说「请换一个文件」**——用户手里可能根本没有 `.json`。反过来，在设置页选中一份种子 `.json` 会落到 `not_node_text`，这是预期行为：错误文案已写明支持多行 `ss://` 链接，不再为它单独识别种子格式。
 
 | 边界 | 要求 |
 |---|---|
-| `path` | **绝对路径**，只能来自设置页的系统文件对话框（`plugin-dialog open()`）。前端**不得**把文本框里的内容当路径传入；**不接受窗口拖放事件**（拖放走 #24） |
+| `path` | **绝对路径**，只能来自设置页的系统文件对话框（`plugin-dialog open()`）。前端**不得**把文本框里的内容当路径传入 |
 | 路径校验 | 空或非绝对 → `invalid_path`；不存在、不是普通文件、不可读、IO 错误 → `file_unreadable` |
 | 编码 | 按 UTF-8 解码，非法字节替换为 U+FFFD，**不做编码猜测**。GBK 等文本里的 `ss://` 行是 ASCII，仍能解析；只有中文节点名可能变成替换字符。JSON 也按文本逐行处理，不要求是合法 JSON |
-| 大小上限 | **1 MiB**（与 `import_seed_file`、URL 拉取一致）。先看 `metadata.len()`，超限不读全文 → `file_too_large`，`details.max_bytes = 1048576` |
+| 大小上限 | **1 MiB**（与种子 URL 拉取一致）。先看 `metadata.len()`，超限不读全文 → `file_too_large`，`details.max_bytes = 1048576` |
 | 扩展名 | **不按扩展名过滤**。`.txt` / `.json` / 无扩展名都收；对话框建议 `.txt,.json`，命令不据此拒绝——扩展名不代表内容 |
 | 支持的格式 | 与 §4.1.1 同一套：多行 `ss://` 链接、整段 base64 的 `ss://` 列表，或 Clash 配置的块状 `proxies:` 子集。**不按扩展名判断格式**：先看根级 `proxies:`，再看 `ss://`，都不命中才落到 `not_node_text`。不新增 `unsupported_format`——解析器无法可靠区分「格式不对」与「格式对但没有节点」 |
 | 一条都用不了 | `INVALID_ARGUMENT`：Clash 但没有可用的 ss → `not_subscription`；其它 → `not_node_text`（与 §4.1.1 同一个解析实现） |
@@ -2052,6 +2043,7 @@ type TrialStatusData = {
   5. 发 `trial-expired`（`events.md` §4.24），载荷带 `disconnected` 真实结果。
   **先提交再断连**：断连失败不回滚数据库——节点已经不该存在，回滚只会让用户连着一台试用已结束的服务器。
 - `remaining_ms` 由 Host 算，界面不自己做减法。
+- **`state = "expired"` 是种子写入闸门的唯一依据（2.91.0）**：Host 在 `seed::refresh`、`config_create(source="seed")` / `node_attach(source="seed")` 的 seed 分支，以及 `config_create({nodeIds})`、`node_attach({nodeIds})`、`config_update({nodeIds})` 里硬拦；与到期清理事务是否提交无关（`status` 按时间推导过期）。界面隐藏按钮不构成拦截。
 - 不注册为 AI 工具；不与任何写命令耦合；`trial_state` 表见 `data-model.md` §3.12。
 
 ### 7.20 `node_forget { nodeId }` → `{ removed: boolean }`（仅 UI，2.44.0；2.45.0 改删除顺序）
@@ -2597,6 +2589,7 @@ type DefaultProfileResult = {
 - `default_profile_status` 不联网：`source = "cache"`、`changed = false`、`reason = null`、`added = removed = null`。
 
 - **只读，不联网**。
+- **过期后仍可读状态**（2.91.0）：它只报缓存元数据，不表示可以刷新；`node_count` 是缓存里的数量，不是节点池里的数量（清理后池内为 0，缓存还在）。
 - 变化判定用**内容哈希**，不依赖 `version` 字段：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。
 - `seed_id` 是常量：上游的 provider 元数据我们不再消费（`bootstrap.json` 只作为我们的上游来源，不是客户端契约）。
 
@@ -2605,6 +2598,8 @@ type DefaultProfileResult = {
 **本命令是用户显式触发，语义恒为强制检查**：实现必须固定以 `force = true` 调用服务层，不得复用「距上次检查不足 6 小时就返回 Unchanged」的短路逻辑。设置页按钮点下去什么都没发、只回「已是最新」，是假成功。
 
 与 AI 工具 `CatalogRefresh` 的 `force` 参数不冲突：那条走服务层、参数由模型给；命令层保持无参、语义恒为强制。
+
+- **试用到期后停止更新（2.91.0）**：`trial_status.state = "expired"` 时直接返回 `PRECONDITION_FAILED`，`details.reason = "trial_expired"`、`retryable = false`。不联网、不读写种子缓存（不推进 `checked_at`）、不合并节点、不发 `default-profile-updated` / `node-list-changed`；`force = true` 不能绕过。已有缓存保留但不再刷新，`default_profile_status` 仍可读。
 
 - 拉取 `https://meshnetprotocol.github.io/veyl_seed.json`，**直接拉全文自己算哈希**；先带 `If-None-Match`，304 直接结束。
 - **同一时刻只允许一个请求在飞**，避免并发写坏缓存（`docs/config-execution.md` §10）。
@@ -2616,42 +2611,6 @@ type DefaultProfileResult = {
   - 为什么不是留 `null`：节点卡与节点面板靠 `current_node_id` 画「当前」标记；置 `null` 会出现「卡片显示某个节点、却没有当前标记」，用户无法确认下次连哪个。落到第一个节点是确定行为，但仍须告知用户。
 - 拉取失败 / 校验不过 → 保留旧缓存，返回 `UPSTREAM_ERROR` 或 `INVALID_ARGUMENT`，`new_version_available = false`。
 - 发 `default-profile-updated` 与 `node-list-changed`（`reason = "seed_refreshed"`）。
-
-### 8.3 `import_seed_file { path }` → `SeedImportResult`
-
-**保留，但语义收窄：不再创建配置，只并节点。**
-
-自 `2.16.12` 起，本命令的**目标状态是退出 UI**：设置页「添加节点」的粘贴 / 订阅入口在 A 批次迁到 `node_import_text` / `node_import_url`，文件入口由 `node_import_file`（2.16.14）接管。**当前唯一 UI 调用方：窗口级拖放**；拖放**不随批 B 迁移**（§4.1.2「为什么窗口拖放不迁移」），种子分发退场后再定去向。迁移完成后更新此段。
-
-```ts
-type SeedImportResult = {
-  imported: number;
-  skipped: Array<{ name: string | null; reason: string }>;
-  nodes: NodeSummary[];
-};
-```
-
-为什么仍然需要它：
-
-1. **离线兜底**：`docs/config-execution.md` §9 写明「首次分发时如果某个用户拉不到，通过其它渠道把种子给他」——给的就是这个格式的文件。
-2. **开发与测试**：CI 与本地没有稳定外网时，用文件注入同一份种子。
-
-规则：
-
-- 只接受 `veyl_seed.json` 结构（`{ version, updated_at, nodes[] }`），扩展名 `.json`、≤ 1 MB、存在且可读。
-- 节点以 `source = "seed"` 合并进节点池，**只增不删**：手工导入不删除种子拉取层已有的节点，避免一次误操作把用户正在用的节点删掉。
-- UI 入口现状：只剩**窗口级拖放**（`App.tsx:341-375` 的 `onDragDropEvent` → `importPath` → `importSeedFile`），只接受 `.json` 种子文件，前端先按扩展名拦截。设置页的粘贴 / 订阅入口在 A 批次接 `node_import_text` / `node_import_url`，文件入口接 `node_import_file`。窗口拖放**不随批 B 迁移**：种子是 `{ version, updated_at, nodes[] }`，与逐行 `ss://` 不同格式，迁过去等于让一份可用文件被判成「没有可用的节点」。拖入非 `.json` 时提示要指向设置页，不能只说「请换一个文件」。
-- 只接受 shadowsocks 出站、method 白名单；部分成功不算失败；返回值与日志**永不含 password**；不回显文件内容。
-
-| 错误码 | `details.reason` | 场景 |
-|---|---|---|
-| `INVALID_ARGUMENT` | `not_json_file` | 扩展名不是 `.json` |
-| `INVALID_ARGUMENT` | `file_too_large` | 超过 1 MB，`details.max_bytes` |
-| `INVALID_ARGUMENT` | `file_unreadable` | 路径不存在或不可读 |
-| `INVALID_ARGUMENT` | `invalid_json` | 不是合法 JSON / 结构不符（不是 seed 格式） |
-| `INVALID_ARGUMENT` | `no_importable_nodes` | 解析成功但无可导入节点，`details.skipped` |
-| `UNSUPPORTED` | — | method 不在白名单，`details.method` |
-| `INTERNAL` | `keychain_failed` | `secrets.enc` 写入失败 |
 
 ---
 
@@ -3111,7 +3070,7 @@ type RulesStatus = {
 | `config_activate` | **K3** 切换配置 | 左栏切换 | 与 B2「切换节点」是两个层级，不可混用 |
 | `node_import_url` | **B4** 导入配置文件 | 导入按钮 / `source_choice` 后置 | |
 | `node_import_text` | **B4** 导入配置文件 | 手工表单「粘贴分享链接」 | 只解析粘贴文本，不联网；与 `node_import_url` 分开（2.14.0） |
-| `node_import_file` | **B4** 导入配置文件 | 设置 › 添加节点（文件） | 仅 UI；与 `node_import_text` 共用解析，不联网、不涉及运行时；**不含窗口拖放**（拖放仍走 #24，2.16.14） |
+| `node_import_file` | **B4** 导入配置文件 | 设置 › 添加节点（文件） | 仅 UI；与 `node_import_text` 共用解析，不联网、不涉及运行时；2.91.0 起窗口拖放已删除 |
 | `issue_report_reveal` | —（仅 UI，2.17.0） | 会话内报告卡「在文件夹中显示」 | 只认 Host 登记过的报告目录，不接受路径 |
 | `issue_report_mail` | —（仅 UI，2.17.0） | 会话内报告卡「打开发送邮件」 | 调起系统邮件客户端，预填固定收件人；**不发送** |
 | `issue_report_preference` | —（仅 UI，2.17.0） | 报告入口的「保留完整域名」勾选 | 读 / 写 `issue_report_include_domains`；模型无权改 |
@@ -3244,7 +3203,7 @@ type RulesStatus = {
 | 5 | `node_switch` 是否新增（而不是复用 `runtime_start`） | **新增**。理由见 §12.3 缺口 2 | **已拍板**（2026-11-03） |
 | 6 | 配置级能力 ID | **已拍板**：新增 K 组 K1–K5，见 §12.1 | **已解决** |
 | 7 | `seed_id` 常量命名 | `"veyl_seed"` | 待确认 |
-| 8 | `import_seed_file` 保留（语义收窄为「只并节点」） | **保留**，理由见 §8.3 | **建议采纳** |
+| 8 | `import_seed_file` 保留（语义收窄为「只并节点」） | **已删除（2.91.0）**，窗口拖放同时退役；种子更新只剩 `default_profile_refresh` | **建议采纳** |
 | 9 | 删除配置的二次确认由谁做 | **UI**。`config_delete` 命中「正在连接」时拒绝；其余情况 Host 不再拦，确认框是界面职责（K5 标了破坏性） | 待确认 |
 
 ---
@@ -3295,7 +3254,7 @@ type RulesStatus = {
 
 | 文件 | 版本 | 状态 |
 |---|---|---|
-| `contracts/commands.md` | **2.90.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** + **节点升级改为按需：`MyServer.singbox_version`、`node_upgrade_singbox` 命令与 agent 工具 `upgrade_singbox`（2.75.0）** + **自定义充值范围：`my_server_wallet` 增可选 `min_topup_cents` / `max_topup_cents`（2.75.1）** + **账单流水：`my_server_billing_ledger`（仅 UI，2.76.0）** + **移除 `new_node.ask_ai` 控件（2.77.0）** + **`MyServer` 流量四字段：`traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state`（2.78.0）** + **`my_server_list` 增账号级 `traffic_pool`（2.79.0）** + **`settings` 控件集移除 `settings.account`（2.80.0）** + **`node_create` / `node_update` 的 `method` 白名单摘掉 `none`、2022 系列校验 PSK（2.81.0）** + **单台 `traffic_state` 收窄为 `ok` / `unpaid`，near/over 上移账号级（2.82.0）** + **AI 侧 `MyServers` 透出 `MyServer` 流量四字段与账号池 `traffic_pool`（3.37.0，契约 2.83.0）** + **订阅导入支持 Clash 配置的 `proxies:` 子集（2.83.0）** + **my_server_wallet 增 `daily_cents` / `remaining_days`（2.85.0）** + **MyServer 增 provider_gone（2.86.0）** + **创建中禁止用户销毁：`my_server_destroy` 对 `creating` / `booting` / `installing` / `verifying` 返回 `PRECONDITION_FAILED / server_provisioning`，`cancel_after_paid` 不再指向销毁入口（2.87.0）** + **批量测速并发 6 → 16、控制台接入「停止测速」（2.88.0）** + **TUN 提交后的失败不再当作被取代、登记 `tun_start_failed`（2.89.0）** + **探测新增 `running_config_stale`：同步配置只更新库、运行配置仍是旧凭据时按未测处理（2.90.0）** |
+| `contracts/commands.md` | **2.91.0** | 批 0 + 批 3 + `ai_send_message.hidden` + 测试节点口径 + 流量口径 + 节点延迟字段 + 助手设置/卸载两条命令 + 强制重置网络 + 运行时核心版本管理（`core_*`，仅 UI）+ helper 状态/重启与退出流程 + 面向用户的表达 + 批量测速三命令（含节点子集）+ 测速阶段/方式与种子刷新字段 + `config_detail.layout_revision` + 本地代理端口两条命令与 `port_fallback` + 同会话单请求与按 requestId 取消 + 粘贴文本导入 + 系统地区命令（2.18.0 增 `source` + 地区写入语义）+ 启动窗口切换与断开（2.19.0 增 `already_connected`）+ 切换配置只改 active、连接前自动停旧连接（2.20.0）+ 系统代理异常退出恢复报告命令（2.21.0）+ 我的服务器目录命令（2.22.0）+ 我的服务器 8 条命令（2.23.0）+ 重新注册设备命令（2.24.0）+ 本地身份查询命令（2.25.0）+ **凭据落成本地节点、`my_server_credentials` 只回本地节点（2.26.0）** + **登录与支付 5 条命令、`my_server_checkout` 改返回收银台会话（2.27.0）** + **`MyServerAccount` 增 `account_kind`（2.27.1）** + **预付费余额：钱包 / 充值两条命令、`checkout` 改余额扣费（2.28.0）** + **`MyServerWallet` 增 `denominations_cents`（2.28.1）** + **按天计费：`checkout` 只扣 1 天、`MyServer` 增计费四字段、目录增 `daily_price_cents`（2.29.0）** + **`paid_until` 收紧为非空、`grace_ends_at` 标为派生、目录日价成唯一真源（2.30.0）** + **AI 中转：`ai_relay_status` / `ai_usage_summary` 两条命令、内置 provider `veyl-relay` 语义收紧（2.31.0，已由 2.33.0 撤回）** + **每月流量额度：`MyServer` 与目录 `plans` 增 `transfer_gib`、不新增已用字段（2.32.0）** + **在线切换接管方式：`config_set_mode` 一条命令 + 确认卡 `config_set_mode_confirm`（2.34.0）** + 提问自由文本回答与回答落库 + TUN `stack`/`mtu`/`dns_mode` 与系统 DNS 接管 + `RuntimeSnapshot.system_dns` + 设置 IA 文档同步（`import_seed_file` / `flush_dns` 的 UI 使用标注）+ 节点文件导入命令 + 问题报告两条动作命令 + `tun-backend.md` 1.6.0 / 1.7.0 矩阵同步 + `runtime.md` 2.8.0 矩阵同步 + `tools.md` 3.15.0 / `events.md` 2.15.0 矩阵同步 + 应用内退出确认（`quit_decision`，2.35.0） + **免费节点试用与界面上下文（`trial_status` / `ai_send_message.context`，2.36.0）** + **`my_server_rebuild` 标为未接入（2.36.1）** + **收银台打开失败带链接报错（2.36.2）** + **可达性链路收口、`probe_run` 标为未实现（2.36.3）** + **`StageSelect` 部分字段与 `CatalogOptions`（2.36.4；3.29.0 改名 `ServerOptions`）** + **目录共用一个取数入口、不做本地缓存（2.36.5）** + **`source = "seed"` 新建留空 `current_node_id`，预选不写库（2.36.6）** + **空当前节点的读取口径（2.36.7）** + **不变量 #3 允许 `NULL`（2.36.8）** + **种子失败细分增 `stale_source`（2.36.9）** + **`client.probe` 控件 id（2.36.10）** + **Cmd+Q 任何时候都弹退出确认（2.36.11）** + **接管方式用词统一、失败回退按 `restored`（2.36.12）** + **全局单配置定稿：`node_attach`、`config_create`/`config_activate`/`config_delete` 退休、`NodeSummary.source` 增 `owned`（2.37.0）** + **建机门槛 7 天余额、`insufficient_balance` 带 `required_cents` / `min_days`（2.37.1）** + **服务器详情补 `charged_cents` / `refunded_cents`（2.37.2）** + **目录按真实数据给出地区 × 档位：`plans[].regions`、`plan_unavailable_in_region`（2.38.0）** + **§7.15 错误码补全与界面动作（2.38.1）** + **就绪后扣款：`checkout` 不扣费、返回 `MyServerOrder`、结算在 enroll、`charge_mode`、`billing_state='pending'`（2.39.0）** + **服务器改名 `my_server_rename` 与 `my-server-renamed` 事件（2.40.0）** + **真实阶段上报：`installing_at` / `verifying_at`、`failure.stage` 取 `failure_stage`（2.41.0）** + **连接中新增节点重建运行配置：`node_attach` / `node_create` 返回 `runtime_rebuild`，§4.0.1（2.42.0；2.42.2 补 `node_switch` 闸门；2.42.3 撤回 `cancelled`）** + **探测三态与唯一 Clash 口径：`NodeProbeData.status`、`reachable: boolean \| null`、`probe_method: "clash_delay" \| "none"`，删除裸 TCP（2.43.0）** + **启动移出锁的收尾与重建被断开取代（2.43.1）** + **服务器页无连接入口、节点静默入池与 `local_node_id`（2.43.2）** + **`<ui-context>` 补接管方式 / 流量范围（2.43.3）** + **「本期已过，服务正常」文案定稿（2.43.4）** + **余额不足停机墓碑与 `node_forget`（2.44.0）** + **`node_forget` 改为先控制面后本地：dismiss 失败整体失败、本地不动（2.45.0）** + **销毁当前连接节点时先停运行时（2.45.1）** + **取消后台轮询，改为详情 / 探测失败时顺手检查（2.45.2）** + **销毁先停隧道、超时放宽到 30 秒、结果不确定也停（2.45.3）** + **`my_server_list` 对齐残留 owned 节点（2.45.4）** + **`NodeSummary` 增 `unavailable_reason`（2.45.5）** + **手机端导出三命令：`mobile_export_get` 返回 `formats[]`、`mobile_export_rotate` 同步、`mobile_clients_qr` 改客户端枚举（2.46.0–2.47.0）** + **Shadowrocket 专用配置（2.48.0）** + **UI 排障日志命令 `ui_log`（2.49.0）** + **AI 会话语义：系统提示词拆分、内容文档指路、首启 kickoff 命令（2.50.0）** + **语言设置两条命令与中英文提示词（2.51.0）** + **AI 可选与统一入口：`AI_NOT_CONFIGURED`（2.52.0）** + **智能修复命令 `node_rotate_credentials`（2.53.0）** + **节点配置同步三命令与间隔设置（2.54.0）** + **界面错误只回稳定码：`message` 恒空、文案按 `code` + `details.reason` 由 UI 映射（2.55.0）** + **节点可达性探测命令 `node_probe_reachability`（2.56.0）** + **节点同步间隔改档位 0/30/60/240/480/1440、默认 240（2.57.0）** + **可达性探测区分未执行：`icmp.error`（2.58.0）** + **`untested.reason` 去掉 `other_config`、新增 `node_not_in_config` / `node_not_in_running_config`（2.59.0）** + **`MyServerAccount` 增 `session_expires_at`（2.60.0）** + **充值通道由 Dodo 换成 Stripe：`price_data`、面额 1200/2400/3600/4800、回调 `/v1/webhooks/stripe`（2.61.0）** + **`my_server_account` 区分「控制面不可达」与「未登录」（2.62.0）** + **服务器创建记录 `my_server_events`、审计索引迁移 0013（2.63.0）** + **Shadowrocket 改发内联规则的 Clash YAML（2.64.0）** + **AI 工具第 2 组：三条分流命令保留、3.27.0 起无 AI 工具；§9.8 映射数量 44 → 40（2.65.0）** + **AI 工具第 3 组：节点写入三工具合并为 `NodeImport`，`node_import_url` / `node_import_text` / `node_create` 的 AI 工具列改指 `NodeImport`，命令本身不动（2.66.0）** + **`node_create` 的 `method` 白名单按实现列全 12 项（2.67.0）** + **移除自定义节点 `node_remove`（仅 UI，2.68.0）** + **AI 工具第 4 组：`CatalogOptions` 改名 `ServerOptions`，命令映射与工具侧引用同步（2.69.0）** + **编辑自定义节点 `node_update`（仅 UI，2.70.0）** + **导出配置文件 `mobile_export_save_file`（仅 UI，2.71.0）** + **前置批：工具去重（不占组号）：删除 `RuntimeStart` / `RuntimeStop`，`runtime_start` / `runtime_stop` 的 AI 工具列改「无」，§13 同步（2.72.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0，映射 2.73.0）** + **新增只读工具 `LlmProviders`，`llm_provider_list` / `llm_provider_test` 的 AI 侧改指它，总数 37 → 38（3.32.0，映射 2.74.0）** + **节点升级改为按需：`MyServer.singbox_version`、`node_upgrade_singbox` 命令与 agent 工具 `upgrade_singbox`（2.75.0）** + **自定义充值范围：`my_server_wallet` 增可选 `min_topup_cents` / `max_topup_cents`（2.75.1）** + **账单流水：`my_server_billing_ledger`（仅 UI，2.76.0）** + **移除 `new_node.ask_ai` 控件（2.77.0）** + **`MyServer` 流量四字段：`traffic_used_bytes` / `traffic_limit_bytes` / `traffic_reset_at` / `traffic_state`（2.78.0）** + **`my_server_list` 增账号级 `traffic_pool`（2.79.0）** + **`settings` 控件集移除 `settings.account`（2.80.0）** + **`node_create` / `node_update` 的 `method` 白名单摘掉 `none`、2022 系列校验 PSK（2.81.0）** + **单台 `traffic_state` 收窄为 `ok` / `unpaid`，near/over 上移账号级（2.82.0）** + **AI 侧 `MyServers` 透出 `MyServer` 流量四字段与账号池 `traffic_pool`（3.37.0，契约 2.83.0）** + **订阅导入支持 Clash 配置的 `proxies:` 子集（2.83.0）** + **my_server_wallet 增 `daily_cents` / `remaining_days`（2.85.0）** + **MyServer 增 provider_gone（2.86.0）** + **创建中禁止用户销毁：`my_server_destroy` 对 `creating` / `booting` / `installing` / `verifying` 返回 `PRECONDITION_FAILED / server_provisioning`，`cancel_after_paid` 不再指向销毁入口（2.87.0）** + **批量测速并发 6 → 16、控制台接入「停止测速」（2.88.0）** + **TUN 提交后的失败不再当作被取代、登记 `tun_start_failed`（2.89.0）** + **探测新增 `running_config_stale`：同步配置只更新库、运行配置仍是旧凭据时按未测处理（2.90.0）** + **试用到期停更：`default_profile_refresh` 与六条 seed 写入路径返回 `PRECONDITION_FAILED / trial_expired`；删除 `import_seed_file` 与窗口拖放（2.91.0）** |
 | `contracts/events.md` | **2.26.0** | 批 0 + 批 3 + 流量 / 连接数 / 延迟进健康事件 + `node_latency_ms` + 核心升级进度/完成事件 + 确认卡 `kind`/`details` + 任务 `origin` + `tool-call-end.display` + 批量测速两事件 + 测速阶段/方式/降级 + 非法布局整份丢弃 + `display.actions`（问题报告两个动作）+ `region-changed`（地区生效值）+ 我的服务器两事件（2.13.0）+ 应用内退出确认 `quit-requested`（2.14.0）+ `trial-expired` / `settings-point` / `stage-select`（2.16.0–2.16.2）+ Cmd+Q 任何时候都弹确认（2.17.0）+ **登出被拒后的本地清理事件 `my-server-account-cleared`（2.18.0）** + **服务器改名事件 `my-server-renamed`（2.19.0）** + **测速三态与 `method: "clash" \| "none"`，`node-probe-finished` 增 `untested` 终态（2.20.0）** + **`node-list-changed` 补 `node_rotated` / `node_synced`（2.22.0）** + **`ai-status` / `ai-compact` 增 `text_key` + `params`，UI 不再渲染 `text`；`display.text` 标记停用（2.23.0）** + **`node-list-changed` 增 `node_updated`（2.25.0）** + **`settings-point` 的 `section` 收窄为 `ai` / `connection` / `advanced`，账户移出设置（2.26.0）** |
 | `contracts/runtime.md` | **2.8.0** | 批 0 + `applied_route_revision` + 流量口径 + `node_latency_ms` + 本地代理端口候选链与 `RUNTIME_PORT_UNAVAILABLE` 落地 + `route_region` + `system_dns` + `data_plane` 连续两次失败才降级与 TUN 必须探测 + 地区优先级与四个入口同源 |
 | `contracts/tools.md` | **3.40.0** | 批 0 + 批 3 工具 + 批 3 修订 + 测试节点口径 + `VpnConnectData` 对齐快照 + 移除 `CoreInstall` + `CoreUpgrade`（AI 代劳升级）+ 面向用户的表达 + `NodeProbe` 单测边界 + `ConfigCreate`/`ConfigUpdate` 移除 `listen_port` + `NodeCreate` 错误原因与实际对齐、`NodeImportText`（两者已于 3.28.0 并入 `NodeImport`） + `IssueReport` 问题报告 + `SetUserRegion` 地区写入 + **`RuntimeStart` 连接前自动停旧连接（3.11.0）** + **`MyServers` 只读工具（3.12.0）** + **`ConfigSetMode` 在线切换接管方式（3.13.0）** + **裁掉 11 个从未实现的工具，总数 51 → 40（3.15.0）** + **`StageSelect` 舞台选择、`CatalogOptions`（3.29.0 改名 `ServerOptions`）建机目录，总数 42（3.16.0–3.17.1）** + **接管方式用词统一为 `Tun 模式` / `Proxy 模式`（3.17.5）** + **`ConfigList` / `ConfigCreate` / `ConfigDelete` 退出 AI 工具集（`ConfigActivate` 本就无工具入口），总数 42 → 39（3.18.0）** + **地区 × 档位按目录真实数据：`CatalogOptionsData.plans[].regions`（3.29.0 改名 `ServerOptionsData`）、`StageSelect` 组合校验（3.19.0）** + **`NodeProbe` 唯一 Clash 口径、`untested` 仍是 `ok`：超时 15 秒、`status` 透传（3.20.0）** + **`RuntimeStart` 被取代启动的收尾（3.20.1）** + **`NodeProbe` 改 `Write`、超时 20s（3.21.1）** + **节点问题以 ConfigDetail 为准（3.21.2）** + **`MyServers` 给已销毁的人话原因（3.21.3）** + **`ConfigDetail` 的 `config_id` 改为可选，缺省当前配置（3.21.4）** + **`OpenSettings` 行登记表新增 `account.mobile`（3.22.0）** + **`MyServers` 可以给地址（3.22.1）** + **`NodeRotateCredentials` 智能修复（3.23.0）** + **工具描述按会话语言（3.24.0）** + **问题墙上报与读取（3.25.0）** + **接手 TUN 的身份口径：接手即视为已连接本配置（3.25.1）** + **`MyServers` 在设备身份 / 会话过期时返回 `PRECONDITION_FAILED / auth_required`（3.26.0）** + **删除 `RouteTargetsSet` / `CategoryList` / `RulesStatus`，`ConfigUpdate.targets` 删除，总数 43 → 40（3.27.0）** + **节点写入三工具合并为 `NodeImport`，总数 40 → 38（3.28.0）** + **`CatalogOptions` 改名 `ServerOptions`，总数仍 38（3.29.0）** + **删除 `RuntimeStart` / `RuntimeStop`，`ConfigUpdate` 去掉 `routing_mode`，总数 38 → 36（3.30.0）** + **新增只读工具 `MyServerWallet`（只读余额快照，不返回充值档位），总数 36 → 37（3.31.0）** + **新增只读工具 `LlmProviders`（列出服务商 + 可选单测，永不返回 Key），总数 37 → 38（3.32.0）** + **`OpenSettings` 行登记表移除 `account.mobile`（该行随账号浮层删除），登记表 12 → 11 项（3.33.0）** + **`MyServers` 补 `paid_until` / `billing_state` 两个计费字段（3.34.0）** + **`LlmProviders` 的 `content` 每行带 service provider id（3.35.0）** + **3.36.0 收口 `OpenSettings`（账户移出设置，`section` 枚举与行登记收缩）** + **`MyServers` 透出流量四字段与账号池（3.37.0）** + **`MyServers` 的 `content` 修正计费与流量措辞（3.38.0）** + **`MyServers` 透出 `provider_gone`（3.39.0）** + **`MyServers` 用语与界面统一为「已累计」（3.40.0）** |
@@ -3313,6 +3272,13 @@ type RulesStatus = {
 ---
 
 ## 16. 变更记录
+
+### 2.91.0（未发布，2026-11-27：试用到期停止更新种子；删除 `import_seed_file`）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 本文件版本升到 `2.91.0`；试用到期（`trial_status.state = "expired"`）成为种子写入闸门的唯一依据：`default_profile_refresh`（`force = true` 也不能绕过）与 `config_create(source="seed")` / `config_create({nodeIds})` / `node_attach(source="seed")` / `node_attach({nodeIds})` / `config_update({nodeIds})` 在候选含**未绑定的** `source="seed"` 时返回 `PRECONDITION_FAILED / trial_expired`（`retryable = false`），与清理事务是否提交无关。§1.6 登记 `trial_expired`；§3.2 写死「参数校验 → `config_exists` → 试用判定 → `seed_unavailable`」；§3.3 错误列表补 `PRECONDITION_FAILED`（`trial_expired` / 既有的 `route_targets_empty`）；§4.0 纠正「只做绑定、不解析」并补两条闸门；§7.19 / §8.1 / §8.2 同步。已绑定的 seed 与 `manual` / `owned` / `url` 照常，`available` / `active` 照常 | 语义新增 | `docs/design/trial-seed-expiry.md`（三轮独立评审后定稿） |
+| 2 | 删除命令 #24 `import_seed_file` 与 §8.3（含 `SeedImportResult` 类型）；窗口级拖放同一批次退役，命令表删除该行但**不重排后续行号**（其它文档按 `#95` 这类编号引用）；§12.1 决策表第 8 行改为「已删除」。种子刷新成为 seed 节点唯一的网络更新入口 | 破坏性（消费者只有本应用 UI，同一批次删除） | 同上 §4.2：隐藏手势、无用户认知；它不查试用状态也不查排除表，是过期后把试用节点加回来的暗路 |
 
 ### 2.90.0（未发布，2026-11-27：探测新增 `running_config_stale`）
 

@@ -76,6 +76,37 @@ pub fn status_at(conn: &Connection, now: i64) -> StoreResult<Status> {
     })
 }
 
+/// 种子写入闸门的哨兵错误：只表示「试用已到期」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedTrialExpired;
+
+impl std::fmt::Display for SeedTrialExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SEED_TRIAL_EXPIRED_MESSAGE)
+    }
+}
+
+impl std::error::Error for SeedTrialExpired {}
+
+/// 对外固定文案（AI 工具信封与 UI 通道共用）。
+pub const SEED_TRIAL_EXPIRED_MESSAGE: &str =
+    "试用节点已过期，不再更新。换用自己的节点，或新建一台服务器。";
+
+/// 六条种子写入路径共用的判定（`docs/design/trial-seed-expiry.md` §3.5）。
+///
+/// 只有 `Expired` 返回 `Err`；读状态失败按「未过期」放行并记 warn——
+/// 闸门是防续期，不是安全边界，不能因为数据库暂时读不出来拦住正常用户。
+pub fn ensure_seed_trial_active(conn: &Connection) -> Result<(), SeedTrialExpired> {
+    match status(conn) {
+        Ok(status) if status.phase == Phase::Expired => Err(SeedTrialExpired),
+        Ok(_) => Ok(()),
+        Err(error) => {
+            log::warn!("读取试用状态失败，按未过期放行：{error}");
+            Ok(())
+        }
+    }
+}
+
 /// `TrialStatusData`（`commands.md` §7.19）。只读，不触发清理。
 pub fn status_json(conn: &Connection) -> StoreResult<Value> {
     let status = status(conn)?;

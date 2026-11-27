@@ -14,8 +14,8 @@
 | 协议 | `NodeProtocol` 增加 `shadowsocks`，wire 值为 `"shadowsocks"` |
 | method | 白名单以 `nodes.rs` 的 `SUPPORTED_METHODS` 为准（当前 11 项），**不收 `none`**；`2022-blake3-*` 的密码必须是 base64 PSK（16 / 32 字节）。不在白名单或密钥不合法的，**不静默降级**，写入即拒绝 |
 | 凭据 | `password` 与 uuid 同级，属凭据：列表接口不返回、不进 SQLite 明文、不进日志、不进模型上下文 |
-| 导入通道 | **当前**：窗口级拖放调 `import_seed_file({ path })`（只收种子 `.json`，是它唯一的 UI 调用方）；设置页「添加节点」走文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`，文件命令契约见 `commands.md` §4.1.2）。**目标**：种子分发退场后拖放才迁到 `node_import_file`（§5.2） |
-| UI | 设置页加一个「选择文件」按钮；窗口接受拖放。profile 列表的协议标签可选 |
+| 导入通道 | **当前**：窗口拖放与 `import_seed_file` 已随 2.91.0 删除（`trial-seed-expiry.md` §4.2），种子节点只剩 `default_profile_refresh` 一条更新入口；设置页「添加节点」走文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`，文件命令契约见 `commands.md` §4.1.2） |
+| UI | 设置页「选择文件」按钮；窗口拖放已删除（拖入文件不再有任何行为） |
 
 ---
 
@@ -143,42 +143,44 @@ ProtocolConfig::Shadowsocks { server, server_port, method, password }
 
 现在只有 `ProfileImport(node_id)` 走目录服务。种子文件里的节点不在目录服务里，没有 `node_id` 可查。为了做真实连通性验证，需要一个把「本地文件 → profile + 凭据」落地的通道。
 
-### 5.2 通道选择：拖放一条，设置页三条（当前）
+### 5.2 通道选择：拖放一条，设置页三条（2026-11-27 起拖放已退役）
 
 > **2026-11-02 最终决定（当日修订一次）**。此前试过五条路，被否决的理由都记在下面 —— 它们不是「没想到」，是试过之后有意不用。
 >
 > 最初只定了拖放；同一天用户明确要求还要能从目录里选文件。当时两条入口共用同一个前端 handler，都调 `import_seed_file({ path })`。
 >
 > **2026-11-11 口径**：设置页「添加节点」已改为文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`，文件命令契约见 `commands.md` §4.1.2，2.16.14），**不再调 `import_seed_file`**；当前唯一调用方是**窗口级拖放**。拖放**不随批 B 迁移**：种子是 `{ version, updated_at, nodes[] }`，与逐行 `ss://` 是两种格式，迁过去等于让一份可用文件被判成「没有可用的节点」。种子分发退场后再定拖放去向。
+>
+> **2026-11-27 更新**：窗口级拖放与 `import_seed_file` 已随 2.91.0 **删除**（`trial-seed-expiry.md` §4.2）。本节以下关于拖放的内容是当时的决定记录；当前只剩设置页三条通道。
 
 | 通道 | 结论 | 说明 |
 |---|---|---|
-| **窗口级拖放** | ✅ P1 | 用户把 `.json` 拖进窗口；`getCurrentWebview().onDragDropEvent()` 拿到路径 |
+| **窗口级拖放** | ❌ 已删除（2.91.0） | 当时：用户把 `.json` 拖进窗口；`getCurrentWebview().onDragDropEvent()` 拿到路径。现拖入文件不再有任何行为 |
 | **设置页「选择文件」按钮** | ✅ P1 | `@tauri-apps/plugin-dialog` 的 `open()` 返回绝对路径；用户取消返回 `null`。**当前接到「添加节点」的文件通道**（`node_import_file`，逐行 `ss://`），不再调 `import_seed_file` |
 | `VEYL_SEED_NODES` 环境变量 | ❌ | 发布版里留一条隐式入口；启动行为随环境变量变化 |
 | `veyl-runtime-selftest import-seeds` | ⚠️ 仅 CI | 开发专用二进制，内测用户手上没有 |
 | 一整个「导入 / 节点管理」页面 | ❌ | 要多做一个页面；用户拿到的只是「安装包 + 一个 JSON」 |
 | 固定路径 `<data_dir>/seeds.json` 自动导入 | ❌ | `~/Library` 默认隐藏，用户手动放文件不可行；有 UI 后是第二套隐形入口，增加攻击面又没有用户价值 |
 
-**当时的设计（2026-11-11 起已不成立）：两条入口一套实现**
+**当时的设计（2026-11-11 起已不成立）**
 
 ```
 拖放事件 ──────┐
-               ├──► 同一个 handler ──► invoke("import_seed_file", { path })
+               ├──► 同一个 handler ──► invoke("import_seed_file", { path })   ← 命令与拖放均已删除
 「选择文件」按钮 ┘
 ```
 
-校验、解析、落库、错误文案当时只在 Host 侧实现一次（`seed_import.rs`），两条入口只负责「拿到一个路径」。**现在两条入口按格式分工，不再共用实现**：设置页走 `node_import_text` / `node_import_url` / `node_import_file`（逐行 `ss://`），窗口拖放走 `import_seed_file`（种子 `.json`）。
+校验、解析、落库、错误文案当时只在 Host 侧实现一次（`seed_import.rs`），两条入口只负责「拿到一个路径」。**后来两条入口按格式分工，不再共用实现**：设置页走 `node_import_text` / `node_import_url` / `node_import_file`（逐行 `ss://`），窗口拖放走 `import_seed_file`（种子 `.json`）；**2.91.0 起拖放与 `import_seed_file` 已删除**，只剩设置页三条通道。
 
 **文件选择器只授 `open` 权限**：`capabilities/default.json` 里只出现 `dialog:allow-open`，不出现 `save` / `ask` / `confirm` / `message`。我们唯一的用途是「选一个已有文件」，多授一项就多一处可被前端代码触发的系统交互。
 
 **取消即无操作**：`open()` 返回 `null` 时前端直接返回，不调 Host、不改任何状态、不显示提示。
 
-自动化（CI / 测试）继续用 `veyl-runtime-selftest import-seeds`，**它与窗口拖放共用同一套 `seed_import` 解析**。
+自动化（CI / 测试）继续用 `veyl-runtime-selftest import-seeds`，**它与已删除的窗口拖放共用过同一套 `seed_import` 解析**。
 
-### 5.3 窗口拖放的导入流程：拿到路径 → `import_seed_file`
+### 5.3 窗口拖放的导入流程：拿到路径 → `import_seed_file`（已退役）
 
-> 设置页改走三条通道之后，这条只剩**窗口拖放**在用（种子 `.json`）。设置页的导入流程见 §5.2 与 `commands.md` §4.1.1 / §4.1.2。
+> **已随 2.91.0 删除**：窗口拖放与 `import_seed_file` 均不再存在，以下流程仅作历史记录。设置页的导入流程见 §5.2 与 `commands.md` §4.1.1 / §4.1.2。
 
 ```
 用户拖放 .json 种子文件
@@ -293,7 +295,7 @@ ProtocolConfig::Shadowsocks { server, server_port, method, password }
 
 | 能力 | 谁触发 | 访问控制 |
 |---|---|---|
-| 拖拽导入 | 用户在窗口里主动拖入 | 人的动作 |
+| 拖拽导入（已删除，2.91.0） | 用户在窗口里主动拖入 | 人的动作 |
 | 写文件工具 | 模型的判断 | 无（审批已移除） |
 
 前者出错是用户点错，后者出错是模型想错 —— 而模型的错误无法被用户事前拦截。
@@ -368,7 +370,7 @@ seed 文件的 sing-box outbound ┘
 
 ### 5.7 产品化的本地导入
 
-P1 的本地入口是**窗口拖放种子文件**（`.json` → `import_seed_file`）；设置页「添加节点」现在是文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`），不再与拖放共用实现。拖放的去向见 §5.2：种子分发退场后再迁。
+P1 的本地入口原本是**窗口拖放种子文件**（`.json` → `import_seed_file`）；两者已随 2.91.0 删除，当前唯一入口是设置页「添加节点」的文本 / 订阅 / 文件三条通道（`node_import_text` / `node_import_url` / `node_import_file`）。
 
 P2 要做的是**节点管理**（列出 / 重命名 / 删除本地导入项），不是再开第三条导入路径 —— 设置页三条通道都已汇到 `node_import_text` 的解析，任何新入口也必须汇到同一处。
 

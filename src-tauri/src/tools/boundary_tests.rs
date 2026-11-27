@@ -357,10 +357,6 @@ impl VpnToolServices for FakeServices {
         self.rec.record(format!("default_profile_refresh({force})"));
         Ok(self.data.clone())
     }
-    async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value> {
-        self.rec.record(format!("import_seed_file({path})"));
-        Ok(self.data.clone())
-    }
     async fn rules_status(&self) -> anyhow::Result<Value> {
         self.rec.record("rules_status");
         Ok(self.data.clone())
@@ -2073,9 +2069,6 @@ async fn service_failure_becomes_a_structured_error_with_next_actions() {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn default_profile_refresh(&self, _: bool) -> anyhow::Result<Value> {
-            Err(anyhow::anyhow!("磁盘满了"))
-        }
-        async fn import_seed_file(&self, _: &str) -> anyhow::Result<Value> {
             Err(anyhow::anyhow!("磁盘满了"))
         }
         async fn rules_status(&self) -> anyhow::Result<Value> {

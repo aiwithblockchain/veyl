@@ -523,7 +523,7 @@ CREATE TABLE trial_state (
 | `config_nodes` | `config_detail` | `config_update`（整体替换）/ 导入时追加 | `config-changed` / `node-list-changed` |
 | `layout` | `config_detail` | AI 编排（批 4，Host 内部） | `layout-updated` |
 | `issues` | `issue_list` / `issue_get` | Host 内部（J1）、`issue_handoff` / `issue_resolve` / `issue_ignore` | `issue-changed` |
-| `seed_cache` | `default_profile_status` | `default_profile_refresh` / `import_seed_file` | `default-profile-updated` |
+| `seed_cache` | `default_profile_status` | `default_profile_refresh` | `default-profile-updated` |
 | `config_rules` | `rule_custom_list` | `rule_custom_add` / `rule_custom_delete` | `routing-changed` |
 | `rules_state` | `rules_status` | `rules_update` / 启动解压 | `rules-changed` |
 | `seed_node_exclusions` | 无直接命令（设置页将来展示） | Host 内部：用户从配置移除种子节点时写入 | 无 |

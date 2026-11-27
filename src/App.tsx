@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type {
   AgentEvent,
   ConfigConnectMode,
@@ -13,7 +12,7 @@ import type {
 } from "./agent/protocol";
 import { AGENT_EVENTS } from "./agent/protocol";
 import { applyRuntimeEvent, emptyRuntimeView, getAgentBridge, keepLiveHealth, snapshotToView } from "./agent";
-import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, isTauri, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
+import { DEFAULT_PROXY_PORT, isConfirmQuestionKind, readQuestionDetail, shouldRefreshSnapshotOnHealth, viewAfterConnected, viewAfterStopped } from "./agent/bridge";
 import type {
   AgentBridge,
   DefaultProfileStatus,
@@ -64,7 +63,7 @@ import { AiRequiredDialog } from "./components/AiRequiredDialog";
 import { PaneHandle } from "./components/PaneHandle";
 import { MyServerWizard } from "./components/MyServerWizard";
 import { QuitDialog } from "./components/QuitDialog";
-import { Settings, describeImportError } from "./components/Settings";
+import { Settings } from "./components/Settings";
 import type { DisplayActionOutcome } from "./components/ToolCallCard";
 import type { ToolDisplayAction } from "./components/toolDisplay";
 import {
@@ -728,7 +727,6 @@ export default function App() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
-  const importingRef = useRef(false);
   const endWaiters = useRef(new Map<string, () => void>());
   // 同一会话同时只允许一条请求：ref 挡住在重渲染之前连点第二下。
   const sendBusyRef = useRef(new Set<string>());
@@ -1017,64 +1015,6 @@ export default function App() {
   useEffect(() => {
     panelOpenRef.current = panelOpen;
   }, [panelOpen]);
-
-  const importPath = useCallback(
-    async (path: string) => {
-      if (!/\.json$/i.test(path)) {
-        setAppNotice({
-          level: "error",
-          text: translate("app.importJsonOnly"),
-        });
-        return;
-      }
-      if (importingRef.current) return;
-
-      importingRef.current = true;
-      try {
-        const result = await bridge.importSeedFile(path);
-        setAppNotice({
-          level: "info",
-          text: translate("app.imported", { count: result.imported }),
-        });
-      } catch (error) {
-        setAppNotice({ level: "error", text: describeImportError(error) });
-      } finally {
-        importingRef.current = false;
-      }
-    },
-    [bridge],
-  );
-
-  // 窗口级拖放：整个应用只此一处。
-  useEffect(() => {
-    if (!isTauri()) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        const payload = event.payload;
-        if (payload.type !== "drop") return;
-        if (payload.paths.length > 1) {
-          setAppNotice({
-            level: "error",
-            text: translate("app.dropOneFile", { count: payload.paths.length }),
-          });
-          return;
-        }
-        const path = payload.paths[0];
-        if (path) void importPath(path);
-      })
-      .then((off) => {
-        if (disposed) off();
-        else unlisten = off;
-      });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [importPath]);
 
   useEffect(() => {
     return bridge.subscribe((event) => {
@@ -3433,6 +3373,7 @@ export default function App() {
         routingMode={activeRoutingMode}
         onSetRoutingMode={handleSetRoutingMode}
         onConnectModeChanged={() => vpn.reload()}
+        trial={trial}
         assistant={aiPanel}
         onConsultingChange={setSettingsConsulting}
         onConsultAi={askAiInPanel}

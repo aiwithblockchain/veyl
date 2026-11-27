@@ -245,7 +245,7 @@ describe("端口行编辑态", () => {
     beginEdit();
     fireEvent.change(input(), { target: { value: "8081" } });
 
-    fireEvent.click(screen.getByText("更新 Veyl 免费节点"));
+    fireEvent.click(screen.getByText("更新试用节点"));
 
     expect(input().value).toBe("8081");
     expect(screen.getByRole("button", { name: /保存/ })).toBeTruthy();

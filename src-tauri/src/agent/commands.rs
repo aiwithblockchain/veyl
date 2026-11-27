@@ -1830,7 +1830,7 @@ pub async fn node_import_text(
         .map_err(error_value)
 }
 
-/// 文件导入上限：与 `import_seed_file`、URL 拉取一致（契约 §4.1.2）。
+/// 文件导入上限：与种子 URL 拉取一致（契约 §4.1.2）。
 ///
 /// 大小以打开后的**句柄**为准，读取再用 `take(MAX + 1)` 卡住，最多只读
 /// 1 MiB + 1 字节。
@@ -2160,19 +2160,6 @@ pub async fn default_profile_refresh(state: State<'_, Arc<AppState>>) -> Result<
     state
         .services
         .default_profile_refresh(true)
-        .await
-        .map_err(error_value)
-}
-
-/// 离线兜底：把一份 `veyl_seed.json` 合并进节点池（只增不删）。
-#[tauri::command]
-pub async fn import_seed_file(
-    state: State<'_, Arc<AppState>>,
-    path: String,
-) -> Result<Value, Value> {
-    state
-        .services
-        .import_seed_file(&path)
         .await
         .map_err(error_value)
 }
