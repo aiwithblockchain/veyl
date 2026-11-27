@@ -11,6 +11,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261113.1",
+    "@peculiar/x509": "^3.1.0",
+    "reflect-metadata": "^0.2.2",
     "typescript": "^5.4.5",
     "vitest": "^1.6.1",
     "wrangler": "^4.92.0"

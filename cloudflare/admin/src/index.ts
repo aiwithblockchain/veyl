@@ -4,6 +4,8 @@
 export interface Env {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
+  /** 控制面的库（运维看板直接读）。见 agent/docs/agent-health.md §5.6。 */
+  DB?: D1Database;
 }
 
 const CERTS_TTL_MS = 5 * 60_000;
@@ -206,34 +208,6 @@ export default {
     if (!email) return new Response("Unauthorized", { status: 401, headers: baseHeaders() });
 
     const { pathname } = new URL(request.url);
-
-    // 临时诊断：Worker 能否连上节点 agent 的自签证书。用完即删。
-    // 只对白名单地址生效，避免变成任何人都能用的代理。
-    if (pathname === "/probe" && request.method.toUpperCase() === "GET") {
-      const ip = new URL(request.url).searchParams.get("ip") ?? "";
-      if (!PROBE_ALLOWLIST.has(ip)) {
-        return new Response("not allowed", { status: 400, headers: baseHeaders() });
-      }
-      const target = `https://${ip}:32100/mcp`;
-      const started = Date.now();
-      try {
-        const res = await fetch(target, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
-        });
-        const body = (await res.text()).slice(0, 300);
-        return Response.json({ target, ok: true, status: res.status, ms: Date.now() - started, body });
-      } catch (error) {
-        return Response.json({
-          target,
-          ok: false,
-          ms: Date.now() - started,
-          name: (error as Error)?.name ?? null,
-          message: String(error),
-        });
-      }
-    }
 
     if (pathname === "/" && request.method.toUpperCase() === "GET") {
       return new Response(homePage(email), {
