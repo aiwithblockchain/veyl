@@ -2102,6 +2102,195 @@ body[data-resizing] {
   padding: 10px 0 4px;
 }
 
+/* 账单（账户弹层内）：默认只有一行入口；展开才请求，内容常驻以便收动画。
+   表头 sticky 相对账户 body：reveal 用 overflow: clip，不新建滚动容器。 */
+
+.billing-inline {
+  display: flex;
+  flex-direction: column;
+}
+
+.billing-disclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.billing-disclosure--toggle {
+  cursor: pointer;
+}
+
+.billing-disclosure--toggle:hover {
+  color: var(--ink);
+}
+
+.billing-disclosure__text {
+  min-width: 0;
+}
+
+.billing-disclosure__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.billing-disclosure__chevron {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+  transition: transform 120ms ease-out;
+}
+
+.billing-disclosure__chevron.is-open {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+/* 与充值同一套 grid 行高动画：收起 120ms、展开 160ms。 */
+.billing-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 120ms ease-out;
+}
+
+.billing-reveal.is-open {
+  grid-template-rows: 1fr;
+  transition-duration: 160ms;
+}
+
+.billing-reveal__inner {
+  min-height: 0;
+  overflow: hidden;
+  overflow: clip;
+}
+
+.billing-reveal__body {
+  padding-top: 14px;
+}
+
+.billing-empty {
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.billing-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 0 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.billing-status--failed span {
+  color: var(--amber);
+}
+
+/* 骨架是静态灰条：一屏只保留两处展开动效。 */
+.billing-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 6px;
+}
+
+.billing-skeleton__row {
+  height: 12px;
+  border-radius: 4px;
+  background: var(--line);
+}
+
+.billing-skeleton__row:last-child {
+  width: 65%;
+}
+
+.billing-more {
+  padding-top: 10px;
+}
+
+.billing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.billing-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--hair);
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.billing-table td {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: top;
+}
+
+.billing-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.billing-table__amount-head,
+.billing-table__amount {
+  text-align: right;
+}
+
+.billing-table__kind {
+  white-space: nowrap;
+}
+
+.billing-table__server {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.billing-table__date {
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.billing-table__amount {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.billing-footnote {
+  margin: 0;
+  padding: 10px 0 2px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
 .settings-account__error + .settings-note {
   margin-top: 4px;
 }

@@ -9,12 +9,42 @@ const css: string = readFileSync("src/styles/app.css", "utf8").replace(
   "",
 );
 const source: string = readFileSync("src/components/AccountSurface.tsx", "utf8");
+const ledgerSource: string = readFileSync(
+  "src/components/BillingLedgerTable.tsx",
+  "utf8",
+);
 
 /** 纯布局钩子：组件里挂着，但没有自己的规则。 */
 const UNSTYLED = new Set([
   "account-surface__topup",
   "account-surface__traffic-block",
 ]);
+
+/** 账单的纯钩子：7166b72^ 里也没有规则。 */
+const UNSTYLED_BILLING = new Set(["billing-body"]);
+
+/** 只收 className 里的词：id / aria-controls 里的 account-billing-details 不算类名。 */
+function classNameTokens(src: string, prefix: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of src.matchAll(
+    /className=(?:"([^"]*)"|\{`([^`]*)`\}|\{"([^"]*)"\})/g,
+  )) {
+    const raw = match[1] ?? match[2] ?? match[3] ?? "";
+    // 模板里的条件后缀不是类名本身，去掉后再按空白切词。
+    for (const token of raw.replace(/\$\{[^}]*\}/g, " ").split(/\s+/)) {
+      if (token.startsWith(prefix)) out.add(token);
+    }
+  }
+  return out;
+}
+
+/** 必须是有非空声明块的规则：只剩选择器（或注释里的名字）不算数。
+ *  声明块内不允许出现花括号，否则空块会吞掉下一条规则冒充自己。 */
+function hasDeclarationBlock(cls: string): boolean {
+  return new RegExp(
+    `\\.${cls}(?![\\w-])[^{}]*\\{[^{}]*[^\\s{}][^{}]*\\}`,
+  ).test(css);
+}
 
 describe("账户弹层样式覆盖", () => {
   it("组件里用到的每个 account-surface 类名在 app.css 里都有声明块", () => {
@@ -28,10 +58,19 @@ describe("账户弹层样式覆盖", () => {
       if (UNSTYLED.has(cls)) continue;
       // 必须是有非空声明块的规则：只剩选择器（或注释里的名字）不算数。
       // 声明块内不允许出现花括号，否则空块会吞掉下一条规则冒充自己。
-      const selector = new RegExp(
-        `\\.${cls}(?![\\w-])[^{}]*\\{[^{}]*[^\\s{}][^{}]*\\}`,
-      );
-      if (!selector.test(css)) missing.push(cls);
+      if (!hasDeclarationBlock(cls)) missing.push(cls);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("BillingLedgerTable 用到的每个 billing 类名在 app.css 里都有声明块", () => {
+    const used = classNameTokens(ledgerSource, "billing-");
+    expect(used.size).toBeGreaterThan(0);
+
+    const missing: string[] = [];
+    for (const cls of used) {
+      if (UNSTYLED_BILLING.has(cls)) continue;
+      if (!hasDeclarationBlock(cls)) missing.push(cls);
     }
     expect(missing).toEqual([]);
   });
