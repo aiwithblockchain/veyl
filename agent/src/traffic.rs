@@ -355,6 +355,13 @@ impl TrafficMeter {
                     .with_context(|| "creating the counter table")?;
                 bail!("counter table was missing; recreated, skipping this window")
             }
+            TableRead::Incomplete => {
+                tracing::warn!("traffic: counter table is incomplete; recreating");
+                self.rebuild(&iface)
+                    .await
+                    .with_context(|| "completing an incomplete counter table")?;
+                bail!("counter table was incomplete; recreated, skipping this window")
+            }
             TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
         }
     }
@@ -399,6 +406,7 @@ impl TrafficMeter {
         if out.success() {
             return Ok(match parse_counter(&out.stdout) {
                 Some((iface, bytes)) => TableRead::Counter { iface, bytes },
+                None if table_is_incomplete(&out.stdout) => TableRead::Incomplete,
                 None => TableRead::Broken(format!(
                     "unparsable counter output: {}",
                     snippet(&out.stdout)
@@ -499,10 +507,16 @@ impl TrafficMeter {
     }
 }
 
-/// What one counter read told us. Only `Missing` may rebuild the table.
+/// What one counter read told us. `Missing` and `Incomplete` may rebuild the
+/// table; `Broken` never does.
 enum TableRead {
     /// The table is not there — a first run, or someone deleted it.
     Missing,
+    /// The table exists but holds no rule: a rebuild was interrupted (the agent
+    /// was killed between `add table` and `add rule`). There is no counter, so
+    /// there are no bytes to lose and recreating it is safe. Without this arm
+    /// the agent would read `Broken` every window and never recover.
+    Incomplete,
     Counter { iface: String, bytes: u64 },
     /// `nft` ran but its output cannot be used, or it failed while the table
     /// exists. Rebuilding here would zero the counter every window.
@@ -540,6 +554,38 @@ fn json_lists_table(json: &str) -> Option<bool> {
 fn lists_table(stdout: &str) -> bool {
     let want = format!("table inet {TABLE}");
     stdout.lines().any(|line| line.trim() == want)
+}
+
+/// A table that exists but has no rule: an interrupted rebuild left it behind.
+///
+/// Verified on a real node: both a bare table and a table holding only a chain
+/// make `nft -j list table` exit 0 and return `metainfo` + `table` (+ `chain`),
+/// with no `rule` entry. See `agent/docs/traffic-metering.md` §5.
+///
+/// The schema gate is deliberate. If a future nft reports a different shape, we
+/// must not read "I could not find a rule" as "there is no rule" — that would
+/// recreate a table that may be counting traffic.
+fn table_is_incomplete(json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    let Some(entries) = value.get("nftables").and_then(Value::as_array) else {
+        return false;
+    };
+    let schema_ok = entries.iter().any(|entry| {
+        entry
+            .pointer("/metainfo/json_schema_version")
+            .and_then(Value::as_i64)
+            == Some(1)
+    });
+    let our_table = entries.iter().any(|entry| {
+        entry.get("table").is_some_and(|table| {
+            table.get("family").and_then(Value::as_str) == Some("inet")
+                && table.get("name").and_then(Value::as_str) == Some(TABLE)
+        })
+    });
+    let has_rule = entries.iter().any(|entry| entry.get("rule").is_some());
+    schema_ok && our_table && !has_rule
 }
 
 /// `ip route show default` → the `dev` of the first default route. Names like
@@ -686,6 +732,18 @@ mod tests {
             .filter(|(program, _)| program == "nft")
             .map(|(_, args)| args)
             .collect()
+    }
+
+    /// Verbatim `nft -j list table` from a real node for a table with nothing
+    /// in it (an interrupted rebuild stopped right after `add table`).
+    fn nft_bare_table_json() -> String {
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 7}}]}"#.to_string()
+    }
+
+    /// Verbatim `nft -j list table` from a real node for a table that holds a
+    /// chain but no rule (the rebuild died before `add rule`).
+    fn nft_chain_only_json() -> String {
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 7}}, {"chain": {"family": "inet", "table": "veyl_meter", "name": "out", "handle": 1, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}]}"#.to_string()
     }
 
     fn setup(name: &str) -> (PathBuf, Arc<FakeHost>, Arc<RecordingControl>) {
@@ -1479,6 +1537,108 @@ mod tests {
         assert_eq!(meter.report_failures(), 0);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_rebuild_is_recreated_instead_of_wedging() {
+        let (dir, host, control) = setup("incomplete");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                // A previous rebuild died right after `add table`.
+                (0, &nft_bare_table_json(), ""),
+                // The rebuild issues four calls of its own.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // Then the table reads normally.
+                (0, &nft_json("ens3", 400), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // incomplete → recreate → failed window
+        assert_eq!(rebuilds(&host), 1, "an incomplete table must be recreated");
+        assert!(meter.snapshot().is_none());
+
+        meter.tick(1_030).await;
+        assert_eq!(rebuilds(&host), 1, "and only once");
+        assert_eq!(meter.snapshot().unwrap().counter_last, 400);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_table_with_a_chain_but_no_rule_is_also_recreated() {
+        let (dir, host, control) = setup("chain-only");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_chain_only_json(), ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, &nft_json("ens3", 500), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        assert_eq!(rebuilds(&host), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_json_schema_is_never_treated_as_an_empty_table() {
+        // Same shape, but a schema version we have not verified. Recreating on
+        // this would destroy a table that may well be counting traffic.
+        let json = nft_bare_table_json().replace(r#""json_schema_version": 1"#, r#""json_schema_version": 2"#);
+        let (dir, host, control) = setup("schema-gate");
+        host.queue_command_outputs("nft", &[(0, &json, "")]);
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert_eq!(rebuilds(&host), 0, "an unknown schema must never rebuild");
+        assert!(meter.snapshot().is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incomplete_tables_are_recognised() {
+        assert!(table_is_incomplete(&nft_bare_table_json()));
+        assert!(table_is_incomplete(&nft_chain_only_json()));
+        assert!(!table_is_incomplete(&nft_json("ens3", 1)), "a rule means real data");
+        let rule_without_counter = r#"{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":"inet","name":"veyl_meter"}},{"rule":{"family":"inet","table":"veyl_meter","chain":"out","expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"eth0"}}]}}]}"#;
+        assert!(
+            !table_is_incomplete(rule_without_counter),
+            "any rule blocks the rebuild, even one we cannot read a counter from"
+        );
+        assert!(!table_is_incomplete("not json"));
+        assert!(!table_is_incomplete(r#"{"nftables":[]}"#), "no metainfo, no gate");
+        assert!(
+            !table_is_incomplete(&nft_bare_table_json().replace("veyl_meter", "someone_else")),
+            "not our table"
+        );
     }
 
     #[test]

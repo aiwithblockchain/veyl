@@ -57,7 +57,7 @@ loop {
 
 ## 2. 一次读取的完整流程
 
-入口：`TrafficMeter::tick()`（`traffic.rs:153`）→ `read_counter()`（`traffic.rs:332`）→ `read_table()`（`traffic.rs:385`）。
+入口：`TrafficMeter::tick()`（`traffic.rs:153`）→ `read_counter()`（`traffic.rs:332`）→ `read_table()`（`traffic.rs:394`）。
 
 ```
 tick(now)
@@ -69,7 +69,9 @@ tick(now)
 │
 ├─ ② nft -j list table inet veyl_meter
 │     ├─ 退出码 0，且能解析出 (网卡, 字节) ──→ 计数器
-│     ├─ 退出码 0，但解析不出来 ───────────→ Broken
+│     ├─ 退出码 0，解析不出，但表里没有任何 rule → Incomplete
+│     │       （schema 必须是 1、且找得到我们这张表；见 §5）
+│     ├─ 退出码 0，其它（有 rule 但读不出）──→ Broken
 │     └─ 退出码非 0
 │          └─ ③ nft -j list tables（JSON，主信号）
 │               ├─ 列表里有 veyl_meter ────→ Broken
@@ -82,6 +84,7 @@ tick(now)
 ├─ 计数器.网卡 == 默认路由网卡 ────────────→ Ok(字节)     ← 唯一成功出口
 ├─ 计数器.网卡 != 默认路由网卡 → 重建表 ──→ Err
 ├─ Missing                    → 重建表 ──→ Err
+├─ Incomplete                 → 重建表 ──→ Err（日志 warn）
 └─ Broken                     → bail!  ──→ Err
 ```
 
@@ -89,7 +92,9 @@ tick(now)
 
 `Broken` 与 `Missing` 的区分是这一版修掉的核心问题：以前两者都被当成「表不存在」，于是 nft 输出格式一变（内核升级、nft 版本变化），每个窗口都会删表重建、每轮读数归零——**永远上报 0 字节，一行错误都没有**。
 
-**表只在 `Missing` 时重建。** 重建动作是 **4 条 `nft` 命令**：1 次 `nft delete table`，然后 3 次 `nft add`（table / chain / rule）。
+**表在 `Missing` 和 `Incomplete` 两种情况下重建。** 重建动作是 **4 条 `nft` 命令**：1 次 `nft delete table`，然后 3 次 `nft add`（table / chain / rule）。
+
+`Incomplete` 是 2026-11-27 补的：重建是四条独立命令，如果 agent 在 `add table` 之后、`add rule` 之前被杀（SIGKILL / OOM），机器上会留下一个「有表、没规则」的半成品。这种表读表命令**成功**、但读不到计数器，按旧逻辑会一直判 `Broken`——而 `Broken` 不重建，于是永久停摆。现在把它单独识别出来，允许重建：表里本来就没有计数器，删掉重建不会丢任何数。
 
 ---
 
@@ -147,10 +152,13 @@ pending      = pending + delta
 | 读到计数器，且它数的是当前默认路由网卡 | `Ok(字节)` |
 | 默认路由网卡解析失败 | `Err` |
 | 表不存在 → 已重建 | `Err` |
+| 表**不完整**（有表没规则，上一次重建被打断）→ 已重建 | `Err` |
 | 计数器数的是旧网卡 → 已重建 | `Err` |
 | 表读不出来（命令失败但表还在 / 输出不可解析） | `Err` |
 
 `Ok` 一定是读数，`Err` 一定不是。重建是**修**，不是**读**，所以它落在 `Err` 里。
+
+「表不完整」可以安全重建，是因为那种表**从来没有过计数器**——删掉不会丢任何数。这与「表读不出来」有本质区别：后者可能是一个正在计数的表，碰它就等于清零。
 
 ---
 
@@ -181,6 +189,21 @@ table inet veyl_meter
 
 **这条验证只覆盖一种 nft 版本。** 换发行版或内核版本后，若输出格式变化，需要重跑上面两条命令确认；代码的两个信号互相兜底，单边失效不会直接导致重建。
 
+### 5.1 半成品表的输出（同一天实测）
+
+重建是四条独立命令，中途被杀会留下「有表、没规则」的表。这种表上 `nft -j list table` 的**退出码是 0**：
+
+```
+$ nft add table inet veyl_probe7; nft -j list table inet veyl_probe7; echo "exit=$?"
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}},
+              {"table": {"family": "inet", "name": "veyl_probe7", "handle": 7}}]}
+exit=0
+```
+
+再加一条 chain、仍然没有 rule 时，同样 `exit=0`，只是数组里多一个 `chain` 条目。
+
+`table_is_incomplete()` 就按这份输出判定：**schema 为 1** + **找得到 `table{inet, veyl_meter}`** + **数组里没有任何 `rule` 条目**。三条同时成立才允许重建；缺任何一条都退回 `Broken`，不碰。
+
 ---
 
 ## 6. 日志速查
@@ -191,6 +214,7 @@ table inet veyl_meter
 | 表不存在（两个列表都说没有） | info | `traffic: no counter table; creating it`（带 `json_listing=` 和 `listing=`） |
 | 表不存在（JSON 说没有，但文本列表不可用） | **warn** | 同一句消息，只带 `json_listing=`——这是唯一「文本列表拿不到却仍然重建」的路径，要让人看得见 |
 | 网卡变了，重建 | info | `traffic: counter follows a stale interface; rebuilding` |
+| 表**不完整**（有表没 rule，重建被打断）→ 重建 | **warn** | `traffic: counter table is incomplete; recreating` |
 | 表建好 | info | `traffic: created the outbound counter table` |
 | 状态文件不存在（首次运行） | warn | `traffic: no state file; using the current counter as the new baseline` |
 | 状态文件读不出 | error | `traffic: state file is unreadable; using the current counter as the new baseline` |
@@ -202,7 +226,7 @@ table inet veyl_meter
 
 收到 **409 `server_destroyed`** 不单独记一条：它走上面「上报失败」那一行，`error=` 里会带上 409 和响应体。这是有意的，见 §3.2。
 
-「读失败」那一条的 `error=` 字段是 `read_counter` 返回的原因，五类：网卡解析失败 / `ip` 或 `nft` 命令本身失败或超时 / 重建后跳过本窗口 / 表读不出来 / 重建本身失败。
+「读失败」那一条的 `error=` 字段是 `read_counter` 返回的原因：网卡解析失败 / `ip` 或 `nft` 命令本身失败或超时 / 重建（缺表、半成品、网卡变了）后跳过本窗口 / 表读不出来 / 重建本身失败。
 
 前两种「状态文件」事件都带 `event="metering_state_lost"` 字段，但消息文本不同、级别也不同——按文本区分，不要只看 event。
 
