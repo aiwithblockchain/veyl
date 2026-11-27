@@ -63,3 +63,21 @@ export const api = {
   remove: (id: string) => invoke<void>("profile_remove", { id }),
   detail: (id: string) => invoke<ProfileDetail>("profile_detail", { id }),
 };
+
+export type ConnectionState =
+  | { state: "idle" }
+  | { state: "connecting"; config_id: string }
+  | { state: "connected"; config_id: string; pid: number; since: string; node: string | null }
+  | { state: "disconnecting" }
+  | { state: "failed"; code: string; message: string; reason: string; hint: string };
+
+export type ConnectionSnapshot = ConnectionState & {
+  uptime_seconds: number | null;
+};
+
+export const connectionApi = {
+  connect: (id: string) => invoke<ConnectionSnapshot>("connect", { id }),
+  disconnect: () => invoke<ConnectionSnapshot>("disconnect"),
+  status: () => invoke<ConnectionSnapshot>("connection_status"),
+  switchNode: (tag: string) => invoke<ConnectionSnapshot>("switch_node", { tag }),
+};

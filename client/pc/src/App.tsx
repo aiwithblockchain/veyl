@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
   api,
+  connectionApi,
   toCommandError,
   type CommandError,
+  type ConnectionSnapshot,
   type Profile,
   type ProfileDetail,
 } from "./api";
@@ -18,6 +20,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
+  const [connection, setConnection] = useState<ConnectionSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<CommandError | null>(null);
@@ -41,38 +44,12 @@ export default function App() {
 
   useEffect(() => {
     void reload();
-  }, [reload]);
-
-  // 后端在每次改动后都会发事件：接上它，关窗后台刷新（M1-B）与多入口操作
-  // 才不会出现「数据变了、界面还停着」。
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: UnlistenFn[] = [];
-    void (async () => {
-      const offProfiles = await listen("profiles-changed", () => {
-        void reload();
-      });
-      const offSync = await listen<Profile>("sync-changed", (event) => {
-        const updated = event.payload;
-        setProfiles((current) =>
-          current.map((item) => (item.id === updated.id ? updated : item)),
-        );
-        setDetail((current) =>
-          current && current.profile.id === updated.id
-            ? { ...current, profile: updated }
-            : current,
-        );
-      });
-      if (cancelled) {
-        offProfiles();
-        offSync();
-        return;
-      }
-      unlisten = [offProfiles, offSync];
-    })();
+    connectionApi.status().then(setConnection).catch(() => setConnection(null));
+    const unlisten = listen<ConnectionSnapshot>("connection-changed", (event) => {
+      setConnection(event.payload);
+    });
     return () => {
-      cancelled = true;
-      unlisten.forEach((off) => off());
+      void unlisten.then((stop) => stop());
     };
   }, [reload]);
 
@@ -107,11 +84,15 @@ export default function App() {
     }
   };
 
-  const renameProfile = async (id: string, name: string) => {
+  const rename = async (id: string, name: string) => {
     setBusy(true);
     try {
       await api.rename(id, name);
-      await reload(activeId ?? id);
+      if (id === activeId) {
+        await reload(id);
+      } else {
+        setProfiles(await api.list());
+      }
     } catch (failure) {
       setError(await toCommandError(failure));
     } finally {
@@ -119,16 +100,48 @@ export default function App() {
     }
   };
 
-  const removeProfile = async (id: string) => {
+  const remove = async (id: string) => {
     setBusy(true);
     try {
       await api.remove(id);
-      if (activeId === id) setDetail(null);
-      await reload(null);
+      if (id === activeId) setDetail(null);
+      await reload(id === activeId ? null : activeId);
     } catch (failure) {
       setError(await toCommandError(failure));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const connect = async () => {
+    if (!activeId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setConnection(await connectionApi.connect(activeId));
+    } catch (failure) {
+      setError(await toCommandError(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    try {
+      setConnection(await connectionApi.disconnect());
+    } catch (failure) {
+      setError(await toCommandError(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const switchNode = async (tag: string) => {
+    try {
+      setConnection(await connectionApi.switchNode(tag));
+    } catch (failure) {
+      setError(await toCommandError(failure));
     }
   };
 
@@ -148,8 +161,8 @@ export default function App() {
         activeId={activeId}
         onSelect={(id) => void select(id)}
         onImport={() => setImporting(true)}
-        onRename={(id, name) => void renameProfile(id, name)}
-        onDelete={(id) => void removeProfile(id)}
+        onRename={(id, name) => void rename(id, name)}
+        onDelete={(id) => void remove(id)}
       />
 
       <main className="main">
@@ -181,9 +194,13 @@ export default function App() {
             <DetailView
               detail={detail}
               busy={busy}
+              connection={connection}
               onRefresh={() => void refresh()}
-              onRename={(name) => void renameProfile(detail.profile.id, name)}
-              onDelete={() => void removeProfile(detail.profile.id)}
+              onRename={(name) => activeId && void rename(activeId, name)}
+              onDelete={() => activeId && void remove(activeId)}
+              onConnect={() => void connect()}
+              onDisconnect={() => void disconnect()}
+              onSwitchNode={(tag) => void switchNode(tag)}
             />
           </>
         )}
