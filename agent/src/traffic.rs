@@ -12,7 +12,7 @@
 //!   baseline. Some traffic is then under-counted; nothing is counted twice.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -123,6 +123,10 @@ pub struct TrafficMeter {
     state: Mutex<Option<TrafficState>>,
     /// 409 from the control plane: the server is gone, stop reporting.
     stopped: AtomicBool,
+    /// Consecutive failed reports, reset by the next 2xx. Drives a single info
+    /// line when reporting recovers; without it the log simply goes quiet and
+    /// a healed outage looks the same as a wedged one.
+    report_failures: AtomicU32,
 }
 
 impl TrafficMeter {
@@ -139,6 +143,7 @@ impl TrafficMeter {
             params,
             state: Mutex::new(None),
             stopped: AtomicBool::new(false),
+            report_failures: AtomicU32::new(0),
         }
     }
 
@@ -213,6 +218,7 @@ impl TrafficMeter {
 
         match self.control.traffic(seq, delta_bytes).await {
             Ok(()) => {
+                let failures = self.report_failures.swap(0, Ordering::Relaxed);
                 {
                     let mut guard = self.state.lock().unwrap();
                     if let Some(state) = guard.as_mut() {
@@ -224,6 +230,13 @@ impl TrafficMeter {
                     }
                 }
                 self.save(now);
+                if failures > 0 {
+                    tracing::info!(
+                        failures,
+                        seq,
+                        "traffic: reporting recovered; the earlier failures are cleared"
+                    );
+                }
                 tracing::debug!(seq, delta_bytes, "traffic: reported");
             }
             Err(ControlError::Status { status: 409, .. }) => {
@@ -234,6 +247,7 @@ impl TrafficMeter {
                 );
             }
             Err(e) => {
+                let failures = self.report_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 // Keep the attempt and the seq untouched: the next window
                 // resends exactly this batch, so a report the control plane did
                 // record (but whose response was lost) is deduped instead of
@@ -241,6 +255,7 @@ impl TrafficMeter {
                 tracing::warn!(
                     seq,
                     delta_bytes,
+                    failures,
                     error = %e,
                     "traffic: report failed; retrying the same batch next window"
                 );
@@ -309,25 +324,38 @@ impl TrafficMeter {
         self.state.lock().unwrap().clone()
     }
 
+    #[cfg(test)]
+    fn report_failures(&self) -> u32 {
+        self.report_failures.load(Ordering::Relaxed)
+    }
+
     /// Resolve the interface on every read: a default-route change would
     /// otherwise freeze the counter without any error.
     async fn read_counter(&self) -> Result<u64> {
         let iface = self.default_iface().await?;
-        match self.list_table().await? {
-            Some((rule_iface, bytes)) if rule_iface == iface => Ok(bytes),
-            other => {
-                if let Some((rule_iface, _)) = other {
-                    tracing::info!(
-                        rule_iface,
-                        iface = %iface,
-                        "traffic: counter follows a stale interface; rebuilding"
-                    );
-                }
+        match self.read_table().await? {
+            TableRead::Counter {
+                iface: rule_iface,
+                bytes,
+            } if rule_iface == iface => Ok(bytes),
+            TableRead::Counter {
+                iface: rule_iface, ..
+            } => {
+                tracing::info!(
+                    rule_iface,
+                    iface = %iface,
+                    "traffic: counter follows a stale interface; rebuilding"
+                );
                 self.rebuild(&iface).await?;
                 // A fresh table starts at zero; the negative-delta branch takes
                 // over on the next window.
                 Ok(0)
             }
+            TableRead::Missing => {
+                self.rebuild(&iface).await?;
+                Ok(0)
+            }
+            TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
         }
     }
 
@@ -350,7 +378,11 @@ impl TrafficMeter {
             .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
     }
 
-    async fn list_table(&self) -> Result<Option<(String, u64)>> {
+    /// One read of the counter table, classified so that only a genuinely
+    /// absent table is rebuilt. A failed or unparsable read must never be
+    /// folded into `Missing`: rebuilding resets the counter, so doing it on
+    /// every window would report zero bytes forever, with no error at all.
+    async fn read_table(&self) -> Result<TableRead> {
         let out = self
             .host
             .run(
@@ -364,10 +396,45 @@ impl TrafficMeter {
                 ],
             )
             .await?;
-        if !out.success() {
-            return Ok(None);
+        if out.success() {
+            return Ok(match parse_counter(&out.stdout) {
+                Some((iface, bytes)) => TableRead::Counter { iface, bytes },
+                None => TableRead::Broken(format!(
+                    "unparsable counter output: {}",
+                    snippet(&out.stdout)
+                )),
+            });
         }
-        Ok(parse_counter(&out.stdout))
+        // The command failed. Ask whether the table exists at all: a kernel
+        // without nftables, or a permission problem, must not be mistaken for
+        // "this node has never been set up". (A missing binary never reaches
+        // here: `Host::run` returns Err and `?` short-circuits.)
+        let listing = self
+            .host
+            .run("nft", &["list".into(), "tables".into()])
+            .await?;
+        if !listing.success() {
+            return Ok(TableRead::Broken(format!(
+                "`nft list table` failed ({}); `nft list tables` failed too ({})",
+                snippet(&out.summary()),
+                snippet(&listing.summary())
+            )));
+        }
+        if lists_table(&listing.stdout) {
+            return Ok(TableRead::Broken(format!(
+                "`nft list table` failed while the table exists: {}",
+                snippet(&out.summary())
+            )));
+        }
+        // This is the one assumption the fix rests on: that `nft list tables`
+        // prints `table inet veyl_meter`. It cannot be checked offline, so log
+        // what we actually saw — a false negative here would recreate the
+        // table every window and quietly go back to reporting zero.
+        tracing::info!(
+            listing = %snippet(&listing.stdout),
+            "traffic: no counter table; creating it"
+        );
+        Ok(TableRead::Missing)
     }
 
     async fn rebuild(&self, iface: &str) -> Result<()> {
@@ -397,6 +464,33 @@ impl TrafficMeter {
         tracing::info!(iface, "traffic: created the outbound counter table");
         Ok(())
     }
+}
+
+/// What one counter read told us. Only `Missing` may rebuild the table.
+enum TableRead {
+    /// The table is not there — a first run, or someone deleted it.
+    Missing,
+    Counter { iface: String, bytes: u64 },
+    /// `nft` ran but its output cannot be used, or it failed while the table
+    /// exists. Rebuilding here would zero the counter every window.
+    Broken(String),
+}
+
+/// Enough of a command's stdout for a log line, without dumping a whole table.
+fn snippet(stdout: &str) -> String {
+    const MAX: usize = 120;
+    let trimmed = stdout.trim();
+    let mut out: String = trimmed.chars().take(MAX).collect();
+    if trimmed.chars().count() > MAX {
+        out.push('…');
+    }
+    out
+}
+
+/// `nft list tables` prints one `table <family> <name>` line per table.
+fn lists_table(stdout: &str) -> bool {
+    let want = format!("table inet {TABLE}");
+    stdout.lines().any(|line| line.trim() == want)
 }
 
 /// `ip route show default` → the `dev` of the first default route. Names like
@@ -534,6 +628,19 @@ mod tests {
         );
         let control = Arc::new(RecordingControl::default());
         (dir, host, control)
+    }
+
+    /// How many times the counter table was (re)created. One rebuild issues
+    /// three `nft add` calls (table, chain, rule); only the table one counts.
+    fn rebuilds(host: &FakeHost) -> usize {
+        host.commands()
+            .into_iter()
+            .filter(|(program, args)| {
+                program == "nft"
+                    && args.first().map(String::as_str) == Some("add")
+                    && args.get(1).map(String::as_str) == Some("table")
+            })
+            .count()
     }
 
     #[tokio::test]
@@ -781,6 +888,196 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_nft_read_is_not_mistaken_for_a_missing_table() {
+        let (dir, host, control) = setup("broken-nft");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                // The read fails, but `nft list tables` shows the table is there.
+                (1, "", "Operation not permitted"),
+                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // baseline 1_000
+        meter.tick(1_030).await; // unreadable → this window is skipped
+        meter.tick(1_060).await; // still unreadable
+
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.counter_last, 1_000, "the counter is left alone");
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(
+            rebuilds(&host),
+            0,
+            "a broken read must never recreate the table"
+        );
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_counter_is_an_error_not_a_reset() {
+        let (dir, host, control) = setup("unparsable");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 5_000), ""),
+                // Exit 0 but no rule we can read: a parser that broke, not a
+                // node that has never been set up.
+                (0, r#"{"nftables":[]}"#, ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        meter.tick(1_030).await;
+
+        let state = meter.snapshot().unwrap();
+        assert_eq!(
+            state.counter_last, 5_000,
+            "an unreadable counter is not a zero counter"
+        );
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(rebuilds(&host), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_missing_table_is_rebuilt_once() {
+        let (dir, host, control) = setup("missing-table");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                // First window: the table is not there.
+                (1, "", "No such file or directory"),
+                (0, "table inet filter\n", ""),
+                // The rebuild issues four calls of its own: delete, add table,
+                // add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // After the rebuild the counter starts from zero.
+                (0, &nft_json("ens3", 0), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        assert_eq!(meter.snapshot().unwrap().counter_last, 0);
+        assert_eq!(rebuilds(&host), 1);
+
+        meter.tick(1_030).await; // the rebuilt table reads normally
+        assert_eq!(rebuilds(&host), 1, "the next window must not rebuild again");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn failed_reports_are_counted_and_cleared_by_the_next_success() {
+        let (dir, host, control) = setup("recovery");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_200), ""),
+                (0, &nft_json("ens3", 1_250), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(100),
+        );
+
+        *control.fail.lock().unwrap() = true;
+        meter.tick(1_000).await; // baseline
+        meter.tick(1_030).await; // +200 → the report fails
+        assert_eq!(meter.report_failures(), 1);
+
+        *control.fail.lock().unwrap() = false;
+        meter.tick(1_060).await; // the frozen batch goes through
+        assert_eq!(
+            meter.report_failures(),
+            0,
+            "a 2xx clears the counter that drives the recovery log line"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_skipped_window_is_recovered_by_the_next_successful_read() {
+        let (dir, host, control) = setup("skip-recovers");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (1, "", "Operation not permitted"),
+                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+                (0, &nft_json("ens3", 1_600), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // baseline 1_000
+        meter.tick(1_030).await; // unreadable: the window is skipped
+        assert_eq!(meter.snapshot().unwrap().pending_bytes, 0);
+
+        meter.tick(1_060).await; // 1_600 → the whole segment lands in one delta
+        assert_eq!(
+            meter.snapshot().unwrap().pending_bytes,
+            600,
+            "the counter is cumulative, so the skipped window is not lost"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_table_listing_is_recognised() {
+        assert!(lists_table("table inet filter\ntable inet veyl_meter\n"));
+        assert!(!lists_table("table inet filter\n"));
+        assert!(!lists_table(""));
+        assert!(!lists_table("table ip veyl_meter\n"));
+    }
+
+    #[test]
+    fn log_snippets_are_bounded() {
+        assert_eq!(snippet("  \n"), "");
+        assert_eq!(snippet("abc"), "abc");
+        let long = "x".repeat(500);
+        let out = snippet(&long);
+        assert_eq!(out.chars().count(), 121, "120 chars plus the ellipsis");
+        assert!(out.ends_with('…'));
     }
 
     #[test]
