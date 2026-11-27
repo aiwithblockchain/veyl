@@ -4,7 +4,7 @@
 > 状态：**讨论中，未定稿**。本文只记录「现在会发生什么」，不下结论、不提方案。
 > 逐条讨论的题目列在最后一节。
 > 范围：agent 侧的流量计量与上报。
-> **不包含**「在 DO 后台删除机器」：那种情况 agent 随机器一起消失，没有任何本机动作可执行。那条线归 `provider-gone.md`。
+> **不包含**「在 DO 后台删除机器」：那种情况 agent 随机器一起消失，没有任何本机动作可执行。那条线归 `docs/design/provider-gone.md`。
 
 ---
 
@@ -44,26 +44,27 @@
 
 | # | 控制面返回 | 出现条件 | 控制面位置 | agent 当前行为 |
 |---|---|---|---|---|
-| 1 | `200 {ok:true}` | 正常记账；或 `seq <= last_seq` 被去重 | `traffic.ts:189` | 推进 seq、清掉待发批次、刷新 `last_ok_at` |
-| 2 | `409 server_destroyed` | 该行 `destroyed_at` 非空 | `traffic.ts:156` | **停止上报**（内存标志，进程重启才清）；sing-box 继续跑 |
-| 3 | `401 unknown_token` | `server_token_hash` 在 `servers` 表里查不到 | `traffic.ts:154` | 无限重试，每 30 秒一次；sing-box 继续跑 |
-| 4 | `401 missing_token` | 请求没带 `Authorization: Bearer` | `traffic.ts:148` | 同上 |
-| 5 | `503 unavailable` | 控制面 `env.DB` 未绑定 | `traffic.ts:145` | 同上 |
+| 1 | `200 {ok:true}` | 正常记账；或 `seq <= last_seq` 被去重 | `traffic.ts:194`（去重）/ `:212`（并发重复）/ `:251`（记账完成） | 推进 seq、清掉待发批次、刷新 `last_ok_at` |
+| 2 | `409 server_destroyed` | 该行 `destroyed_at` 非空 | `traffic.ts:160` | **记录并重试，不停上报**（2026-11-27 改）；sing-box 继续跑 |
+| 3 | `401 unknown_token` | `server_token_hash` 在 `servers` 表里查不到 | `traffic.ts:158` | 无限重试，每 30 秒一次；sing-box 继续跑 |
+| 4 | `401 missing_token` | 请求没带 `Authorization: Bearer` | `traffic.ts:152` | 同上 |
+| 5 | `503 unavailable` | 控制面 `env.DB` 未绑定 | `traffic.ts:149` | 同上 |
 | 6 | `5xx`（其它） | 未捕获异常等 | — | 同上 |
 | 7 | 传输层失败 | DNS、连接超时、TLS、连接被拒 | `control.rs` `ControlError::Transport` | 同上 |
 | 8 | 解码失败 | 响应不是预期 JSON | `control.rs` `ControlError::Decode` | 同上 |
-| 9 | `400 invalid_body` | `seq` / `delta_bytes` 不是非负安全整数 | `traffic.ts:163` / `:175` | 同上 |
+| 9 | `400 invalid_body` | `seq` / `delta_bytes` 不是非负安全整数 | `traffic.ts:167` / `:179` | 同上 |
 
-重试的机制：失败时不推进 seq，`pending_attempt` 保留，**下一个 30 秒窗口重发同一批**，直到成功或被 409 拦下。
+重试的机制：失败时不推进 seq，`pending_attempt` 保留，**下一个 30 秒窗口重发同一批，直到成功**。
 
 ---
 
-## 5. 现在只有两种反应
+## 5. 现在只有一种反应
 
-- 第 2 条（409）→ **停止上报**，`traffic.rs:229`。sing-box 不动。
-- 其余全部 → **无限重试**，`traffic.rs:238`。sing-box 不动。
+- 全部九种 → **记录并无限重试**。sing-box 不动。
 
-也就是说：**目前没有任何一种上报失败会让 sing-box 停下来。**
+409 原本会「停止上报」，2026-11-27 改成与其它失败一样重试：控制面只在 droplet 删除成功后才会写 `destroyed_at`，活着的机器收到 409 说明库和现实不一致，那时更需要继续计量。理由见 `traffic-billing.md` §7.2。
+
+也就是说：**没有任何一种上报失败会让 sing-box 停下来。**
 
 ---
 
@@ -73,7 +74,7 @@
 
 - **Q1** 本机读计量失败（第 2 节）：现在跳过窗口、不丢账、不停服。这一条要不要再做什么？
 - **Q2** 本机存进度失败（第 3 节）：现在最多丢 300 秒、不停服。这一条要不要再做什么？
-- **Q3** 409 `server_destroyed`（第 2 条）：现在停上报、不停服务。服务该不该一起停？
+- ~~**Q3** 409 `server_destroyed`（第 2 条）：现在停上报、不停服务。服务该不该一起停？~~ **已决（2026-11-27）：上报不停、服务也不停**——见 §5。
 - **Q4** 401 `unknown_token`（第 3 条）：现在无限重试。它可能来自凭据轮换的短暂窗口，也可能是 token 被彻底吊销。要不要区分？分别怎么处理？
 - **Q5** 401 `missing_token`（第 4 条）：本地配置坏了。现在无限重试。
 - **Q6** 503 / 其它 5xx / 传输层 / 解码（第 5–8 条）：这一组的共同点是「说不上话」，分不清是对端故障还是我们自己的控制面挂了。现在无限重试、不停服。

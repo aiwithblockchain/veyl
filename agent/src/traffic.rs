@@ -12,7 +12,7 @@
 //!   baseline. Some traffic is then under-counted; nothing is counted twice.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::auth::now_unix;
 use crate::config::TrafficConfig;
-use crate::control::{ControlApi, ControlError};
+use crate::control::ControlApi;
 use crate::host::Host;
 
 /// Dedicated table: the host's own firewall is never touched, and `nft` only
@@ -121,8 +121,6 @@ pub struct TrafficMeter {
     store: TrafficStore,
     params: TrafficConfig,
     state: Mutex<Option<TrafficState>>,
-    /// 409 from the control plane: the server is gone, stop reporting.
-    stopped: AtomicBool,
     /// Consecutive failed reports, reset by the next 2xx. Drives a single info
     /// line when reporting recovers; without it the log simply goes quiet and
     /// a healed outage looks the same as a wedged one.
@@ -142,13 +140,8 @@ impl TrafficMeter {
             store: TrafficStore::new(state_path),
             params,
             state: Mutex::new(None),
-            stopped: AtomicBool::new(false),
             report_failures: AtomicU32::new(0),
         }
-    }
-
-    pub fn stopped(&self) -> bool {
-        self.stopped.load(Ordering::Relaxed)
     }
 
     pub async fn tick_now(&self) {
@@ -158,9 +151,6 @@ impl TrafficMeter {
     /// One 30-second window: read the counter, accumulate, then save and/or
     /// report if due. Never returns an error; every failure is a log line.
     pub async fn tick(&self, now: u64) {
-        if self.stopped() {
-            return;
-        }
         let counter = match self.read_counter().await {
             Ok(counter) => counter,
             Err(e) => {
@@ -176,7 +166,10 @@ impl TrafficMeter {
             }
             let state = guard.as_mut().expect("seeded above");
             // A smaller reading means the table was recreated: everything the
-            // new counter holds is new traffic.
+            // new counter holds is new traffic. This branch is the *only* thing
+            // that absorbs a rebuild — `read_counter` reports the window it
+            // rebuilds in as a failure, so nothing else carries those bytes.
+            // Removing or "simplifying" it double-counts or drops a rebuild.
             let delta = if counter < state.counter_last {
                 counter
             } else {
@@ -239,15 +232,14 @@ impl TrafficMeter {
                 }
                 tracing::debug!(seq, delta_bytes, "traffic: reported");
             }
-            Err(ControlError::Status { status: 409, .. }) => {
-                self.stopped.store(true, Ordering::Relaxed);
-                tracing::error!(
-                    event = "traffic_report_stopped",
-                    "the control plane says this server is gone (409); traffic reporting stops"
-                );
-            }
             Err(e) => {
                 let failures = self.report_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                // 409 `server_destroyed` is deliberately not special-cased. The
+                // control plane only sets `destroyed_at` after the droplet is
+                // gone, so a live agent should never see it; when it does, our
+                // records are wrong while the machine still serves traffic. A
+                // one-way "stop reporting" latch would hide that leak for good,
+                // so the next window simply tries again.
                 // Keep the attempt and the seq untouched: the next window
                 // resends exactly this batch, so a report the control plane did
                 // record (but whose response was lost) is deduped instead of
@@ -331,6 +323,12 @@ impl TrafficMeter {
 
     /// Resolve the interface on every read: a default-route change would
     /// otherwise freeze the counter without any error.
+    ///
+    /// Exactly two outcomes: `Ok(bytes)` is a real reading of the counter, and
+    /// `Err` means this window has no reading at all. A rebuild is a repair,
+    /// not a reading — the window it happens in is reported as a failure and
+    /// the next window picks the new counter up through the negative-delta
+    /// branch in `tick`.
     async fn read_counter(&self) -> Result<u64> {
         let iface = self.default_iface().await?;
         match self.read_table().await? {
@@ -346,14 +344,16 @@ impl TrafficMeter {
                     iface = %iface,
                     "traffic: counter follows a stale interface; rebuilding"
                 );
-                self.rebuild(&iface).await?;
-                // A fresh table starts at zero; the negative-delta branch takes
-                // over on the next window.
-                Ok(0)
+                self.rebuild(&iface)
+                    .await
+                    .with_context(|| "recreating the counter after a stale interface")?;
+                bail!("counter followed a stale interface; recreated, skipping this window")
             }
             TableRead::Missing => {
-                self.rebuild(&iface).await?;
-                Ok(0)
+                self.rebuild(&iface)
+                    .await
+                    .with_context(|| "creating the counter table")?;
+                bail!("counter table was missing; recreated, skipping this window")
             }
             TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
         }
@@ -554,7 +554,7 @@ pub fn parse_counter(json: &str) -> Option<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::{DesiredState, ReportRequest};
+    use crate::control::{ControlError, DesiredState, ReportRequest};
     use crate::test_support::FakeHost;
     use async_trait::async_trait;
 
@@ -565,6 +565,8 @@ mod tests {
         /// Record the report, then fail the request: the control plane counted
         /// it but the agent never sees the 2xx.
         lose_response: Mutex<bool>,
+        /// The control plane says the server row is destroyed (409).
+        destroyed: Mutex<bool>,
     }
 
     #[async_trait]
@@ -578,6 +580,12 @@ mod tests {
         }
 
         async fn traffic(&self, seq: u64, delta_bytes: u64) -> Result<(), ControlError> {
+            if *self.destroyed.lock().unwrap() {
+                return Err(ControlError::Status {
+                    status: 409,
+                    body: r#"{"ok":false,"reason":"server_destroyed"}"#.into(),
+                });
+            }
             if *self.lose_response.lock().unwrap() {
                 self.reports.lock().unwrap().push((seq, delta_bytes));
                 return Err(ControlError::Transport("response lost".into()));
@@ -974,8 +982,8 @@ mod tests {
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
-                // After the rebuild the counter starts from zero.
-                (0, &nft_json("ens3", 0), ""),
+                // After the rebuild the counter starts from zero and then grows.
+                (0, &nft_json("ens3", 500), ""),
             ],
         );
         let meter = TrafficMeter::new(
@@ -985,12 +993,91 @@ mod tests {
             params(1_000_000),
         );
 
+        // The window that creates the table is a failed read, not a zero one.
         meter.tick(1_000).await;
-        assert_eq!(meter.snapshot().unwrap().counter_last, 0);
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
         assert_eq!(rebuilds(&host), 1);
 
-        meter.tick(1_030).await; // the rebuilt table reads normally
+        // The next window reads the fresh counter and adopts it as the
+        // baseline: whatever flowed before this point is not counted. That loss
+        // is bounded by one window and only happens on the first install.
+        // The reading is deliberately non-zero so this cannot pass by accident
+        // when the baseline would have been zero anyway.
+        meter.tick(1_030).await;
         assert_eq!(rebuilds(&host), 1, "the next window must not rebuild again");
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.counter_last, 500);
+        assert_eq!(
+            state.pending_bytes, 0,
+            "the first window after the rebuild is adopted as the baseline"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_stale_interface_is_a_failed_window_not_a_zero_reading() {
+        let (dir, host, control) = setup("stale-iface");
+        host.queue_command_outputs(
+            "ip",
+            &[
+                (
+                    0,
+                    "default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.5 metric 100\n",
+                    "",
+                ),
+                (
+                    0,
+                    "default via 10.0.0.1 dev eth0 proto dhcp src 10.0.0.6 metric 100\n",
+                    "",
+                ),
+                (
+                    0,
+                    "default via 10.0.0.1 dev eth0 proto dhcp src 10.0.0.6 metric 100\n",
+                    "",
+                ),
+            ],
+        );
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                // The default route moved, but the rule still counts ens3.
+                (0, &nft_json("ens3", 1_000), ""),
+                // The rebuild issues four calls of its own: delete, add table,
+                // add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // The rebuilt table counts the new interface from zero.
+                (0, &nft_json("eth0", 700), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // baseline 1_000 on ens3
+        meter.tick(1_030).await; // stale interface → rebuild → failed window
+
+        assert_eq!(rebuilds(&host), 1);
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(
+            state.counter_last, 1_000,
+            "a rebuild is not a reading, so the baseline is untouched"
+        );
+
+        meter.tick(1_060).await;
+        assert_eq!(
+            meter.snapshot().unwrap().pending_bytes,
+            700,
+            "700 < 1_000, so the negative-delta branch carries the whole new counter"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1058,6 +1145,46 @@ mod tests {
             600,
             "the counter is cumulative, so the skipped window is not lost"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_destroyed_row_does_not_stop_reporting() {
+        let (dir, host, control) = setup("destroyed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_200), ""),
+                (0, &nft_json("ens3", 1_350), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(100),
+        );
+
+        *control.destroyed.lock().unwrap() = true;
+        meter.tick(1_000).await; // baseline
+        meter.tick(1_030).await; // +200 → 409
+
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 200, "the batch is kept");
+        assert_eq!(state.seq, 1_000, "a 409 does not advance the sequence");
+        assert_eq!(meter.report_failures(), 1);
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        // The control plane's records disagree with reality and the machine is
+        // still serving, so the next window must try again instead of going
+        // quiet forever.
+        *control.destroyed.lock().unwrap() = false;
+        meter.tick(1_060).await;
+
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 200)]);
+        assert_eq!(meter.report_failures(), 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

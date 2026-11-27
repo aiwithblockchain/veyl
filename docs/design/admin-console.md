@@ -2,7 +2,7 @@
 
 > 日期：2026-11-26
 > 状态：**草案，待逐条讨论**。只写结构与边界，不下最终结论。
-> 相关：`agent-metering-failures.md`（失败类型清单）、`provider-gone.md`（DO 404 检测）
+> 相关：`agent/docs/agent-metering-failures.md`（失败类型清单）、`provider-gone.md`（DO 404 检测）
 
 ---
 
@@ -26,7 +26,7 @@
 
 所以需要一个能**主动问**的地方：不是等 agent 上报，而是由管理员点一下、现在就去问。
 
-### 1.1 要覆盖的故障类型（清单见 `agent-metering-failures.md`）
+### 1.1 要覆盖的故障类型（清单见 `agent/docs/agent-metering-failures.md`）
 
 那个文档把节点计量会失败的地方逐条列了出来：本机读计量、本机存进度、上报到控制面（控制面九种返回）。这里只关心一件事——**今天控制面看得见几条**：
 

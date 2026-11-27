@@ -247,9 +247,10 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         "agent ready"
     );
 
-    // Create the nft counter before the first apply so traffic that flows
-    // during a slow install is already counted. The first window only records
-    // the baseline; any error here is a log line, never a startup failure.
+    // Create the nft counter before the first apply so the table is in place as
+    // early as possible. The window that creates it is a *failed* read (see
+    // `TrafficMeter::read_counter`), so the counter is adopted as the baseline
+    // one window later. Any error here is a log line, never a startup failure.
     meter.tick_now().await;
 
     if let Some(desired) = &desired {

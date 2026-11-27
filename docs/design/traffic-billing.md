@@ -342,11 +342,12 @@ Authorization: Bearer <server_token>
 400 { "ok": false, "reason": "invalid_body" }
 401 { "ok": false, "reason": "missing_token" }      // 没带 Authorization
 401 { "ok": false, "reason": "unknown_token" }      // 令牌对不上任何机器
-409 { "ok": false, "reason": "server_destroyed" }   // 终态，agent 停止上报
+409 { "ok": false, "reason": "server_destroyed" }   // agent 记录并重试，**不**停止上报
 503 { "ok": false, "reason": "unavailable" }        // D1 未绑定
 ```
 
 - `seq` 每个 server 单调递增、永不清零；`seq <= last_seq` 视为重复，回 200 但不记账。
+- **409 不是终态**（2026-11-27 改，原设计为「agent 停止上报」）：控制面只在 droplet 删除成功（或 404）之后才写 `destroyed_at`，所以活着的机器不该收到 409。真收到了，说明「库里说已销毁、机器还在跑」——那一刻更需要继续计量。agent 把它当普通失败处理：记日志、保留批次、下个窗口重试。用一个进程级的单向开关永久停掉上报，只会把这个不一致藏起来、且不会自愈。控制面继续返回 409 是对的，它是有价值的信号，只是不该由 agent 消化。
 - 归属周期 = 控制面收到请求时的 UTC 年月，agent 不传周期。
 - 接受 delta 后分两步，**不是同一个事务**：
   1. `server_traffic.bytes += delta` 与 `last_seq` 推进是**一条原子写入**（`ON CONFLICT … WHERE last_seq < excluded.last_seq`，并发时后到的那条 `changes = 0`，按重复处理）；
