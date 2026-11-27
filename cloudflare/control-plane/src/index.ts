@@ -456,8 +456,8 @@ ${check}
   const rulesResponse = handleRules(request);
   if (rulesResponse) return rulesResponse;
 
-  // 免费节点种子：匿名只读，随 Worker 部署（seed-publishing.md §4）。
-  const seedResponse = await handleSeed(request);
+  // 免费节点种子：匿名只读，正文来自 D1 `seed_payload`（seed-publishing.md §2）。
+  const seedResponse = await handleSeed(request, env);
   if (seedResponse) return seedResponse;
 
   // 设备令牌：静默注册与刷新（§19.2）。目录之后实现，未配置 D1 时返回 503。

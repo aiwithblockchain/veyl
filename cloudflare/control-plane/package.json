@@ -9,12 +9,14 @@
     "deploy:dev": "wrangler deploy --env dev",
     "typecheck": "tsc --noEmit",
     "schema:check": "node scripts/schema-check.mjs",
+    "seed:publish": "vite-node ../../scripts/seed/publish-d1.ts --",
     "export:webhook-fixture": "node scripts/export-webhook-fixture.mjs",
     "test": "vitest run"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261113.1",
     "typescript": "^5.4.5",
+    "vite-node": "^1.6.1",
     "vitest": "^1.6.1",
     "wrangler": "^4.92.0"
   }

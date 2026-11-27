@@ -19,12 +19,23 @@ declare module "node:child_process" {
     args: string[],
     options?: { stdio?: Array<"ignore" | "pipe"> },
   ): ChildProcess;
+
+  export function spawnSync(
+    command: string,
+    args: string[],
+    options?: { cwd?: string; encoding?: "utf8"; maxBuffer?: number },
+  ): { status: number | null; stdout?: string; stderr?: string };
 }
 
 declare module "node:fs" {
   export function existsSync(path: string): boolean;
   export function mkdtempSync(prefix: string): string;
-  export function writeFileSync(path: string, data: string): void;
+  export function writeFileSync(
+    path: string,
+    data: string,
+    options?: { mode?: number },
+  ): void;
+  export function chmodSync(path: string, mode: number): void;
   export function readFileSync(path: string, encoding: "utf8"): string;
   export function readdirSync(path: string): string[];
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
@@ -36,6 +47,10 @@ declare module "node:os" {
 
 declare module "node:path" {
   export function join(...parts: string[]): string;
+  export function dirname(path: string): string;
+  export function isAbsolute(path: string): boolean;
+  export function relative(from: string, to: string): string;
+  export function resolve(...parts: string[]): string;
 }
 
 declare module "node:module" {
