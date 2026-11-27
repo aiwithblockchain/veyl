@@ -101,6 +101,8 @@ async fn main() -> Result<()> {
             hosts,
         }) => {
             let verifying_key = auth::parse_verifying_key_hex(&signer_pubkey)?;
+            // Dev only: production nodes get their leaf from the control plane.
+            cert::ensure_dev_certs(&cert_dir, &hosts)?;
             let identity = Arc::new(Identity::load(&cert_dir, &hosts, None)?);
             println!("server_id:        {server_id}");
             println!("cert dir:         {}", cert_dir.display());

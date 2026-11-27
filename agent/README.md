@@ -2,13 +2,13 @@
 
 独立 Rust 项目（不并进 `src-tauri` 的 workspace），现在是**可用形态**：
 
-- 自签 TLS 的 MCP Streamable HTTP 端点，暴露 `rotate_credentials` 与 `upgrade_singbox` 两个工具；
+- TLS 的 MCP Streamable HTTP 端点（叶证书由控制面的统一根签发），暴露 `rotate_credentials`、`upgrade_singbox` 与 `get_status` 三个工具；
 - 一次性 Ed25519 Bearer 令牌，agent 内置公钥离线验签；
 - enroll → 安装/校验 sing-box → 写配置 → systemd → 验活 → 上报的三阶段流程；
 - agent 自己生成新端口与密码的真实轮换；
 - 启动时拉一次期望状态并按差异应用（没有周期轮询）；
 - 出站流量计量：nft 计数器 + 5 分钟落盘 + 事件触发上报；
-- 自签证书持久化，按节点公网地址重签 leaf SAN。
+- 证书生命周期：enroll 时提交 CSR 换回叶证书，剩余不足 30 天自动续期；**生产节点不在本地自签**（自签只保留给 `serve`/`gen-certs` 两个 dev 命令与测试）。
 
 设计依据：`docs/design/node-agent-mcp.md` §4–§8、`shared-firewall.md` §3。
 
@@ -146,7 +146,7 @@ bash scripts/agent/build-release.sh --tag    # 交互确认后打 agent-v<版本
 
 `failed` 阶段对未激活机器仍会销毁；对已 active/healthy 的机器只记录 `last_error`。agent 只在期望状态驱动的 apply 内部重试一次后仍失败时才上报，并带 `error`（控制面截断 300 字写入审计 / `last_error`）。轮换失败不上报 `failed`；升级失败只在控制面确认过 active 时上报（否则只回工具错误），读不到版本时不带 `singbox_version`，换回旧二进制失败时保留 `.bak` 供下次复用。
 
-每条 report 都带 `ca_pem`（自签 CA 的 PEM）与 `cert_fingerprint`；桌面端优先用 CA 建立信任，指纹作为兜底。
+每条 report 都带 `ca_pem`（统一根证书）与 `cert_fingerprint`；桌面端优先用 CA 建立信任，指纹作为兜底。还没换证的存量节点上报的仍是自己的自签 CA。
 
 ## sing-box 安装
 
@@ -215,7 +215,7 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 - 密码与令牌永不进日志：`DesiredState`/`Enrollment`/`ReportRequest`/`AgentState`/`AgentConfig`/`ControlError`/`RotateError` 的 `Debug` 手写脱敏；stdout 与文件两路用同一条 `redact_sensitive`（JSON 的 `password`/`server_token`/`token`/`authorization` 字段、`agt_`/`enr_` 前缀串、`Authorization:` 头、`Bearer <token>`、`password=`/`token=` 赋值），并截断。
 - 状态文件 `state.json`（0600）保存 `server_id`、`server_token`、最近端口、证书指纹、`token_public_key` 与 `last_desired`（含密码，用于控制面不可达时重启恢复）；密码与令牌不会出现在日志里。解析失败时改名为 `state.json.corrupt.<时间戳>` 备份并重新 enroll，不会把进程拖进 systemd 重启循环。
 - **jti 重放表落盘**：已用 jti + 过期时间写在 `state_dir/jtis.json`（0600、原子 rename、上限 512 条、过期清理），重启后 60 秒窗口内不能重放同一令牌；demo/serve 用内存表。
-- **证书热重载**：公网 IP 后补探测导致 leaf 重签后，下一条 TLS 连接即使用新证书，不需要重启 agent。
+- **证书热重载**：换证（续期、迁移到统一根、公网 IP 后补探测）后，下一条 TLS 连接即使用新证书，不需要重启 agent。
 - **命令超时**：`systemctl`/`journalctl`/`sing-box` 等系统命令 30 秒，`tar`/`install` 300 秒，超时按可重试处理并记录命令；下载只接受 https、重定向不允许降级到 http、上限 200 MiB。
 
 ## 测试
@@ -224,10 +224,10 @@ apply/verify 遇到可重试错误（restart 失败、监听超时、出站失�
 cargo test
 ```
 
-当前 **97 个单元测试**，覆盖：
+当前单元测试覆盖：
 
 - 令牌：JWT 往返、过期、错误签名、错误 `server_id`、jti 一次性、JWK 解析、篡改 payload/alg=none、批量 `tools/call` 计数、**jti 跨重启重放**、过期 jti 清理、重放表上限；
-- 证书：CA/leaf 持久化、leaf 缺失时只重签 leaf、公网地址变化时只重签 leaf、动态 Host 白名单、公网 IP 重签只发生一次、**重签后新连接实际拿到新证书（TLS 握手校验）**；
+- 证书：CSR 生成与落盘、证书与私钥配对校验、换证判据（是否统一根签发 / host 变化 / 30 天续期）、换证失败仍用旧证书服务、动态 Host 白名单、**换证后新连接实际拿到新证书（TLS 握手校验）**；
 - 配置：HTTPS 强制、控制端口必须在带外、allowed_hosts 合并去重、cloud-init 最小配置解析、**release 策略拒绝 `allow_insecure_control_plane`**、`Debug` 不打印 enroll token；
 - control：enroll 响应的 `token_public_key`、desired 两种包裹形态、report 字段、错误体 Display/Debug 脱敏；
 - 端口：只在带内、排除已用、带耗尽返回空；
@@ -260,8 +260,8 @@ agent/
   Cargo.toml            standalone；rmcp =1.8.0、reqwest 0.13.5
   Cross.toml            musl 交叉构建配置（目标镜像里装 cmake/perl）
   config.example.json   生产配置样例
-  src/cert.rs           rcgen 自签 CA/leaf、SAN、指纹、持久化
-  src/identity.rs       动态 TLS 身份：指纹、CA PEM、Host 白名单、公网 IP 重签
+  src/cert.rs           CSR 生成、证书解析与落盘（生产不自签）、SAN、指纹
+  src/identity.rs       动态 TLS 身份：指纹、CA PEM、Host 白名单、换证判据
   src/auth.rs           令牌签发/验签、exp/server_id、jti 重放表
   src/server.rs         MCP Streamable HTTP + TLS + 验签中间件 + 工具
   src/client.rs         rmcp client（CA / 指纹 pin / 裸诊断）

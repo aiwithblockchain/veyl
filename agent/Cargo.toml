@@ -60,6 +60,10 @@ rustls-pki-types = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Already in the lock via rcgen's `x509-parser` feature; read/write directly
+# here for the leaf's not_after, the certificate/key pairing check, the real
+# SANs and the "signed by the returned root" check.
+x509-parser = { version = "0.18", features = ["verify"] }
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 tokio-util = "0.7"

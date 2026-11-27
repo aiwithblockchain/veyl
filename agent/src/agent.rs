@@ -14,7 +14,9 @@ use tokio::time::MissedTickBehavior;
 use crate::auth;
 use crate::cert;
 use crate::config::AgentConfig;
-use crate::control::{ControlApi, ControlError, ControlPlane, ControlSession, DesiredState};
+use crate::control::{
+    ControlApi, ControlError, ControlPlane, ControlSession, DesiredState, ReportRequest, Stage,
+};
 use crate::host::{Host, RealHost};
 use crate::identity::Identity;
 use crate::logging::{self, redact_sensitive, FileLogConfig};
@@ -29,6 +31,20 @@ const BUILTIN_SIGNER_PUBKEY: Option<&str> = option_env!("VEYL_AGENT_SIGNER_PUBKE
 
 /// How long to wait before touching the control plane again after a 409.
 const TERMINAL_BACKOFF: Duration = Duration::from_secs(600);
+
+/// A leaf that still needs replacing (or is inside the 30-day renewal window)
+/// is re-requested this often; a failed round never stops the node serving
+/// (contract §3).
+const CERT_RETRY_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// Cold start with nothing servable: back off until the control plane signs a
+/// leaf. Exiting would only lean on systemd, and the contract wants the process
+/// to stay up and listen once the certificate arrives.
+const CERT_BOOTSTRAP_BACKOFF_START: Duration = Duration::from_secs(30);
+const CERT_BOOTSTRAP_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+/// A cold node gets its server token from enrollment, so a transient enrollment
+/// failure backs off instead of exiting for the same reason.
+const ENROLL_BACKOFF_START: Duration = Duration::from_secs(60);
+const ENROLL_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// Readiness signal for cloud-init. With `Type=exec` the unit is "active" at
 /// `execve`, before the metering probe has run, so cloud-init waits for this
@@ -52,6 +68,16 @@ enum DesiredFetch {
     Unavailable,
     /// 409: the token is dead or the server was destroyed.
     Terminal(String),
+}
+
+struct Enrolled {
+    server_id: String,
+    server_token: String,
+    /// Set only when this call enrolled; a restored node keeps its persisted one.
+    desired: Option<DesiredState>,
+    token_public_key: Option<String>,
+    /// Leaf + root from the enroll response, when the control plane signed one.
+    cert: Option<(String, String)>,
 }
 
 fn is_terminal_control_error(err: &ControlError) -> bool {
@@ -119,25 +145,31 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         }
     }
 
-    // Identity owns the leaf/CA and the dynamic Host allow-list. If the public
-    // IP is still unknown, it keeps the previous leaf SANs instead of dropping
-    // the IP; the poll loop retries detection and re-signs.
+    // Identity owns the leaf, the root PEM and the dynamic Host allow-list.
+    // Loading never creates a certificate: a node whose leaf is missing, stale
+    // or expiring asks the control plane to sign one (contract §4).
     let identity = Arc::new(Identity::load(
         &cfg.cert_dir,
         &cfg.allowed_hosts,
         cfg.public_host.clone(),
     )?);
-    let leaf_fp = identity.leaf_fingerprint();
-    let ca_fp = cert::ca_fingerprint(&identity.certs().ca_cert)?;
-    tracing::info!(ca_fingerprint = %ca_fp, leaf_fingerprint = %leaf_fp, "TLS identity ready");
+    if identity.servable() {
+        tracing::info!(
+            leaf_fingerprint = %identity.leaf_fingerprint(),
+            ca_fingerprint = %cert::ca_fingerprint(&identity.certs().ca_cert)
+                .unwrap_or_else(|_| "<none>".into()),
+            needs_new_cert = identity.needs_new_cert(),
+            "TLS identity loaded"
+        );
+    } else {
+        tracing::warn!(
+            "no usable TLS certificate on disk; waiting for the control plane to issue one"
+        );
+    }
 
     let plane = ControlPlane::new(&cfg.control_plane_url)?
         .with_enroll_url(cfg.enroll_url.clone())
         .with_fail_url(cfg.fail_url.clone());
-    if state.cert_fingerprint.as_deref() != Some(leaf_fp.as_str()) {
-        state.cert_fingerprint = Some(leaf_fp.clone());
-        store.save(&state)?;
-    }
 
     // A unit with `Type=exec` is active as soon as `execve` succeeds — long
     // before the probe answers — so cloud-init cannot use `is-active` to learn
@@ -166,13 +198,73 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         }
     }
 
-    let (server_id, server_token, enrolled_desired, token_public_key) =
-        ensure_identity(&cfg, &plane, &mut state, &store).await?;
+    // A cold node has no token yet, so enrollment is the only request that can
+    // carry a CSR; a restored node asks afterwards on `/v1/agent/cert`.
+    let enroll_request = if state.server_token.is_none() {
+        Some(cert::request_leaf(&identity.cert_hosts())?)
+    } else {
+        None
+    };
+    let enrolled = ensure_identity(
+        &cfg,
+        &plane,
+        &mut state,
+        &store,
+        enroll_request.as_ref().map(|req| req.csr_b64()),
+    )
+    .await?;
+    let Enrolled {
+        server_id,
+        server_token,
+        desired: enrolled_desired,
+        token_public_key,
+        cert: enroll_cert,
+    } = enrolled;
     let signer = resolve_signer_pubkey(&cfg, token_public_key.as_deref())?;
     tracing::info!(server_id = %server_id, "identity ready");
 
-    let control: Arc<dyn ControlApi> =
-        Arc::new(ControlSession::new(plane, server_token));
+    let mut leaf_installed = false;
+    if let (Some(req), Some((cert_pem, ca_pem))) = (&enroll_request, enroll_cert.as_ref()) {
+        match identity.install_issued(req, cert_pem, ca_pem, None) {
+            Ok(()) => {
+                leaf_installed = true;
+                tracing::info!(
+                    fingerprint = %identity.leaf_fingerprint(),
+                    "installed the leaf issued at enrollment"
+                );
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not install the enrollment certificate; requesting a new one"
+            ),
+        }
+    }
+
+    // Blocks only when nothing servable is on disk; a stale-but-usable leaf
+    // keeps serving while the replacement is retried every 6 hours.
+    leaf_installed |= ensure_leaf(&identity, &plane, &server_token).await;
+    let leaf_fp = identity.leaf_fingerprint();
+    if !leaf_fp.is_empty() && state.cert_fingerprint.as_deref() != Some(leaf_fp.as_str()) {
+        state.cert_fingerprint = Some(leaf_fp);
+        store.save(&state)?;
+    }
+
+    // The sing-box apply between here and `reannounce_active` can take minutes,
+    // and until this report lands clients are handed the old root/fingerprint.
+    if leaf_installed {
+        report_new_leaf(
+            &plane,
+            &server_token,
+            &identity,
+            enrolled_desired.as_ref(),
+            state.last_desired.as_ref(),
+        )
+        .await;
+    }
+
+    let cert_plane = plane.clone();
+    let cert_token = server_token.clone();
+    let control: Arc<dyn ControlApi> = Arc::new(ControlSession::new(plane, server_token));
     // A 409 means the token is no longer valid for this server (consumed,
     // expired, or the server was destroyed). Nothing else can be done locally:
     // say what the operator has to do and serve whatever was persisted.
@@ -324,6 +416,10 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     traffic_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     traffic_tick.tick().await;
 
+    let mut cert_tick = tokio::time::interval(CERT_RETRY_INTERVAL);
+    cert_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    cert_tick.tick().await;
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -355,25 +451,51 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
             {
                 ip_retries_left -= 1;
                 match detect_public_ip(&cfg.metadata_url).await {
-                    Some(ip) => match identity.set_public_host(&ip) {
-                        Ok(true) => {
-                            let fingerprint = identity.leaf_fingerprint();
-                            tracing::info!(
-                                public_ip = %ip,
-                                fingerprint = %fingerprint,
-                                "re-signed the leaf with the detected public IP"
-                            );
-                            engine.record_cert_fingerprint(&fingerprint);
-                            engine.report_registration().await;
+                    Some(ip) => {
+                        let changed = identity.note_public_host(&ip);
+                        if changed || identity.needs_new_cert() {
+                            match issue_leaf(&identity, &cert_plane, &cert_token).await {
+                                Ok(fingerprint) => {
+                                    tracing::info!(
+                                        public_ip = %ip,
+                                        fingerprint = %fingerprint,
+                                        "issued a leaf for the detected public IP"
+                                    );
+                                    engine.record_cert_fingerprint(&fingerprint);
+                                    engine.report_registration().await;
+                                }
+                                Err((_, error)) => tracing::warn!(
+                                    public_ip = %ip,
+                                    error = %error,
+                                    "could not issue a leaf for the detected public IP; keeping the existing certificate"
+                                ),
+                            }
                         }
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!(error = %e, "failed to re-sign the leaf"),
-                    },
+                    }
                     None if ip_retries_left == 0 => tracing::error!(
                         attempts = IP_RETRY_ATTEMPTS,
                         "the public IP is still unknown; set public_host or allowed_hosts in the config"
                     ),
                     None => {}
+                }
+            }
+            // Renewal, migration and repair: a leaf inside the 30-day window or
+            // one the current root did not sign. The TLS acceptor cache picks up
+            // the new fingerprint without a restart.
+            _ = cert_tick.tick() => {
+                if identity.needs_new_cert() {
+                    match issue_leaf(&identity, &cert_plane, &cert_token).await {
+                        Ok(fingerprint) => {
+                            tracing::info!(fingerprint = %fingerprint, "replaced the TLS leaf");
+                            engine.record_cert_fingerprint(&fingerprint);
+                            engine.report_registration().await;
+                        }
+                        Err((permanent, error)) => tracing::warn!(
+                            permanent,
+                            error = %error,
+                            "leaf renewal failed; retrying in 6 hours"
+                        ),
+                    }
                 }
             }
             // Metering: read the counter, accumulate, report when due. Every
@@ -445,7 +567,8 @@ fn short_sha(sha: &str) -> String {
     }
 }
 
-fn resolve_signer_pubkey(cfg: &AgentConfig, jwk: Option<&str>) -> Result<VerifyingKey> {    if let Some(jwk) = jwk {
+fn resolve_signer_pubkey(cfg: &AgentConfig, jwk: Option<&str>) -> Result<VerifyingKey> {
+    if let Some(jwk) = jwk {
         match auth::parse_verifying_key_jwk(jwk) {
             Ok(key) => return Ok(key),
             Err(e) => tracing::warn!(error = %e, "invalid token_public_key from enroll"),
@@ -484,14 +607,16 @@ async fn ensure_identity(
     plane: &ControlPlane,
     state: &mut AgentState,
     store: &StateStore,
-) -> Result<(String, String, Option<DesiredState>, Option<String>)> {
+    csr_b64: Option<&str>,
+) -> Result<Enrolled> {
     if let (Some(id), Some(token)) = (&state.server_id, &state.server_token) {
-        return Ok((
-            id.clone(),
-            token.clone(),
-            None,
-            state.agent_token_public_key.clone(),
-        ));
+        return Ok(Enrolled {
+            server_id: id.clone(),
+            server_token: token.clone(),
+            desired: None,
+            token_public_key: state.agent_token_public_key.clone(),
+            cert: None,
+        });
     }
     let Some(enrollment_token) = cfg.enrollment_token.as_deref() else {
         bail!("not enrolled and no enrollment_token in the config");
@@ -501,10 +626,11 @@ async fn ensure_identity(
     // expired, or the server was destroyed. Retrying quickly (and letting
     // systemd restart every 10 s) only burns requests, so back off for 10
     // minutes and say what the operator has to do.
+    let mut backoff = ENROLL_BACKOFF_START;
     'enroll: loop {
         let mut last = String::new();
         for attempt in 1..=3 {
-            match plane.enroll(enrollment_token).await {
+            match plane.enroll(enrollment_token, csr_b64).await {
                 Ok(enrollment) => {
                     tracing::info!(
                         server_id = %enrollment.server_id,
@@ -513,6 +639,7 @@ async fn ensure_identity(
                         singbox_version = %enrollment.desired.singbox.version.trim_start_matches('v'),
                         singbox_sha256 = %short_sha(&enrollment.desired.singbox.sha256),
                         token_public_key = enrollment.token_public_key.is_some(),
+                        certificate = enrollment.cert_pem.is_some(),
                         "enrolled with the control plane"
                     );
                     state.server_id = Some(enrollment.server_id.clone());
@@ -527,12 +654,17 @@ async fn ensure_identity(
                         auth::now_unix(),
                     ));
                     store.save(state)?;
-                    return Ok((
-                        enrollment.server_id,
-                        enrollment.server_token,
-                        Some(enrollment.desired),
-                        enrollment.token_public_key,
-                    ));
+                    let cert = match (enrollment.cert_pem, enrollment.ca_pem) {
+                        (Some(cert_pem), Some(ca_pem)) => Some((cert_pem, ca_pem)),
+                        _ => None,
+                    };
+                    return Ok(Enrolled {
+                        server_id: enrollment.server_id,
+                        server_token: enrollment.server_token,
+                        desired: Some(enrollment.desired),
+                        token_public_key: enrollment.token_public_key,
+                        cert,
+                    });
                 }
                 Err(e) if is_terminal_control_error(&e) => {
                     tracing::error!(
@@ -553,7 +685,164 @@ async fn ensure_identity(
                 }
             }
         }
-        bail!("enrollment failed after 3 attempts: {last}");
+        // A cold node has no certificate and no token; exiting would leave
+        // systemd to crash-loop it. Back off and keep trying while the control
+        // plane is unreachable.
+        tracing::error!(
+            error = %last,
+            retry_in_secs = backoff.as_secs(),
+            "enrollment failed; the node keeps retrying"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(ENROLL_BACKOFF_MAX);
+    }
+}
+
+/// One request/install round: fresh key, CSR, `POST /v1/agent/cert`, install.
+/// Returns the new leaf fingerprint, or `(permanent, message)` where a permanent
+/// failure means asking again with the same host list cannot succeed.
+async fn issue_leaf(
+    identity: &Identity,
+    plane: &ControlPlane,
+    server_token: &str,
+) -> std::result::Result<String, (bool, String)> {
+    let req = match cert::request_leaf(&identity.cert_hosts()) {
+        Ok(req) => req,
+        Err(e) => {
+            let message = format!("generate a CSR: {e:#}");
+            identity.record_renewal_failure(&message);
+            return Err((false, message));
+        }
+    };
+    match plane.request_cert(server_token, req.csr_b64()).await {
+        Ok(issued) => {
+            if let Err(e) =
+                identity.install_issued(&req, &issued.cert_pem, &issued.ca_pem, issued.not_after)
+            {
+                let message = format!("install the issued certificate: {e:#}");
+                identity.record_renewal_failure(&message);
+                return Err((false, message));
+            }
+            identity.record_renewal_success();
+            Ok(identity.leaf_fingerprint())
+        }
+        Err(e) => {
+            let message = e.to_string();
+            identity.record_renewal_failure(&message);
+            Err((!e.retryable(), message))
+        }
+    }
+}
+
+/// What to do after one failed replacement round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafRetry {
+    /// The leaf on disk still works: keep serving, retry on the next tick.
+    KeepServing,
+    /// Nothing servable and the failure may pass: wait, then try again.
+    Backoff(Duration),
+    /// Nothing servable and the same request cannot succeed (bad token,
+    /// rejected SANs): wait a long time before asking again.
+    LongSleep(Duration),
+}
+
+fn leaf_retry_decision(servable: bool, permanent: bool, backoff: Duration) -> LeafRetry {
+    if servable {
+        LeafRetry::KeepServing
+    } else if permanent {
+        LeafRetry::LongSleep(CERT_RETRY_INTERVAL)
+    } else {
+        LeafRetry::Backoff(backoff.min(CERT_BOOTSTRAP_BACKOFF_MAX))
+    }
+}
+
+/// Make sure this process has a leaf worth serving. A stale but parseable leaf
+/// keeps serving while one replacement round is attempted; with nothing
+/// servable this blocks (backing off) until the control plane signs one, and
+/// the caller only starts listening afterwards (contract §4).
+///
+/// Returns true when a new leaf was installed, so the caller can report it
+/// before the next scheduled report.
+async fn ensure_leaf(identity: &Identity, plane: &ControlPlane, server_token: &str) -> bool {
+    let mut backoff = CERT_BOOTSTRAP_BACKOFF_START;
+    loop {
+        if !identity.needs_new_cert() {
+            return false;
+        }
+        let servable = identity.servable();
+        match issue_leaf(identity, plane, server_token).await {
+            Ok(fingerprint) => {
+                tracing::info!(
+                    fingerprint = %fingerprint,
+                    "installed a control-plane signed leaf"
+                );
+                return true;
+            }
+            Err((permanent, error)) => match leaf_retry_decision(servable, permanent, backoff) {
+                LeafRetry::KeepServing => {
+                    tracing::warn!(
+                        error = %error,
+                        "could not replace the TLS leaf; keeping the existing certificate until the next retry"
+                    );
+                    return false;
+                }
+                LeafRetry::LongSleep(wait) => {
+                    tracing::error!(
+                        error = %error,
+                        retry_in_secs = wait.as_secs(),
+                        "the control plane rejected the certificate request"
+                    );
+                    tokio::time::sleep(wait).await;
+                    backoff = CERT_BOOTSTRAP_BACKOFF_START;
+                }
+                LeafRetry::Backoff(wait) => {
+                    tracing::warn!(
+                        error = %error,
+                        retry_in_secs = wait.as_secs(),
+                        "no usable TLS certificate yet; retrying"
+                    );
+                    tokio::time::sleep(wait).await;
+                    backoff = (backoff * 2).min(CERT_BOOTSTRAP_BACKOFF_MAX);
+                }
+            },
+        }
+    }
+}
+
+/// Send a minimal `verifying` report carrying the new fingerprint and root. The
+/// control plane hands both to clients, so a leaf that is only on disk still
+/// leaves them pinning the old one.
+async fn report_new_leaf(
+    plane: &ControlPlane,
+    server_token: &str,
+    identity: &Identity,
+    enrolled: Option<&DesiredState>,
+    persisted: Option<&StoredDesired>,
+) {
+    let desired = match enrolled {
+        Some(desired) => Some(desired.clone()),
+        None => persisted.map(StoredDesired::to_desired),
+    };
+    let Some(desired) = desired else {
+        tracing::warn!(
+            "a new certificate was installed but no desired state is known; the next report carries it"
+        );
+        return;
+    };
+    let body = ReportRequest::new(
+        Stage::Verifying,
+        desired.port,
+        desired.control_port,
+        &identity.leaf_fingerprint(),
+        &identity.ca_pem(),
+    )
+    .with_singbox_version(desired.singbox.version.clone());
+    match plane.report(server_token, &body).await {
+        Ok(()) => tracing::info!(
+            fingerprint = %identity.leaf_fingerprint(),
+            "reported the new certificate to the control plane"
+        ),
+        Err(e) => tracing::warn!(error = %e, "could not report the new certificate"),
     }
 }
 
@@ -600,6 +889,37 @@ mod tests {
             body: "gone".into(),
         };
         assert!(!is_terminal_control_error(&other));
+    }
+
+    #[test]
+    fn leaf_retry_keeps_serving_a_working_certificate() {
+        let backoff = CERT_BOOTSTRAP_BACKOFF_START;
+        assert_eq!(
+            leaf_retry_decision(true, false, backoff),
+            LeafRetry::KeepServing
+        );
+        assert_eq!(
+            leaf_retry_decision(true, true, backoff),
+            LeafRetry::KeepServing,
+            "a permanent rejection must not stop a node that can still serve"
+        );
+    }
+
+    #[test]
+    fn leaf_retry_backs_off_then_caps_when_nothing_is_servable() {
+        assert_eq!(
+            leaf_retry_decision(false, false, CERT_BOOTSTRAP_BACKOFF_START),
+            LeafRetry::Backoff(CERT_BOOTSTRAP_BACKOFF_START)
+        );
+        assert_eq!(
+            leaf_retry_decision(false, false, Duration::from_secs(60 * 60)),
+            LeafRetry::Backoff(CERT_BOOTSTRAP_BACKOFF_MAX),
+            "the backoff never grows past the cap"
+        );
+        assert_eq!(
+            leaf_retry_decision(false, true, CERT_BOOTSTRAP_BACKOFF_START),
+            LeafRetry::LongSleep(CERT_RETRY_INTERVAL)
+        );
     }
 
     #[tokio::test]

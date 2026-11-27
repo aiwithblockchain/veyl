@@ -145,7 +145,7 @@ impl ServerHandler for NodeAgentServer {
         // when the control plane is down, and it cannot be delayed by one.
         if name == "get_status" {
             let view = self.state.metering.as_deref();
-            return Ok(self.success(status_payload(view)));
+            return Ok(self.success(status_payload(view, &self.state.identity)));
         }
 
         // Heal an `active` report that never landed before doing anything else.
@@ -222,7 +222,10 @@ impl NodeAgentServer {
 ///
 /// `uptime_secs` is not optional: the health table is cleared by a restart, so
 /// without it an empty table reads as "always healthy".
-fn status_payload(metering: Option<&dyn MeteringView>) -> Value {
+///
+/// `cert` is null until the leaf came from the current root: a legacy
+/// self-signed node must not advertise its own expiry (`agent-health.md` §3.3).
+fn status_payload(metering: Option<&dyn MeteringView>, identity: &Identity) -> Value {
     let metering_json = match metering.and_then(|view| view.status()) {
         Some(status) => json!({
             "counter_last": status.counter_last,
@@ -246,6 +249,13 @@ fn status_payload(metering: Option<&dyn MeteringView>) -> Value {
             );
         }
     }
+    let cert = identity.cert_not_after().map(|not_after| {
+        json!({
+            "not_after": not_after,
+            "renewal_failures": identity.renewal_failures(),
+            "last_renewal_error": identity.last_renewal_error(),
+        })
+    });
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": crate::uptime_secs(),
@@ -254,6 +264,7 @@ fn status_payload(metering: Option<&dyn MeteringView>) -> Value {
         // without this flag the first would read as an all-green dashboard.
         "metering_attached": metering.is_some(),
         "metering": metering_json,
+        "cert": cert,
         "health": health,
     })
 }
@@ -591,6 +602,20 @@ pub async fn bind(addr: SocketAddr) -> Result<TcpListener> {
 mod tests {
     use super::*;
 
+    fn identity_for_status(name: &str) -> (std::path::PathBuf, Identity) {
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-agent-status-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        (dir, identity)
+    }
+
     #[test]
     fn counts_tool_calls_in_single_and_batch_bodies() {
         assert_eq!(
@@ -707,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_resigned_leaf_is_served_on_the_next_connection() {
+    async fn a_replaced_leaf_is_served_on_the_next_connection() {
         crate::init_crypto_provider();
         let dir = std::env::temp_dir().join(format!(
             "veyl-agent-tls-reload-{}-{}",
@@ -718,14 +743,17 @@ mod tests {
                 .subsec_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        // Dev certs stand in for a control-plane install.
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
         let identity = std::sync::Arc::new(Identity::load(&dir, &[], None).unwrap());
         let mut cache = TlsAcceptorCache::new(identity.clone()).unwrap();
 
         let before = accept_once(&mut cache).await;
-        assert!(identity.set_public_host("203.0.113.7").unwrap());
+        cert::generate_with_hosts(&dir, &["203.0.113.7".to_string()]).unwrap();
+        identity.reload().unwrap();
         let after = accept_once(&mut cache).await;
 
-        assert_ne!(before, after, "the re-signed leaf must be used");
+        assert_ne!(before, after, "the replaced leaf must be used");
         assert_eq!(after, identity.leaf_fingerprint());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -787,11 +815,12 @@ mod tests {
             TrafficConfig::default(),
         ));
         let view: Arc<dyn MeteringView> = meter.clone();
+        let (status_dir, identity) = identity_for_status("metering");
 
         // A cold node whose very first read fails has no state to report, but
         // the failure itself must be visible.
         meter.tick(1_000).await;
-        let body = status_payload(Some(view.as_ref()));
+        let body = status_payload(Some(view.as_ref()), &identity);
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["metering_attached"], true);
         assert!(
@@ -817,7 +846,7 @@ mod tests {
         // The next window reads fine: the metering block appears and the run of
         // failures is cleared.
         meter.tick(1_030).await;
-        let body = status_payload(Some(view.as_ref()));
+        let body = status_payload(Some(view.as_ref()), &identity);
         assert_eq!(body["metering"]["counter_last"], 4_096);
         assert_eq!(body["metering"]["pending_bytes"], 0);
         assert!(body["metering"]["seq"].as_u64().is_some());
@@ -827,11 +856,13 @@ mod tests {
             body["health"]["nft_read"]["count"], 1,
             "counts never go down"
         );
+        std::fs::remove_dir_all(&status_dir).ok();
     }
 
     #[test]
     fn get_status_distinguishes_an_unattached_meter() {
-        let body = status_payload(None);
+        let (dir, identity) = identity_for_status("unattached");
+        let body = status_payload(None, &identity);
         assert_eq!(body["metering_attached"], false);
         assert!(body["metering"].is_null());
         assert_eq!(
@@ -839,5 +870,60 @@ mod tests {
             json!({}),
             "no module means no health claims"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_status_reports_cert_state_after_the_root_signed_the_leaf() {
+        let (dir, _) = identity_for_status("cert");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+
+        let body = status_payload(None, &identity);
+        let not_after = body["cert"]["not_after"]
+            .as_i64()
+            .expect("a signed leaf has an expiry");
+        assert!(not_after > 0);
+        assert_eq!(body["cert"]["renewal_failures"], 0);
+        assert!(body["cert"]["last_renewal_error"].is_null());
+
+        identity.record_renewal_failure("control plane unreachable");
+        let body = status_payload(None, &identity);
+        assert_eq!(body["cert"]["renewal_failures"], 1);
+        assert_eq!(
+            body["cert"]["last_renewal_error"],
+            "control plane unreachable"
+        );
+
+        identity.record_renewal_success();
+        let body = status_payload(None, &identity);
+        assert_eq!(body["cert"]["renewal_failures"], 0);
+        assert!(body["cert"]["last_renewal_error"].is_null());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_leaf_reports_no_cert_block() {
+        let (dir, _) = identity_for_status("legacy-cert");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+
+        // A marker from another root is not this node's certificate.
+        std::fs::write(
+            cert::paths(&dir).leaf_meta,
+            r#"{"root_fingerprint":"nope","not_after":1955000000}"#,
+        )
+        .unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert!(
+            status_payload(None, &identity)["cert"].is_null(),
+            "an expiry from an unknown root must not be advertised"
+        );
+
+        std::fs::remove_file(cert::paths(&dir).leaf_meta).unwrap();
+        assert!(
+            status_payload(None, &identity)["cert"].is_null(),
+            "a legacy self-signed node has no cert block"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

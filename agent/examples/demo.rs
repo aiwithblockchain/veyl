@@ -265,7 +265,11 @@ async fn main() -> Result<()> {
     println!("Ed25519 verifying key (agent's built-in public key):");
     println!("  {}", cert::hex(signing.verifying_key().as_bytes()));
 
-    let identity = Arc::new(Identity::load(&cert_dir, &[], None)?);
+    let identity = {
+        // Dev only: the demo has no control plane to sign a leaf.
+        cert::ensure_dev_certs(&cert_dir, &[])?;
+        Arc::new(Identity::load(&cert_dir, &[], None)?)
+    };
     let agent = start_agent_with_certs(
         "127.0.0.1:0".parse()?,
         identity.clone(),

@@ -1,59 +1,77 @@
-//! Runtime TLS identity: leaf fingerprint, CA PEM, and the dynamic Host
-//! allow-list. When the public IP was unknown at startup, the poll loop can
-//! retry detection and re-sign the leaf without restarting the agent.
+//! Runtime TLS identity: leaf fingerprint, root PEM, the dynamic Host
+//! allow-list, and whether the leaf on disk is still the one the control plane
+//! issued for this node.
+//!
+//! Nothing here signs a certificate. A missing, stale or expiring leaf is
+//! reported by [`Identity::needs_new_cert`]; the run loop asks the control
+//! plane and then calls [`Identity::install_issued`].
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 
-use crate::cert::{self, CertPaths};
+use crate::cert::{self, CertPaths, LeafRequest};
 
 #[derive(Debug, Clone)]
 pub struct IdentitySnapshot {
     pub leaf_fingerprint: String,
     pub public_host: Option<String>,
+    /// Host header allow-list (configured hosts included).
     pub allowed_hosts: Vec<String>,
+    /// Hosts the leaf must cover: localhost, 127.0.0.1 and the public IP.
+    pub cert_hosts: Vec<String>,
 }
 
 pub struct Identity {
     dir: PathBuf,
     certs: CertPaths,
     static_hosts: Vec<String>,
-    ca_pem: String,
+    ca_pem: RwLock<String>,
     snapshot: RwLock<IdentitySnapshot>,
+    /// Consecutive failed replacement rounds; reset by a successful install.
+    /// Diagnostic only, never persisted (`agent-health.md` §3.5).
+    renewal_failures: AtomicU64,
+    last_renewal_error: RwLock<Option<String>>,
 }
 
 impl Identity {
-    /// Load or generate the CA/leaf. `public_host` is the address clients will
-    /// use; when it is missing, the previous leaf's SANs are kept so a restart
-    /// during a metadata outage does not drop the IP.
-    pub fn load(
-        dir: &Path,
-        static_hosts: &[String],
-        public_host: Option<String>,
-    ) -> Result<Self> {
-        let mut extras: Vec<String> = static_hosts.to_vec();
-        if let Some(host) = &public_host {
-            extras.push(host.clone());
-        } else if let Some(previous) = cert::previous_extra_hosts(dir) {
-            extras.extend(previous);
-        }
-        let certs = cert::ensure_certs_with_hosts(dir, &extras)?;
-        let leaf_fingerprint = cert::leaf_fingerprint(&certs.leaf_cert)?;
-        let ca_pem = std::fs::read_to_string(&certs.ca_cert)
-            .with_context(|| format!("read {}", certs.ca_cert.display()))?;
+    /// Load whatever is on disk. It deliberately does not create certificates:
+    /// production nodes are signed by the control plane, and a node without a
+    /// leaf has to wait for one (contract §4).
+    ///
+    /// `public_host` is the address clients use. When it is missing, the
+    /// previous leaf's addresses are kept so a restart during a metadata outage
+    /// does not drop the IP.
+    pub fn load(dir: &Path, static_hosts: &[String], public_host: Option<String>) -> Result<Self> {
+        let extras: Vec<String> = match &public_host {
+            Some(host) => vec![host.clone()],
+            None => cert::previous_extra_hosts(dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|host| host.parse::<IpAddr>().is_ok())
+                .collect(),
+        };
+        let cert_hosts = cert::canonical_hosts(&extras);
+        let certs = cert::paths(dir);
+        let ca_pem = std::fs::read_to_string(&certs.ca_cert).unwrap_or_default();
+        let leaf_fingerprint = cert::leaf_fingerprint(&certs.leaf_cert).unwrap_or_default();
         let allowed_hosts = build_allowed_hosts(static_hosts, public_host.as_deref());
         Ok(Self {
             dir: dir.to_path_buf(),
             certs,
             static_hosts: static_hosts.to_vec(),
-            ca_pem,
+            ca_pem: RwLock::new(ca_pem),
             snapshot: RwLock::new(IdentitySnapshot {
                 leaf_fingerprint,
                 public_host,
                 allowed_hosts,
+                cert_hosts,
             }),
+            renewal_failures: AtomicU64::new(0),
+            last_renewal_error: RwLock::new(None),
         })
     }
 
@@ -66,36 +84,140 @@ impl Identity {
     }
 
     pub fn leaf_fingerprint(&self) -> String {
-        self.snapshot.read().expect("identity poisoned").leaf_fingerprint.clone()
+        self.snapshot
+            .read()
+            .expect("identity poisoned")
+            .leaf_fingerprint
+            .clone()
     }
 
     pub fn public_host(&self) -> Option<String> {
-        self.snapshot.read().expect("identity poisoned").public_host.clone()
+        self.snapshot
+            .read()
+            .expect("identity poisoned")
+            .public_host
+            .clone()
     }
 
     pub fn ca_pem(&self) -> String {
-        self.ca_pem.clone()
+        self.ca_pem.read().expect("ca_pem poisoned").clone()
     }
 
-    /// Re-sign the leaf with `ip` added, if it is not already the public host.
-    /// Returns true when the certificate (and fingerprint) changed.
-    pub fn set_public_host(&self, ip: &str) -> Result<bool> {
-        {
-            let snapshot = self.snapshot.read().expect("identity poisoned");
-            if snapshot.public_host.as_deref() == Some(ip) {
-                return Ok(false);
-            }
+    /// Hosts the next CSR must cover (contract §4: localhost, 127.0.0.1, the
+    /// public IP; configured domains are never requested).
+    pub fn cert_hosts(&self) -> Vec<String> {
+        self.snapshot
+            .read()
+            .expect("identity poisoned")
+            .cert_hosts
+            .clone()
+    }
+
+    pub fn leaf_state(&self) -> cert::LeafState {
+        cert::inspect(&self.dir, &self.cert_hosts())
+    }
+
+    /// A leaf that can be served right now, even if it still needs replacing.
+    pub fn servable(&self) -> bool {
+        self.leaf_state().servable()
+    }
+
+    /// Remaining lifetime is under 30 days (contract §3).
+    pub fn renewal_due(&self) -> bool {
+        self.leaf_state()
+            .renewal_due(crate::auth::now_unix() as i64)
+    }
+
+    /// The leaf must be replaced: not signed by the current root, files
+    /// incomplete, SANs changed, or inside the renewal window.
+    pub fn needs_new_cert(&self) -> bool {
+        let state = self.leaf_state();
+        !state.is_current() || state.renewal_due(crate::auth::now_unix() as i64)
+    }
+
+    /// `not_after` of a leaf the current root issued, or `None` for a legacy
+    /// self-signed pair. `get_status` renders a null `cert` block in that case
+    /// (`agent-health.md` §3.3).
+    pub fn cert_not_after(&self) -> Option<i64> {
+        let state = self.leaf_state();
+        if state.issued_by_current_root {
+            state.not_after
+        } else {
+            None
         }
-        let mut extras = self.static_hosts.clone();
-        extras.push(ip.to_string());
-        let certs = cert::ensure_certs_with_hosts(&self.dir, &extras)?;
-        let leaf_fingerprint = cert::leaf_fingerprint(&certs.leaf_cert)?;
-        let allowed_hosts = build_allowed_hosts(&self.static_hosts, Some(ip));
+    }
+
+    pub fn renewal_failures(&self) -> u64 {
+        self.renewal_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn last_renewal_error(&self) -> Option<String> {
+        self.last_renewal_error
+            .read()
+            .expect("renewal error poisoned")
+            .clone()
+    }
+
+    pub fn record_renewal_success(&self) {
+        self.renewal_failures.store(0, Ordering::Relaxed);
+        *self
+            .last_renewal_error
+            .write()
+            .expect("renewal error poisoned") = None;
+    }
+
+    /// Count a failed replacement round and keep its redacted cause for
+    /// `get_status`; the value is diagnostic only and never persisted.
+    pub fn record_renewal_failure(&self, error: &str) {
+        self.renewal_failures.fetch_add(1, Ordering::Relaxed);
+        *self
+            .last_renewal_error
+            .write()
+            .expect("renewal error poisoned") = Some(crate::logging::truncate(
+            &crate::logging::redact_sensitive(error),
+            300,
+        ));
+    }
+
+    /// Record an address discovered after startup. Returns true when the leaf's
+    /// host list changed, i.e. the certificate has to be re-issued.
+    pub fn note_public_host(&self, ip: &str) -> bool {
         let mut snapshot = self.snapshot.write().expect("identity poisoned");
-        snapshot.leaf_fingerprint = leaf_fingerprint;
+        if snapshot.public_host.as_deref() == Some(ip) {
+            return false;
+        }
+        let cert_hosts = cert::canonical_hosts(&[ip.to_string()]);
+        let changed = cert_hosts != snapshot.cert_hosts;
         snapshot.public_host = Some(ip.to_string());
-        snapshot.allowed_hosts = allowed_hosts;
-        Ok(true)
+        snapshot.cert_hosts = cert_hosts;
+        snapshot.allowed_hosts = build_allowed_hosts(&self.static_hosts, Some(ip));
+        changed
+    }
+
+    /// Persist a leaf the control plane just issued and start serving it. The
+    /// TLS acceptor cache reloads on the fingerprint change.
+    pub fn install_issued(
+        &self,
+        req: &LeafRequest,
+        cert_pem: &str,
+        ca_pem: &str,
+        not_after: Option<i64>,
+    ) -> Result<()> {
+        cert::install_leaf(&self.dir, req, cert_pem, ca_pem, not_after)?;
+        self.reload()
+    }
+
+    /// Re-read the root and leaf from disk.
+    pub fn reload(&self) -> Result<()> {
+        let ca_pem = std::fs::read_to_string(&self.certs.ca_cert)
+            .with_context(|| format!("read {}", self.certs.ca_cert.display()))?;
+        let leaf_fingerprint = cert::leaf_fingerprint(&self.certs.leaf_cert)?;
+        *self.ca_pem.write().expect("ca_pem poisoned") = ca_pem;
+        self.snapshot
+            .write()
+            .expect("identity poisoned")
+            .leaf_fingerprint = leaf_fingerprint;
+        Ok(())
     }
 
     /// Dynamic Host-header allow-list check. rmcp's static check is disabled;
@@ -176,17 +298,115 @@ mod tests {
     }
 
     #[test]
-    fn set_public_host_resigns_only_once() {
-        let dir = tmpdir("resign");
+    fn a_node_without_certificates_waits_for_the_control_plane() {
+        let dir = tmpdir("empty");
         let identity = Identity::load(&dir, &[], None).unwrap();
-        let before = identity.leaf_fingerprint();
+        assert_eq!(identity.leaf_fingerprint(), "");
+        assert!(!identity.servable());
+        assert!(identity.needs_new_cert());
+        assert!(!identity.renewal_due());
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "load writes nothing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_dev_leaf_is_current_and_renewal_is_not_due() {
+        let dir = tmpdir("current");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert!(identity.servable());
+        assert!(!identity.needs_new_cert());
+        assert!(!identity.renewal_due());
+        assert!(identity.ca_pem().contains("BEGIN CERTIFICATE"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_leaf_needs_replacing_but_stays_servable() {
+        let dir = tmpdir("legacy");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        std::fs::remove_file(cert::paths(&dir).leaf_meta).unwrap();
+
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert!(identity.servable());
+        assert!(identity.needs_new_cert());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_late_public_ip_changes_the_host_list_and_the_allow_list() {
+        let dir = tmpdir("late-ip");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
         assert!(!identity.host_allowed(Some("203.0.113.7:32100")));
 
-        assert!(identity.set_public_host("203.0.113.7").unwrap());
-        let after = identity.leaf_fingerprint();
-        assert_ne!(before, after);
+        assert!(identity.note_public_host("203.0.113.7"));
         assert!(identity.host_allowed(Some("203.0.113.7:32100")));
-        assert!(!identity.set_public_host("203.0.113.7").unwrap());
+        assert!(
+            identity.needs_new_cert(),
+            "the new address must trigger a re-issue"
+        );
+        assert!(!identity.note_public_host("203.0.113.7"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn renewal_failures_are_counted_redacted_and_cleared() {
+        let dir = tmpdir("renewal-counters");
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert_eq!(identity.renewal_failures(), 0);
+        assert_eq!(identity.last_renewal_error(), None);
+
+        identity.record_renewal_failure("GET failed: token agt_ABC123 password=hunter2");
+        identity.record_renewal_failure(&"x".repeat(500));
+        assert_eq!(identity.renewal_failures(), 2);
+        let last = identity.last_renewal_error().unwrap();
+        assert!(last.chars().count() <= 301, "truncated with an ellipsis");
+        assert!(!last.contains("agt_ABC123"));
+        assert!(!last.contains("hunter2"));
+
+        identity.record_renewal_success();
+        assert_eq!(identity.renewal_failures(), 0);
+        assert_eq!(identity.last_renewal_error(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cert_not_after_requires_the_current_root() {
+        let dir = tmpdir("cert-not-after");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert!(identity.cert_not_after().is_some());
+
+        std::fs::write(
+            cert::paths(&dir).leaf_meta,
+            r#"{"root_fingerprint":"nope","not_after":1955000000}"#,
+        )
+        .unwrap();
+        assert_eq!(identity.cert_not_after(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn installing_an_issued_leaf_switches_the_fingerprint_and_root() {
+        let dir = tmpdir("install");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        let before = identity.leaf_fingerprint();
+
+        // A second issued pair: new key, new root, same host list.
+        let hosts = identity.cert_hosts();
+        let req = cert::request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = cert::dev_sign(&req).unwrap();
+        identity
+            .install_issued(&req, &cert_pem, &ca_pem, None)
+            .unwrap();
+
+        assert_ne!(identity.leaf_fingerprint(), before);
+        assert!(!identity.needs_new_cert());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

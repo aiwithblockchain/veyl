@@ -58,6 +58,12 @@ pub struct Enrollment {
     /// uses it for offline verification.
     #[serde(default)]
     pub token_public_key: Option<String>,
+    /// Leaf signed by the shared root; absent when enroll carried no CSR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
+    /// The control plane's root certificate, not a node-local CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_pem: Option<String>,
 }
 
 impl fmt::Debug for Enrollment {
@@ -66,6 +72,8 @@ impl fmt::Debug for Enrollment {
             .field("server_id", &self.server_id)
             .field("server_token", &"***")
             .field("desired", &self.desired)
+            .field("cert_pem", &self.cert_pem.as_ref().map(|_| "***"))
+            .field("ca_pem", &self.ca_pem.as_ref().map(|_| "***"))
             .finish()
     }
 }
@@ -223,6 +231,112 @@ impl fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
+/// A leaf the control plane issued (`POST /v1/agent/cert`, contract §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedCert {
+    pub cert_pem: String,
+    pub ca_pem: String,
+    /// Unix seconds; the certificate's own validity when the response omits it.
+    pub not_after: Option<i64>,
+}
+
+/// Why a certificate request failed. The distinction matters: a rejected CSR
+/// or a bad token cannot be fixed by asking again, a 5xx can.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CertError {
+    Transport(String),
+    Rejected { status: u16, reason: String },
+    Decode(String),
+}
+
+impl CertError {
+    /// True when the same request could succeed later. `403 san_rejected`, a
+    /// bad token, or a destroyed server are permanent; the caller must not loop
+    /// on them at the normal retry cadence.
+    pub fn retryable(&self) -> bool {
+        match self {
+            CertError::Rejected { status, .. } => {
+                matches!(status, 408 | 425 | 429) || *status >= 500
+            }
+            CertError::Transport(_) | CertError::Decode(_) => true,
+        }
+    }
+}
+
+impl std::fmt::Debug for CertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CertError::Transport(e) => f.debug_tuple("Transport").field(e).finish(),
+            CertError::Rejected { status, reason } => f
+                .debug_struct("Rejected")
+                .field("status", status)
+                .field("reason", &truncate(&redact_sensitive(reason), 300))
+                .finish(),
+            CertError::Decode(e) => f.debug_tuple("Decode").field(e).finish(),
+        }
+    }
+}
+
+impl fmt::Display for CertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CertError::Transport(e) => write!(f, "certificate request transport error: {e}"),
+            CertError::Rejected { status: 404, reason } => write!(
+                f,
+                "certificate request rejected: HTTP 404 {} — the control plane has no /v1/agent/cert (it is older than this agent)",
+                truncate(&redact_sensitive(reason), 120)
+            ),
+            CertError::Rejected { status, reason } => write!(
+                f,
+                "certificate request rejected: HTTP {status} {}",
+                truncate(&redact_sensitive(reason), 120)
+            ),
+            CertError::Decode(e) => write!(f, "certificate response decode error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CertError {}
+
+fn rejected_cert(status: u16, body: &str) -> CertError {
+    // The control plane sends `{ ok: false, reason }`; anything else is kept as
+    // a truncated body so a proxy's HTML page still says something useful.
+    let reason = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("reason")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| truncate(&redact_sensitive(body.trim()), 120));
+    CertError::Rejected { status, reason }
+}
+
+fn issued_cert_from_text(text: &str) -> Result<IssuedCert, CertError> {
+    let value: Value = serde_json::from_str(text).map_err(|e| {
+        CertError::Decode(format!("{e}: {}", truncate(&redact_sensitive(text), 200)))
+    })?;
+    let cert_pem = value
+        .get("cert_pem")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let ca_pem = value
+        .get("ca_pem")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if cert_pem.is_empty() || ca_pem.is_empty() {
+        return Err(CertError::Decode(
+            "certificate response is missing cert_pem or ca_pem".to_string(),
+        ));
+    }
+    Ok(IssuedCert {
+        cert_pem,
+        ca_pem,
+        not_after: value.get("not_after").and_then(Value::as_i64),
+    })
+}
+
+#[derive(Clone)]
 pub struct ControlPlane {
     http: reqwest::Client,
     base: String,
@@ -301,19 +415,28 @@ impl ControlPlane {
         })
     }
 
-    /// CONTRACT: the one-time token is sent as `Authorization: Bearer <token>`;
-    /// the body is an empty JSON object.
-    pub async fn enroll(&self, enrollment_token: &str) -> Result<Enrollment, ControlError> {
+    /// CONTRACT: the one-time token is sent as `Authorization: Bearer <token>`.
+    /// With a CSR the body is `{ "csr": "<base64(DER)>" }`; without one it stays
+    /// `{}`, exactly what an older control plane expects (contract §1).
+    pub async fn enroll(
+        &self,
+        enrollment_token: &str,
+        csr_b64: Option<&str>,
+    ) -> Result<Enrollment, ControlError> {
         let url = self
             .enroll_url
             .clone()
             .unwrap_or_else(|| self.url("/v1/agent/enroll"));
+        let body = match csr_b64 {
+            Some(csr) => json!({ "csr": csr }),
+            None => json!({}),
+        };
         let resp = self
             .http
             .post(url)
             .bearer_auth(enrollment_token)
             .header("accept", "application/json")
-            .json(&json!({}))
+            .json(&body)
             .send()
             .await
             .map_err(|e| ControlError::Transport(e.to_string()))?;
@@ -333,6 +456,33 @@ impl ControlPlane {
         })?;
         serde_json::from_value(value)
             .map_err(|e| ControlError::Decode(format!("enroll response: {e}")))
+    }
+
+    /// `POST /v1/agent/cert` with the long-lived server token: renewal, root
+    /// rotation, or replacing a lost/corrupt leaf (contract §2).
+    pub async fn request_cert(
+        &self,
+        server_token: &str,
+        csr_b64: &str,
+    ) -> Result<IssuedCert, CertError> {
+        let resp = self
+            .http
+            .post(self.url("/v1/agent/cert"))
+            .bearer_auth(server_token)
+            .header("accept", "application/json")
+            .json(&json!({ "csr": csr_b64 }))
+            .send()
+            .await
+            .map_err(|e| CertError::Transport(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| CertError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(rejected_cert(status.as_u16(), &text));
+        }
+        issued_cert_from_text(&text)
     }
 
     /// Tell the control plane that this build cannot meter. It uses the one-time
@@ -507,6 +657,68 @@ mod tests {
         let enrollment: Enrollment = serde_json::from_value(value).unwrap();
         assert_eq!(enrollment.server_id, "srv_1");
         assert!(enrollment.token_public_key.unwrap().contains("Ed25519"));
+        assert_eq!(enrollment.cert_pem, None);
+        assert_eq!(enrollment.ca_pem, None);
+    }
+
+    #[test]
+    fn enroll_response_parses_the_issued_certificate() {
+        let value = json!({
+            "server_id": "srv_1",
+            "server_token": "agt_abc",
+            "desired": desired(),
+            "cert_pem": "-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----",
+            "ca_pem": "-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----"
+        });
+        let enrollment: Enrollment = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            enrollment.cert_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----")
+        );
+        assert!(enrollment.ca_pem.as_deref().unwrap().contains("root"));
+    }
+
+    #[test]
+    fn a_cert_response_needs_both_pem_blocks() {
+        let issued = issued_cert_from_text(
+            r#"{"ok":true,"cert_pem":"leaf","ca_pem":"root","not_after":1955000000}"#,
+        )
+        .unwrap();
+        assert_eq!(issued.cert_pem, "leaf");
+        assert_eq!(issued.ca_pem, "root");
+        assert_eq!(issued.not_after, Some(1_955_000_000));
+
+        let missing = issued_cert_from_text(r#"{"ok":true,"cert_pem":"leaf"}"#).unwrap_err();
+        assert!(matches!(missing, CertError::Decode(_)));
+        assert!(missing.retryable());
+    }
+
+    #[test]
+    fn certificate_error_codes_decide_whether_to_retry() {
+        let rejected = rejected_cert(403, r#"{"ok":false,"reason":"san_rejected"}"#);
+        assert_eq!(
+            rejected,
+            CertError::Rejected {
+                status: 403,
+                reason: "san_rejected".into()
+            }
+        );
+        assert!(!rejected.retryable(), "403 san_rejected must not loop");
+
+        assert!(!rejected_cert(401, r#"{"reason":"unknown_token"}"#).retryable());
+        assert!(!rejected_cert(409, r#"{"reason":"destroyed"}"#).retryable());
+        assert!(!rejected_cert(400, r#"{"reason":"csr_invalid"}"#).retryable());
+        let missing = rejected_cert(404, "not found");
+        assert!(!missing.retryable());
+        assert!(missing.to_string().contains("/v1/agent/cert"));
+        assert!(rejected_cert(429, r#"{"reason":"rate_limited"}"#).retryable());
+        assert!(rejected_cert(503, r#"{"reason":"host_unavailable"}"#).retryable());
+        assert!(CertError::Transport("timeout".into()).retryable());
+
+        // A proxy's non-JSON body still carries the status.
+        let html = rejected_cert(502, "<html>bad gateway</html>");
+        assert!(html.retryable());
+        assert!(format!("{html}").contains("502"));
     }
 
     #[test]
@@ -580,10 +792,13 @@ mod tests {
             server_token: "agt_secret".into(),
             desired: desired(),
             token_public_key: Some(r#"{"kty":"OKP","crv":"Ed25519","x":"abc"}"#.into()),
+            cert_pem: Some("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----".into()),
+            ca_pem: Some("-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----".into()),
         };
         let e = format!("{e:?}");
         assert!(!e.contains("agt_secret"));
         assert!(!e.contains("secret-password"));
+        assert!(!e.contains("BEGIN CERTIFICATE"));
     }
 
     #[test]

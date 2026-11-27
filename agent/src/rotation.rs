@@ -1327,6 +1327,7 @@ mod tests {
         let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
         let store = StateStore::new(cfg.state_path());
         let state = Arc::new(Mutex::new(AgentState::default()));
+        crate::cert::ensure_dev_certs(&dir.join("certs"), &[]).unwrap();
         let identity = Arc::new(
             crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap(),
         );
@@ -1876,6 +1877,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let host = Arc::new(FakeHost::new());
         let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
+        crate::cert::ensure_dev_certs(&dir.join("certs"), &[]).unwrap();
         let identity =
             Arc::new(crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap());
         let engine = RotationEngine::new(
@@ -2261,6 +2263,7 @@ mod tests {
             calls: calls.clone(),
         });
         let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
+        crate::cert::ensure_dev_certs(&dir.join("certs"), &[]).unwrap();
         let identity =
             Arc::new(crate::identity::Identity::load(&dir.join("certs"), &[], None).unwrap());
         let engine = RotationEngine::new(
