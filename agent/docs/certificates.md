@@ -2,7 +2,7 @@
 
 > 日期：2026-11-27
 > 状态：**草案，未实现**。技术前提已在本地 workerd 验证通过（§8），实现拆分见 §9。
-> 相关：`agent/src/cert.rs`（当前实现）、`agent/docs/agent-health.md`（运维平台）
+> 相关：`agent/src/cert.rs`（当前实现）、`agent/docs/agent-health.md`（运维平台）、`docs/design/agent-signing-contract.md`（**实现按此**）
 
 ---
 
@@ -97,7 +97,7 @@ body: CSR
 
 - **根证书有效期定长**（十年以上），并把到期日记下来。到期不处理，所有节点会一起失效。
 - 根轮换 = 用新根重签所有叶证书 + 浏览器重装一次。这是一个人工动作，不能自动化到没人知道。
-- **叶证书有效期一年**，剩余不足 30 天自动续期（走 §4.1 的通道）。现状 `cert.rs` 没有设置 `not_after`，rcgen 的默认是几千年——等于永不过期，泄露的叶证书在换根之前一直有效。这一点必须改。
+- **叶证书有效期 2 年**，剩余不足 30 天自动续期（走 §4.1 的通道），续期失败每 6 小时重试。现状 `cert.rs` 没有设置 `not_after`，rcgen 的默认是几千年——等于永不过期，泄露的叶证书在换根之前一直有效。这一点必须改。
 
 ### 5.1 不做吊销（明确取舍）
 
@@ -188,7 +188,7 @@ leafSan           = [{"type":"ip","value":"139.59.99.76"}]  ← IP SAN 完整传
 - 根证书与私钥放 Cloudflare secret（PEM）。**私钥不进仓库、不进日志。**
 - **SAN 由控制面构造**：`servers.ip` + `localhost` + `127.0.0.1`。CSR 的 `subjectAltNames` 一律忽略；带了白名单之外的条目就拒签并写审计（§3.1）。
 - 密钥类型只收 ECDSA P-256；密钥用法扩展由控制面固定，不采信 CSR。
-- 叶证书有效期一年。
+- 叶证书有效期 2 年。
 - enroll 时接收 CSR 签出叶证书；另开 `POST /v1/agent/cert`（server token 鉴权）供 enroll 之后续期与重签（§4.1）。
 - 继续往 `servers` 写 `cert_fingerprint`（叶证书）与 `ca_pem`（根证书）。
 

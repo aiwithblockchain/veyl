@@ -27,6 +27,7 @@ import {
 } from "./providers/digitalocean";
 import { recordLedgerEntry } from "./wallet";
 import { usableBuild } from "./provision";
+import { CertError, issueLeaf, loadRoot } from "./certs";
 
 // 每个环境用自己的签名密钥：dev 与 prod 的公钥都内置在客户端，靠 key_id 区分。
 const CREDENTIAL_TTL_MS = 5 * 60 * 1000;
@@ -45,6 +46,9 @@ export interface ServersEnv extends MaybeAuthEnv {
   SING_BOX_VERSION?: string;
   SING_BOX_SHA256?: string;
   SING_BOX_DOWNLOAD_URL?: string;
+  /** 统一根证书与私钥（PEM，Cloudflare secret）：agent 的叶证书都由它签发。 */
+  ROOT_CA_CERT_PEM?: string;
+  ROOT_CA_KEY_PEM?: string;
 }
 
 interface ServerRow {
@@ -1061,6 +1065,169 @@ async function serverByAgentToken(
     .first<ServerRow>();
 }
 
+interface IssuedAgentCert {
+  cert_pem: string;
+  ca_pem: string;
+  not_after: number;
+  /** 叶证书 DER 的 SHA-256；只进审计，不进响应。 */
+  fingerprint: string;
+}
+
+type CertOutcome = { ok: true; cert: IssuedAgentCert } | { ok: false; response: Response };
+
+/** 契约 §1：CSR 是标准 base64 的 DER；空串与非法编码都当坏 CSR，不抛异常。 */
+function decodeCsr(value: unknown): Uint8Array | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (text === "") return null;
+  let binary: string;
+  try {
+    binary = atob(text);
+  } catch {
+    return null;
+  }
+  if (binary.length === 0) return null;
+  const der = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) der[i] = binary.charCodeAt(i);
+  return der;
+}
+
+/**
+ * 用统一根签一张叶证书。失败一律返回响应而不是抛出：调用方按契约 §2 的错误码回给 agent。
+ * SAN 越权要写审计——那是有人试图借共享根签别的域名。
+ */
+async function issueAgentCert(
+  env: ServersEnv,
+  row: ServerRow,
+  csrDer: Uint8Array,
+  serverIp: string | null,
+): Promise<CertOutcome> {
+  const certPem = env.ROOT_CA_CERT_PEM;
+  const keyPem = env.ROOT_CA_KEY_PEM;
+  if (!certPem || !keyPem) {
+    console.warn(`[servers] root_ca_missing server=${row.id}`);
+    return { ok: false, response: agentJson({ ok: false, reason: "root_missing" }, 503) };
+  }
+
+  let root;
+  try {
+    root = await loadRoot(certPem, keyPem);
+  } catch (error) {
+    // 根配置坏了是控制面自己的问题：不把细节回给节点，也不让它变成未捕获异常。
+    console.error(`[servers] root_ca_invalid server=${row.id} error=${String(error)}`);
+    return { ok: false, response: agentJson({ ok: false, reason: "root_missing" }, 503) };
+  }
+
+  try {
+    const leaf = await issueLeaf(root, {
+      csrDer,
+      serverIps: serverIp ? [serverIp] : [],
+    });
+    return {
+      ok: true,
+      cert: {
+        cert_pem: leaf.certPem,
+        ca_pem: root.certificate.toString("pem"),
+        not_after: leaf.notAfter,
+        fingerprint: leaf.fingerprint,
+      },
+    };
+  } catch (error) {
+    if (!(error instanceof CertError)) {
+      console.error(`[servers] cert_issue_failed server=${row.id} error=${String(error)}`);
+      return { ok: false, response: agentJson({ ok: false, reason: "unavailable" }, 503) };
+    }
+    if (error.reason === "san_rejected") {
+      await env
+        .DB!.prepare(
+          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.cert.san_rejected', ?)",
+        )
+        .bind(
+          Date.now(),
+          row.account_id,
+          row.id,
+          JSON.stringify({
+            requested: error.rejectedNames.slice(0, 10).map((n) => n.slice(0, 200)),
+            ...error.auditDetail,
+          }),
+        )
+        .run()
+        .catch((auditError) =>
+          console.warn(
+            `[servers] audit_failed action=agent.cert.san_rejected server=${row.id} error=${String(auditError)}`,
+          ),
+        );
+      return { ok: false, response: agentJson({ ok: false, reason: "san_rejected" }, 403) };
+    }
+    if (error.reason === "root_invalid") {
+      console.error(`[servers] root_ca_invalid server=${row.id} error=${error.message}`);
+      return { ok: false, response: agentJson({ ok: false, reason: "root_missing" }, 503) };
+    }
+    if (error.reason === "sign_failed") {
+      console.error(`[servers] cert_sign_failed server=${row.id} error=${error.message}`);
+      return { ok: false, response: agentJson({ ok: false, reason: "unavailable" }, 503) };
+    }
+    return { ok: false, response: agentJson({ ok: false, reason: error.reason }, 400) };
+  }
+}
+
+/**
+ * 成功签发的审计：只记到期时间与指纹，**不放 PEM**——审计表是要长期留的。
+ * 失败不影响这次签发。
+ */
+async function recordCertIssued(
+  env: ServersEnv,
+  row: ServerRow,
+  cert: IssuedAgentCert,
+): Promise<void> {
+  await env
+    .DB!.prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'agent.cert.issued', ?)",
+    )
+    .bind(
+      Date.now(),
+      row.account_id,
+      row.id,
+      JSON.stringify({ not_after: cert.not_after, fingerprint: cert.fingerprint }),
+    )
+    .run()
+    .catch((error) =>
+      console.warn(
+        `[servers] audit_failed action=agent.cert.issued server=${row.id} error=${String(error)}`,
+      ),
+    );
+}
+
+/**
+ * enroll 的请求体可选：老 agent 什么都不带。空体、或对象里没有 `csr` 字段视为「不要证书」；
+ * 其余（`null`、数字、数组、坏 JSON）一律 400——含糊的 body 不能静默走老路径。
+ */
+async function readEnrollCsr(
+  request: Request,
+): Promise<{ ok: true; csr: Uint8Array | null } | { ok: false; reason: string }> {
+  let text: string;
+  try {
+    text = await request.text();
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+  if (text.trim() === "") return { ok: true, csr: null };
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: "invalid_json" };
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, reason: "invalid_json" };
+  }
+  const raw = (body as { csr?: unknown }).csr;
+  if (raw === undefined) return { ok: true, csr: null };
+  const csr = decodeCsr(raw);
+  if (!csr) return { ok: false, reason: "csr_invalid" };
+  return { ok: true, csr };
+}
+
 /**
  * 同一 enrollment token 在 TTL 内的重放：换发新的 server_token（旧的立即失效），
  * 复用上一次下发的 host/port/password——重放不是重新签发，客户端拿到的配置不能变。
@@ -1070,6 +1237,7 @@ async function reEnroll(
   env: ServersEnv,
   row: ServerRow,
   singbox: { version: string; sha256: string; url: string },
+  csr: Uint8Array | null,
 ): Promise<Response> {
   const db = env.DB!;
   // 防把它当免费接口刷：同一服务器 5 分钟最多 3 次。
@@ -1128,9 +1296,22 @@ async function reEnroll(
   const serverToken = randomId("agt_", 32);
   const tokenHash = await sha256B64u(serverToken);
   const now = Date.now();
+
+  // 签发放在限流与凭据检查之后：重放被限流时不该还替人签一张证书。
+  let cert: IssuedAgentCert | null = null;
+  if (csr) {
+    // SAN 统一口径 `row.ip ?? secret.host`：IP 变了以后不能因为来源不同签出两张 SAN 不同的证书。
+    const outcome = await issueAgentCert(env, row, csr, row.ip ?? secret.host);
+    if (!outcome.ok) return outcome.response;
+    cert = outcome.cert;
+  }
+
   const updated = await db
-    .prepare("UPDATE servers SET server_token_hash = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL")
-    .bind(tokenHash, now, row.id)
+    .prepare(
+      "UPDATE servers SET server_token_hash = ?, updated_at = ?, " +
+        "cert_not_after = COALESCE(?, cert_not_after) WHERE id = ? AND destroyed_at IS NULL",
+    )
+    .bind(tokenHash, now, cert?.not_after ?? null, row.id)
     .run();
   if (((updated as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
     return agentJson({ ok: false, reason: "destroyed" }, 409);
@@ -1148,6 +1329,8 @@ async function reEnroll(
       ),
     );
 
+  if (cert) await recordCertIssued(env, row, cert);
+
   return agentJson({
     server_id: row.id,
     server_token: serverToken,
@@ -1158,6 +1341,7 @@ async function reEnroll(
       singbox,
     },
     token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK!),
+    ...(cert ? { cert_pem: cert.cert_pem, ca_pem: cert.ca_pem } : {}),
   });
 }
 
@@ -1191,6 +1375,14 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     return agentJson({ ok: false, reason: "expired" }, 409);
   }
 
+  // CSR 在消费 token 之前解析：坏 CSR / 缺根只回错误，不销毁、不消费。
+  const csrResult = await readEnrollCsr(request);
+  if (!csrResult.ok) {
+    console.warn(`[servers] agent_enroll_rejected server=${row.id} reason=${csrResult.reason}`);
+    return agentJson({ ok: false, reason: csrResult.reason }, 400);
+  }
+  const csr = csrResult.csr;
+
   if (!env.CREDENTIAL_ENC_KEY) return agentJson({ ok: false, reason: "storage_unavailable" }, 503);
   if (!env.AGENT_TOKEN_SIGNING_JWK) {
     return agentJson({ ok: false, reason: "agent_key_missing" }, 503);
@@ -1202,7 +1394,7 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
   // TTL 内重放（agent 丢了 state.json / 首次 enroll 响应丢失）：换发新 server_token，
   // 复用上一次下发的凭据；不做「一次性」拒绝，否则这台机器永久失管。
   if (row.enrollment_used_at !== null) {
-    return reEnroll(env, row, singbox);
+    return reEnroll(env, row, singbox, csr);
   }
 
   // 机器已建好，IP 通常已回填；极端情况下补查一次，别让凭据里的 host 为空。
@@ -1219,6 +1411,14 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
   }
   if (!host) return agentJson({ ok: false, reason: "host_unavailable" }, 503);
 
+  // 签发放在 host 确定之后：补查回填的 IP 也要进 SAN，不能拿旧的 row.ip。
+  let cert: IssuedAgentCert | null = null;
+  if (csr) {
+    const outcome = await issueAgentCert(env, row, csr, host);
+    if (!outcome.ok) return outcome.response;
+    cert = outcome.cert;
+  }
+
   const password = randomPassword();
   const sealed = await sealSecret(
     env.CREDENTIAL_ENC_KEY,
@@ -1229,14 +1429,15 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
   const nodeId = row.node_id ?? randomId("nd_", 12);
   const now = Date.now();
 
-  // 原子消费：token 用过一次即失效；node_id 与令牌哈希同一笔写入，避免两处不一致。
+  // 原子消费：token 用过一次即失效；node_id、令牌哈希与证书到期同一笔写入。
   // 已销毁的行即使 token 没用过也不能再 enroll（避免把死机器复活）。
   const consumed = await db
     .prepare(
-      "UPDATE servers SET enrollment_used_at = ?, updated_at = ?, node_id = ?, server_token_hash = ? " +
+      "UPDATE servers SET enrollment_used_at = ?, updated_at = ?, node_id = ?, server_token_hash = ?, " +
+        "cert_not_after = COALESCE(?, cert_not_after) " +
         "WHERE id = ? AND enrollment_hash = ? AND enrollment_used_at IS NULL AND destroyed_at IS NULL",
     )
-    .bind(now, now, nodeId, tokenHash, row.id, hash)
+    .bind(now, now, nodeId, tokenHash, cert?.not_after ?? null, row.id, hash)
     .run();
   const changed = (consumed as { meta?: { changes?: number } }).meta?.changes ?? 0;
   if (changed === 0) {
@@ -1260,6 +1461,8 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     return agentJson({ ok: false, reason: "storage_failed" }, 500);
   }
 
+  if (cert) await recordCertIssued(env, row, cert);
+
   return agentJson({
     server_id: row.id,
     server_token: serverToken,
@@ -1271,6 +1474,7 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     },
     // Ed25519 公钥 JWK 字符串：agent 用它离线验桌面端的一次性令牌。
     token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK),
+    ...(cert ? { cert_pem: cert.cert_pem, ca_pem: cert.ca_pem } : {}),
   });
 }
 
@@ -1629,6 +1833,93 @@ async function agentReport(request: Request, env: ServersEnv): Promise<Response>
     return agentJson({ ok: false, reason: outcome.reason }, outcome.status);
   }
   return agentJson({ ok: true });
+}
+
+/** `/v1/agent/cert` 请求体上限：一张 base64 CSR 只有几 KB，64 KB 足够且能挡住垃圾流量。 */
+const AGENT_CERT_MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * POST /v1/agent/cert：enroll 之后的签发通道（到期续期、换根重签、本地证书丢失）。
+ * Bearer `server_token`，只对未销毁的行签发。契约 §2。
+ */
+async function agentCert(request: Request, env: ServersEnv): Promise<Response> {
+  if (!env.DB) return agentJson({ ok: false, reason: "unavailable" }, 503);
+
+  const token = bearerToken(request);
+  if (!token) return agentJson({ ok: false, reason: "missing_token" }, 401);
+  const row = await serverByAgentToken(env.DB, token);
+  if (!row) return agentJson({ ok: false, reason: "unknown_token" }, 401);
+  if (row.destroyed_at !== null) {
+    return agentJson({ ok: false, reason: "destroyed" }, 409);
+  }
+
+  // 与 enroll 重放同一口径：同一台 5 分钟最多 3 次，挡住拿长期令牌刷签发。
+  if (!(await bumpRateLimit(env.DB, `agent-cert:${row.id}`, 3, 5 * 60_000))) {
+    return agentJson({ ok: false, reason: "rate_limited" }, 429);
+  }
+
+  // 有 Content-Length 就先挡掉明显超限的请求，省得把大 body 读进来。
+  const declaredLength = Number(request.headers.get("content-length") ?? "");
+  if (Number.isFinite(declaredLength) && declaredLength > AGENT_CERT_MAX_BODY_BYTES) {
+    return agentJson({ ok: false, reason: "invalid_json" }, 400);
+  }
+
+  let text: string;
+  try {
+    text = await request.text();
+  } catch {
+    return agentJson({ ok: false, reason: "invalid_json" }, 400);
+  }
+  if (new TextEncoder().encode(text).byteLength > AGENT_CERT_MAX_BODY_BYTES) {
+    return agentJson({ ok: false, reason: "invalid_json" }, 400);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return agentJson({ ok: false, reason: "invalid_json" }, 400);
+  }
+  const csr = decodeCsr((body as { csr?: unknown } | null)?.csr);
+  if (!csr) return agentJson({ ok: false, reason: "csr_invalid" }, 400);
+
+  // 与 enroll 同一口径：IP 还没回填时向 DO 补查一次；仍为空就报错，别静默签一张只有 localhost 的证书。
+  let host = row.ip;
+  if (!host && env.DO_API_TOKEN && row.provider_id) {
+    const droplet = await getDroplet(env.DO_API_TOKEN, row.provider_id);
+    if (droplet.ok && droplet.value.ipv4) {
+      host = droplet.value.ipv4;
+      await env.DB.prepare(
+        "UPDATE servers SET ip = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL",
+      )
+        .bind(host, Date.now(), row.id)
+        .run();
+    }
+  }
+  if (!host) return agentJson({ ok: false, reason: "host_unavailable" }, 503);
+
+  const outcome = await issueAgentCert(env, row, csr, host);
+  if (!outcome.ok) return outcome.response;
+
+  // 证书已经签出：落库失败只记日志，不能把可用证书扣下（节点会因为没有证书起不了 TLS）。
+  await env.DB.prepare(
+    "UPDATE servers SET cert_not_after = ?, updated_at = ? WHERE id = ? AND destroyed_at IS NULL",
+  )
+    .bind(outcome.cert.not_after, Date.now(), row.id)
+    .run()
+    .catch((error) =>
+      console.warn(
+        `[servers] cert_not_after_write_failed server=${row.id} error=${String(error)}`,
+      ),
+    );
+
+  await recordCertIssued(env, row, outcome.cert);
+
+  return agentJson({
+    ok: true,
+    cert_pem: outcome.cert.cert_pem,
+    ca_pem: outcome.cert.ca_pem,
+    not_after: outcome.cert.not_after,
+  });
 }
 
 /** GET /v1/agent/desired-state：轮换与升级都从这里拉最新期望值（Bearer `server_token`）。 */
@@ -2426,6 +2717,7 @@ export async function handleServers(request: Request, env: ServersEnv): Promise<
   }
   if (parts[0] === "v1" && parts[1] === "agent" && parts.length === 3) {
     if (parts[2] === "enroll" && post) return agentEnroll(request, env);
+    if (parts[2] === "cert" && post) return agentCert(request, env);
     if (parts[2] === "fail" && post) return agentFail(request, env);
     if (parts[2] === "report" && post) return agentReport(request, env);
     if (parts[2] === "desired-state" && request.method === "GET") {

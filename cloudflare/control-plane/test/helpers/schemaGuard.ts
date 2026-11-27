@@ -19,8 +19,9 @@ import retentionIndexSql from "../../migrations/0015_retention_indexes.sql?raw";
 import serversAccountIndexSql from "../../migrations/0016_servers_account_index.sql?raw";
 import providerGoneSql from "../../migrations/0017_servers_provider_gone.sql?raw";
 import alignBillingSql from "../../migrations/0018_align_billing_to_utc_day.sql?raw";
+import serverCertSql from "../../migrations/0020_server_cert_not_after.sql?raw";
 
-const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}\n${refreshGraceSql}\n${auditIndexSql}\n${serverTrafficSql}\n${retentionIndexSql}\n${serversAccountIndexSql}\n${providerGoneSql}\n${alignBillingSql}`;
+const allSchemaSql = `${schemaSql}\n${catalogCacheSql}\n${readyAtSql}\n${progressStagesSql}\n${serverPortSql}\n${webhookSamplesSql}\n${atReadySql}\n${tombstoneDismissSql}\n${mobileTokensSql}\n${nodeAgentSql}\n${issuesSql}\n${refreshGraceSql}\n${auditIndexSql}\n${serverTrafficSql}\n${retentionIndexSql}\n${serversAccountIndexSql}\n${providerGoneSql}\n${alignBillingSql}\n${serverCertSql}`;
 
 interface TableShape {
   columns: Set<string>;

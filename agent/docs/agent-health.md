@@ -94,9 +94,16 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
     "last_read_at": 1795760351,
     "consecutive_read_failures": 0
   },
+  "cert": {
+    "not_after": 1955000000,
+    "renewal_failures": 0,
+    "last_renewal_error": null
+  },
   "health": { "...": "见 §4" }
 }
 ```
+
+文件 `agent/docs/certificates.md` 换成统一根之后，`cert` 块才有内容；现在自签的节点返回 `cert: null`。三个字段的含义见 §3.5。
 
 ### 3.4 `metering: null` 有两种含义，必须分开
 
@@ -113,6 +120,17 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 
 `uptime_secs` 不能省，原因见 §4.3。
 
+### 3.5 证书状态
+
+| 字段 | 来源 | 落盘 |
+|---|---|---|
+| `not_after` | 签发成功时控制面返回、agent 存下来 | 是 |
+| `renewal_failures` | 续期请求连续失败次数，成功清零 | 否 |
+| `last_renewal_error` | 最近一次续期失败原文，截断 | 否 |
+
+**运维平台判断「续期坏了」不靠这个块，靠 D1 里的到期日。** 控制面每次签发成功都会把 `servers.cert_not_after` 写成新的到期时间；续期正常时，这个值会在进入 30 天窗口后的几小时内跳到两年后。如果它停在原处不动，就是续期失败——这比等 agent 把失败事件送上来可靠，因为续期失败时网络往往正是不通的。
+
+`get_status` 里的这个块是**诊断用**：能连上时才看得到，用来回答「失败了几次、最后一次报什么错」。`renewal_failures` 不落盘的理由同 §3.2 的 `consecutive_read_failures`。
 
 ---
 

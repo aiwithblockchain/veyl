@@ -1125,8 +1125,8 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set enrollment_used_at") && sql.includes("server_token_hash")) {
-      // agent enroll：消费 token 的同时写 node_id 与长期令牌哈希。
-      const [usedAt, updatedAt, nodeId, tokenHash, id, hash] = a;
+      // agent enroll：消费 token 的同时写 node_id、长期令牌哈希与证书到期。
+      const [usedAt, updatedAt, nodeId, tokenHash, certNotAfter, id, hash] = a;
       const server = this.tables.servers.find((s) => s.id === id);
       if (
         server &&
@@ -1138,6 +1138,7 @@ export class FakeD1 {
         server.updated_at = updatedAt;
         server.node_id = nodeId;
         server.server_token_hash = tokenHash;
+        if (certNotAfter != null) server.cert_not_after = certNotAfter;
       }
       return null;
     }
@@ -1150,13 +1151,24 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set cert_not_after")) {
+      // /v1/agent/cert 签发成功后回写到期时间；已销毁的行不再改。
+      const [notAfter, updatedAt, id] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (server && server.destroyed_at == null) {
+        server.cert_not_after = notAfter;
+        server.updated_at = updatedAt;
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set server_token_hash")) {
       // agent re-enroll：同一个 enrollment token 换发新的长期令牌（旧的立即失效）。
-      const [tokenHash, updatedAt, id] = a;
+      const [tokenHash, updatedAt, certNotAfter, id] = a;
       const server = this.tables.servers.find((s) => s.id === id);
       if (server && server.destroyed_at == null) {
         server.server_token_hash = tokenHash;
         server.updated_at = updatedAt;
+        if (certNotAfter != null) server.cert_not_after = certNotAfter;
       }
       return null;
     }
@@ -2347,8 +2359,8 @@ export class FakeStatement {
       const allowed = ["pending_payment", "awaiting_payment", "payment_failed", "expired", "cancelled"];
       changes = row && allowed.includes(String(row.state)) ? 1 : 0;
     } else if (sql.startsWith("update servers set enrollment_used_at") && sql.includes("server_token_hash")) {
-      const id = this.statement.args[4];
-      const hash = this.statement.args[5];
+      const id = this.statement.args[5];
+      const hash = this.statement.args[6];
       const row = this.db.rows("servers").find((s) => s.id === id);
       changes =
         row && row.enrollment_hash === hash && row.enrollment_used_at == null &&
