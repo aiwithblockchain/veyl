@@ -974,6 +974,36 @@ mod tests {
         assert!(manager.adopt_existing().await.is_none());
     }
 
+    /// `since` 未知时字段不该出现在快照里——空串是假信息。
+    #[test]
+    fn an_unknown_since_is_omitted_from_the_snapshot() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        let manager = manager(backend, &clash);
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.state = ConnectionState::Connected {
+                config_id: "p1".into(),
+                pid: 4242,
+                since: String::new(),
+                node: None,
+            };
+        }
+        let json = serde_json::to_value(manager.snapshot()).unwrap();
+        assert!(json.get("since").is_none(), "空 since 不该出现：{json}");
+
+        if let ConnectionState::Connected { since, .. } =
+            &mut manager.inner.lock().unwrap().state
+        {
+            *since = "2026-11-27T00:00:00Z".into();
+        }
+        let json = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!(
+            json.get("since").and_then(serde_json::Value::as_str),
+            Some("2026-11-27T00:00:00Z")
+        );
+    }
+
     /// 没在跑就保持 Idle，不要凭空造一个已连接。
     #[tokio::test]
     async fn nothing_is_adopted_when_no_tunnel_runs() {
