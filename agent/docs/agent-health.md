@@ -56,14 +56,16 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 
 新增只读工具 `get_status`，返回 agent 当前的自检状态。
 
-数据来源是 agent **内存里**的 `TrafficState`（启动时从 `/var/lib/veyl-agent/traffic.json` 读入，每 `save_secs` 落盘一次）。不要读磁盘——那份最多滞后 5 分钟。
+数据来源是 agent **内存里**的 `TrafficState`（第一次成功读取时从 `/var/lib/veyl-agent/traffic.json` 载入，之后每 `save_secs` 落盘一次）。不要读磁盘——那份最多滞后 5 分钟。
+
+注意是**第一次成功读取**才载入，不是进程启动：首次 `tick` 之前这份状态还是空的，那就是 §3.4 里 `metering: null` 的窗口。
 
 ### 3.2 为什么现有字段不够
 
 `TrafficState` 现在有 `counter_last`、`pending_bytes`、`last_ok_at`、`seq`。其中：
 
 - `counter_last` 是最后一次读到的计数，**只有读成功才会变**；
-- `last_ok_at` 记的是最后一次**上报成功**的时间（`traffic.rs:223`），不是最后一次读取。
+- `last_ok_at` 记的是最后一次**上报成功**的时间（`traffic.rs:253`），不是最后一次读取。
 
 所以「计数器在涨」是滞后指标，「上次上报成功」和「读网卡是否正常」也不是同一件事。要直接回答问题，需要两个新字段：
 

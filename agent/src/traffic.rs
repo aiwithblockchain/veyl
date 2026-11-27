@@ -23,6 +23,7 @@ use serde_json::Value;
 use crate::auth::now_unix;
 use crate::config::TrafficConfig;
 use crate::control::ControlApi;
+use crate::health::{Health, HealthKey};
 use crate::host::Host;
 
 /// Dedicated table: the host's own firewall is never touched, and `nft` only
@@ -54,6 +55,20 @@ pub struct TrafficState {
     pub last_saved_at: u64,
     #[serde(default)]
     pub last_ok_at: u64,
+    /// Unix seconds of the last *successful counter read*. Distinct from
+    /// `last_ok_at`, which is the last successful report: a counter that keeps
+    /// reading fine while reporting fails is a different incident.
+    #[serde(default)]
+    pub last_read_at: u64,
+    /// Reset by the next successful read. Drives the "is the agent reading at
+    /// all" answer in `get_status`; the in-memory health table carries the
+    /// reason.
+    ///
+    /// Deliberately not persisted: a run that spans a restart was never
+    /// observed by the new process, so a restored "7 consecutive failures"
+    /// would describe a process that no longer exists. Loading starts at 0.
+    #[serde(skip)]
+    pub consecutive_read_failures: u32,
     #[serde(default)]
     pub seq: u64,
     /// In-flight report; `pending_bytes` may grow past it while it is sent.
@@ -126,6 +141,8 @@ pub struct TrafficMeter {
     /// line when reporting recovers; without it the log simply goes quiet and
     /// a healed outage looks the same as a wedged one.
     report_failures: AtomicU32,
+    /// In-memory failure table, shared with `get_status`. Never persisted.
+    health: Arc<Health>,
 }
 
 impl TrafficMeter {
@@ -142,6 +159,7 @@ impl TrafficMeter {
             params,
             state: Mutex::new(None),
             report_failures: AtomicU32::new(0),
+            health: Arc::new(Health::new()),
         }
     }
 
@@ -155,6 +173,16 @@ impl TrafficMeter {
         let counter = match read_counter(self.host.as_ref()).await {
             Ok(counter) => counter,
             Err(e) => {
+                self.health.record(HealthKey::NftRead, now, &e.to_string());
+                {
+                    let mut guard = self.state.lock().unwrap();
+                    // A cold node that fails its very first read has no state
+                    // to bump yet; the health table above still records it.
+                    if let Some(state) = guard.as_mut() {
+                        state.consecutive_read_failures =
+                            state.consecutive_read_failures.saturating_add(1);
+                    }
+                }
                 tracing::warn!(error = %e, "traffic: counter read failed; skipping this window");
                 return;
             }
@@ -166,6 +194,8 @@ impl TrafficMeter {
                 *guard = Some(self.seed(now, counter));
             }
             let state = guard.as_mut().expect("seeded above");
+            state.last_read_at = now;
+            state.consecutive_read_failures = 0;
             // A smaller reading means the table was recreated: everything the
             // new counter holds is new traffic. This branch is the *only* thing
             // that absorbs a rebuild — `read_counter` reports the window it
@@ -235,6 +265,7 @@ impl TrafficMeter {
             }
             Err(e) => {
                 let failures = self.report_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                self.health.record(HealthKey::Report, now, &e.to_string());
                 // 409 `server_destroyed` is deliberately not special-cased. The
                 // control plane only sets `destroyed_at` after the droplet is
                 // gone, so a live agent should never see it; when it does, our
@@ -292,6 +323,8 @@ impl TrafficMeter {
             pending_bytes: 0,
             last_saved_at: now,
             last_ok_at: now,
+            last_read_at: now,
+            consecutive_read_failures: 0,
             seq: now.max(1),
             pending_attempt: None,
         };
@@ -320,6 +353,25 @@ impl TrafficMeter {
     #[cfg(test)]
     fn report_failures(&self) -> u32 {
         self.report_failures.load(Ordering::Relaxed)
+    }
+}
+
+/// Read-only view of the meter for the MCP `get_status` tool. Deliberately
+/// separate from `ControlApi`: reading local state must not need a server
+/// token, and nothing here can change what is reported.
+pub trait MeteringView: Send + Sync {
+    /// The in-memory state, not the file: the file lags by up to `save_secs`.
+    fn status(&self) -> Option<TrafficState>;
+    fn health(&self) -> Arc<Health>;
+}
+
+impl MeteringView for TrafficMeter {
+    fn status(&self) -> Option<TrafficState> {
+        self.state.lock().unwrap().clone()
+    }
+
+    fn health(&self) -> Arc<Health> {
+        self.health.clone()
     }
 }
 
@@ -1795,6 +1847,94 @@ mod tests {
             parse_default_iface("default via 146.190.144.1 dev eth0 proto static\n").as_deref(),
             Some("eth0")
         );
+    }
+
+    #[tokio::test]
+    async fn read_failures_are_counted_and_cleared_by_the_next_success() {
+        let (dir, host, control) = setup("read-health");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),  // baseline
+                (1, "", "Operation not permitted"), // the read fails ...
+                (0, &nft_tables_json(), ""),        // ... but the table exists: Broken
+                (0, &nft_json("ens3", 2_000), ""),  // recovery
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control,
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.last_read_at, 1_000, "the first reading is stamped");
+        assert_eq!(state.consecutive_read_failures, 0);
+
+        meter.tick(1_030).await;
+        let state = meter.snapshot().unwrap();
+        assert_eq!(
+            state.consecutive_read_failures, 1,
+            "a failed window is counted"
+        );
+        assert_eq!(
+            state.last_read_at, 1_000,
+            "the timestamp only moves on a successful read"
+        );
+
+        meter.tick(1_060).await;
+        let state = meter.snapshot().unwrap();
+        assert_eq!(
+            state.consecutive_read_failures, 0,
+            "the next success clears the run"
+        );
+        assert_eq!(state.last_read_at, 1_060);
+
+        let entry = meter
+            .health()
+            .entries()
+            .into_iter()
+            .find(|(key, _)| *key == crate::health::HealthKey::NftRead)
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(entry.count, 1, "only the failed window is recorded");
+        assert_eq!(entry.last_at, 1_030);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_old_state_file_without_the_read_fields_still_loads() {
+        let json =
+            r#"{"counter_last":5,"pending_bytes":7,"last_saved_at":1,"last_ok_at":2,"seq":3}"#;
+        let state: TrafficState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.counter_last, 5);
+        assert_eq!(state.last_read_at, 0, "serde(default) covers an old file");
+        assert_eq!(state.consecutive_read_failures, 0);
+    }
+
+    #[test]
+    fn a_run_of_read_failures_does_not_survive_a_restart() {
+        let state = TrafficState {
+            last_read_at: 42,
+            consecutive_read_failures: 7,
+            ..TrafficState::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(
+            json.get("consecutive_read_failures").is_none(),
+            "a run belongs to one process; a restart must not inherit it"
+        );
+        assert_eq!(
+            json["last_read_at"], 42,
+            "the timestamp stays useful across restarts"
+        );
+
+        let back: TrafficState = serde_json::from_value(json).unwrap();
+        assert_eq!(back.consecutive_read_failures, 0);
+        assert_eq!(back.last_read_at, 42);
     }
 
     #[tokio::test]
