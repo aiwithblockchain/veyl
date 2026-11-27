@@ -344,20 +344,20 @@ impl TrafficMeter {
                     iface = %iface,
                     "traffic: counter follows a stale interface; rebuilding"
                 );
-                self.rebuild(&iface)
+                self.rebuild(&iface, true)
                     .await
                     .with_context(|| "recreating the counter after a stale interface")?;
                 bail!("counter followed a stale interface; recreated, skipping this window")
             }
             TableRead::Missing => {
-                self.rebuild(&iface)
+                self.rebuild(&iface, false)
                     .await
                     .with_context(|| "creating the counter table")?;
                 bail!("counter table was missing; recreated, skipping this window")
             }
             TableRead::Incomplete => {
                 tracing::warn!("traffic: counter table is incomplete; recreating");
-                self.rebuild(&iface)
+                self.rebuild(&iface, true)
                     .await
                     .with_context(|| "completing an incomplete counter table")?;
                 bail!("counter table was incomplete; recreated, skipping this window")
@@ -478,15 +478,42 @@ impl TrafficMeter {
         )))
     }
 
-    async fn rebuild(&self, iface: &str) -> Result<()> {
-        // Deleting a missing table fails; that is the expected first-run path.
-        let _ = self
+    /// `table_expected` is true when the caller knows a table is there and the
+    /// delete has to succeed. It only changes how a failed delete is logged:
+    /// on the first run "no such file" is normal, but a table that survives the
+    /// delete means the `add rule` below appends a second counter instead of
+    /// replacing the old one.
+    async fn rebuild(&self, iface: &str, table_expected: bool) -> Result<()> {
+        match self
             .host
             .run(
                 "nft",
                 &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
             )
-            .await;
+            .await
+        {
+            Ok(out) if out.success() => {
+                tracing::debug!(
+                    result = %snippet(&out.summary()),
+                    "traffic: dropped the old counter table"
+                );
+            }
+            Ok(out) => {
+                let result = snippet(&out.summary());
+                if table_expected {
+                    tracing::warn!(
+                        result = %result,
+                        "traffic: could not drop the existing counter table; the new rule may be \
+                         appended instead of replacing it"
+                    );
+                } else {
+                    tracing::debug!(result = %result, "traffic: no counter table to drop");
+                }
+            }
+            // `Host::run` itself failed (spawn error, timeout). The `add` below
+            // fails too, so this is recorded rather than acted on.
+            Err(e) => tracing::warn!(error = %e, "traffic: could not run `nft delete`"),
+        }
         let steps: [&[&str]; 3] = [
             &["add", "table", "inet", TABLE],
             &[

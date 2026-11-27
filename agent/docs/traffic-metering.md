@@ -92,7 +92,7 @@ tick(now)
 
 `Broken` 与 `Missing` 的区分是这一版修掉的核心问题：以前两者都被当成「表不存在」，于是 nft 输出格式一变（内核升级、nft 版本变化），每个窗口都会删表重建、每轮读数归零——**永远上报 0 字节，一行错误都没有**。
 
-**表在 `Missing` 和 `Incomplete` 两种情况下重建。** 重建动作是 **4 条 `nft` 命令**：1 次 `nft delete table`，然后 3 次 `nft add`（table / chain / rule）。
+**表在 `Missing` 和 `Incomplete` 两种情况下重建。** 重建动作是 **4 条 `nft` 命令**：1 次 `nft delete table`，然后 3 次 `nft add`（table / chain / rule）。第一条删表命令的结果会被记录下来：首次安装时它必然失败（表不存在），按正常路径处理；只有**表本该在却删不掉**时才打 `warn`——那种情况下后面的 `add rule` 会往旧表里再叠一条规则，而不是替换。
 
 `Incomplete` 是 2026-11-27 补的：重建是四条独立命令，如果 agent 在 `add table` 之后、`add rule` 之前被杀（SIGKILL / OOM），机器上会留下一个「有表、没规则」的半成品。这种表读表命令**成功**、但读不到计数器，按旧逻辑会一直判 `Broken`——而 `Broken` 不重建，于是永久停摆。现在把它单独识别出来，允许重建：表里本来就没有计数器，删掉重建不会丢任何数。
 
@@ -216,6 +216,10 @@ exit=0
 | 网卡变了，重建 | info | `traffic: counter follows a stale interface; rebuilding` |
 | 表**不完整**（有表没 rule，重建被打断）→ 重建 | **warn** | `traffic: counter table is incomplete; recreating` |
 | 表建好 | info | `traffic: created the outbound counter table` |
+| 删旧表成功 | debug | `traffic: dropped the old counter table`（带 `result=`） |
+| 删旧表时表本就不在 | debug | `traffic: no counter table to drop`（带 `result=`，首次安装的正常路径） |
+| **删旧表失败，但表本该在** | **warn** | `traffic: could not drop the existing counter table; the new rule may be appended instead of replacing it`（带 `result=`）——出现这条说明表里可能叠出了第二条 rule |
+| `nft` 自己起不来或超时（删表那一步） | warn | `traffic: could not run \`nft delete\`` |
 | 状态文件不存在（首次运行） | warn | `traffic: no state file; using the current counter as the new baseline` |
 | 状态文件读不出 | error | `traffic: state file is unreadable; using the current counter as the new baseline` |
 | 初始状态写失败 | warn | `traffic: could not write the initial state` |
