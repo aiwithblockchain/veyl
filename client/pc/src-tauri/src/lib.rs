@@ -2,6 +2,7 @@ use tauri::Manager;
 
 pub mod assemble;
 pub mod commands;
+pub mod connection;
 pub mod error;
 pub mod fetch;
 pub mod fsutil;
