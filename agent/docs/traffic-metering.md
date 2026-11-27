@@ -71,10 +71,13 @@ tick(now)
 │     ├─ 退出码 0，且能解析出 (网卡, 字节) ──→ 计数器
 │     ├─ 退出码 0，但解析不出来 ───────────→ Broken
 │     └─ 退出码非 0
-│          └─ ③ nft list tables
-│               ├─ 也失败 ─────────────────→ Broken
+│          └─ ③ nft -j list tables（JSON，主信号）
 │               ├─ 列表里有 veyl_meter ────→ Broken
-│               └─ 列表里没有 ─────────────→ Missing
+│               └─ 没有 / 拿不到
+│                    └─ ④ nft list tables（文本，兜底）
+│                         ├─ 有 veyl_meter ─→ Broken
+│                         ├─ 没有 ──────────→ Missing
+│                         └─ 命令失败 ──────→ JSON 明确说没有 → Missing；否则 Broken
 │
 ├─ 计数器.网卡 == 默认路由网卡 ────────────→ Ok(字节)     ← 唯一成功出口
 ├─ 计数器.网卡 != 默认路由网卡 → 重建表 ──→ Err
@@ -147,10 +150,9 @@ pending      = pending + delta
 
 | # | 项 | 后果 | 处理 |
 |---|---|---|---|
-| 1 | 判 `Missing` 依赖 `nft list tables` 的文本格式 `table inet veyl_meter` | 假阴性 → 每 30 秒重建一次表（每窗口至少 6 个 `nft` 进程：读表 1 + 列表 1 + 重建 4，外加 1 个 `ip`）、计量实际停摆、**不自愈**；但每轮都报读失败，不再静默，方向是**少收费**不是多收 | 改用 `nft -j list tables` 解析 JSON（与 `parse_counter` 同一类假设）。**不要**加重建冷却：那会掩盖真正的删除，还引入新的可变状态 |
-| 2 | `nft list tables` / `nft -j list tables` 的真实输出**未在真机验证过** | 同上 | 在 Linux 节点上跑一次这两个命令，把输出样例补进本节，然后删掉本行 |
+| 1 | `nft -j list tables` 与 `nft list tables` 的真实输出**都未在真机验证过**（2026-11-27 起判定为 JSON 优先、文本兜底，任一信号说「表在」就不重建） | 只有**没有任何信号给出「表在」**时才判 `Missing`，共三种组合：① JSON 说没有 + 文本说没有；② JSON 拿不到 + 文本说没有；③ JSON 说没有 + 文本命令失败。后两种**只需一个信号出问题**（另一个是「没答案」而不是「假阴性」）。误判后果：每 30 秒重建一次表、计量实际停摆、**不自愈**；但每轮都报读失败，方向是**少收费**不是多收 | 在 Linux 节点上跑一次 `nft list tables` 和 `nft -j list tables`，把输出样例补进本节；与代码里的假设不符就按真实格式修正解析，然后删掉本行 |
 
-第 1 项的兜底：判 `Missing` 之前会把 `nft list tables` 的**真实输出**打进 info 日志，假设错了每轮都看得见。
+判 `Missing` 之前会把两个列表的真实输出打进 info 日志，假设错了每轮都看得见。
 
 这一项与「二元结果」正交，单独开待办，不绑在同一次评审和回滚里。
 
@@ -161,7 +163,8 @@ pending      = pending + delta
 | 事件 | 级别 | 消息文本 |
 |---|---|---|
 | 读失败（跳过本窗口） | warn | `traffic: counter read failed; skipping this window` |
-| 表不存在，即将创建 | info | `traffic: no counter table; creating it`（带 `listing=` 真实输出） |
+| 表不存在（两个列表都说没有） | info | `traffic: no counter table; creating it`（带 `json_listing=` 和 `listing=`） |
+| 表不存在（JSON 说没有，但文本列表不可用） | **warn** | 同一句消息，只带 `json_listing=`——这是唯一「文本列表拿不到却仍然重建」的路径，要让人看得见 |
 | 网卡变了，重建 | info | `traffic: counter follows a stale interface; rebuilding` |
 | 表建好 | info | `traffic: created the outbound counter table` |
 | 状态文件不存在（首次运行） | warn | `traffic: no state file; using the current counter as the new baseline` |

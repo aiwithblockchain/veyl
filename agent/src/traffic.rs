@@ -409,32 +409,65 @@ impl TrafficMeter {
         // without nftables, or a permission problem, must not be mistaken for
         // "this node has never been set up". (A missing binary never reaches
         // here: `Host::run` returns Err and `?` short-circuits.)
-        let listing = self
+        //
+        // The JSON listing is the primary signal: the text one has no
+        // machine-readable contract, and a false negative there rebuilds the
+        // table every window, resetting the counter while only logging info.
+        let json_listing = self
             .host
-            .run("nft", &["list".into(), "tables".into()])
+            .run("nft", &["-j".into(), "list".into(), "tables".into()])
             .await?;
-        if !listing.success() {
-            return Ok(TableRead::Broken(format!(
-                "`nft list table` failed ({}); `nft list tables` failed too ({})",
-                snippet(&out.summary()),
-                snippet(&listing.summary())
-            )));
-        }
-        if lists_table(&listing.stdout) {
+        let json_verdict = if json_listing.success() {
+            json_lists_table(&json_listing.stdout)
+        } else {
+            None
+        };
+        if json_verdict == Some(true) {
             return Ok(TableRead::Broken(format!(
                 "`nft list table` failed while the table exists: {}",
                 snippet(&out.summary())
             )));
         }
-        // This is the one assumption the fix rests on: that `nft list tables`
-        // prints `table inet veyl_meter`. It cannot be checked offline, so log
-        // what we actually saw — a false negative here would recreate the
-        // table every window and quietly go back to reporting zero.
-        tracing::info!(
-            listing = %snippet(&listing.stdout),
-            "traffic: no counter table; creating it"
-        );
-        Ok(TableRead::Missing)
+
+        // Text listing: the fallback when the JSON command fails or its output
+        // is not the shape we expect. It is also consulted when the JSON parsed
+        // but did not list the table — either signal saying "present" is enough
+        // to keep us from rebuilding over a table that is really there.
+        let listing = self
+            .host
+            .run("nft", &["list".into(), "tables".into()])
+            .await?;
+        if listing.success() {
+            if lists_table(&listing.stdout) {
+                return Ok(TableRead::Broken(format!(
+                    "`nft list table` failed while the table exists: {}",
+                    snippet(&out.summary())
+                )));
+            }
+            tracing::info!(
+                json_listing = %snippet(&json_listing.stdout),
+                listing = %snippet(&listing.stdout),
+                "traffic: no counter table; creating it"
+            );
+            return Ok(TableRead::Missing);
+        }
+        // No usable text listing. A JSON that parsed and explicitly did not
+        // list the table is still an answer; only two unusable listings are
+        // reason to leave the counter alone. This is the one Missing path that
+        // rebuilds on a single signal, so it is a warn: someone should see that
+        // the text listing was unavailable when the counter was recreated.
+        if json_verdict == Some(false) {
+            tracing::warn!(
+                json_listing = %snippet(&json_listing.stdout),
+                "traffic: no counter table; creating it"
+            );
+            return Ok(TableRead::Missing);
+        }
+        Ok(TableRead::Broken(format!(
+            "`nft list table` failed ({}); `nft list tables` failed too ({})",
+            snippet(&out.summary()),
+            snippet(&listing.summary())
+        )))
     }
 
     async fn rebuild(&self, iface: &str) -> Result<()> {
@@ -487,7 +520,23 @@ fn snippet(stdout: &str) -> String {
     out
 }
 
-/// `nft list tables` prints one `table <family> <name>` line per table.
+/// `nft -j list tables` → whether our table is listed.
+///
+/// `None` means the output is not the JSON shape we expect, so the caller must
+/// fall back to [`lists_table`]. Only `Some(false)` is an explicit "not there".
+fn json_lists_table(json: &str) -> Option<bool> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let entries = value.get("nftables")?.as_array()?;
+    Some(entries.iter().any(|entry| {
+        entry.get("table").is_some_and(|table| {
+            table.get("family").and_then(Value::as_str) == Some("inet")
+                && table.get("name").and_then(Value::as_str) == Some(TABLE)
+        })
+    }))
+}
+
+/// `nft list tables` prints one `table <family> <name>` line per table. Used
+/// only when the JSON listing is unavailable; its format has no contract.
 fn lists_table(stdout: &str) -> bool {
     let want = format!("table inet {TABLE}");
     stdout.lines().any(|line| line.trim() == want)
@@ -623,6 +672,20 @@ mod tests {
         format!(
             r#"{{"nftables":[{{"metainfo":{{"version":"1.0.9","release_name":"x"}}}},{{"table":{{"family":"inet","name":"veyl_meter"}}}},{{"chain":{{"family":"inet","table":"veyl_meter","name":"out","type":"filter","hook":"output","prio":0,"policy":"accept"}}}},{{"rule":{{"family":"inet","table":"veyl_meter","chain":"out","expr":[{{"match":{{"op":"==","left":{{"meta":{{"key":"oifname"}}}},"right":"{iface}"}}}},{{"counter":{{"packets":7,"bytes":{bytes}}}}}]}}}}]}}"#
         )
+    }
+
+    /// What `nft -j list tables` is assumed to print for a node that has our
+    /// table. This shape is unverified on a real Linux host.
+    fn nft_tables_json() -> String {
+        r#"{"nftables":[{"metainfo":{"version":"1.0.9","release_name":"x"}},{"table":{"family":"inet","name":"veyl_meter"}}]}"#.to_string()
+    }
+
+    fn nft_calls(host: &FakeHost) -> Vec<Vec<String>> {
+        host.commands()
+            .into_iter()
+            .filter(|(program, _)| program == "nft")
+            .map(|(_, args)| args)
+            .collect()
     }
 
     fn setup(name: &str) -> (PathBuf, Arc<FakeHost>, Arc<RecordingControl>) {
@@ -905,9 +968,11 @@ mod tests {
             "nft",
             &[
                 (0, &nft_json("ens3", 1_000), ""),
-                // The read fails, but `nft list tables` shows the table is there.
+                // The read fails, but the JSON listing shows the table is there.
                 (1, "", "Operation not permitted"),
-                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+                (0, &nft_tables_json(), ""),
+                (1, "", "Operation not permitted"),
+                (0, &nft_tables_json(), ""),
             ],
         );
         let meter = TrafficMeter::new(
@@ -975,6 +1040,8 @@ mod tests {
             &[
                 // First window: the table is not there.
                 (1, "", "No such file or directory"),
+                // `nft -j list tables` agrees: only metainfo.
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
                 (0, "table inet filter\n", ""),
                 // The rebuild issues four calls of its own: delete, add table,
                 // add chain, add rule.
@@ -1011,6 +1078,231 @@ mod tests {
             state.pending_bytes, 0,
             "the first window after the rebuild is adopted as the baseline"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_json_listing_that_names_the_table_is_not_missing() {
+        let (dir, host, _control) = setup("json-present");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (0, &nft_tables_json(), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a broken read is not a reading");
+        assert_eq!(rebuilds(&host), 0, "a listed table is never recreated");
+        let calls = nft_calls(&host);
+        assert_eq!(calls.len(), 2, "the text listing is not consulted");
+        assert_eq!(calls[1], vec!["-j", "list", "tables"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_json_listing_without_the_table_falls_back_to_text_and_rebuilds() {
+        let (dir, host, _control) = setup("json-absent");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
+        assert_eq!(rebuilds(&host), 1, "both listings agree the table is gone");
+        let calls = nft_calls(&host);
+        assert_eq!(
+            calls.len(),
+            7,
+            "read + JSON listing + text listing + 4 rebuilds"
+        );
+        assert_eq!(calls[1], vec!["-j", "list", "tables"]);
+        assert_eq!(calls[2], vec!["list", "tables"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_json_listing_with_no_text_table_is_missing() {
+        let (dir, host, _control) = setup("json-list-failed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (1, "", "unknown option -- -j"),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_json_listing_with_a_text_table_is_broken() {
+        let (dir, host, _control) = setup("text-present");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (1, "", "unknown option -- -j"),
+                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 0, "the text fallback saw the table");
+        assert_eq!(nft_calls(&host).len(), 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_explicit_json_absence_with_an_unusable_text_listing_is_missing() {
+        let (dir, host, _control) = setup("json-absent-text-failed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                // The JSON listing parsed and explicitly has no table for us.
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                // The text listing cannot be used at all. JSON is the only
+                // signal left, and it said "not there".
+                (1, "", "Operation not permitted"),
+                // The rebuild issues four calls of its own: delete, add table,
+                // add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
+        assert_eq!(
+            rebuilds(&host),
+            1,
+            "an explicit JSON absence is enough to rebuild even when the text listing fails"
+        );
+        assert_eq!(nft_calls(&host).len(), 7);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_table_in_another_family_is_not_ours() {
+        let (dir, host, _control) = setup("wrong-family");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (
+                    0,
+                    r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"ip","name":"veyl_meter"}}]}"#,
+                    "",
+                ),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 1, "`table ip` is a different table");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_non_json_listing_falls_back_to_the_text_check() {
+        let (dir, host, _control) = setup("not-json");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                // Exit 0 but not JSON: the fallback has to answer.
+                (0, "table inet veyl_meter\n", ""),
+                (0, "table inet veyl_meter\n", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 0);
+        assert_eq!(nft_calls(&host).len(), 3);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1124,7 +1416,7 @@ mod tests {
             &[
                 (0, &nft_json("ens3", 1_000), ""),
                 (1, "", "Operation not permitted"),
-                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+                (0, &nft_tables_json(), ""),
                 (0, &nft_json("ens3", 1_600), ""),
             ],
         );
@@ -1195,6 +1487,29 @@ mod tests {
         assert!(!lists_table("table inet filter\n"));
         assert!(!lists_table(""));
         assert!(!lists_table("table ip veyl_meter\n"));
+    }
+
+    #[test]
+    fn the_json_table_listing_is_recognised() {
+        assert_eq!(json_lists_table(&nft_tables_json()), Some(true));
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#),
+            Some(false)
+        );
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"table":{"family":"ip","name":"veyl_meter"}}]}"#),
+            Some(false)
+        );
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"table":{"family":"inet","name":"other"}}]}"#),
+            Some(false)
+        );
+        // Anything that is not the shape we expect must let the caller fall
+        // back to the text listing rather than claim the table is absent.
+        assert_eq!(json_lists_table("table inet veyl_meter\n"), None);
+        assert_eq!(json_lists_table(""), None);
+        assert_eq!(json_lists_table("{}"), None);
+        assert_eq!(json_lists_table(r#"{"nftables":"nope"}"#), None);
     }
 
     #[test]
