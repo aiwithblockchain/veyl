@@ -858,7 +858,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.state.error": "Error",
   "myservers.state.destroying": "Destroying",
   "myservers.state.destroyed": "Deleted",
-  "myservers.state.gone": "Gone",
+  "myservers.state.gone": "Deleted at the provider",
   "myservers.state.unknown": "Unknown status",
   "myservers.tombstone.word": "Deleted",
   "myservers.tombstone.text":
@@ -888,6 +888,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.paid.expired": "Current period ended; service is running normally",
   "myservers.billing.daily": "{price} per day",
   "myservers.billing.dailyExpired": "{price} per day · {word}",
+  "myservers.billing.providerGone": "Deleted at the provider — no longer billed",
   "myservers.billing.pastDueNoGrace":
     "Balance is short and the last charge failed. Top up within 7 days to keep using it.",
   "myservers.billing.pastDueGrace":
@@ -929,10 +930,11 @@ export const en: Record<MessageKey, string> = {
   "account.remainingDays": "{days} days left",
   "account.stale": "Couldn't refresh. Showing the last known balance.",
   "account.traffic.title": "This month's traffic",
-  "account.traffic.summary": "{percent}% used · {used} / {limit} GiB",
-  "account.traffic.unknown": "Used {used} · limit unknown",
-  "account.traffic.tomorrow": "+{amount} GiB daily at {time}",
-  "account.traffic.near": "Traffic is almost used up",
+  "account.traffic.used": "Used {used}",
+  "account.traffic.usedAccrued": "Used {used} · {accrued} GiB accrued",
+  "account.traffic.rate": " (daily {time} +{amount})",
+  "account.traffic.cap": "Cap {limit} GiB",
+  "account.traffic.unknown": "Limit unknown",
   "account.traffic.over": "Over {over}, charged at $0.02/GiB from balance",
   "account.identity.lost":
     "This device lost its identity and needs to register again. Your account and servers are intact.",
@@ -962,7 +964,7 @@ export const en: Record<MessageKey, string> = {
   "progress.verifying": "Checking that the node is reachable — usually 1–2 minutes.",
   "progress.processing": "Working",
   "progress.waited": "Waited {duration}",
-  "progress.buildTimeout": "Setup timed out — you can destroy and rebuild. It won't be destroyed automatically.",
+  "progress.buildTimeout": "Setup timed out. Creation will finish or fail on its own.",
   "progress.stepOf": "Step {n} of 4",
 
   // Sign in to my servers
@@ -1123,13 +1125,12 @@ export const en: Record<MessageKey, string> = {
   "detail.settleFailed": "The server wasn't activated, so nothing was charged.",
   "detail.topUp": "Top up",
   "detail.destroying": "Destroying…",
-  "detail.destroyConfirmProvisioning":
-    "Cancel creation and destroy this server? The ongoing install will stop.",
   "detail.destroyConfirm":
     "Destroying stops new charges. Unused full days return to your balance; the current day's charge isn't refunded. The configuration loses one node.",
   "detail.confirmDestroy": "Confirm destroy",
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
+  "detail.providerGone": "This server was deleted in the cloud provider's console. It is no longer billed. Destroy it to remove it from the list.",
   "detail.rotate": "Change connection password",
   "detail.rotateConfirm":
     "After changing it, the old port and password stop working immediately and the node drops briefly. Re-import the profile on your phone; the desktop app refreshes on its own.",
@@ -1742,6 +1743,8 @@ export const en: Record<MessageKey, string> = {
   "error.reason.serverGone": "That server wasn't found.",
   "error.reason.syncInFlight": "A node config sync is already running.",
   "error.reason.serverBusy": "The server is busy. Try again later.",
+  "error.reason.serverProvisioning":
+    "This server is still being created and can't be destroyed yet. Setup will finish or fail on its own.",
   "error.reason.providerUnavailable": "The service is temporarily unavailable. Try again later.",
   "error.reason.unexpectedStatus": "The service returned an unexpected response ({status}).",
   "error.reason.unexpectedCode": "The service returned an unexpected result.",

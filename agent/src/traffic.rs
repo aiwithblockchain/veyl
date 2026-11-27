@@ -12,8 +12,9 @@
 //!   baseline. Some traffic is then under-counted; nothing is counted twice.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ use serde_json::Value;
 
 use crate::auth::now_unix;
 use crate::config::TrafficConfig;
-use crate::control::{ControlApi, ControlError};
+use crate::control::ControlApi;
 use crate::host::Host;
 
 /// Dedicated table: the host's own firewall is never touched, and `nft` only
@@ -121,8 +122,6 @@ pub struct TrafficMeter {
     store: TrafficStore,
     params: TrafficConfig,
     state: Mutex<Option<TrafficState>>,
-    /// 409 from the control plane: the server is gone, stop reporting.
-    stopped: AtomicBool,
     /// Consecutive failed reports, reset by the next 2xx. Drives a single info
     /// line when reporting recovers; without it the log simply goes quiet and
     /// a healed outage looks the same as a wedged one.
@@ -142,13 +141,8 @@ impl TrafficMeter {
             store: TrafficStore::new(state_path),
             params,
             state: Mutex::new(None),
-            stopped: AtomicBool::new(false),
             report_failures: AtomicU32::new(0),
         }
-    }
-
-    pub fn stopped(&self) -> bool {
-        self.stopped.load(Ordering::Relaxed)
     }
 
     pub async fn tick_now(&self) {
@@ -158,10 +152,7 @@ impl TrafficMeter {
     /// One 30-second window: read the counter, accumulate, then save and/or
     /// report if due. Never returns an error; every failure is a log line.
     pub async fn tick(&self, now: u64) {
-        if self.stopped() {
-            return;
-        }
-        let counter = match self.read_counter().await {
+        let counter = match read_counter(self.host.as_ref()).await {
             Ok(counter) => counter,
             Err(e) => {
                 tracing::warn!(error = %e, "traffic: counter read failed; skipping this window");
@@ -176,7 +167,10 @@ impl TrafficMeter {
             }
             let state = guard.as_mut().expect("seeded above");
             // A smaller reading means the table was recreated: everything the
-            // new counter holds is new traffic.
+            // new counter holds is new traffic. This branch is the *only* thing
+            // that absorbs a rebuild — `read_counter` reports the window it
+            // rebuilds in as a failure, so nothing else carries those bytes.
+            // Removing or "simplifying" it double-counts or drops a rebuild.
             let delta = if counter < state.counter_last {
                 counter
             } else {
@@ -239,15 +233,14 @@ impl TrafficMeter {
                 }
                 tracing::debug!(seq, delta_bytes, "traffic: reported");
             }
-            Err(ControlError::Status { status: 409, .. }) => {
-                self.stopped.store(true, Ordering::Relaxed);
-                tracing::error!(
-                    event = "traffic_report_stopped",
-                    "the control plane says this server is gone (409); traffic reporting stops"
-                );
-            }
             Err(e) => {
                 let failures = self.report_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                // 409 `server_destroyed` is deliberately not special-cased. The
+                // control plane only sets `destroyed_at` after the droplet is
+                // gone, so a live agent should never see it; when it does, our
+                // records are wrong while the machine still serves traffic. A
+                // one-way "stop reporting" latch would hide that leak for good,
+                // so the next window simply tries again.
                 // Keep the attempt and the seq untouched: the next window
                 // resends exactly this batch, so a report the control plane did
                 // record (but whose response was lost) is deduped instead of
@@ -328,148 +321,263 @@ impl TrafficMeter {
     fn report_failures(&self) -> u32 {
         self.report_failures.load(Ordering::Relaxed)
     }
+}
 
-    /// Resolve the interface on every read: a default-route change would
-    /// otherwise freeze the counter without any error.
-    async fn read_counter(&self) -> Result<u64> {
-        let iface = self.default_iface().await?;
-        match self.read_table().await? {
-            TableRead::Counter {
-                iface: rule_iface,
-                bytes,
-            } if rule_iface == iface => Ok(bytes),
-            TableRead::Counter {
-                iface: rule_iface, ..
-            } => {
-                tracing::info!(
-                    rule_iface,
-                    iface = %iface,
-                    "traffic: counter follows a stale interface; rebuilding"
-                );
-                self.rebuild(&iface).await?;
-                // A fresh table starts at zero; the negative-delta branch takes
-                // over on the next window.
-                Ok(0)
-            }
-            TableRead::Missing => {
-                self.rebuild(&iface).await?;
-                Ok(0)
-            }
-            TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
-        }
-    }
-
-    async fn default_iface(&self) -> Result<String> {
-        let out = self
-            .host
-            .run(
-                "ip",
-                &["route".into(), "show".into(), "default".into()],
-            )
-            .await?;
-        if !out.success() {
-            bail!(
-                "ip route show default exited with {}: {}",
-                out.status.unwrap_or(-1),
-                out.summary()
+/// Resolve the interface on every read: a default-route change would otherwise
+/// freeze the counter without any error.
+///
+/// Exactly two outcomes: `Ok(bytes)` is a real reading of the counter, and
+/// `Err` means this window has no reading at all. A rebuild is a repair, not a
+/// reading — the window it happens in is reported as a failure and the next
+/// window picks the new counter up through the negative-delta branch in
+/// `TrafficMeter::tick`.
+async fn read_counter(host: &dyn Host) -> Result<u64> {
+    let iface = default_iface(host).await?;
+    match read_table(host).await? {
+        TableRead::Counter {
+            iface: rule_iface,
+            bytes,
+        } if rule_iface == iface => Ok(bytes),
+        TableRead::Counter {
+            iface: rule_iface, ..
+        } => {
+            tracing::info!(
+                rule_iface,
+                iface = %iface,
+                "traffic: counter follows a stale interface; rebuilding"
             );
+            rebuild(host, &iface, true)
+                .await
+                .with_context(|| "recreating the counter after a stale interface")?;
+            bail!("counter followed a stale interface; recreated, skipping this window")
         }
-        parse_default_iface(&out.stdout)
-            .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
+        TableRead::Missing => {
+            rebuild(host, &iface, false)
+                .await
+                .with_context(|| "creating the counter table")?;
+            bail!("counter table was missing; recreated, skipping this window")
+        }
+        TableRead::Incomplete => {
+            tracing::warn!("traffic: counter table is incomplete; recreating");
+            rebuild(host, &iface, true)
+                .await
+                .with_context(|| "completing an incomplete counter table")?;
+            bail!("counter table was incomplete; recreated, skipping this window")
+        }
+        TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
+    }
+}
+
+/// Startup probe: prove the counter can be read before enrollment, so a node
+/// that cannot meter fails its build instead of reporting zero bytes forever.
+///
+/// Retries until one attempt succeeds or the budget is spent. A cold node needs
+/// the second round (the first creates the table and is a failed read); a
+/// restored node normally answers on the first.
+pub async fn probe(host: &dyn Host) -> Result<u64> {
+    const ATTEMPTS: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_secs(1);
+    const BUDGET: Duration = Duration::from_secs(25);
+
+    let attempts = async {
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 1..=ATTEMPTS {
+            match read_counter(host).await {
+                Ok(bytes) => {
+                    // Logged on success too: on a restored node nothing else
+                    // records that the probe ran at all.
+                    tracing::info!(bytes, attempts = attempt, "metering probe ok");
+                    return Ok(bytes);
+                }
+                Err(e) => {
+                    tracing::debug!(attempt, error = %e, "traffic: metering probe attempt failed");
+                    last = Some(e);
+                }
+            }
+            if attempt < ATTEMPTS {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+        Err(last.expect("at least one attempt ran"))
+    };
+
+    // `Host::run` gives a single command 30 s; this bounds the whole probe
+    // below that, and `kill_on_drop` reclaims a child still running.
+    match tokio::time::timeout(BUDGET, attempts).await {
+        Ok(result) => result,
+        Err(_) => bail!("metering probe timed out after {}s", BUDGET.as_secs()),
+    }
+}
+
+async fn default_iface(host: &dyn Host) -> Result<String> {
+    let out = host
+        .run("ip", &["route".into(), "show".into(), "default".into()])
+        .await?;
+    if !out.success() {
+        bail!(
+            "ip route show default exited with {}: {}",
+            out.status.unwrap_or(-1),
+            out.summary()
+        );
+    }
+    parse_default_iface(&out.stdout)
+        .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
+}
+
+/// One read of the counter table, classified so that only a genuinely absent
+/// table is rebuilt. A failed or unparsable read must never be folded into
+/// `Missing`: rebuilding resets the counter, so doing it on every window would
+/// report zero bytes forever, with no error at all.
+async fn read_table(host: &dyn Host) -> Result<TableRead> {
+    let out = host
+        .run(
+            "nft",
+            &[
+                "-j".into(),
+                "list".into(),
+                "table".into(),
+                "inet".into(),
+                TABLE.into(),
+            ],
+        )
+        .await?;
+    if out.success() {
+        return Ok(match parse_counter(&out.stdout) {
+            Some((iface, bytes)) => TableRead::Counter { iface, bytes },
+            None if table_is_incomplete(&out.stdout) => TableRead::Incomplete,
+            None => TableRead::Broken(format!(
+                "unparsable counter output: {}",
+                snippet(&out.stdout)
+            )),
+        });
+    }
+    // The command failed. Ask whether the table exists at all: a kernel
+    // without nftables, or a permission problem, must not be mistaken for
+    // "this node has never been set up". (A missing binary never reaches
+    // here: `Host::run` returns Err and `?` short-circuits.)
+    //
+    // The JSON listing is the primary signal: the text one has no
+    // machine-readable contract, and a false negative there rebuilds the
+    // table every window, resetting the counter while only logging info.
+    let json_listing = host
+        .run("nft", &["-j".into(), "list".into(), "tables".into()])
+        .await?;
+    let json_verdict = if json_listing.success() {
+        json_lists_table(&json_listing.stdout)
+    } else {
+        None
+    };
+    if json_verdict == Some(true) {
+        return Ok(TableRead::Broken(format!(
+            "`nft list table` failed while the table exists: {}",
+            snippet(&out.summary())
+        )));
     }
 
-    /// One read of the counter table, classified so that only a genuinely
-    /// absent table is rebuilt. A failed or unparsable read must never be
-    /// folded into `Missing`: rebuilding resets the counter, so doing it on
-    /// every window would report zero bytes forever, with no error at all.
-    async fn read_table(&self) -> Result<TableRead> {
-        let out = self
-            .host
-            .run(
-                "nft",
-                &[
-                    "-j".into(),
-                    "list".into(),
-                    "table".into(),
-                    "inet".into(),
-                    TABLE.into(),
-                ],
-            )
-            .await?;
-        if out.success() {
-            return Ok(match parse_counter(&out.stdout) {
-                Some((iface, bytes)) => TableRead::Counter { iface, bytes },
-                None => TableRead::Broken(format!(
-                    "unparsable counter output: {}",
-                    snippet(&out.stdout)
-                )),
-            });
-        }
-        // The command failed. Ask whether the table exists at all: a kernel
-        // without nftables, or a permission problem, must not be mistaken for
-        // "this node has never been set up". (A missing binary never reaches
-        // here: `Host::run` returns Err and `?` short-circuits.)
-        let listing = self
-            .host
-            .run("nft", &["list".into(), "tables".into()])
-            .await?;
-        if !listing.success() {
-            return Ok(TableRead::Broken(format!(
-                "`nft list table` failed ({}); `nft list tables` failed too ({})",
-                snippet(&out.summary()),
-                snippet(&listing.summary())
-            )));
-        }
+    // Text listing: the fallback when the JSON command fails or its output
+    // is not the shape we expect. It is also consulted when the JSON parsed
+    // but did not list the table — either signal saying "present" is enough
+    // to keep us from rebuilding over a table that is really there.
+    let listing = host.run("nft", &["list".into(), "tables".into()]).await?;
+    if listing.success() {
         if lists_table(&listing.stdout) {
             return Ok(TableRead::Broken(format!(
                 "`nft list table` failed while the table exists: {}",
                 snippet(&out.summary())
             )));
         }
-        // This is the one assumption the fix rests on: that `nft list tables`
-        // prints `table inet veyl_meter`. It cannot be checked offline, so log
-        // what we actually saw — a false negative here would recreate the
-        // table every window and quietly go back to reporting zero.
         tracing::info!(
+            json_listing = %snippet(&json_listing.stdout),
             listing = %snippet(&listing.stdout),
             "traffic: no counter table; creating it"
         );
-        Ok(TableRead::Missing)
+        return Ok(TableRead::Missing);
     }
-
-    async fn rebuild(&self, iface: &str) -> Result<()> {
-        // Deleting a missing table fails; that is the expected first-run path.
-        let _ = self
-            .host
-            .run(
-                "nft",
-                &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
-            )
-            .await;
-        let steps: [&[&str]; 3] = [
-            &["add", "table", "inet", TABLE],
-            &[
-                "add", "chain", "inet", TABLE, CHAIN, "{", "type", "filter", "hook", "output",
-                "priority", "0", ";", "policy", "accept", ";", "}",
-            ],
-            &["add", "rule", "inet", TABLE, CHAIN, "oifname", iface, "counter"],
-        ];
-        for step in steps {
-            let args: Vec<String> = step.iter().map(|s| s.to_string()).collect();
-            let out = self.host.run("nft", &args).await?;
-            if !out.success() {
-                bail!("nft {} failed: {}", args.join(" "), out.summary());
-            }
-        }
-        tracing::info!(iface, "traffic: created the outbound counter table");
-        Ok(())
+    // No usable text listing. A JSON that parsed and explicitly did not
+    // list the table is still an answer; only two unusable listings are
+    // reason to leave the counter alone. This is the one Missing path that
+    // rebuilds on a single signal, so it is a warn: someone should see that
+    // the text listing was unavailable when the counter was recreated.
+    if json_verdict == Some(false) {
+        tracing::warn!(
+            json_listing = %snippet(&json_listing.stdout),
+            "traffic: no counter table; creating it"
+        );
+        return Ok(TableRead::Missing);
     }
+    Ok(TableRead::Broken(format!(
+        "`nft list table` failed ({}); `nft list tables` failed too ({})",
+        snippet(&out.summary()),
+        snippet(&listing.summary())
+    )))
 }
 
-/// What one counter read told us. Only `Missing` may rebuild the table.
+/// `table_expected` is true when the caller knows a table is there and the
+/// delete has to succeed. It only changes how a failed delete is logged:
+/// on the first run "no such file" is normal, but a table that survives the
+/// delete means the `add rule` below appends a second counter instead of
+/// replacing the old one.
+async fn rebuild(host: &dyn Host, iface: &str, table_expected: bool) -> Result<()> {
+    match host
+        .run(
+            "nft",
+            &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
+        )
+        .await
+    {
+        Ok(out) if out.success() => {
+            tracing::debug!(
+                result = %snippet(&out.summary()),
+                "traffic: dropped the old counter table"
+            );
+        }
+        Ok(out) => {
+            let result = snippet(&out.summary());
+            if table_expected {
+                tracing::warn!(
+                    result = %result,
+                    "traffic: could not drop the existing counter table; the new rule may be \
+                     appended instead of replacing it"
+                );
+            } else {
+                tracing::debug!(result = %result, "traffic: no counter table to drop");
+            }
+        }
+        // `Host::run` itself failed (spawn error, timeout). The `add` below
+        // fails too, so this is recorded rather than acted on.
+        Err(e) => tracing::warn!(error = %e, "traffic: could not run `nft delete`"),
+    }
+    let steps: [&[&str]; 3] = [
+        &["add", "table", "inet", TABLE],
+        &[
+            "add", "chain", "inet", TABLE, CHAIN, "{", "type", "filter", "hook", "output",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ],
+        &[
+            "add", "rule", "inet", TABLE, CHAIN, "oifname", iface, "counter",
+        ],
+    ];
+    for step in steps {
+        let args: Vec<String> = step.iter().map(|s| s.to_string()).collect();
+        let out = host.run("nft", &args).await?;
+        if !out.success() {
+            bail!("nft {} failed: {}", args.join(" "), out.summary());
+        }
+    }
+    tracing::info!(iface, "traffic: created the outbound counter table");
+    Ok(())
+}
+
+/// What one counter read told us. `Missing` and `Incomplete` may rebuild the
+/// table; `Broken` never does.
 enum TableRead {
     /// The table is not there — a first run, or someone deleted it.
     Missing,
+    /// The table exists but holds no rule: a rebuild was interrupted (the agent
+    /// was killed between `add table` and `add rule`). There is no counter, so
+    /// there are no bytes to lose and recreating it is safe. Without this arm
+    /// the agent would read `Broken` every window and never recover.
+    Incomplete,
     Counter { iface: String, bytes: u64 },
     /// `nft` ran but its output cannot be used, or it failed while the table
     /// exists. Rebuilding here would zero the counter every window.
@@ -487,10 +595,58 @@ fn snippet(stdout: &str) -> String {
     out
 }
 
-/// `nft list tables` prints one `table <family> <name>` line per table.
+/// `nft -j list tables` → whether our table is listed.
+///
+/// `None` means the output is not the JSON shape we expect, so the caller must
+/// fall back to [`lists_table`]. Only `Some(false)` is an explicit "not there".
+fn json_lists_table(json: &str) -> Option<bool> {
+    let value: Value = serde_json::from_str(json).ok()?;
+    let entries = value.get("nftables")?.as_array()?;
+    Some(entries.iter().any(|entry| {
+        entry.get("table").is_some_and(|table| {
+            table.get("family").and_then(Value::as_str) == Some("inet")
+                && table.get("name").and_then(Value::as_str) == Some(TABLE)
+        })
+    }))
+}
+
+/// `nft list tables` prints one `table <family> <name>` line per table. Used
+/// only when the JSON listing is unavailable; its format has no contract.
 fn lists_table(stdout: &str) -> bool {
     let want = format!("table inet {TABLE}");
     stdout.lines().any(|line| line.trim() == want)
+}
+
+/// A table that exists but has no rule: an interrupted rebuild left it behind.
+///
+/// Verified on a real node: both a bare table and a table holding only a chain
+/// make `nft -j list table` exit 0 and return `metainfo` + `table` (+ `chain`),
+/// with no `rule` entry. See `agent/docs/traffic-metering.md` §5.
+///
+/// The schema gate is deliberate. If a future nft reports a different shape, we
+/// must not read "I could not find a rule" as "there is no rule" — that would
+/// recreate a table that may be counting traffic.
+fn table_is_incomplete(json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
+        return false;
+    };
+    let Some(entries) = value.get("nftables").and_then(Value::as_array) else {
+        return false;
+    };
+    let schema_ok = entries.iter().any(|entry| {
+        entry
+            .pointer("/metainfo/json_schema_version")
+            .and_then(Value::as_i64)
+            == Some(1)
+    });
+    let our_table = entries.iter().any(|entry| {
+        entry.get("table").is_some_and(|table| {
+            table.get("family").and_then(Value::as_str) == Some("inet")
+                && table.get("name").and_then(Value::as_str) == Some(TABLE)
+        })
+    });
+    let has_rule = entries.iter().any(|entry| entry.get("rule").is_some());
+    schema_ok && our_table && !has_rule
 }
 
 /// `ip route show default` → the `dev` of the first default route. Names like
@@ -554,7 +710,7 @@ pub fn parse_counter(json: &str) -> Option<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::{DesiredState, ReportRequest};
+    use crate::control::{ControlError, DesiredState, ReportRequest};
     use crate::test_support::FakeHost;
     use async_trait::async_trait;
 
@@ -565,6 +721,8 @@ mod tests {
         /// Record the report, then fail the request: the control plane counted
         /// it but the agent never sees the 2xx.
         lose_response: Mutex<bool>,
+        /// The control plane says the server row is destroyed (409).
+        destroyed: Mutex<bool>,
     }
 
     #[async_trait]
@@ -578,6 +736,12 @@ mod tests {
         }
 
         async fn traffic(&self, seq: u64, delta_bytes: u64) -> Result<(), ControlError> {
+            if *self.destroyed.lock().unwrap() {
+                return Err(ControlError::Status {
+                    status: 409,
+                    body: r#"{"ok":false,"reason":"server_destroyed"}"#.into(),
+                });
+            }
             if *self.lose_response.lock().unwrap() {
                 self.reports.lock().unwrap().push((seq, delta_bytes));
                 return Err(ControlError::Transport("response lost".into()));
@@ -615,6 +779,32 @@ mod tests {
         format!(
             r#"{{"nftables":[{{"metainfo":{{"version":"1.0.9","release_name":"x"}}}},{{"table":{{"family":"inet","name":"veyl_meter"}}}},{{"chain":{{"family":"inet","table":"veyl_meter","name":"out","type":"filter","hook":"output","prio":0,"policy":"accept"}}}},{{"rule":{{"family":"inet","table":"veyl_meter","chain":"out","expr":[{{"match":{{"op":"==","left":{{"meta":{{"key":"oifname"}}}},"right":"{iface}"}}}},{{"counter":{{"packets":7,"bytes":{bytes}}}}}]}}}}]}}"#
         )
+    }
+
+    /// Verbatim `nft -j list tables` from a real node (nft 1.0.9, "Old Doc
+    /// Yak #3"); see `agent/docs/traffic-metering.md` §5.
+    fn nft_tables_json() -> String {
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}]}"#.to_string()
+    }
+
+    fn nft_calls(host: &FakeHost) -> Vec<Vec<String>> {
+        host.commands()
+            .into_iter()
+            .filter(|(program, _)| program == "nft")
+            .map(|(_, args)| args)
+            .collect()
+    }
+
+    /// Verbatim `nft -j list table` from a real node for a table with nothing
+    /// in it (an interrupted rebuild stopped right after `add table`).
+    fn nft_bare_table_json() -> String {
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 7}}]}"#.to_string()
+    }
+
+    /// Verbatim `nft -j list table` from a real node for a table that holds a
+    /// chain but no rule (the rebuild died before `add rule`).
+    fn nft_chain_only_json() -> String {
+        r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 7}}, {"chain": {"family": "inet", "table": "veyl_meter", "name": "out", "handle": 1, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}]}"#.to_string()
     }
 
     fn setup(name: &str) -> (PathBuf, Arc<FakeHost>, Arc<RecordingControl>) {
@@ -897,9 +1087,11 @@ mod tests {
             "nft",
             &[
                 (0, &nft_json("ens3", 1_000), ""),
-                // The read fails, but `nft list tables` shows the table is there.
+                // The read fails, but the JSON listing shows the table is there.
                 (1, "", "Operation not permitted"),
-                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+                (0, &nft_tables_json(), ""),
+                (1, "", "Operation not permitted"),
+                (0, &nft_tables_json(), ""),
             ],
         );
         let meter = TrafficMeter::new(
@@ -967,6 +1159,8 @@ mod tests {
             &[
                 // First window: the table is not there.
                 (1, "", "No such file or directory"),
+                // `nft -j list tables` agrees: only metainfo.
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
                 (0, "table inet filter\n", ""),
                 // The rebuild issues four calls of its own: delete, add table,
                 // add chain, add rule.
@@ -974,8 +1168,8 @@ mod tests {
                 (0, "", ""),
                 (0, "", ""),
                 (0, "", ""),
-                // After the rebuild the counter starts from zero.
-                (0, &nft_json("ens3", 0), ""),
+                // After the rebuild the counter starts from zero and then grows.
+                (0, &nft_json("ens3", 500), ""),
             ],
         );
         let meter = TrafficMeter::new(
@@ -985,12 +1179,316 @@ mod tests {
             params(1_000_000),
         );
 
+        // The window that creates the table is a failed read, not a zero one.
         meter.tick(1_000).await;
-        assert_eq!(meter.snapshot().unwrap().counter_last, 0);
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
         assert_eq!(rebuilds(&host), 1);
 
-        meter.tick(1_030).await; // the rebuilt table reads normally
+        // The next window reads the fresh counter and adopts it as the
+        // baseline: whatever flowed before this point is not counted. That loss
+        // is bounded by one window and only happens on the first install.
+        // The reading is deliberately non-zero so this cannot pass by accident
+        // when the baseline would have been zero anyway.
+        meter.tick(1_030).await;
         assert_eq!(rebuilds(&host), 1, "the next window must not rebuild again");
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.counter_last, 500);
+        assert_eq!(
+            state.pending_bytes, 0,
+            "the first window after the rebuild is adopted as the baseline"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_json_listing_that_names_the_table_is_not_missing() {
+        let (dir, host, _control) = setup("json-present");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (0, &nft_tables_json(), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a broken read is not a reading");
+        assert_eq!(rebuilds(&host), 0, "a listed table is never recreated");
+        let calls = nft_calls(&host);
+        assert_eq!(calls.len(), 2, "the text listing is not consulted");
+        assert_eq!(calls[1], vec!["-j", "list", "tables"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_json_listing_without_the_table_falls_back_to_text_and_rebuilds() {
+        let (dir, host, _control) = setup("json-absent");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
+        assert_eq!(rebuilds(&host), 1, "both listings agree the table is gone");
+        let calls = nft_calls(&host);
+        assert_eq!(
+            calls.len(),
+            7,
+            "read + JSON listing + text listing + 4 rebuilds"
+        );
+        assert_eq!(calls[1], vec!["-j", "list", "tables"]);
+        assert_eq!(calls[2], vec!["list", "tables"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_json_listing_with_no_text_table_is_missing() {
+        let (dir, host, _control) = setup("json-list-failed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (1, "", "unknown option -- -j"),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_json_listing_with_a_text_table_is_broken() {
+        let (dir, host, _control) = setup("text-present");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (1, "", "unknown option -- -j"),
+                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 0, "the text fallback saw the table");
+        assert_eq!(nft_calls(&host).len(), 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_explicit_json_absence_with_an_unusable_text_listing_is_missing() {
+        let (dir, host, _control) = setup("json-absent-text-failed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                // The JSON listing parsed and explicitly has no table for us.
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                // The text listing cannot be used at all. JSON is the only
+                // signal left, and it said "not there".
+                (1, "", "Operation not permitted"),
+                // The rebuild issues four calls of its own: delete, add table,
+                // add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none(), "a rebuild is not a reading");
+        assert_eq!(
+            rebuilds(&host),
+            1,
+            "an explicit JSON absence is enough to rebuild even when the text listing fails"
+        );
+        assert_eq!(nft_calls(&host).len(), 7);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_table_in_another_family_is_not_ours() {
+        let (dir, host, _control) = setup("wrong-family");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (
+                    0,
+                    r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"ip","name":"veyl_meter"}}]}"#,
+                    "",
+                ),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 1, "`table ip` is a different table");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_non_json_listing_falls_back_to_the_text_check() {
+        let (dir, host, _control) = setup("not-json");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                // Exit 0 but not JSON: the fallback has to answer.
+                (0, "table inet veyl_meter\n", ""),
+                (0, "table inet veyl_meter\n", ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            Arc::new(RecordingControl::default()),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert!(meter.snapshot().is_none());
+        assert_eq!(rebuilds(&host), 0);
+        assert_eq!(nft_calls(&host).len(), 3);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_stale_interface_is_a_failed_window_not_a_zero_reading() {
+        let (dir, host, control) = setup("stale-iface");
+        host.queue_command_outputs(
+            "ip",
+            &[
+                (
+                    0,
+                    "default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.5 metric 100\n",
+                    "",
+                ),
+                (
+                    0,
+                    "default via 10.0.0.1 dev eth0 proto dhcp src 10.0.0.6 metric 100\n",
+                    "",
+                ),
+                (
+                    0,
+                    "default via 10.0.0.1 dev eth0 proto dhcp src 10.0.0.6 metric 100\n",
+                    "",
+                ),
+            ],
+        );
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                // The default route moved, but the rule still counts ens3.
+                (0, &nft_json("ens3", 1_000), ""),
+                // The rebuild issues four calls of its own: delete, add table,
+                // add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // The rebuilt table counts the new interface from zero.
+                (0, &nft_json("eth0", 700), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // baseline 1_000 on ens3
+        meter.tick(1_030).await; // stale interface → rebuild → failed window
+
+        assert_eq!(rebuilds(&host), 1);
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 0);
+        assert_eq!(
+            state.counter_last, 1_000,
+            "a rebuild is not a reading, so the baseline is untouched"
+        );
+
+        meter.tick(1_060).await;
+        assert_eq!(
+            meter.snapshot().unwrap().pending_bytes,
+            700,
+            "700 < 1_000, so the negative-delta branch carries the whole new counter"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1037,7 +1535,7 @@ mod tests {
             &[
                 (0, &nft_json("ens3", 1_000), ""),
                 (1, "", "Operation not permitted"),
-                (0, "table inet filter\ntable inet veyl_meter\n", ""),
+                (0, &nft_tables_json(), ""),
                 (0, &nft_json("ens3", 1_600), ""),
             ],
         );
@@ -1062,12 +1560,177 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn a_destroyed_row_does_not_stop_reporting() {
+        let (dir, host, control) = setup("destroyed");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_json("ens3", 1_000), ""),
+                (0, &nft_json("ens3", 1_200), ""),
+                (0, &nft_json("ens3", 1_350), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(100),
+        );
+
+        *control.destroyed.lock().unwrap() = true;
+        meter.tick(1_000).await; // baseline
+        meter.tick(1_030).await; // +200 → 409
+
+        let state = meter.snapshot().unwrap();
+        assert_eq!(state.pending_bytes, 200, "the batch is kept");
+        assert_eq!(state.seq, 1_000, "a 409 does not advance the sequence");
+        assert_eq!(meter.report_failures(), 1);
+        assert!(control.reports.lock().unwrap().is_empty());
+
+        // The control plane's records disagree with reality and the machine is
+        // still serving, so the next window must try again instead of going
+        // quiet forever.
+        *control.destroyed.lock().unwrap() = false;
+        meter.tick(1_060).await;
+
+        assert_eq!(*control.reports.lock().unwrap(), vec![(1_000, 200)]);
+        assert_eq!(meter.report_failures(), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_rebuild_is_recreated_instead_of_wedging() {
+        let (dir, host, control) = setup("incomplete");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                // A previous rebuild died right after `add table`.
+                (0, &nft_bare_table_json(), ""),
+                // The rebuild issues four calls of its own.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // Then the table reads normally.
+                (0, &nft_json("ens3", 400), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await; // incomplete → recreate → failed window
+        assert_eq!(rebuilds(&host), 1, "an incomplete table must be recreated");
+        assert!(meter.snapshot().is_none());
+
+        meter.tick(1_030).await;
+        assert_eq!(rebuilds(&host), 1, "and only once");
+        assert_eq!(meter.snapshot().unwrap().counter_last, 400);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_table_with_a_chain_but_no_rule_is_also_recreated() {
+        let (dir, host, control) = setup("chain-only");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (0, &nft_chain_only_json(), ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, &nft_json("ens3", 500), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        assert_eq!(rebuilds(&host), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_json_schema_is_never_treated_as_an_empty_table() {
+        // Same shape, but a schema version we have not verified. Recreating on
+        // this would destroy a table that may well be counting traffic.
+        let json = nft_bare_table_json().replace(r#""json_schema_version": 1"#, r#""json_schema_version": 2"#);
+        let (dir, host, control) = setup("schema-gate");
+        host.queue_command_outputs("nft", &[(0, &json, "")]);
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control.clone(),
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+
+        assert_eq!(rebuilds(&host), 0, "an unknown schema must never rebuild");
+        assert!(meter.snapshot().is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incomplete_tables_are_recognised() {
+        assert!(table_is_incomplete(&nft_bare_table_json()));
+        assert!(table_is_incomplete(&nft_chain_only_json()));
+        assert!(!table_is_incomplete(&nft_json("ens3", 1)), "a rule means real data");
+        let rule_without_counter = r#"{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":"inet","name":"veyl_meter"}},{"rule":{"family":"inet","table":"veyl_meter","chain":"out","expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"eth0"}}]}}]}"#;
+        assert!(
+            !table_is_incomplete(rule_without_counter),
+            "any rule blocks the rebuild, even one we cannot read a counter from"
+        );
+        assert!(!table_is_incomplete("not json"));
+        assert!(!table_is_incomplete(r#"{"nftables":[]}"#), "no metainfo, no gate");
+        assert!(
+            !table_is_incomplete(&nft_bare_table_json().replace("veyl_meter", "someone_else")),
+            "not our table"
+        );
+    }
+
     #[test]
     fn the_table_listing_is_recognised() {
         assert!(lists_table("table inet filter\ntable inet veyl_meter\n"));
         assert!(!lists_table("table inet filter\n"));
         assert!(!lists_table(""));
         assert!(!lists_table("table ip veyl_meter\n"));
+    }
+
+    #[test]
+    fn the_json_table_listing_is_recognised() {
+        assert_eq!(json_lists_table(&nft_tables_json()), Some(true));
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#),
+            Some(false)
+        );
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"table":{"family":"ip","name":"veyl_meter"}}]}"#),
+            Some(false)
+        );
+        assert_eq!(
+            json_lists_table(r#"{"nftables":[{"table":{"family":"inet","name":"other"}}]}"#),
+            Some(false)
+        );
+        // Anything that is not the shape we expect must let the caller fall
+        // back to the text listing rather than claim the table is absent.
+        assert_eq!(json_lists_table("table inet veyl_meter\n"), None);
+        assert_eq!(json_lists_table(""), None);
+        assert_eq!(json_lists_table("{}"), None);
+        assert_eq!(json_lists_table(r#"{"nftables":"nope"}"#), None);
     }
 
     #[test]
@@ -1110,5 +1773,90 @@ mod tests {
         );
         assert_eq!(parse_counter("not json"), None);
         assert_eq!(parse_counter(r#"{"nftables":[]}"#), None);
+    }
+
+    /// Verbatim `nft -j list table inet veyl_meter` captured on node
+    /// `veyl-iiIXYokol5Ss` (nft 1.0.9, "Old Doc Yak #3"), 2026-11-27.
+    /// `nft_json()` stays as the arbitrary-bytes fixture the other tests use;
+    /// this one only pins the shape a real host produces.
+    const REAL_TABLE_JSON: &str = r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}, {"chain": {"family": "inet", "table": "veyl_meter", "name": "out", "handle": 1, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}, {"rule": {"family": "inet", "table": "veyl_meter", "chain": "out", "handle": 2, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "eth0"}}, {"counter": {"packets": 3083298, "bytes": 2935574562}}]}}]}"#;
+
+    #[test]
+    fn a_counter_read_from_a_real_node_parses() {
+        assert_eq!(
+            parse_counter(REAL_TABLE_JSON),
+            Some(("eth0".to_string(), 2_935_574_562))
+        );
+    }
+
+    #[test]
+    fn a_default_route_from_a_real_node_parses() {
+        assert_eq!(
+            parse_default_iface("default via 146.190.144.1 dev eth0 proto static\n").as_deref(),
+            Some("eth0")
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_retries_a_cold_node_until_the_table_reads() {
+        let (dir, host, _control) = setup("probe-cold");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                // First round: the table is not there, so `read_counter`
+                // creates it and reports the window as a failure.
+                (1, "", "No such file or directory"),
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // Second round: the freshly created counter reads.
+                (0, &nft_json("ens3", 500), ""),
+            ],
+        );
+
+        assert_eq!(probe(host.as_ref()).await.unwrap(), 500);
+        assert_eq!(
+            rebuilds(&host),
+            1,
+            "the probe builds the table exactly once"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_gives_up_after_three_failed_rounds() {
+        let (dir, host, _control) = setup("probe-broken");
+        // Exit 0 with no rule to read: `Broken`, which never rebuilds.
+        host.queue_command_outputs("nft", &[(0, "", ""), (0, "", ""), (0, "", "")]);
+
+        assert!(probe(host.as_ref()).await.is_err());
+        assert_eq!(rebuilds(&host), 0, "a broken table is never recreated");
+        assert_eq!(
+            nft_calls(&host).len(),
+            3,
+            "one read per attempt and no extra commands"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_a_restored_node_on_the_first_round() {
+        let (dir, host, _control) = setup("probe-restored");
+        host.queue_command_outputs("nft", &[(0, &nft_json("ens3", 9_000), "")]);
+
+        assert_eq!(probe(host.as_ref()).await.unwrap(), 9_000);
+        assert_eq!(rebuilds(&host), 0);
+        assert_eq!(
+            nft_calls(&host).len(),
+            1,
+            "no retry after a successful read"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

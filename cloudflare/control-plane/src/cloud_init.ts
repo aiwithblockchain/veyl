@@ -39,6 +39,7 @@ export function buildCloudInit(input: AgentInstallInput): string {
   const config = JSON.stringify({
     control_url: input.controlUrl,
     enroll_url: input.enrollUrl,
+    fail_url: input.failUrl,
     enroll_token: input.enrollToken,
   });
 
@@ -79,6 +80,13 @@ if ! command -v curl >/dev/null 2>&1; then
   apt-get update -qq 2>>"\${ERR_FILE}"
   apt-get install -y -qq curl ca-certificates 2>>"\${ERR_FILE}"
 fi
+# 计量依赖 nft 与 ip：镜像通常自带，缺了就让 agent 的启动探针 100% 失败，
+# 所以在这里兜一层，而不是等建机后才发现。
+if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq 2>>"\${ERR_FILE}"
+  apt-get install -y -qq nftables iproute2 2>>"\${ERR_FILE}"
+fi
 curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 -o /tmp/veyl-agent "\${AGENT_URL}" 2>>"\${ERR_FILE}"
 STAGE=checksum
 : > "\${ERR_FILE}"
@@ -108,6 +116,7 @@ After=network-online.target nss-lookup.target
 Wants=network-online.target
 
 [Service]
+Type=exec
 ExecStart=/usr/local/bin/veyl-agent --config /etc/veyl-agent.json
 Restart=on-failure
 RestartSec=10s
@@ -125,16 +134,21 @@ systemctl daemon-reload 2>>"\${ERR_FILE}"
 systemctl enable veyl-agent >/dev/null 2>&1
 systemctl restart veyl-agent 2>>"\${ERR_FILE}"
 
-# 6. 真的起来了才算装好：装上了但跑不起来（比如二进制装载器缺失）时，机器会
-#    一直停在 booting 直到过期销毁，现场只剩控制面日志。这里主动回传。
-for _ in $(seq 1 30); do
-  if systemctl is-active --quiet veyl-agent; then
+# 6. 真的可用了才算装好：Type=exec 下单元在 execve 成功时就 active，早于 agent 的
+#    计量探针，所以这里等 agent 自己写的就绪文件。探针最坏要 ~24 秒（三次重试 + 建表），
+#    窗口给到 60 秒；期间没就绪就走 on_error 用**尚未消费的** token 销毁实例。
+#    这一段的失败归 stage=ready：systemd 早就成功了，报成 systemd 会误导排查。
+#    路径 /run/veyl-agent/ready 必须与 agent/src/agent.rs 的 READY_FILE 一致——
+#    两边各有一份字面量，改一处忘一处就是 60 秒后建机失败。
+STAGE=ready
+for _ in $(seq 1 60); do
+  if systemctl is-active --quiet veyl-agent && [ -f /run/veyl-agent/ready ]; then
     exit 0
   fi
   sleep 1
 done
 {
-  echo "veyl-agent did not become active within 30s"
+  echo "veyl-agent did not become ready within 60s"
   systemctl status veyl-agent --no-pager 2>&1 | tail -20
   journalctl -u veyl-agent -n 40 --no-pager 2>&1
 } >>"\${ERR_FILE}" 2>&1

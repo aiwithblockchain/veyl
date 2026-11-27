@@ -1,7 +1,7 @@
 # 机器在 DO 后台被删掉之后：停计费与停额度
 
 > 日期：2026-11-26
-> 状态：控制面已实现（迁移 0017，未部署）。**未做**：自动销毁、界面文案、通知。
+> 状态：控制面已实现（迁移 0017，已部署）。**未做**：自动销毁、通知。**界面文案（2026-11-27 落地）**：`state` 不动，展示态来自 `provider_gone`——列表与详情状态词「云服务商已删除」、状态点琥珀，费用行与左栏副行不报日价，详情提示「销毁后即可从列表移除」；账号面板的上限 / 每日增量 /「每天约」把这类机器排除。
 > 相关：`traffic-billing.md`（§4.0 / §4.1 周期与额度）、`my-servers.md`（销毁流程）
 > 事实来源：DigitalOcean API `GET /v2/droplets/{id}`（404 = 不存在）；agent 上报周期 `agent/src/traffic.rs:33` `REPORT_IDLE_SECS = 30 * 60`
 
@@ -46,7 +46,7 @@ ALTER TABLE servers ADD COLUMN provider_gone_at INTEGER DEFAULT NULL;  -- 迁移
 - **`failure_code`**：`MyServer.failure` 把未知 code 一律显示成「这台服务器没有创建成功」，`billing_unpaid` / `traffic_overage` 又被 dismiss 与墓碑展示逻辑判读；加第三个码会污染这两处。
 - **`billing_state`**：契约里它是 `active | past_due | expired`，界面按它算 `grace_ends_at`，加值要连带 App 端改。
 
-`state` 保持原样（驱动建机、凭据签发、销毁流程）。代价是界面暂时仍显示「可用」——用户已确认这不算 bug。
+`state` 保持原样（驱动建机、凭据签发、销毁流程）。界面不靠 `state` 表达这件事：状态词与状态点另外读 `provider_gone`（见 `my-servers.md` §7.4），`state` 只继续管那三条流程。
 
 ## 3. 三分语义
 
@@ -56,7 +56,7 @@ ALTER TABLE servers ADD COLUMN provider_gone_at INTEGER DEFAULT NULL;  -- 迁移
 - **`alive`（200 或心跳新鲜）**：照常扣。
 - **`unknown`（超时 / 5xx / 429 / 401 / 没令牌）**：照常扣，下一轮再查。**绝不能「查不出来就免费」**——那会把一次 DO 抖动变成全站免单。
 
-报告里并列记三个数：`providerProbed`（本轮真的打了 DO 的台数，含判「还在」与判「消失」）、`providerGone`（判消失）、`providerUnknown`（没下结论）。上线第一轮就能从 `[billing] done {...}` 看出探测量级；DO 出问题或量级超预期时不用靠猜。
+报告里并列记四个数：`providerProbed`（本轮真的打了 DO 的台数，含判「还在」与判「消失」）、`providerGone`（本轮判消失）、`providerUnknown`（没下结论）、`providerGoneActive`（**当前被冻结且未销毁的存量台数**）。前三个是当轮动作，事故过去后就看不出来；`providerGoneActive` 是存量，每小时那行 `[billing] done {...}` 能直接读出「现在冻了多少台」。
 
 ## 4. 额度封顶
 
@@ -106,7 +106,7 @@ end <= cycleStart → 0
 - **DO 查不到也不能免费**：令牌过期 / DO 抖动期间仍照扣。这是取舍：宁可多扣一台仍在的机器，也不把抖动变成免单。
 - **假 404 的代价不对称**：额度封顶会让 `used − released` 提前进入超支区间，可能多收一笔超支费（超支没有自动退款路径）。两个信号同时成立才命中，概率低；恢复时写 `billing.gone_recovered` 留人工兜底。
 - **检测延迟 ≤ 1 天**：判定挂在到期结算上，最晚一天后才发现；期间额度最多多涨一天（对用户有利），扣费最多多扣一天（2 小时阈值把窗口压到「删除发生在结算前 2 小时内」）。
-- **界面仍显示「可用」**：要让用户看见，需要在 `MyServer` 上加字段（建议 `gone_at`），属于 App 那条线。
+- **界面仍显示「可用」**：~~要让用户看见，需要在 `MyServer` 上加字段~~ 已于 2026-11-27 落地（`c7c6f21`）：`MyServer` 增 `provider_gone`，列表与详情写「云服务商已删除」、状态点转琥珀，见 `my-servers.md` §7.4。
 
 ## 10. 部署
 
@@ -118,3 +118,18 @@ end <= cycleStart → 0
 - `recoverExpiredServers` 的真实 SQL 用例：目前只有 FakeD1 覆盖，语义已对齐（`provider_gone_at IS NULL`）。
 - `markProviderGone` 里 `provider_gone_at != null` 那条防御分支目前不可达（`collectDue` 已过滤），补一句注释说明即可。
 
+## 12. 误判评审（2026-11-27）
+
+两位工程师分别从白盒（穷举所有能写出 `provider_gone_at` 的路径）和外部事实（DO 文档语义 + dev/prod 实际数据）审了一轮，架构侧裁决。结论：**判定入口窄、无已知误判实例**（dev 仅 1 条真实记录、prod 0 条），但提出「单次 404 无交叉校验」与「事故不可见」两处。裁决如下：
+
+| 提议 | 结论 | 理由 |
+|---|---|---|
+| 信 404 前先 `GET /v2/account` 比对账号 UUID（新增 secret） | **不做** | 风险前提是「合法但属于另一个团队」的 token = 部署事故，紧接着第一次建机/销毁就会响亮失败，不是静默风险；「文档没写 403 ⇒ 必回 404」是推演，不是事实 |
+| 一轮探测 ≥3 台且全部 404 时熔断 | **不做** | 方向反了：用户一次在 DO 删多台会被永久压住（下一轮仍全 404），1–2 台时又完全无效 |
+| 对冻结行每 7 天复查、DO 回 200 即恢复（需迁移） | **不做** | 自愈路径本就是 agent 上报：agent 活着会自己清，agent 死了复查也改变不了机器是否还在；无「存活 droplet 偶发 404」的已知实例，不值一次迁移 |
+| 标记的 `UPDATE` 只在 `meta.changes === 1` 后写审计 | **做** | 并发双例会重复写审计、多计 `providerGone`；写失败时审计没有依据 |
+| 报告加 `providerGoneActive` | **做** | 一行只读查询，成本近零；补上「事故过去后看不见」这个缺口 |
+
+**残余风险（已知、可见、可人工处置）**：若真的出现批量误判，`[billing] done` 里的 `providerGoneActive` 会明显抬升；处置是直接清 `provider_gone_at`（agent 恢复上报也会清）。不做自动熔断是刻意的——它对「用户一次性删多台」的伤害大于对误配的保护。
+
+**更划算的防护是部署纪律**：token 轮换后立刻跑一次建机，任何鉴权问题都会当场失败，而不是等一小时后由 Cron 静默发现。

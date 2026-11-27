@@ -156,6 +156,8 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
     expect(list.servers[0].traffic_limit_bytes).toBe(0);
     expect(list.servers[0].traffic_reset_at).toBe("");
     expect(list.servers[0].traffic_state).toBe("ok");
+    // 旧 Host / 旧控制面不给 provider_gone：按「没失联」处理。
+    expect(list.servers[0].provider_gone).toBe(false);
     expect(list.traffic_pool).toBeUndefined();
   });
 
@@ -166,6 +168,7 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_limit_bytes: 32_212_254_720,
       traffic_reset_at: "2026-12-01T00:00:00.000Z",
       traffic_state: "unpaid",
+      provider_gone: true,
     };
     const dirty = {
       ...SERVER,
@@ -184,6 +187,7 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_limit_bytes: 32_212_254_720,
       traffic_reset_at: "2026-12-01T00:00:00.000Z",
       traffic_state: "unpaid",
+      provider_gone: true,
     });
     expect(list.servers[1]).toMatchObject({
       server_id: "srv_2",
@@ -192,6 +196,7 @@ describe("流量四字段（2.78.0）与账号池（2.79.0）", () => {
       traffic_limit_bytes: 0,
       traffic_reset_at: "",
       traffic_state: "ok",
+      provider_gone: false,
     });
   });
 

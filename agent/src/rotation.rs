@@ -708,7 +708,19 @@ impl RotationEngine {
         let Some(desired) = self.last_desired() else {
             return;
         };
-        let applied = self.singbox.applied().await.ok().flatten();
+        // A read error is not "the node serves nothing": swallowing it here
+        // means `active` is never re-announced and the control plane can sit in
+        // installing/verifying until it is swept. Say so and keep going.
+        let applied = match self.singbox.applied().await {
+            Ok(applied) => applied,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not read the applied sing-box config; not announcing active"
+                );
+                return;
+            }
+        };
         if !applied.map(|a| a.matches(&desired)).unwrap_or(false) {
             return;
         }
@@ -1249,6 +1261,7 @@ mod tests {
             control_plane_url: "https://control.example.com".into(),
             enrollment_token: None,
             enroll_url: None,
+            fail_url: None,
             signer_pubkey: None,
             detect_public_ip: false,
             metadata_url: "http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address".into(),

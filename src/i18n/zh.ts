@@ -817,7 +817,7 @@ export const zh = {
   "myservers.state.error": "出错了",
   "myservers.state.destroying": "正在销毁",
   "myservers.state.destroyed": "已停机删除",
-  "myservers.state.gone": "已失效",
+  "myservers.state.gone": "云服务商已删除",
   "myservers.state.unknown": "状态未知",
   "myservers.tombstone.word": "已停机删除",
   "myservers.tombstone.text":
@@ -844,6 +844,7 @@ export const zh = {
   "myservers.paid.expired": "本期已过，服务正常",
   "myservers.billing.daily": "每天 {price}",
   "myservers.billing.dailyExpired": "每天 {price} · {word}",
+  "myservers.billing.providerGone": "云服务商已删除，不再扣费",
   "myservers.billing.pastDueNoGrace": "余额不足，最近一次扣费没成功。7 天内充值可继续使用。",
   "myservers.billing.pastDueGrace":
     "余额不足，最近一次扣费没成功。宽限还剩 {days} 天，7 天内充值可继续使用。",
@@ -884,10 +885,11 @@ export const zh = {
   "account.remainingDays": "还能用 {days} 天",
   "account.stale": "没刷新成功，显示的是上次的余额。",
   "account.traffic.title": "本月流量",
-  "account.traffic.summary": "已用 {percent}% · {used} / {limit} GiB",
-  "account.traffic.unknown": "已用 {used} · 额度未知",
-  "account.traffic.tomorrow": "每日 {time} 增加 {amount} GiB",
-  "account.traffic.near": "流量快用完了",
+  "account.traffic.used": "已用 {used}",
+  "account.traffic.usedAccrued": "已用 {used} · 已累计 {accrued} GiB",
+  "account.traffic.rate": "（每日 {time} +{amount}）",
+  "account.traffic.cap": "上限 {limit} GiB",
+  "account.traffic.unknown": "额度未知",
   "account.traffic.over": "超出 {over}，按 $0.02/GiB 扣余额",
   "account.identity.lost": "这台设备的身份丢了，需要重新注册设备；账户和服务器都在。",
   "account.identity.lostLabel": "重新注册设备",
@@ -914,7 +916,7 @@ export const zh = {
   "progress.verifying": "正在检查节点是否可用，通常 1–2 分钟。",
   "progress.processing": "正在处理",
   "progress.waited": "已等待 {duration}",
-  "progress.buildTimeout": "安装超时，可以销毁重建；不会自动销毁。",
+  "progress.buildTimeout": "安装超时；创建会自动完成或失败。",
   "progress.stepOf": "第 {n} 步，共 4 步",
 
   // 登录我的服务器
@@ -1064,12 +1066,12 @@ export const zh = {
   "detail.settleFailed": "服务器没开通，本次没有扣费。",
   "detail.topUp": "去充值",
   "detail.destroying": "正在销毁…",
-  "detail.destroyConfirmProvisioning": "取消创建并销毁这台服务器？正在进行的安装会中断。",
   "detail.destroyConfirm":
     "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。",
   "detail.confirmDestroy": "确认销毁",
   "detail.retryDestroy": "重试销毁",
   "detail.destroy": "销毁",
+  "detail.providerGone": "这台机器已在云服务商后台删除，不会再扣费。销毁后即可从列表移除。",
   "detail.rotate": "更换连接密码",
   "detail.rotateConfirm":
     "更换后旧的端口和密码立刻失效，节点会短暂中断；手机上已导入的配置要重新导入一次，桌面端会自动刷新。",
@@ -1662,6 +1664,7 @@ export const zh = {
   "error.reason.serverGone": "找不到这台服务器。",
   "error.reason.syncInFlight": "节点配置同步正在进行中。",
   "error.reason.serverBusy": "服务器正忙，稍后再试。",
+  "error.reason.serverProvisioning": "正在创建这台服务器，不能销毁；创建会自动完成或失败。",
   "error.reason.providerUnavailable": "服务器服务暂时不可用，稍后再试。",
   "error.reason.unexpectedStatus": "服务器服务返回了异常响应（{status}）。",
   "error.reason.unexpectedCode": "服务器服务返回了异常结果。",

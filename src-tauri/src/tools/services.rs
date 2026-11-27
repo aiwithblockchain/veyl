@@ -6255,6 +6255,8 @@ impl VpnToolServices for WiredServices {
                     "traffic_limit_bytes": server.traffic_limit_bytes,
                     "traffic_reset_at": server.traffic_reset_at,
                     "traffic_state": server.traffic_state,
+                    // 云服务商侧已不存在：state 仍是 active，但不再扣费、额度冻结。
+                    "provider_gone": server.provider_gone,
                     "failure": server.failure.map(|failure| json!({
                         "code": failure.code,
                         "message": failure.message,

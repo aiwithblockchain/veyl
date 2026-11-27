@@ -180,22 +180,69 @@ impl FileSink {
 
     fn rotate(&mut self) -> io::Result<()> {
         self.file.flush()?;
+        // This is the logging subsystem itself, so `tracing` would recurse back
+        // into this sink. Failures go to stderr instead, and every one of them
+        // is reported: a rotation that quietly stops working is a file that
+        // grows until the disk is full, on a machine nobody can log into.
+        let mut problems: Vec<(PathBuf, io::Error)> = Vec::new();
+
         let oldest = backup_path(&self.path, self.keep_files);
-        let _ = fs::remove_file(&oldest);
-        for i in (1..self.keep_files).rev() {
-            let from = backup_path(&self.path, i);
-            if from.exists() {
-                let _ = fs::rename(&from, backup_path(&self.path, i + 1));
+        if let Err(e) = fs::remove_file(&oldest) {
+            if e.kind() != io::ErrorKind::NotFound {
+                problems.push((oldest.clone(), e));
             }
         }
-        let _ = fs::rename(&self.path, backup_path(&self.path, 1));
+        for i in (1..self.keep_files).rev() {
+            let from = backup_path(&self.path, i);
+            // `Path::exists()` folds "not there" and "cannot stat" into `false`,
+            // which would skip this backup level without a word.
+            match fs::metadata(&from) {
+                Ok(_) => {
+                    if let Err(e) = fs::rename(&from, backup_path(&self.path, i + 1)) {
+                        problems.push((from, e));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => problems.push((from, e)),
+            }
+        }
+        match fs::rename(&self.path, backup_path(&self.path, 1)) {
+            Ok(()) => {}
+            // The live file is gone (logrotate, or a manual `rm`): our handle
+            // still points at the unlinked inode and the `open` below recreates
+            // the path. That is a recovery path, not a rotation failure.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => problems.push((self.path.clone(), e)),
+        }
         self.file = OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(&self.path)?;
-        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
-        self.size = 0;
+        if let Err(e) = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600)) {
+            problems.push((self.path.clone(), e));
+        }
+        for (path, e) in &problems {
+            eprintln!(
+                "veyl-agent: log rotation failed for {}: {e}",
+                path.display()
+            );
+        }
+        // Take the size from the file that actually exists. If the rename above
+        // failed the old contents are still here; hard-setting 0 would make the
+        // rotator believe it had replaced them, and the file would grow to about
+        // twice `max_bytes` before another attempt.
+        self.size = match self.file.metadata() {
+            Ok(meta) => meta.len(),
+            Err(e) => {
+                eprintln!(
+                    "veyl-agent: log rotation could not stat {}: {e}",
+                    self.path.display()
+                );
+                // Retry on the next write rather than pretend the file is empty.
+                self.max_bytes
+            }
+        };
         Ok(())
     }
 }
@@ -590,6 +637,23 @@ mod tests {
         sink.write_line(&"b".repeat(80)).unwrap();
         assert!(read(&backup_path(&path, 1)).contains(&"a".repeat(80)));
         assert!(read(&path).contains(&"b".repeat(80)));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_rename_keeps_the_size_honest() {
+        let dir = tmpdir("rotate-fail");
+        let path = dir.join("agent.log");
+        let mut sink = FileSink::open(&path, 50, 1).unwrap();
+        sink.write_line(&"a".repeat(40)).unwrap();
+        // Make the rotation's rename fail: `.1` is a non-empty directory.
+        let blocker = backup_path(&path, 1);
+        fs::create_dir_all(&blocker).unwrap();
+        fs::write(blocker.join("keep"), b"x").unwrap();
+        sink.write_line(&"b".repeat(40)).unwrap();
+        let on_disk = fs::metadata(&path).unwrap().len();
+        assert!(on_disk > 50, "old contents were not rotated away");
+        assert_eq!(sink.size, on_disk, "size must follow the file that survived");
         fs::remove_dir_all(&dir).ok();
     }
 }

@@ -227,6 +227,7 @@ pub struct ControlPlane {
     http: reqwest::Client,
     base: String,
     enroll_url: Option<String>,
+    fail_url: Option<String>,
 }
 
 impl ControlPlane {
@@ -239,12 +240,19 @@ impl ControlPlane {
             http,
             base: base_url.trim_end_matches('/').to_string(),
             enroll_url: None,
+            fail_url: None,
         })
     }
 
     /// cloud-init writes the full enroll URL; use it verbatim when present.
     pub fn with_enroll_url(mut self, enroll_url: Option<String>) -> Self {
         self.enroll_url = enroll_url;
+        self
+    }
+
+    /// Full `POST /v1/agent/fail` URL; derived from the base when absent.
+    pub fn with_fail_url(mut self, fail_url: Option<String>) -> Self {
+        self.fail_url = fail_url;
         self
     }
 
@@ -325,6 +333,54 @@ impl ControlPlane {
         })?;
         serde_json::from_value(value)
             .map_err(|e| ControlError::Decode(format!("enroll response: {e}")))
+    }
+
+    /// Tell the control plane that this build cannot meter. It uses the one-time
+    /// enrollment token, so it must run **before** `enroll`: `/v1/agent/fail`
+    /// only accepts a token that has not been consumed yet.
+    ///
+    /// The control plane destroys the instance in response, so nothing here is
+    /// actionable — a failed report is logged and the caller exits anyway.
+    pub async fn report_install_failure(
+        &self,
+        enrollment_token: Option<&str>,
+        error: anyhow::Error,
+    ) {
+        let Some(token) = enrollment_token else {
+            tracing::warn!(
+                "cannot report the metering failure: the config has no enrollment token"
+            );
+            return;
+        };
+        let url = self
+            .fail_url
+            .clone()
+            .unwrap_or_else(|| self.url("/v1/agent/fail"));
+        // `{:#}` keeps the whole anyhow chain: the outer message alone is often
+        // just a context line ("creating the counter table").
+        let body = json!({
+            "stage": "metering",
+            "line": 1,
+            "error": truncate(&redact_sensitive(&format!("{error:#}")), 300),
+        });
+        match self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(stage = "metering", "reported the install failure")
+            }
+            Ok(resp) => tracing::warn!(
+                status = resp.status().as_u16(),
+                "the control plane rejected the install-failure report"
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not report the install failure"),
+        }
     }
 
     pub async fn report(

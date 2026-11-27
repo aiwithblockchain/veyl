@@ -767,6 +767,102 @@ describe("POST /v1/agent/fail", () => {
     warn.mockRestore();
   });
 
+  it("metering 阶段来自 agent 的启动探针，原样进审计", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          stage: "metering",
+          line: 1,
+          error: "counter table unreadable",
+        }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail.stage).toBe("metering");
+    expect(detail.error).toBe("counter table unreadable");
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain(
+      "stage=metering",
+    );
+    warn.mockRestore();
+  });
+
+  it("ready 阶段来自 cloud-init 的就绪超时，原样进审计", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          stage: "ready",
+          line: 141,
+          error: "veyl-agent did not become ready within 60s",
+        }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail.stage).toBe("ready");
+    expect(detail.error).toBe("veyl-agent did not become ready within 60s");
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("stage=ready");
+    warn.mockRestore();
+  });
+
+  it("未知阶段收敛成 null，不会写进审计", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await handleServers(
+      new Request("https://example.com/v1/agent/fail", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${ENROLL_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ stage: "something_else", line: 1, error: "boom" }),
+      }),
+      env as never,
+    );
+    expect(res?.status).toBe(200);
+
+    const audit = db.rows("audit_log").find((row) => row.action === "agent.install_failed");
+    const detail = JSON.parse(String(audit?.detail));
+    expect(detail.stage).toBeNull();
+    expect(detail.error).toBe("boom");
+    warn.mockRestore();
+  });
+
   it("failed 上报带日志摘要：落审计并截断到 2000 字", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());

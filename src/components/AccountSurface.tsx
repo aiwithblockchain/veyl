@@ -18,10 +18,34 @@ import {
   formatTrafficGibValue,
   formatTrafficPercent,
   formatTrafficReset,
+  trafficMeterWidths,
   trafficPoolTomorrowBytes,
 } from "./traffic";
 import { MyServerTopUp } from "./MyServerTopUp";
 import { IconClose } from "./icons";
+
+const GIB = 1024 ** 3;
+
+/** 脏值不往下传：一台 NaN 不能让整段上限消失。 */
+function safeBytes(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+/** 只把数字送进 mono（含小数）；标签、单位与括号保持正文。 */
+function withMonoDigits(text: string) {
+  return text
+    .split(/(\d+(?:\.\d+)?)/)
+    .filter(Boolean)
+    .map((part, index) =>
+      /^\d+(?:\.\d+)?$/.test(part) ? (
+        <span key={index} className="num">
+          {part}
+        </span>
+      ) : (
+        <span key={index}>{part}</span>
+      ),
+    );
+}
 
 export type AccountPoint = { row: string | null; nonce: number };
 
@@ -111,6 +135,10 @@ export function AccountSurface({
     resetAt: string;
     /** 明天账号会新增的额度；逐台增量之和，不是账号余额。 */
     tomorrowBytes: number;
+    /** 计费中机器的月额度合计（上限）；计量条轨道取 max(上限 + 冻结, 已累计)。 */
+    capBytes: number;
+    /** 轨道总宽：在跑机器的上限 + 已销毁机器冻结下来的额度。 */
+    trackBytes: number;
   } | null>(null);
   /** 每天在扣的合计与台数：余额下面的那句「每天约 X · N 台服务器」。 */
   const [daily, setDaily] = useState<{
@@ -134,6 +162,9 @@ export function AccountSurface({
             // 余额不足停机销毁的行 billing_state 还是 active，只有 state 变成
             // destroyed；不排除会让台数比金额多，出现「每天约 $0.00 · 1 台服务器」。
             server.state !== "destroyed" &&
+            // DO 侧已失联的机器（state 仍是 active）不再扣费、额度也冻结，
+            // 把它算进来会虚增上限与每日增量，见下方 capBytes / tomorrowBytes。
+            !server.provider_gone &&
             (server.billing_state === "active" ||
               server.billing_state === "past_due"),
         );
@@ -153,10 +184,29 @@ export function AccountSurface({
         const resetAt =
           list.servers.find((server) => server.traffic_reset_at !== "")
             ?.traffic_reset_at ?? "";
+        // 已累计含已销毁机器冻结的额度；只按在跑机器的上限画轨道，
+        // 会让浅灰「本月还长得到的」恒为 0。轨道 = 在跑上限 + 冻结部分。
+        const liveReleasedBytes = billable.reduce(
+          (sum, server) => sum + safeBytes(server.traffic_limit_bytes),
+          0,
+        );
+        const capBytes = billable.reduce(
+          (sum, server) => sum + safeBytes(server.transfer_gib) * GIB,
+          0,
+        );
+        const frozenBytes = Math.max(
+          0,
+          list.traffic_pool.limitBytes - liveReleasedBytes,
+        );
         setTraffic({
           pool: list.traffic_pool,
           resetAt,
-          tomorrowBytes: trafficPoolTomorrowBytes(list.servers),
+          tomorrowBytes: trafficPoolTomorrowBytes(billable),
+          capBytes,
+          trackBytes: Math.max(
+            capBytes + frozenBytes,
+            list.traffic_pool.limitBytes,
+          ),
         });
       })
       .catch(() => {
@@ -322,14 +372,26 @@ export function AccountSurface({
           .filter((part): part is string => part !== null)
           .join(" · ")
       : null;
-  /** 进度条只做视觉比例，不写百分比文字；超额时铺满。 */
-  const trafficRatio =
+  /** 三段条：深色=已用、中灰=已累计未用，其余是轨道；超额时深色铺满。 */
+  const trafficMeter =
+    traffic !== null
+      ? trafficMeterWidths(
+          traffic.pool.usedBytes,
+          traffic.pool.limitBytes,
+          traffic.trackBytes,
+        )
+      : { usedPercent: 0, accruedPercent: 0 };
+  const trafficUsedWidth = `${Math.min(100, Math.max(0, trafficMeter.usedPercent)).toFixed(2)}%`;
+  const trafficAccruedWidth = `${Math.min(100, Math.max(0, trafficMeter.accruedPercent)).toFixed(2)}%`;
+  /** 百分比 = 已用 ÷ 已累计；已累计为 0 或值不可用时都不显示。 */
+  const trafficPercentValue =
     traffic !== null && traffic.pool.limitBytes > 0
-      ? traffic.pool.usedBytes / traffic.pool.limitBytes
-      : 0;
-  const trafficBarWidth = Number.isFinite(trafficRatio)
-    ? `${Math.min(100, Math.max(0, trafficRatio * 100)).toFixed(2)}%`
-    : "0.00%";
+      ? formatTrafficPercent(traffic.pool.usedBytes, traffic.pool.limitBytes)
+      : null;
+  const trafficPercent =
+    trafficPercentValue && trafficPercentValue !== "—"
+      ? `${trafficPercentValue}%`
+      : null;
 
   const pointAttrs = (row: string) => ({
     "data-point": row,
@@ -535,12 +597,19 @@ export function AccountSurface({
                     {...pointAttrs("account.traffic")}
                   >
                     <div className="account-surface__traffic-head">
-                      <span className="account-surface__label">
+                      <span className="account-surface__traffic-meta">
                         {tr("account.traffic.title")}
+                        {trafficReset
+                          ? ` · ${tr("detail.trafficResetAt", { date: trafficReset })}`
+                          : ""}
                       </span>
-                      {trafficReset ? (
-                        <span className="account-surface__traffic-reset">
-                          {tr("detail.trafficResetAt", { date: trafficReset })}
+                      {trafficPercent ? (
+                        <span
+                          className={`account-surface__traffic-pct num${
+                            trafficState === "ok" ? "" : " is-warn"
+                          }`}
+                        >
+                          {trafficPercent}
                         </span>
                       ) : null}
                     </div>
@@ -549,61 +618,82 @@ export function AccountSurface({
                         className="account-surface__traffic-bar"
                         aria-hidden="true"
                       >
-                        <span
-                          className={`account-surface__traffic-fill is-${trafficState}`}
-                          style={{ width: trafficBarWidth }}
-                        />
+                        {traffic.pool.usedBytes > 0 ? (
+                          <span
+                            className={`account-surface__traffic-used${
+                              trafficState === "ok" ? "" : " is-warn"
+                            }`}
+                            style={{ width: trafficUsedWidth }}
+                          />
+                        ) : null}
+                        {trafficMeter.accruedPercent > 0 ? (
+                          <span
+                            className="account-surface__traffic-accrued"
+                            style={{ width: trafficAccruedWidth }}
+                          />
+                        ) : null}
                       </div>
                     )}
                     <p className="account-surface__traffic-line">
-                      {trafficState === "unknown"
-                        ? tr("account.traffic.unknown", {
-                            used: formatTrafficGib(traffic.pool.usedBytes),
-                          })
-                        : (
-                          <>
-                            {tr("account.traffic.summary", {
-                              percent: formatTrafficPercent(
-                                traffic.pool.usedBytes,
-                                traffic.pool.limitBytes,
-                              ),
-                              limit: formatTrafficGibValue(traffic.pool.limitBytes),
-                              used: formatTrafficGibValue(traffic.pool.usedBytes),
-                            })}
-                            {trafficState === "over" ? (
-                              <>
-                                {" · "}
-                                <span className="account-surface__traffic-over">
-                                  {tr("account.traffic.over", {
-                                    over: formatTrafficGib(trafficOver),
-                                  })}
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                {traffic.tomorrowBytes > 0 ? (
-                                  <>
-                                    {" · "}
-                                    {tr("account.traffic.tomorrow", {
-                                      time: formatDailyBoundaryTime(getLanguage()),
-                                      amount: formatTrafficGibValue(
-                                        traffic.tomorrowBytes,
-                                      ),
-                                    })}
-                                  </>
-                                ) : null}
-                                {trafficState === "near" ? (
-                                  <>
-                                    {" · "}
-                                    <span className="account-surface__traffic-near">
-                                      {tr("account.traffic.near")}
-                                    </span>
-                                  </>
-                                ) : null}
-                              </>
+                      {trafficState === "unknown" ? (
+                        <>
+                          <span>
+                            {withMonoDigits(
+                              tr("account.traffic.used", {
+                                used: formatTrafficGib(traffic.pool.usedBytes),
+                              }),
                             )}
-                          </>
-                        )}
+                          </span>
+                          <span className="account-surface__traffic-cap">
+                            {tr("account.traffic.unknown")}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="account-surface__traffic-figures">
+                            {withMonoDigits(
+                              tr("account.traffic.usedAccrued", {
+                                used: formatTrafficGibValue(
+                                  traffic.pool.usedBytes,
+                                ),
+                                accrued: formatTrafficGibValue(
+                                  traffic.pool.limitBytes,
+                                ),
+                              }),
+                            )}
+                            {trafficState !== "over" &&
+                            traffic.tomorrowBytes > 0 ? (
+                              <span className="account-surface__traffic-rate">
+                                {withMonoDigits(
+                                  tr("account.traffic.rate", {
+                                    time: formatDailyBoundaryTime(getLanguage()),
+                                    amount: formatTrafficGibValue(
+                                      traffic.tomorrowBytes,
+                                    ),
+                                  }),
+                                )}
+                              </span>
+                            ) : null}
+                          </span>
+                          {trafficState === "over" ? (
+                            <span className="account-surface__traffic-over">
+                              {tr("account.traffic.over", {
+                                over: formatTrafficGib(trafficOver),
+                              })}
+                            </span>
+                          ) : traffic.capBytes > 0 ? (
+                            <span className="account-surface__traffic-cap">
+                              {withMonoDigits(
+                                tr("account.traffic.cap", {
+                                  limit: formatTrafficGibValue(
+                                    traffic.trackBytes,
+                                  ),
+                                }),
+                              )}
+                            </span>
+                          ) : null}
+                        </>
+                      )}
                     </p>
                   </div>
                 </>

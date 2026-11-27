@@ -71,9 +71,13 @@ function ServerRow({
     provisioning && Number.isFinite(created) ? formatElapsed(now - created) : null;
   // 失败机器的计费字段可能是 0：副行不写日价，避免读成「免费 / 计费坏了」。
   // 停机删除的墓碑也不再报价：机器已经没了，价格只会误导。
+  // 云服务商侧已删除（provider_gone）同样不再报价：已经不扣费了。
   // 进行中的行只报状态与计时，不报日价，也不再说「开通中」。
   const billingPart =
-    server.state === "error" || isTombstone(server) || provisioning
+    server.state === "error" ||
+    isTombstone(server) ||
+    server.provider_gone === true ||
+    provisioning
       ? null
       : (
           <>

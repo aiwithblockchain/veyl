@@ -61,7 +61,7 @@ fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static 
 
 /// 对模型可见的字段白名单：地址可以给（用户已同意 AI 看到自己服务器的 IP）；
 /// 端口、密码、节点 id、provider id 等内部字段一律不出。
-const VISIBLE_FIELDS: [&str; 16] = [
+const VISIBLE_FIELDS: [&str; 17] = [
     "server_id",
     "name",
     "region",
@@ -80,6 +80,8 @@ const VISIBLE_FIELDS: [&str; 16] = [
     "traffic_limit_bytes",
     "traffic_reset_at",
     "traffic_state",
+    // 云服务商侧已不存在：state 仍是 active，但不再扣费、额度冻结。
+    "provider_gone",
 ];
 
 /// 对模型可见的单条：按白名单重建，destroyed 时补人话原因并抹掉内部 failure。
@@ -123,7 +125,18 @@ fn server_row_fact(server: &Value) -> Option<Fact> {
         .get("region")
         .and_then(Value::as_str)
         .filter(|region| !region.is_empty())?;
-    let state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    // 云服务商侧已删除：复用契约里已有的 `gone`（实例已不存在），否则卡片会把幽灵机
+    // 写成「已开通」。已销毁优先——应用里销毁之后仍然写「已销毁」。
+    let provider_gone = server
+        .get("provider_gone")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let raw_state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    let state = if provider_gone && raw_state != "destroyed" {
+        "gone"
+    } else {
+        raw_state
+    };
     let failure_code = server
         .get("failure")
         .and_then(|failure| failure.get("code"))
@@ -166,9 +179,11 @@ impl Tool for MyServersTool {
         "查看「我的服务器」列表：名称、地区、状态、地址、是否可用、月费、流量。\
          只读；返回地址，不返回端口、密码。用户问这台机器的地址时直接答，不要绕。\
          账号本月流量只看摘要首行，不要把各台相加——列表不含已销毁的机器；\
-         流量只说已用与已释放（不是本月上限），不推算还能用几天，也不换算成钱。\
+         流量只说已用与已累计（已累计按月逐日增长，不是整月一次性给满），不推算还能用几天，也不换算成钱。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
-         不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
+         不返回内部错误码。云服务商侧已删除的会标「云服务商已删除，不再扣费」——\
+         它的 state 仍显示可用，但已经不扣费，不要给它报日价。\
+         建机与销毁只能由用户在「我的服务器」页面操作。\n\
          用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
     }
 
@@ -228,13 +243,13 @@ fn gib_text(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
 }
 
-/// `limit` 是已释放额度（按存在天数逐日释放），不是本月上限；0 = 控制面没给，
-/// 只说已用，不编一个 0 GiB 的额度。
+/// `limit` 是已累计额度（按存在天数逐日累计），不是整月一次性给满的「上限」；
+/// 0 = 控制面没给，只说已用，不编一个 0 GiB 的额度。
 fn traffic_text(used: u64, limit: u64) -> String {
     if limit == 0 {
         format!("已用 {}", gib_text(used))
     } else {
-        format!("已用 {} / 已释放 {}", gib_text(used), gib_text(limit))
+        format!("已用 {} / 已累计 {}", gib_text(used), gib_text(limit))
     }
 }
 
@@ -251,7 +266,16 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
             pool.get("used_bytes").and_then(Value::as_u64),
             pool.get("limit_bytes").and_then(Value::as_u64),
         ) {
-            lines.push(format!("本月流量：{}", traffic_text(used, limit)));
+            // 「已累计」是按天长出来的额度，不是整月一次性给满；账号级「上限」是另一个数。
+            // 不说清这层关系，模型容易把它当成「到顶了」，或反过来当成上限报给用户。
+            if limit > 0 {
+                lines.push(format!(
+                    "本月流量：{}（已累计按月逐日增长，不是整月一次性给满；账号级「上限」另算，这里不列）",
+                    traffic_text(used, limit)
+                ));
+            } else {
+                lines.push(format!("本月流量：{}", traffic_text(used, limit)));
+            }
         }
     }
     if servers.is_empty() {
@@ -282,10 +306,20 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
             .get("daily_price_cents")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let mut line = format!("- {id} | {name} | {region} | {state} | {ip} | 每天 {:.2} 美元", daily as f64 / 100.0);
+        // 云服务商侧已删除的机器：state 仍是可用，但不再扣费，报日价就是假话。
+        let gone = server
+            .get("provider_gone")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut line = format!("- {id} | {name} | {region} | {state} | {ip}");
+        if gone {
+            line.push_str(" | 云服务商已删除，不再扣费");
+        } else {
+            line.push_str(&format!(" | 每天 {:.2} 美元", daily as f64 / 100.0));
+        }
         // 计费锚点：到期前 1 小时进可扣窗口，扣成功顺延一天，扣不到当场停机销毁、无宽限。
         // 所以既能说「已付到哪一刻」，也不能说成「有效期」或「到期」。
-        if server.get("billing_state").and_then(Value::as_str) == Some("active") {
+        if !gone && server.get("billing_state").and_then(Value::as_str) == Some("active") {
             if let Some(paid_until) = server
                 .get("paid_until")
                 .and_then(Value::as_str)
@@ -296,7 +330,7 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
                 line.push_str(&format!(" | 已付至 {until}（每天自动续扣；扣不到即停机）"));
             }
         }
-        // 逐台在已释放额度 > 0 时写；旧控制面 / 新机首报前是 0，不写，避免假零值。
+        // 逐台在已累计额度 > 0 时写；旧控制面 / 新机首报前是 0，不写，避免假零值。
         // 机型月额度与清零点只在 data 里，模型读不到，所以放在这里。
         if let (Some(used), Some(limit)) = (
             server.get("traffic_used_bytes").and_then(Value::as_u64),
@@ -631,8 +665,16 @@ mod tests {
         });
         let text = summarise_servers(&servers, Some(&pool));
         assert!(
-            text.starts_with("本月流量：已用 5.0 GiB / 已释放 93.1 GiB"),
+            text.starts_with("本月流量：已用 5.0 GiB / 已累计 93.1 GiB"),
             "首行必须是账号池：{text}"
+        );
+        assert!(
+            text.contains("已累计按月逐日增长，不是整月一次性给满；账号级「上限」另算"),
+            "账号行要讲清与「上限」的区别：{text}"
+        );
+        assert!(
+            !text.contains("已释放"),
+            "用词与界面统一为「已累计」：{text}"
         );
         assert!(
             !text.contains("本月流量：已用 1.0"),
@@ -642,6 +684,24 @@ mod tests {
             text.contains("本月流量 已用 1.0 GiB"),
             "每台自己的用量照写：{text}"
         );
+    }
+
+    /// 云服务商侧已删除的机器：state 仍是可用，但不再扣费，不能报日价。
+    #[test]
+    fn a_ghost_is_not_quoted_a_daily_price() {
+        let servers = vec![json!({
+            "server_id": "srv_1", "name": "悉尼", "region": "syd1", "state": "active",
+            "ip": "203.0.113.9", "node_ready": true, "daily_price_cents": 40,
+            "paid_until": "2026-11-27T00:00:00Z", "billing_state": "active",
+            "provider_gone": true,
+            "traffic_used_bytes": 1_000_000_u64,
+            "traffic_limit_bytes": 38_000_000_000_u64,
+            "traffic_state": "ok",
+        })];
+        let text = summarise_servers(&servers, None);
+        assert!(text.contains("云服务商已删除，不再扣费"), "{text}");
+        assert!(!text.contains("每天 0.40 美元"), "{text}");
+        assert!(!text.contains("已付至"), "{text}");
     }
 
     /// 旧控制面没有池子：整段不出现，也绝不补一个 0。
@@ -658,7 +718,7 @@ mod tests {
     fn the_pool_survives_an_empty_server_list() {
         let pool = json!({ "used_bytes": 500_000_000_u64, "limit_bytes": 100_000_000_000_u64 });
         let text = summarise_servers(&[], Some(&pool));
-        assert!(text.contains("本月流量：已用 0.5 GiB / 已释放 93.1 GiB"), "{text}");
+        assert!(text.contains("本月流量：已用 0.5 GiB / 已累计 93.1 GiB"), "{text}");
         assert!(text.contains("还没有自建服务器"), "{text}");
     }
 
@@ -671,9 +731,9 @@ mod tests {
         assert!(!text.contains("额度"), "{text}");
     }
 
-    /// 每台都写本月流量：已释放额度、机型月额度、清零点（本机时区）都要出来。
+    /// 每台都写本月流量：已累计额度、机型月额度、清零点（本机时区）都要出来。
     #[test]
-    fn a_server_row_carries_released_quota_and_reset_time() {
+    fn a_server_row_carries_accumulated_quota_and_reset_time() {
         let text = summarise_servers(&[json!({
             "server_id": "srv_1", "name": "伦敦", "region": "lon1", "state": "active",
             "traffic_used_bytes": 3_200_000_000_u64,
@@ -682,7 +742,7 @@ mod tests {
             "traffic_reset_at": "2026-12-01T00:00:00Z",
             "traffic_state": "ok",
         })], None);
-        assert!(text.contains("已释放 11.2 GiB"), "{text}");
+        assert!(text.contains("已累计 11.2 GiB"), "{text}");
         assert!(text.contains("机型月额度 50 GiB"), "{text}");
         assert!(text.contains("清零"), "{text}");
         assert!(!text.contains("流量超支"), "正常机不标超支：{text}");
@@ -700,7 +760,7 @@ mod tests {
             "traffic_state": "unpaid",
         })], None);
         assert!(
-            text.contains("本月流量 已用 5.6 GiB / 已释放 4.7 GiB"),
+            text.contains("本月流量 已用 5.6 GiB / 已累计 4.7 GiB"),
             "{text}"
         );
         assert!(text.contains("流量超支已停机（未付费）"), "{text}");
@@ -746,7 +806,7 @@ mod tests {
             "traffic_reset_at": "2026-12-01T00:00:00Z",
             "traffic_state": "ok",
         })], None);
-        assert!(text.contains("已用 500.0 GiB / 已释放 500.0 GiB"), "{text}");
+        assert!(text.contains("已用 500.0 GiB / 已累计 500.0 GiB"), "{text}");
         assert!(text.contains("机型月额度 500 GiB"), "{text}");
         assert!(!text.contains("GB"), "不能混用 GB：{text}");
     }
@@ -801,6 +861,34 @@ mod tests {
             Some(Fact::with_params(
                 FactKey::ServerRow,
                 json!({ "name": "伦敦", "region": "lon1", "state": "active" })
+            ))
+        );
+    }
+
+    /// 云服务商侧已删除的机器：卡片状态词换掉，不能写成「已开通」。
+    #[test]
+    fn a_ghost_row_is_pushed_as_gone() {
+        assert_eq!(
+            server_row_fact(&json!({
+                "state": "active", "name": "悉尼", "region": "syd1", "provider_gone": true
+            })),
+            Some(Fact::with_params(
+                FactKey::ServerRow,
+                json!({ "name": "悉尼", "region": "syd1", "state": "gone" })
+            ))
+        );
+        // 应用里销毁之后仍写「已销毁」，不被 provider_gone 覆盖。
+        assert_eq!(
+            server_row_fact(&json!({
+                "state": "destroyed", "name": "悉尼", "region": "syd1",
+                "provider_gone": true, "failure": null
+            })),
+            Some(Fact::with_params(
+                FactKey::ServerRow,
+                json!({
+                    "name": "悉尼", "region": "syd1", "state": "destroyed",
+                    "destroyed": "user"
+                })
             ))
         );
     }

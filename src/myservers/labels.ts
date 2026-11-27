@@ -76,9 +76,11 @@ function billingStateWord(
  * 进行中的机器 billing_state 是 pending，不会命中这两档。
  */
 export function serverRailState(
-  server: Pick<MyServer, "state" | "billing_state">,
+  server: Pick<MyServer, "state" | "billing_state" | "provider_gone">,
 ): string {
   if (server.state === "destroyed") return serverTombstoneWord();
+  // 云服务商侧已不存在：比欠费更根本——这台机器已经没了，充值也救不回来。
+  if (server.provider_gone === true) return t("myservers.state.gone");
   const billing = billingStateWord(server.billing_state);
   if (billing) return t(billing);
   const phase = RAIL_PHASE_KEYS[server.state];
@@ -88,9 +90,10 @@ export function serverRailState(
 
 /** 详情页标题词：用长词；停机删除与欠费覆盖同源。 */
 export function serverDetailState(
-  server: Pick<MyServer, "state" | "billing_state">,
+  server: Pick<MyServer, "state" | "billing_state" | "provider_gone">,
 ): string {
   if (server.state === "destroyed") return serverTombstoneWord();
+  if (server.provider_gone === true) return t("myservers.state.gone");
   const billing = billingStateWord(server.billing_state);
   if (billing) return t(billing);
   return serverStateLabel(server.state);
@@ -234,9 +237,16 @@ export function formatDuration(totalSeconds: number): string {
 
 /** 机器详情费用行：日价 + 计费状态的单一文案函数。 */
 export function serverBillingText(
-  server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
+  server: Pick<
+    MyServer,
+    "daily_price_cents" | "paid_until" | "billing_state" | "provider_gone"
+  >,
   now = Date.now(),
 ): string {
+  // 机器已在云服务商侧不存在：不再续扣，报日价就是假话。
+  if (server.provider_gone === true) {
+    return t("myservers.billing.providerGone");
+  }
   const price = formatDailyPrice(server.daily_price_cents);
   const ends = server.paid_until ? new Date(server.paid_until).getTime() : NaN;
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。
@@ -299,9 +309,11 @@ export function stateTone(state: MyServerState): "ok" | "err" | "idle" {
  * 欠费存在 billing_state 里，只看 state 会把 past_due 的机器画成绿点。
  */
 export function serverTone(
-  server: Pick<MyServer, "state" | "billing_state">,
+  server: Pick<MyServer, "state" | "billing_state" | "provider_gone">,
 ): "ok" | "err" | "idle" | "warn" {
   if (server.state === "destroyed") return "warn";
+  // 云服务商侧已删除：不是我们的失败，也不可用，按「异常」画琥珀。
+  if (server.provider_gone === true) return "warn";
   if (server.billing_state === "past_due" || server.billing_state === "expired") {
     return "warn";
   }

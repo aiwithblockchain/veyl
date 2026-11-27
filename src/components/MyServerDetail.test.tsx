@@ -348,6 +348,15 @@ describe("服务器详情", () => {
     expect(onAiLocate).not.toHaveBeenCalled();
   });
 
+  it("四种创建中状态：不渲染销毁，只留进度块", () => {
+    for (const state of ["creating", "booting", "installing", "verifying"] as const) {
+      renderDetail({ state });
+      expect(screen.queryByRole("button", { name: /销毁/ }), state).toBeNull();
+      expect(document.querySelector(".myservers__progress")).toBeTruthy();
+      cleanup();
+    }
+  });
+
   it("已销毁：不给销毁，右侧只保留重新购买", () => {
     renderDetail({ state: "gone" });
 
@@ -404,6 +413,30 @@ describe("服务器详情", () => {
     ).toBe("去充值");
     fireEvent.click(screen.getByRole("button", { name: "去充值" }));
     expect(onTopUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("云服务商侧已删除的欠费机器：不给去充值，也不报日价", () => {
+    renderDetail(
+      {
+        billing_state: "past_due",
+        provider_gone: true,
+        grace_ends_at: new Date(Date.now() + 2.5 * 86_400_000).toISOString(),
+      },
+      vi.fn(),
+      undefined,
+      vi.fn(),
+    );
+
+    // 结算不会再跑，充值救不回来；费用行改写「已删除，不再扣费」。
+    expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
+    expect(document.body.textContent).toContain("云服务商已删除，不再扣费");
+    // 标题词与提示都点明「已从云服务商删除」，不是可用。
+    expect(document.querySelector(".myservers__state")?.textContent).toContain(
+      "云服务商已删除",
+    );
+    expect(document.body.textContent).toContain("销毁后即可从列表移除");
+    // 欠费提示与「去充值」都让位给「已删除」：充值救不回来，两个提示会互相否定。
+    expect(document.body.textContent).not.toContain("最近一次扣费没成功");
   });
 
   it("进度条报步骤：1–4 与阶段名，另有 sr-only 第 N 步", () => {
@@ -537,7 +570,7 @@ describe("服务器详情", () => {
     expect(screen.getByText("已等待 3 分 0 秒")).toBeTruthy();
   });
 
-  it("整机满 15 分钟：改判安装超时，阶段提示保留，销毁仍可点", () => {
+  it("整机满 15 分钟：改判安装超时，阶段提示保留，仍不给销毁", () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 18, 10, 15, 0) });
     renderDetail({
       state: "installing",
@@ -548,14 +581,12 @@ describe("服务器详情", () => {
     const timeout = document.querySelector(
       ".myservers__progress-note.is-timeout",
     );
-    expect(timeout?.textContent).toContain("安装超时，可以销毁重建");
+    expect(timeout?.textContent).toContain("安装超时；创建会自动完成或失败。");
     // 阶段提示仍在：解释卡在哪一步。
     expect(
       document.querySelector(".myservers__progress-note")?.textContent,
     ).toBe("这一步已经 14 分钟，还在继续。");
-    const destroy = screen.getByRole("button", { name: "销毁" });
-    expect(destroy.className).toContain("btn--danger-ghost");
-    expect((destroy as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: /销毁/ })).toBeNull();
   });
 
   it("切换服务器后计时按新服务器的时间重算", () => {

@@ -1169,6 +1169,50 @@ describe("DO 侧已删除的机器（用户在 DO 后台直接删 droplet）", (
     ).toHaveLength(1);
   });
 
+  it("并发：标记已被另一轮写下时不再写第二条审计，也不扣费", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(404, { id: "not_found" });
+    // 模拟另一轮 Cron 在探测之后、落标记之前先写了（UPDATE 的守卫会挡下这一次）。
+    db.beforeProviderGoneMark = () => {
+      db.rows("servers")[0].provider_gone_at = Date.now();
+    };
+
+    const report = await runBilling(env as never);
+
+    // 结论仍是 gone：这一轮不扣钱。
+    expect(report.providerGone).toBe(1);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    // 但没改到行，就不写审计——否则事故时审计会多出一倍。
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.provider_gone"),
+    ).toHaveLength(0);
+  });
+
+  it("报告里有「当前未销毁的冻结台数」：事故过去后仍看得见", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, { paid_until: Date.now() - 60_000, last_seen_at: Date.now() - STALE });
+    stubDoGet(404, { id: "not_found" });
+
+    const first = await runBilling(env as never);
+    expect(first.providerGone).toBe(1);
+    expect(first.providerGoneActive).toBe(1);
+
+    // 已冻结又已销毁的行不算存量：它已经不占额度、不再需要盯。
+    db.rows("servers").push({
+      ...db.rows("servers")[0],
+      id: "srv_dead_gone",
+      provider_id: "999999",
+      state: "destroyed",
+      destroyed_at: Date.now(),
+    });
+    const next = await runBilling(env as never);
+    expect(next.providerGone).toBe(0);
+    expect(next.providerGoneActive).toBe(1);
+  });
+
   it("心跳静默 + DO 200：机器还在，agent 挂了也照常扣（计费不看在线）", async () => {
     const db = new FakeD1();
     const env = envWith(db);
@@ -1420,26 +1464,247 @@ describe("卡住的 destroying 清扫", () => {
       db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
     ).toHaveLength(0);
   });
-  it("建机阶段（pending）卡住的 destroying 不动：恢复成 active 会变成永久幻影", async () => {
+  it("建机阶段（pending）卡住的 destroying：补完销毁，订单关闭、不凭空退款", async () => {
     const db = new FakeD1();
     const env = envWith(db);
+    const stuckAt = Date.now() - 40 * 60 * 1000;
     // 扣费扫描不收 pending，收割器只认 booting/installing/verifying，孤儿补建也不接——
-    // 恢复成 active 就是一台「运行中却连不上」的机器。维持原状，界面还能重试销毁。
+    // 恢复成 active 就是一台「运行中却连不上」的机器。这类行一分钱没扣过，直接删干净。
     seedServer(db, {
       state: "destroying",
       billing_state: "pending",
-      updated_at: Date.now() - 40 * 60 * 1000,
+      updated_at: stuckAt,
       paid_until: 0,
+      provider_id: "4242",
+      firewall_id: null,
+    });
+    // 订单已付（钱包）但结算前从没扣过钱：不该凭空退一笔。
+    seedOrder(db, {
+      id: "ord_seed",
+      state: "paid",
+      server_id: "srv_billing0000000000",
+      paid_via: "wallet",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.pendingDestroyed).toBe(1);
+    expect(report.destroyingRecovered).toBe(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.destroyed_at).toBeTruthy();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(db.rows("orders")[0].failure_code).toBe("destroy_stuck");
+    expect(calls).toContain("DELETE https://api.digitalocean.com/v2/droplets/4242");
+    // 从没扣过钱：只能留「无扣款流水」审计，绝不能凭空写退款。
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
+    expect(
+      db
+        .rows("audit_log")
+        .some(
+          (row) =>
+            row.action === "server.destroy" &&
+            JSON.parse(String(row.detail)).reason === "destroy_stuck",
+        ),
+    ).toBe(true);
+    expect(db.rows("audit_log").some((row) => row.action === "refund_skipped_no_charge")).toBe(true);
+  });
+
+  it("补完销毁时 DO 删不掉：行留在 destroying（不是 active），下一轮还能重试", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    const stuckAt = Date.now() - 40 * 60 * 1000;
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: stuckAt,
+      paid_until: 0,
+      provider_id: "4242",
+      firewall_id: null,
+    });
+    seedOrder(db, { id: "ord_seed", state: "paid", server_id: "srv_billing0000000000" });
+    const deletes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "DELETE") deletes.push(String(input));
+        return new Response(null, { status: 500 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.pendingDestroyed).toBe(0);
+    expect(report.destroyingRecovered).toBe(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroying");
+    // 失败要还原原 `updated_at`：否则每失败一次就再等 30 分钟才轮到下一轮。
+    expect(server.updated_at).toBe(stuckAt);
+    expect(server.destroyed_at).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("paid");
+
+    const second = await runBilling(env as never);
+
+    expect(second.pendingDestroyed).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(deletes).toHaveLength(2);
+  });
+
+  it("建机阶段（pending）不到 30 分钟的不动：可能还有一次销毁正在进行", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: Date.now() - 5 * 60 * 1000,
+      paid_until: 0,
+    });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const report = await runBilling(env as never);
+
+    expect(report.pendingDestroyed).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("建机卡死清扫（sweepStaleCreating）", () => {
+  const STALE = 15 * 60 * 1000;
+
+  function seedStaleCreating(
+    db: FakeD1,
+    overrides: Record<string, unknown> = {},
+    options: { withOrder?: boolean } = {},
+  ) {
+    const now = Date.now();
+    seedServer(db, {
+      state: "creating",
+      provider_id: null,
+      paid_until: 0,
+      created_at: now - 20 * 60 * 1000,
+      updated_at: now - STALE,
+      ...overrides,
+    });
+    if (options.withOrder === false) return;
+    db.rows("orders").push({
+      id: "ord_seed",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_cents: 30,
+      amount_usd: 0.3,
+      charge_mode: "upfront",
+      state: "provisioning",
+      paid_via: "wallet",
+      failure_code: null,
+      failure_stage: null,
+      created_at: now - 20 * 60 * 1000,
+      paid_at: now - 20 * 60 * 1000,
+    });
+  }
+
+  it("停在 creating 超过 10 分钟：落 error、关单、退已扣的款，不再被补建", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedStaleCreating(db);
+    db.rows("wallet_ledger").push({
+      id: "led_order_charge",
+      account_id: ACCOUNT,
+      kind: "charge",
+      amount_cents: -30,
+      balance_after_cents: 0,
+      ref_type: "order",
+      ref_id: "ord_seed",
+      note: null,
+      created_at: Date.now() - 20 * 60 * 1000,
     });
 
     const report = await runBilling(env as never);
 
-    expect(report.destroyingRecovered).toBe(0);
-    expect(db.rows("servers")[0].state).toBe("destroying");
-    expect(db.rows("servers")[0].billing_state).toBe("pending");
+    expect(report.creatingReaped).toBe(1);
+    expect(report.rebuilt).toBe(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("error");
+    expect(server.failure_code).toBe("creating_timeout");
+    const order = db.rows("orders")[0];
+    expect(order.state).toBe("failed");
     expect(
-      db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
-    ).toHaveLength(0);
+      db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund"),
+    ).toHaveLength(1);
+    expect(db.rows("audit_log").some((row) => row.action === "provision.created")).toBe(false);
+  });
+
+  it("不到 10 分钟的不动：可能建机请求还在路上", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedStaleCreating(db, { updated_at: Date.now() - 5 * 60 * 1000 }, { withOrder: false });
+
+    const report = await runBilling(env as never);
+
+    expect(report.creatingReaped).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("creating");
+    expect(db.rows("audit_log").some((row) => row.action === "provision.failed")).toBe(false);
+  });
+
+  it("按建机 tag 反查并删掉没有记录的孤儿 droplet", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedStaleCreating(db);
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (url.includes("tag_name=")) {
+          return new Response(
+            JSON.stringify({ droplets: [{ id: 99, status: "active", networks: {} }] }),
+            { status: 200 },
+          );
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    await runBilling(env as never);
+
+    expect(calls.some((call) => call.includes("tag_name=") && call.includes("veyl"))).toBe(true);
+    expect(calls).toContain("DELETE https://api.digitalocean.com/v2/droplets/99");
+  });
+});
+
+describe("补建扫描不会复活已销毁的行", () => {
+  it("订单还是 paid、机器行已销毁：不重建", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroyed",
+      destroyed_at: Date.now() - 1000,
+      paid_until: 0,
+      // `provider_id` 为空是真实场景：建机没走完就被销毁。没有 `destroyed_at IS NULL`
+      // 这条守卫时，补建扫描会把它重新建出来。
+      provider_id: null,
+    });
+    seedOrder(db, { id: "ord_seed", state: "paid", server_id: "srv_billing0000000000" });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const report = await runBilling(env as never);
+
+    expect(report.rebuilt).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(db.rows("audit_log").some((row) => row.action === "provision.created")).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

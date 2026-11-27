@@ -3,9 +3,9 @@
 
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
-import { refundProvision } from "./provision";
-import { getDroplet } from "./providers/digitalocean";
-import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
+import { failPermanently, refundProvision, type ServerToProvision } from "./provision";
+import { deleteDroplet, getDroplet, listDropletsByTag } from "./providers/digitalocean";
+import { destroyStuckServer, destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry, type WalletEnv } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -62,14 +62,26 @@ export interface BillingReport {
   providerProbed: number;
   /** 心跳静默但 DO 查询没给出结论（超时/5xx/无令牌）的台数：下一轮再查，仍照常扣。 */
   providerUnknown: number;
+  /**
+   * 当前被冻结、还没被用户销毁的台数（`provider_gone_at` 非空且未销毁）。
+   * `providerGone` 只计本轮新增，事故过去后从报告里看不出来；这个数才是存量。
+   */
+  providerGoneActive: number;
   pastDue: number;
   expired: number;
   rebuilt: number;
   refunded: number;
   reaped: number;
   settleReaped: number;
+  /** 卡在 `creating` 超过 10 分钟（发起建机的 Worker 已死）被收尾的台数。 */
+  creatingReaped: number;
   /** 卡在 `destroying`（Worker 在删远端与落库之间死掉）被恢复成 active 的台数。 */
   destroyingRecovered: number;
+  /**
+   * 建机阶段（`billing_state='pending'`）卡在 `destroying`、本轮被补完销毁的台数。
+   * 这类行不能恢复成 active（没人会再扣费也不会再收敛），只能直接删干净。
+   */
+  pendingDestroyed: number;
   archived: number;
   /** 超龄的历史 `server_traffic` 行（保留每台机器的最大 last_seq 行）。 */
   trafficPruned: number;
@@ -103,7 +115,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, pendingDestroyed: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -114,9 +126,14 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   // 再清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
   // 这一步放在计费之前，免得同一轮又把没人认领的机器扣一天。
   report.reaped = await sweepExpiredEnrollments(env);
-  // 先把卡住的 destroying 恢复成 active：这类行既不被 collectDue 取到、也不会自己
-  // 恢复，不清理就会「机器还在跑、却永远不再扣费」。要在收集到期之前做。
-  report.destroyingRecovered = await recoverStuckDestroying(env, now);
+  // 再收掉「建机请求没回来」的 creating 行：必须排在补建扫描之前，否则超龄 creating
+  // 会先被补建再建一次；关单之后补建条件（paid / provisioning）自然不命中。
+  report.creatingReaped = await sweepStaleCreating(env, now);
+  // 卡住的 destroying：建机阶段的补完销毁，其余恢复成 active。两类行都既不被 collectDue
+  // 取到、也不会自己收敛；要在收集到期之前做。
+  const stuck = await recoverStuckDestroying(env, now);
+  report.destroyingRecovered = stuck.recovered;
+  report.pendingDestroyed = stuck.pendingDestroyed;
   const due = await collectDue(env, now);
 
   for (const server of due) {
@@ -185,10 +202,13 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   }
 
   // 已收款但没有机器：补建（unique(servers.order_id) 保证不会建第二台）。
+  // `s.destroyed_at IS NULL` 是必须的：用户销毁失败态 / 建机中的机器后，订单可能还没关，
+  // 少了这一条就会把这台机器重新建出来。
   const orphaned = await db
     .prepare(
       "SELECT o.id FROM orders o LEFT JOIN servers s ON s.order_id = o.id " +
         "WHERE o.state IN ('paid', 'provisioning') AND o.charge_mode = 'upfront' AND o.created_at < ? " +
+        "AND s.destroyed_at IS NULL " +
         "AND (s.id IS NULL OR s.provider_id IS NULL OR s.state = 'error') LIMIT 5",
     )
     .bind(now - 5 * 60 * 1000)
@@ -223,6 +243,16 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   report.serversPruned = await pruneDestroyedServers(env, now);
   report.tokensPruned = await pruneRefreshTokens(env, now);
   report.accountsPruned = await pruneOrphanAccounts(env, now);
+  // 事故可见性：`providerGone` 只记本轮新增，事故过去后就看不出冻了多少台。
+  // 只读计数，查失败不影响这一轮计费。
+  try {
+    const gone = await db
+      .prepare("SELECT id FROM servers WHERE provider_gone_at IS NOT NULL AND destroyed_at IS NULL")
+      .all<{ id: string }>();
+    report.providerGoneActive = (gone.results ?? []).length;
+  } catch (error) {
+    console.warn(`[billing] provider_gone_count_failed error=${String(error)}`);
+  }
   return report;
 }
 
@@ -314,31 +344,54 @@ async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> 
  * Worker 恰好在两步之间被踢时，行会永久停在 `destroying`——`collectDue` 不取它，
  * 于是 droplet 还在跑却再也不会扣费。
  *
- * 这里只恢复成 `active`，**不补完销毁**：我们不知道当初为什么销毁、该按哪种退款
- * 口径，猜错就是钱的事。恢复后正常的几条线会接管——到期扫描照常计费，DO 侧真没了的
- * 机器会被 `markProviderGone` 发现，用户也可以自己再点销毁。
- *
- * `billing_state = 'pending'` 的行不能恢复：那是建机阶段，扣费扫描永远不取它，
- * 而两个收割器只认 booting / installing / verifying、孤儿补建要求 provider_id 为空或
- * state='error'——恢复成 active 就会变成一台「运行中却连不上」的永久幻影。
- * 它们维持原状，界面仍有「重试销毁」；让 enroll 收割器补完销毁是更彻底的解法，待办。
+ * 按 `billing_state` 分两类：
+ * - 正常计费过的行：只恢复成 `active`，**不补完销毁**——不知道当初为什么销毁、该按哪种
+ *   退款口径，猜错就是钱的事。恢复后正常几条线接管：到期扫描照常计费，DO 侧真没了的
+ *   机器由 `markProviderGone` 发现，用户也可以自己再点销毁。
+ * - `billing_state = 'pending'`（建机阶段）：**补完销毁**。这类行一分钱没扣过，没有退款
+ *   口径的选择题；恢复成 active 反而会变成一台永远不扣费、也连不上的永久幻影
+ *   （扣费扫描不取 pending，两个收割器只认 booting / installing / verifying）。
+ *   删远端失败时行留在 `destroying`，下一轮再试。
  */
 const DESTROYING_STUCK_MS = 30 * 60 * 1000;
 const DESTROYING_RECOVER_BATCH = 100;
 
-async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<number> {
+interface StuckDestroyingRow {
+  id: string;
+  account_id: string;
+  updated_at: number;
+  billing_state: string;
+}
+
+async function recoverStuckDestroying(
+  env: BillingEnv,
+  now: number,
+): Promise<{ recovered: number; pendingDestroyed: number }> {
   const db = env.DB!;
   let recovered = 0;
+  let pendingDestroyed = 0;
   try {
     const rows = await db
       .prepare(
-        "SELECT id, account_id, updated_at FROM servers " +
-          "WHERE state = 'destroying' AND destroyed_at IS NULL AND updated_at < ? " +
-          "AND billing_state <> 'pending' LIMIT ?",
+        "SELECT id, account_id, updated_at, billing_state FROM servers " +
+          "WHERE state = 'destroying' AND destroyed_at IS NULL AND updated_at < ? LIMIT ?",
       )
       .bind(now - DESTROYING_STUCK_MS, DESTROYING_RECOVER_BATCH)
-      .all<{ id: string; account_id: string; updated_at: number }>();
+      .all<StuckDestroyingRow>();
     for (const row of rows.results ?? []) {
+      if (row.billing_state === "pending") {
+        try {
+          if (await destroyStuckServer(env, row.id, row.account_id)) {
+            pendingDestroyed += 1;
+          } else {
+            console.warn(`[billing] pending_destroy_failed server=${row.id}`);
+          }
+        } catch (error) {
+          // 单台失败不影响其它行；行留在 destroying，下一轮再试。
+          console.error(`[billing] pending_destroy_failed server=${row.id} error=${String(error)}`);
+        }
+        continue;
+      }
       // `updated_at` 一起比对：并发的销毁刚好刷新过这行时不能把它改回 active。
       const updated = await db
         .prepare(
@@ -370,7 +423,90 @@ async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<num
     // 清扫失败不能拖垮整轮计费：下一轮再来。
     console.error(`[billing] destroying_sweep_failed error=${String(error)}`);
   }
-  return recovered;
+  return { recovered, pendingDestroyed };
+}
+
+/**
+ * 建机请求是同步的（秒级）。行停在 `creating` 超过 10 分钟，说明发起它的 Worker 已经死了：
+ * DO 上可能建了一半，也可能已经建好但没来得及写 `provider_id`。
+ *
+ * 收尾口径与 `failPermanently` 一致：落 `error`、关单（补建不再命中）、有已扣的 upfront 款退回。
+ * 动手前先按 `veyl:srv:<id>` 反查一次 droplet 并删掉——没有记录的机器没人会再认领它。
+ * 删失败不阻断收尾（机器由 DO 侧账单兜底），下一轮也不会再为这一行走一遍。
+ */
+const CREATING_STALE_MS = 10 * 60 * 1000;
+const CREATING_REAP_BATCH = 20;
+
+async function sweepStaleCreating(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  let reaped = 0;
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT id, account_id, order_id, region, plan, node_port FROM servers " +
+          "WHERE state = 'creating' AND destroyed_at IS NULL AND updated_at < ? " +
+          "ORDER BY updated_at ASC LIMIT ?",
+      )
+      .bind(now - CREATING_STALE_MS, CREATING_REAP_BATCH)
+      .all<ServerToProvision>();
+    for (const row of rows.results ?? []) {
+      try {
+        // 扫描到处理之间建机可能刚好成功（booting）：先认领，抢不到就放手。
+        const claimed = await db
+          .prepare(
+            "UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? " +
+              "WHERE id = ? AND state = 'creating' AND destroyed_at IS NULL",
+          )
+          .bind("creating_timeout", now, row.id)
+          .run();
+        if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) continue;
+        await deleteCreatingOrphans(env, row.id);
+        await failPermanently(
+          { DB: db },
+          row,
+          "creating_timeout",
+          JSON.stringify({ reason: "creating_timeout" }),
+          now,
+        );
+        reaped += 1;
+      } catch (error) {
+        // 认领之后收尾失败就撤回认领：否则行停在 error、订单还在 paid，补建扫描会把它
+        // 重新建出来；退回 creating 让下一轮重来，收敛路径保持不变。
+        await db
+          .prepare(
+            "UPDATE servers SET state = 'creating', failure_code = NULL WHERE id = ? " +
+              "AND state = 'error' AND failure_code = 'creating_timeout' AND destroyed_at IS NULL",
+          )
+          .bind(row.id)
+          .run()
+          .catch(() => {});
+        console.error(`[billing] creating_reap_failed server=${row.id} error=${String(error)}`);
+      }
+    }
+  } catch (error) {
+    console.error(`[billing] creating_sweep_failed error=${String(error)}`);
+  }
+  return reaped;
+}
+
+/** 建机 tag 在 `provisionServer` 建 droplet 时就写上；没有记录又没来得及登记的机器只能靠它找回来。 */
+async function deleteCreatingOrphans(env: BillingEnv, serverId: string): Promise<void> {
+  if (!env.DO_API_TOKEN) return;
+  const tagged = await listDropletsByTag(env.DO_API_TOKEN, `veyl:srv:${serverId}`);
+  if (!tagged.ok) {
+    console.warn(
+      `[billing] creating_orphan_lookup_failed server=${serverId} reason=${tagged.reason}`,
+    );
+    return;
+  }
+  for (const droplet of tagged.value) {
+    const deleted = await deleteDroplet(env.DO_API_TOKEN, droplet.providerId);
+    if (!deleted.ok && deleted.status !== 404) {
+      console.warn(
+        `[billing] creating_orphan_delete_failed server=${serverId} droplet=${droplet.providerId} reason=${deleted.reason}`,
+      );
+    }
+  }
 }
 
 /**
@@ -457,15 +593,21 @@ async function markProviderGone(
   if (droplet.status !== 404) return { verdict: "unknown", probed: true };
 
   // 写入失败不能静默：标记没落库就等于这台继续扣费，下一轮还会重来。
-  await db
+  const marked = await db
     .prepare(
       "UPDATE servers SET provider_gone_at = ?, updated_at = ? WHERE id = ? AND provider_gone_at IS NULL",
     )
     .bind(now, now, server.id)
     .run()
-    .catch((error) =>
-      console.warn(`[billing] provider_gone_write_failed server=${server.id} error=${String(error)}`),
-    );
+    .catch((error) => {
+      console.warn(`[billing] provider_gone_write_failed server=${server.id} error=${String(error)}`);
+      return null;
+    });
+  // 只有真改了这一行才写审计：并发双例会重复写，写失败时审计也没有依据。
+  // 两种情况都不影响本轮结论——探测已经看到 404，这一轮不扣钱，下一轮自然重来。
+  if (marked === null || Number(marked.meta?.changes ?? 0) !== 1) {
+    return { verdict: "gone", probed: true };
+  }
   await db
     .prepare(
       "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.provider_gone', ?)",

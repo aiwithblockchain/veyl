@@ -100,8 +100,8 @@ async function fail(
  * 退款以 `(server_refund, server_id)` 为幂等键，与销毁退款共用同一把锁——
  * 服务器之后被销毁也不会退第二次。
  */
-async function failPermanently(
-  env: ProvisionEnv,
+export async function failPermanently(
+  env: { DB: D1Database },
   server: ServerToProvision,
   reason: string,
   detail: string,

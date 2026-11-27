@@ -34,7 +34,7 @@ describe("cloud-init（只装 agent）", () => {
     expect(body).toContain("install -m 0755 /tmp/veyl-agent /usr/local/bin/veyl-agent");
   });
 
-  it("写 agent 配置：控制面地址、enroll URL、一次性 token", () => {
+  it("写 agent 配置：控制面地址、enroll/fail URL、一次性 token", () => {
     const body = script();
     const configLine = body
       .split("\n")
@@ -44,9 +44,21 @@ describe("cloud-init（只装 agent）", () => {
     expect(config).toEqual({
       control_url: "https://cp-dev.example.com",
       enroll_url: "https://cp-dev.example.com/v1/agent/enroll",
+      fail_url: "https://cp-dev.example.com/v1/agent/fail",
       enroll_token: "enr_tok_test",
     });
     expect(body).toContain("chmod 600 /etc/veyl-agent.json");
+  });
+
+  it("systemd 等 execve 成功才算启动（Type=exec）", () => {
+    expect(script()).toContain("Type=exec");
+  });
+
+  it("镜像缺 nft/ip 时补装：启动探针依赖它们，缺了会 100% 建机失败", () => {
+    const body = script();
+    expect(body).toContain("command -v nft >/dev/null 2>&1");
+    expect(body).toContain("command -v ip >/dev/null 2>&1");
+    expect(body).toContain("apt-get install -y -qq nftables iproute2");
   });
 
   it("装 systemd unit：root 运行、开机自启、失败重启", () => {
@@ -75,7 +87,7 @@ describe("cloud-init（只装 agent）", () => {
 
   it("失败回传带阶段、行号与截断后的 stderr，且不含凭据", () => {
     const body = script();
-    for (const stage of ["download", "checksum", "install", "config", "systemd"]) {
+    for (const stage of ["download", "checksum", "install", "config", "systemd", "ready"]) {
       expect(body).toContain(`STAGE=${stage}`);
     }
     expect(body).toContain('head -c 300');
@@ -98,12 +110,19 @@ describe("cloud-init（只装 agent）", () => {
     expect(body).toContain("systemctl disable ssh");
   });
 
-  it("启动后确认 agent 真的 active，否则把 unit 状态回传", () => {
+  it("等 agent 的就绪文件（单元 active 不够），否则把 unit 状态回传", () => {
     const body = script();
     expect(body).toContain("systemctl is-active --quiet veyl-agent");
-    expect(body).toContain("veyl-agent did not become active within 30s");
+    // Type=exec 下单元在 execve 时就 active，早于计量探针；必须等就绪文件。
+    expect(body).toContain(
+      "if systemctl is-active --quiet veyl-agent && [ -f /run/veyl-agent/ready ]; then",
+    );
+    expect(body).toContain("veyl-agent did not become ready within 60s");
     expect(body).toContain("journalctl -u veyl-agent -n 40 --no-pager");
-    // 失败时走同一个 trap，控制面能拿到 stage=systemd 与 journal 摘要。
+    // 就绪超时按 ready 阶段上报：systemd 那一步早已成功，报 systemd 会误导排查。
+    expect(body).toContain("STAGE=ready");
+    expect(body.indexOf("STAGE=ready")).toBeLessThan(body.indexOf("for _ in $(seq 1 60)"));
+    // 失败时走同一个 trap，控制面能拿到 stage=ready 与 journal 摘要。
     expect(body).toContain("on_error ${LINENO}");
   });
 

@@ -63,7 +63,8 @@ async function settleOverage(
   const totals = await accountTotals(db, server.account_id, cycleId, now);
   // 判据是**账号池**，不是「这台机器有没有额度」：后者会让一台 `transfer_gib = 0` 的存量机器
   // 把整个账号的超支结算一起跳过（它免费，同账号有额度的机器也不计超支）。
-  // 账号所有的额度都是 0 时仍然不结算——没有月额度就算不出「超出多少」，不能把全部用量当超支扣。
+  // 账号一点已释放额度都没有时仍然不结算：可能是全是零额度存量行（算不出「超出多少」），
+  // 也可能是都还没付过一天（`paidDays = 0`）——两种都按不结算处理，宁少收不多收。
   if (totals.released <= 0) return;
   const due = dueCents(totals);
   const delta = Math.max(0, due - totals.charged);
@@ -121,6 +122,16 @@ async function settleOverage(
 }
 
 async function destroyForTraffic(env: TrafficEnv, server: TrafficServerRow): Promise<void> {
+  // 停机对象必须是**有月额度的上报机器**：额度未知的存量机器（`transfer_gib = 0`）
+  // 既算不出自己的「超出多少」，销毁它也减不了账号的超支——只是退款后让真正超支的
+  // 机器继续跑。同账号有额度的机器会在自己下一次上报时停机；它若一直不上报，也会
+  // 因为余额扣不动在日结时被销毁（`billing_unpaid`）。
+  if (Math.round(Math.max(0, Number(server.transfer_gib ?? 0)) * GIB) <= 0) {
+    console.warn(
+      `[traffic] overage_unpaid server=${server.id} account=${server.account_id} skipped_destroy=no_quota`,
+    );
+    return;
+  }
   const destroyed = await destroyUnpaidServer(
     env as ServersEnv,
     server.id,

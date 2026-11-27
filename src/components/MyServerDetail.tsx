@@ -556,6 +556,8 @@ export function MyServerDetail({
   /** 欠费 / 停用：右侧给「去充值」主按钮，销毁仍在左；停机/已销毁与失败态不掺和。 */
   const deficient =
     (server.billing_state === "past_due" || server.billing_state === "expired") &&
+    // 云服务商侧已删除的机器不会再结算，充值也救不回来。
+    server.provider_gone !== true &&
     !halted &&
     !failed;
   // 就绪后进度块整块抽走（ServerProgress 返回 null）：事实区会随之上移，接受这点位移。
@@ -655,13 +657,21 @@ export function MyServerDetail({
         ) : null}
 
         {server.billing_state === "past_due" || server.billing_state === "expired" ? (
-          <p
-            className={`myservers__billing ${
-              server.billing_state === "expired" ? "is-expired" : ""
-            }`}
-            role="status"
-          >
-            {billingNoticeText(server)}
+          server.provider_gone === true ? null : (
+            <p
+              className={`myservers__billing ${
+                server.billing_state === "expired" ? "is-expired" : ""
+              }`}
+              role="status"
+            >
+              {billingNoticeText(server)}
+            </p>
+          )
+        ) : null}
+
+        {server.provider_gone === true && server.state !== "destroyed" ? (
+          <p className="myservers__billing" role="status">
+            {tr("detail.providerGone")}
           </p>
         ) : null}
 
@@ -838,17 +848,14 @@ export function MyServerDetail({
               </div>
             </div>
           ) : /* 已销毁：对象已不存在，不给「销毁」；右侧仍可「重新购买」。 */
-          server.state === "gone" ? null : destroying && !destroyRetryAllowed ? (
+          server.state === "gone" ? null : /* 创建中：只留进度块，不给销毁入口。 */
+          isProvisioning(server.state) ? null : destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
               {tr("detail.destroying")}
             </p>
           ) : confirming ? (
             <div className="myservers__confirm" role="alert">
-              <p>
-                {isProvisioning(server.state)
-                  ? tr("detail.destroyConfirmProvisioning")
-                  : tr("detail.destroyConfirm")}
-              </p>
+              <p>{tr("detail.destroyConfirm")}</p>
               {tomorrowBytes > 0 ? (
                 <p className="myservers__confirm-note">
                   {tr("detail.destroyTraffic", {

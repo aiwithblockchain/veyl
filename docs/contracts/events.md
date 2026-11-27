@@ -309,6 +309,7 @@ type ToolCallEndPayload = {
 | `region.name` | `{ name }` |
 | `plan.label` | `{ label }` |
 
+- `server.row` 的 `state` 用契约里已有的 `gone`（实例已不存在）表达「云服务商侧已删除」：这类机器在控制面里 `state` 仍是 `active`，Host 按 `provider_gone` 把它发成 `gone`；应用里销毁之后仍发 `destroyed` 并带 `destroyed` 参数。枚举不变，版本不升（2026-11-27）。
 - `server.retryable` 的 `value` 是布尔语义的枚举，不是文案。
 - `http.error` 的 reason 由 Host 在构造失败展示时判定（超时 / 响应头异常大 / 网络失败），**不解析错误文本**。
 

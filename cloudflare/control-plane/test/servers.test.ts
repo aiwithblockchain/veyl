@@ -91,6 +91,153 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("创建中禁止用户销毁（provisioning-lockout.md）", () => {
+  it.each(["creating", "booting", "installing", "verifying"])(
+    "%s：409 server_provisioning，状态/订单/账本/审计都不变",
+    async (state) => {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      seedServer(db, state);
+      const beforeUpdatedAt = db.rows("servers")[0].updated_at;
+      const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const res = await handleServers(destroyRequest(env.token), env as never);
+
+      expect(res?.status).toBe(409);
+      const body = (await res!.json()) as {
+        code: string;
+        retryable: boolean;
+        details: { reason: string; state: string };
+      };
+      expect(body.code).toBe("PRECONDITION_FAILED");
+      expect(body.retryable).toBe(false);
+      expect(body.details).toEqual({ reason: "server_provisioning", state });
+      // 一个 DO 请求都不该发出去：拒绝发生在写 destroying 之前。
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const server = db.rows("servers")[0];
+      expect(server.state).toBe(state);
+      expect(server.destroyed_at ?? null).toBeNull();
+      expect(server.updated_at).toBe(beforeUpdatedAt);
+      expect(db.rows("audit_log")).toHaveLength(0);
+      expect(db.rows("wallet_ledger")).toHaveLength(0);
+    },
+  );
+
+  it("destroying：允许重试销毁（不是创建中）", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "destroying");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("healthy：照常销毁", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "healthy");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("失败态（error）的用户销毁同批关单，补建不会再把它建出来", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "error");
+    // 建机没走完就失败：`provider_id` 还是空的，补建扫描正是靠这个条件命中的。
+    db.rows("servers")[0].provider_id = null;
+    seedCharge(db, 600);
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      region: "sgp1",
+      plan: "s-1vcpu-1gb",
+      amount_cents: 600,
+      charge_mode: "upfront",
+      state: "paid",
+      paid_via: "wallet",
+      failure_code: "firewall_failed",
+      failure_stage: "creating",
+      created_at: Date.now() - 60 * 60 * 1000,
+      paid_at: Date.now() - 60 * 60 * 1000,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    const order = db.rows("orders")[0];
+    expect(order.state).toBe("failed");
+    expect(order.failure_code).toBe("user_destroyed");
+    // 原失败阶段保留，只补失败原因。
+    expect(order.failure_stage).toBe("creating");
+
+    // 再跑一轮计费：补建扫描不得把这条已经销毁的行重新建出来。
+    const report = await runBilling(env as never);
+    expect(report.rebuilt).toBe(0);
+    expect(db.rows("audit_log").some((row) => row.action === "provision.created")).toBe(false);
+    expect(db.rows("servers")).toHaveLength(1);
+  });
+
+  it("判断瞬间行被改成 destroyed：用户收到 204 而不是 409", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "active");
+    db.beforeDestroyClaim = () => {
+      Object.assign(db.rows("servers")[0], { state: "destroyed", destroyed_at: Date.now() });
+    };
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("判断瞬间行从 booting 变成 error：不误拒，照常销毁并关单", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db, "booting");
+    db.rows("orders").push({
+      id: "ord_test",
+      account_id: ACCOUNT,
+      state: "paid",
+      charge_mode: "upfront",
+      created_at: Date.now() - 60 * 60 * 1000,
+    });
+    db.beforeDestroyClaim = () => {
+      db.rows("servers")[0].state = "error";
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    const res = await handleServers(destroyRequest(env.token), env as never);
+
+    expect(res?.status).toBe(204);
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+    expect(db.rows("orders")[0].state).toBe("failed");
+  });
+});
+
 describe("DO 资源命名", () => {
   it("防火墙名把 base64url 里的下划线换成连字符", () => {
     expect(firewallName("veyl-a5_MhEgJWJ3")).toBe("veyl-a5-MhEgJWJ3");

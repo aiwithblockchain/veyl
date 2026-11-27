@@ -661,16 +661,26 @@ impl SingBox {
                 }
             }
             None => {
-                let _ = self.host.remove(&self.cfg.config_path).await;
+                if let Err(e) = self.host.remove(&self.cfg.config_path).await {
+                    tracing::error!(error = %e, "rollback remove failed");
+                }
             }
         }
-        let _ = self
+        // A rollback that fails leaves sing-box down or serving a broken config.
+        // Both outcomes are reported here; the caller still gets its original
+        // error, so behaviour is unchanged.
+        match self
             .host
             .run(
                 &self.cfg.systemctl,
                 &["restart".to_string(), self.cfg.unit_name.clone()],
             )
-            .await;
+            .await
+        {
+            Ok(out) if out.success() => {}
+            Ok(out) => tracing::error!(result = %out.summary(), "rollback restart failed"),
+            Err(e) => tracing::error!(error = %e, "rollback restart failed"),
+        }
     }
 
     async fn wait_active(&self) -> Result<(), ApplyError> {

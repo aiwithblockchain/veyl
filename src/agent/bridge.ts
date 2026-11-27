@@ -760,6 +760,14 @@ export interface MyServer {
   traffic_reset_at: string;
   /** 额度未知时恒为 `ok`：不知道额度就不能断言超支。 */
   traffic_state: MyServerTrafficState;
+  /**
+   * DO 侧已确认不存在（`provider_gone_at`）：额度冻结在失联时刻，不再释放、
+   * 不再扣费。`state` 仍是 active（用户还没在应用里销毁），账号池的上限、
+   * 每日增量与「每天约」都必须把这类机器排除，否则会把已消失的机器当成还会涨。
+   *
+   * 可选：旧 Host / 旧控制面不给这个字段，按「没失联」处理。
+   */
+  provider_gone?: boolean;
   /** 建行失败时的扣费快照（USD 分）；后端未给按 0。 */
   charged_cents?: number;
   /** 建行失败时已退回的金额（USD 分）；后端未给按 0。 */
