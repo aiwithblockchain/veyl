@@ -93,6 +93,7 @@ export const ERROR_REASON_TEXT: Record<string, ReasonEntry> = {  // 登录 / 账
   server_gone: "error.reason.serverGone",
   sync_in_flight: "error.reason.syncInFlight",
   server_busy: "error.reason.serverBusy",
+  server_provisioning: "error.reason.serverProvisioning",
   invalid_denomination: "topup.invalidDenomination",
 
   // 控制面网络

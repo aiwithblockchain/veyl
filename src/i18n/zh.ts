@@ -915,7 +915,7 @@ export const zh = {
   "progress.verifying": "正在检查节点是否可用，通常 1–2 分钟。",
   "progress.processing": "正在处理",
   "progress.waited": "已等待 {duration}",
-  "progress.buildTimeout": "安装超时，可以销毁重建；不会自动销毁。",
+  "progress.buildTimeout": "安装超时；创建会自动完成或失败。",
   "progress.stepOf": "第 {n} 步，共 4 步",
 
   // 登录我的服务器
@@ -1065,7 +1065,6 @@ export const zh = {
   "detail.settleFailed": "服务器没开通，本次没有扣费。",
   "detail.topUp": "去充值",
   "detail.destroying": "正在销毁…",
-  "detail.destroyConfirmProvisioning": "取消创建并销毁这台服务器？正在进行的安装会中断。",
   "detail.destroyConfirm":
     "销毁后不再产生新费用。未用完的整天退回余额，当天已扣不退。配置里会少一个节点。",
   "detail.confirmDestroy": "确认销毁",
@@ -1664,6 +1663,7 @@ export const zh = {
   "error.reason.serverGone": "找不到这台服务器。",
   "error.reason.syncInFlight": "节点配置同步正在进行中。",
   "error.reason.serverBusy": "服务器正忙，稍后再试。",
+  "error.reason.serverProvisioning": "正在创建这台服务器，不能销毁；创建会自动完成或失败。",
   "error.reason.providerUnavailable": "服务器服务暂时不可用，稍后再试。",
   "error.reason.unexpectedStatus": "服务器服务返回了异常响应（{status}）。",
   "error.reason.unexpectedCode": "服务器服务返回了异常结果。",

@@ -55,6 +55,8 @@ export class FakeD1 {
   beforeCredentialInsert?: () => void;
   /** 测试钩子：结算失败认领订单前触发，用来模拟「并发结算已经把订单置 ready」。 */
   beforeSettleClaim?: () => void;
+  /** 测试钩子：用户销毁的条件 UPDATE 执行前触发，用来模拟「判断瞬间行被 sweep 改成 destroyed/error」。 */
+  beforeDestroyClaim?: () => void;
   /** 测试钩子：写 `provider_gone_at` 前触发，用来模拟「另一轮 Cron 已经先写过标记」。 */
   beforeProviderGoneMark?: () => void;
 
@@ -839,6 +841,15 @@ export class FakeD1 {
       if (row) row.state = "ready";
       return null;
     }
+    if (sql.startsWith("update orders set state = 'failed'") && sql.includes("failure_code = 'user_destroyed'")) {
+      // 失败态用户销毁：订单还停在 paid / provisioning 时才关，failure_stage 保持原值。
+      const row = this.tables.orders.find((o) => o.id === a[0]);
+      if (row && (row.state === "paid" || row.state === "provisioning")) {
+        row.state = "failed";
+        row.failure_code = "user_destroyed";
+      }
+      return null;
+    }
     if (sql.startsWith("update orders set state = 'failed'")) {
       const row = this.tables.orders.find((o) => o.id === a[2]);
       const guardOk =
@@ -1050,10 +1061,14 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("update servers set state = 'error'")) {
-      // 两种形态：provision 失败 bind(reason, now, id)；结算失败多带 firewall_id。
+      // 三种形态：provision 失败 bind(reason, now, id)；结算失败多带 firewall_id；
+      // 建机卡死清扫多一个 `AND state = 'creating'` 守卫。
       const withFirewall = sql.includes("firewall_id = ?");
+      const onlyCreating = sql.includes("and state = 'creating'");
       const server = this.tables.servers.find((s) => s.id === a[withFirewall ? 3 : 2]);
-      if (server) {
+      const allowed =
+        server && (!onlyCreating || (server.state === "creating" && server.destroyed_at == null));
+      if (server && allowed) {
         server.state = "error";
         server.failure_code = a[0];
         if (withFirewall) server.firewall_id = (a[2] as string | null) ?? null;
@@ -1319,7 +1334,14 @@ export class FakeD1 {
     }
     if (sql.startsWith("update servers set state = 'destroying'")) {
       const server = this.tables.servers.find((s) => s.id === a[1]);
-      if (server) {
+      // 用户销毁入口那条带「创建中四态」守卫；destroyInstance 自己那条不带。
+      const guarded = sql.includes("state not in ('creating', 'booting', 'installing', 'verifying')");
+      const allowed =
+        server &&
+        (!guarded ||
+          (server.destroyed_at == null &&
+            !["creating", "booting", "installing", "verifying"].includes(String(server.state))));
+      if (server && allowed) {
         server.state = "destroying";
         server.updated_at = a[0];
       }
@@ -2043,13 +2065,35 @@ export class FakeD1 {
           if (!["paid", "provisioning"].includes(String(order.state))) return false;
           if ((order.charge_mode ?? "upfront") !== "upfront") return false;
           if (Number(order.created_at) >= Number(a[0])) return false;
-          const server = this.tables.servers.find(
-            (row) => row.order_id === order.id && row.destroyed_at == null,
-          );
-          return !server || server.provider_id == null || server.state === "error";
+          // `AND s.destroyed_at IS NULL`：唯一那台机器行已销毁时，LEFT JOIN 的行会被过滤掉，
+          // 订单不再出现在结果里——否则用户销毁后会被补建复活。
+          const any = this.tables.servers.find((row) => row.order_id === order.id);
+          if (!any) return true;
+          if (any.destroyed_at != null) return false;
+          return any.provider_id == null || any.state === "error";
         })
         .slice(0, 5)
         .map((order) => ({ id: order.id }));
+    }
+    if (sql.startsWith("select id, account_id, order_id, region, plan, node_port from servers where state = 'creating'")) {
+      // 建机卡死清扫：参数是 [cutoff, limit]。
+      return this.tables.servers
+        .filter(
+          (row) =>
+            row.state === "creating" &&
+            row.destroyed_at == null &&
+            Number(row.updated_at ?? 0) < Number(a[0]),
+        )
+        .sort((left, right) => Number(left.updated_at ?? 0) - Number(right.updated_at ?? 0))
+        .slice(0, Number(a[1]))
+        .map((row) => ({
+          id: row.id,
+          account_id: row.account_id,
+          order_id: row.order_id,
+          region: row.region,
+          plan: row.plan,
+          node_port: row.node_port,
+        }));
     }
     if (sql.startsWith("select id, account_id, updated_at from servers where state = 'destroying'")) {
       // 卡住的 destroying 清扫：只看状态与超时，参数是 [cutoff, limit]。
@@ -2266,6 +2310,10 @@ export class FakeStatement {
     ) {
       this.db.beforeSettleClaim?.();
     }
+    // 用户销毁的条件 UPDATE：在算 affected rows 之前触发，模拟判断瞬间行被别的路径改掉。
+    if (sql.startsWith("update servers set state = 'destroying'") && sql.includes("state not in")) {
+      this.db.beforeDestroyClaim?.();
+    }
     if (sql.startsWith("update orders set state = 'provisioning', server_id")) {
       const row = this.db
         .rows("orders")
@@ -2297,6 +2345,26 @@ export class FakeStatement {
       changes =
         row && row.enrollment_hash === hash && row.enrollment_used_at == null &&
         row.destroyed_at == null
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update servers set state = 'destroying'")) {
+      const server = this.db.rows("servers").find((s) => s.id === this.statement.args[1]);
+      const guarded = sql.includes("state not in ('creating', 'booting', 'installing', 'verifying')");
+      changes =
+        server &&
+        (!guarded ||
+          (server.destroyed_at == null &&
+            !["creating", "booting", "installing", "verifying"].includes(String(server.state))))
+          ? 1
+          : 0;
+    } else if (sql.startsWith("update servers set state = 'error'")) {
+      const withFirewall = sql.includes("firewall_id = ?");
+      const onlyCreating = sql.includes("and state = 'creating'");
+      const server = this.db
+        .rows("servers")
+        .find((s) => s.id === this.statement.args[withFirewall ? 3 : 2]);
+      changes =
+        server && (!onlyCreating || (server.state === "creating" && server.destroyed_at == null))
           ? 1
           : 0;
     } else if (sql.startsWith("update servers set node_port")) {
@@ -2380,6 +2448,9 @@ export class FakeStatement {
         .rows("orders")
         .find((o) => o.id === this.statement.args[0] && o.state === "provisioning");
       changes = row ? 1 : 0;
+    } else if (sql.startsWith("update orders set state = 'failed'") && sql.includes("failure_code = 'user_destroyed'")) {
+      const row = this.db.rows("orders").find((o) => o.id === this.statement.args[0]);
+      changes = row && (row.state === "paid" || row.state === "provisioning") ? 1 : 0;
     } else if (sql.startsWith("update orders set state = 'failed'")) {
       // 结算失败认领带 provisioning 守卫：抢不到时 affected rows 为 0。
       const row = this.db.rows("orders").find((o) => o.id === this.statement.args[2]);

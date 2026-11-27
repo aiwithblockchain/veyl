@@ -342,7 +342,12 @@ async function destroyInstance(
   env: ServersEnv,
   row: ServerRow,
   reason: string,
-  options: { firewallId?: string | null; failureStage?: string | null } = {},
+  options: {
+    firewallId?: string | null;
+    failureStage?: string | null;
+    /** 用户销毁失败态（error）机器时同批关单：补建扫描只认 paid/provisioning，关了才不会复活。 */
+    closeOrderOnUser?: boolean;
+  } = {},
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
   const db = env.DB;
@@ -427,6 +432,17 @@ async function destroyInstance(
       env.DB.prepare(
         "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? WHERE id = ? AND state != 'failed'",
       ).bind(reason, row.state, row.order_id),
+    );
+  }
+
+  // 失败态（error）行的用户销毁：订单若还停在 paid / provisioning，同批关掉——
+  // 补建扫描只认这两种状态，关了它这台机器才不会被重新建出来（§4.4）。
+  // `failure_stage` 保留原阶段，只补 `failure_code`。
+  if (options.closeOrderOnUser && reason === "user" && row.order_id) {
+    statements.push(
+      env.DB.prepare(
+        "UPDATE orders SET state = 'failed', failure_code = 'user_destroyed' WHERE id = ? AND state IN ('paid', 'provisioning')",
+      ).bind(row.order_id),
     );
   }
 
@@ -2191,36 +2207,74 @@ async function rename(request: Request, env: ServersEnv, serverId: string): Prom
   return json(serverView(row, traffic[0], money.get(row.id)));
 }
 
+/** 用户侧不允许销毁的四态（`provisioning-lockout.md` §3）：系统收尾路径不受此限。 */
+const PROVISIONING_STATES = ["creating", "booting", "installing", "verifying"];
+
 async function destroy(request: Request, env: ServersEnv, serverId: string): Promise<Response> {
   const identity = await authenticate(request, env);
   if (isResponse(identity)) return identity;
   if (!env.DB) return apiError("INTERNAL", "服务还没准备好", { retryable: true, status: 503 });
+  const db = env.DB;
 
-  const row = await loadServer(env.DB, identity.accountId, serverId);
+  // 先读行只为拿后续销毁要用的字段；「能不能销毁」由下面那条条件 UPDATE 判定。
+  // 先读后写会在并发下读成 active、写的时候已经是 verifying，所以判断和写必须同一条语句。
+  const row = await loadServer(db, identity.accountId, serverId);
   if (!row) return apiError("NOT_FOUND", "没有这台服务器");
-  if (row.state === "destroyed") {
-    // 上一次销毁可能停在「防火墙没删掉」：行已经 destroyed，这里是唯一的重试入口。
-    // 补删失败也不影响 204——用户要的是「这台机器没了」，多一条规则不该变成报错。
-    if (row.firewall_id) {
-      const surviving = await removeServerFirewall(env, row.id, row.firewall_id, null);
-      if (!surviving) {
-        await env.DB.prepare("UPDATE servers SET firewall_id = ?, updated_at = ? WHERE id = ?")
-          .bind(null, Date.now(), row.id)
-          .run()
-          .catch(() => {});
+
+  // 创建中（creating/booting/installing/verifying）不允许用户销毁：创建过程自己会收敛到成功或失败，
+  // 人工介入只会制造「删了又被补建回来」。系统路径直接调 destroyInstance，不受这条守卫影响。
+  const claimed = await db
+    .prepare(
+      "UPDATE servers SET state = 'destroying', updated_at = ? " +
+        "WHERE id = ? AND account_id = ? AND destroyed_at IS NULL " +
+        "AND state NOT IN ('creating', 'booting', 'installing', 'verifying')",
+    )
+    .bind(Date.now(), row.id, identity.accountId)
+    .run();
+  const claimedOne = Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) === 1;
+
+  // 没抢到：判断瞬间行可能已经被 sweep 改成 destroyed / error，按最新状态回答。
+  // 抢到了就不再按旧快照判创建中——UPDATE 成功本身就证明它当时不在那四态里。
+  let target = row;
+  if (!claimedOne) {
+    const fresh = await loadServer(db, identity.accountId, serverId);
+    if (!fresh) return apiError("NOT_FOUND", "没有这台服务器");
+    if (fresh.state === "destroyed") {
+      // 上一次销毁可能停在「防火墙没删掉」：行已经 destroyed，这里是唯一的重试入口。
+      // 补删失败也不影响 204——用户要的是「这台机器没了」，多一条规则不该变成报错。
+      if (fresh.firewall_id) {
+        const surviving = await removeServerFirewall(env, fresh.id, fresh.firewall_id, null);
+        if (!surviving) {
+          await env.DB.prepare("UPDATE servers SET firewall_id = ?, updated_at = ? WHERE id = ?")
+            .bind(null, Date.now(), fresh.id)
+            .run()
+            .catch(() => {});
+        }
       }
+      return new Response(null, { status: 204 });
     }
-    return new Response(null, { status: 204 });
+    if (PROVISIONING_STATES.includes(String(fresh.state))) {
+      return apiError("PRECONDITION_FAILED", "服务器还在创建中，暂时不能销毁", {
+        status: 409,
+        retryable: false,
+        reason: "server_provisioning",
+        details: { state: fresh.state },
+      });
+    }
+    target = fresh;
   }
 
-  await env.DB.prepare("UPDATE servers SET state = 'destroying', updated_at = ? WHERE id = ?")
-    .bind(Date.now(), row.id)
-    .run();
-  const outcome = await destroyInstance(env, row, "user");
+  const outcome = await destroyInstance(env, target, "user", {
+    // 失败态（error）的用户销毁要连带关单：否则订单停在 paid，补建扫描会把这台重新建出来。
+    // 读到的旧状态是创建中、但抢到了 UPDATE 时，说明它在两步之间落到了 error（否则不会放行），
+    // 同样要关单；订单已经 ready 的话这条守卫自然不命中。
+    closeOrderOnUser:
+      target.state === "error" || PROVISIONING_STATES.includes(String(row.state)),
+  });
   if (!outcome.ok) {
     // 远端没删掉：状态还原，机器继续可见、可以重试。
     await env.DB.prepare("UPDATE servers SET state = ?, updated_at = ? WHERE id = ?")
-      .bind(row.state === "destroying" ? "active" : row.state, Date.now(), row.id)
+      .bind(target.state === "destroying" ? "active" : target.state, Date.now(), target.id)
       .run();
     return apiError("UPSTREAM_ERROR", "暂时删不掉这台服务器，它还在运行，稍后再试", {
       retryable: outcome.retryable,

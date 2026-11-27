@@ -239,7 +239,7 @@ describe("整机 15 分钟边界", () => {
     expect(notes).toHaveLength(2);
     expect(notes[0].textContent).toContain("这一步已经 4 分钟");
     expect(notes[1].classList.contains("is-timeout")).toBe(true);
-    expect(notes[1].textContent).toContain("安装超时，可以销毁重建");
+    expect(notes[1].textContent).toContain("安装超时；创建会自动完成或失败。");
   });
 
   it("未满 15 分钟不出现超时提示", () => {

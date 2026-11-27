@@ -52,6 +52,18 @@ describe("errorText", () => {
     ).toBe("标题最多 60 个字符。");
   });
 
+  it("server_provisioning：创建中不能销毁", () => {
+    expect(
+      errorText(
+        {
+          code: "PRECONDITION_FAILED",
+          details: { reason: "server_provisioning", state: "installing" },
+        },
+        FALLBACK,
+      ),
+    ).toBe("正在创建这台服务器，不能销毁；创建会自动完成或失败。");
+  });
+
   it("reason 缺关键参数时退到无参数句或下一层", () => {
     expect(
       errorText(
@@ -236,6 +248,7 @@ describe("字典覆盖", () => {
       "server_gone",
       "sync_in_flight",
       "server_busy",
+      "server_provisioning",
       "invalid_denomination",
       "provider_unavailable",
       "unexpected_status",

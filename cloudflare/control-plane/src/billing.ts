@@ -3,8 +3,8 @@
 
 import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
-import { refundProvision } from "./provision";
-import { getDroplet } from "./providers/digitalocean";
+import { failPermanently, refundProvision, type ServerToProvision } from "./provision";
+import { deleteDroplet, getDroplet, listDropletsByTag } from "./providers/digitalocean";
 import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry, type WalletEnv } from "./wallet";
 
@@ -73,6 +73,8 @@ export interface BillingReport {
   refunded: number;
   reaped: number;
   settleReaped: number;
+  /** 卡在 `creating` 超过 10 分钟（发起建机的 Worker 已死）被收尾的台数。 */
+  creatingReaped: number;
   /** 卡在 `destroying`（Worker 在删远端与落库之间死掉）被恢复成 active 的台数。 */
   destroyingRecovered: number;
   archived: number;
@@ -108,7 +110,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -119,6 +121,9 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   // 再清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
   // 这一步放在计费之前，免得同一轮又把没人认领的机器扣一天。
   report.reaped = await sweepExpiredEnrollments(env);
+  // 再收掉「建机请求没回来」的 creating 行：必须排在补建扫描之前，否则超龄 creating
+  // 会先被补建再建一次；关单之后补建条件（paid / provisioning）自然不命中。
+  report.creatingReaped = await sweepStaleCreating(env, now);
   // 先把卡住的 destroying 恢复成 active：这类行既不被 collectDue 取到、也不会自己
   // 恢复，不清理就会「机器还在跑、却永远不再扣费」。要在收集到期之前做。
   report.destroyingRecovered = await recoverStuckDestroying(env, now);
@@ -190,10 +195,13 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   }
 
   // 已收款但没有机器：补建（unique(servers.order_id) 保证不会建第二台）。
+  // `s.destroyed_at IS NULL` 是必须的：用户销毁失败态 / 建机中的机器后，订单可能还没关，
+  // 少了这一条就会把这台机器重新建出来。
   const orphaned = await db
     .prepare(
       "SELECT o.id FROM orders o LEFT JOIN servers s ON s.order_id = o.id " +
         "WHERE o.state IN ('paid', 'provisioning') AND o.charge_mode = 'upfront' AND o.created_at < ? " +
+        "AND s.destroyed_at IS NULL " +
         "AND (s.id IS NULL OR s.provider_id IS NULL OR s.state = 'error') LIMIT 5",
     )
     .bind(now - 5 * 60 * 1000)
@@ -386,6 +394,89 @@ async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<num
     console.error(`[billing] destroying_sweep_failed error=${String(error)}`);
   }
   return recovered;
+}
+
+/**
+ * 建机请求是同步的（秒级）。行停在 `creating` 超过 10 分钟，说明发起它的 Worker 已经死了：
+ * DO 上可能建了一半，也可能已经建好但没来得及写 `provider_id`。
+ *
+ * 收尾口径与 `failPermanently` 一致：落 `error`、关单（补建不再命中）、有已扣的 upfront 款退回。
+ * 动手前先按 `veyl:srv:<id>` 反查一次 droplet 并删掉——没有记录的机器没人会再认领它。
+ * 删失败不阻断收尾（机器由 DO 侧账单兜底），下一轮也不会再为这一行走一遍。
+ */
+const CREATING_STALE_MS = 10 * 60 * 1000;
+const CREATING_REAP_BATCH = 20;
+
+async function sweepStaleCreating(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  let reaped = 0;
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT id, account_id, order_id, region, plan, node_port FROM servers " +
+          "WHERE state = 'creating' AND destroyed_at IS NULL AND updated_at < ? " +
+          "ORDER BY updated_at ASC LIMIT ?",
+      )
+      .bind(now - CREATING_STALE_MS, CREATING_REAP_BATCH)
+      .all<ServerToProvision>();
+    for (const row of rows.results ?? []) {
+      try {
+        // 扫描到处理之间建机可能刚好成功（booting）：先认领，抢不到就放手。
+        const claimed = await db
+          .prepare(
+            "UPDATE servers SET state = 'error', failure_code = ?, updated_at = ? " +
+              "WHERE id = ? AND state = 'creating' AND destroyed_at IS NULL",
+          )
+          .bind("creating_timeout", now, row.id)
+          .run();
+        if (Number((claimed as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) continue;
+        await deleteCreatingOrphans(env, row.id);
+        await failPermanently(
+          { DB: db },
+          row,
+          "creating_timeout",
+          JSON.stringify({ reason: "creating_timeout" }),
+          now,
+        );
+        reaped += 1;
+      } catch (error) {
+        // 认领之后收尾失败就撤回认领：否则行停在 error、订单还在 paid，补建扫描会把它
+        // 重新建出来；退回 creating 让下一轮重来，收敛路径保持不变。
+        await db
+          .prepare(
+            "UPDATE servers SET state = 'creating', failure_code = NULL WHERE id = ? " +
+              "AND state = 'error' AND failure_code = 'creating_timeout' AND destroyed_at IS NULL",
+          )
+          .bind(row.id)
+          .run()
+          .catch(() => {});
+        console.error(`[billing] creating_reap_failed server=${row.id} error=${String(error)}`);
+      }
+    }
+  } catch (error) {
+    console.error(`[billing] creating_sweep_failed error=${String(error)}`);
+  }
+  return reaped;
+}
+
+/** 建机 tag 在 `provisionServer` 建 droplet 时就写上；没有记录又没来得及登记的机器只能靠它找回来。 */
+async function deleteCreatingOrphans(env: BillingEnv, serverId: string): Promise<void> {
+  if (!env.DO_API_TOKEN) return;
+  const tagged = await listDropletsByTag(env.DO_API_TOKEN, `veyl:srv:${serverId}`);
+  if (!tagged.ok) {
+    console.warn(
+      `[billing] creating_orphan_lookup_failed server=${serverId} reason=${tagged.reason}`,
+    );
+    return;
+  }
+  for (const droplet of tagged.value) {
+    const deleted = await deleteDroplet(env.DO_API_TOKEN, droplet.providerId);
+    if (!deleted.ok && deleted.status !== 404) {
+      console.warn(
+        `[billing] creating_orphan_delete_failed server=${serverId} droplet=${droplet.providerId} reason=${deleted.reason}`,
+      );
+    }
+  }
 }
 
 /**

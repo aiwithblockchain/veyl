@@ -848,17 +848,14 @@ export function MyServerDetail({
               </div>
             </div>
           ) : /* 已销毁：对象已不存在，不给「销毁」；右侧仍可「重新购买」。 */
-          server.state === "gone" ? null : destroying && !destroyRetryAllowed ? (
+          server.state === "gone" ? null : /* 创建中：只留进度块，不给销毁入口。 */
+          isProvisioning(server.state) ? null : destroying && !destroyRetryAllowed ? (
             <p className="myservers__hint" role="status">
               {tr("detail.destroying")}
             </p>
           ) : confirming ? (
             <div className="myservers__confirm" role="alert">
-              <p>
-                {isProvisioning(server.state)
-                  ? tr("detail.destroyConfirmProvisioning")
-                  : tr("detail.destroyConfirm")}
-              </p>
+              <p>{tr("detail.destroyConfirm")}</p>
               {tomorrowBytes > 0 ? (
                 <p className="myservers__confirm-note">
                   {tr("detail.destroyTraffic", {

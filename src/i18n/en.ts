@@ -963,7 +963,7 @@ export const en: Record<MessageKey, string> = {
   "progress.verifying": "Checking that the node is reachable — usually 1–2 minutes.",
   "progress.processing": "Working",
   "progress.waited": "Waited {duration}",
-  "progress.buildTimeout": "Setup timed out — you can destroy and rebuild. It won't be destroyed automatically.",
+  "progress.buildTimeout": "Setup timed out. Creation will finish or fail on its own.",
   "progress.stepOf": "Step {n} of 4",
 
   // Sign in to my servers
@@ -1124,8 +1124,6 @@ export const en: Record<MessageKey, string> = {
   "detail.settleFailed": "The server wasn't activated, so nothing was charged.",
   "detail.topUp": "Top up",
   "detail.destroying": "Destroying…",
-  "detail.destroyConfirmProvisioning":
-    "Cancel creation and destroy this server? The ongoing install will stop.",
   "detail.destroyConfirm":
     "Destroying stops new charges. Unused full days return to your balance; the current day's charge isn't refunded. The configuration loses one node.",
   "detail.confirmDestroy": "Confirm destroy",
@@ -1744,6 +1742,8 @@ export const en: Record<MessageKey, string> = {
   "error.reason.serverGone": "That server wasn't found.",
   "error.reason.syncInFlight": "A node config sync is already running.",
   "error.reason.serverBusy": "The server is busy. Try again later.",
+  "error.reason.serverProvisioning":
+    "This server is still being created and can't be destroyed yet. Setup will finish or fail on its own.",
   "error.reason.providerUnavailable": "The service is temporarily unavailable. Try again later.",
   "error.reason.unexpectedStatus": "The service returned an unexpected response ({status}).",
   "error.reason.unexpectedCode": "The service returned an unexpected result.",

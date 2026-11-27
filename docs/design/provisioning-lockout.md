@@ -9,7 +9,7 @@
 
 ## 0. 一句话
 
-`creating / booting / installing / verifying` 四种「创建中」状态下，用户侧的 `POST /v1/servers/{id}/destroy` 一律拒绝（`PRECONDITION_FAILED / server_provisioning`）；拒绝在控制面入口做，界面只是不渲染入口。创建过程本来就有自动收敛，最长 80 分钟内一定落到成功或失败。
+`creating / booting / installing / verifying` 四种「创建中」状态下，用户侧的 `POST /v1/servers/{id}/destroy` 一律拒绝（`PRECONDITION_FAILED / server_provisioning`）；拒绝在控制面入口做，界面只是不渲染入口。创建过程本来就有自动收敛，最长 80 分钟内一定落到成功或失败（每轮最多收 20 条，同时卡住的更多时按轮次顺延）。
 
 ---
 
@@ -148,7 +148,7 @@ HTTP 409
 | DO 建机慢 / 失败 | `createDroplet` 超时或报错 → `fail()` | 请求内 | `error`（可销毁） |
 | Worker 在 DO 创建成功后、DB 写 `provider_id` 前死亡 | `sweepStaleCreating` 顺带按 tag `veyl:srv:<server id>` 反查一次并删（复用 `listDropletsByTag`） | 同上 | `error`，不留下付费孤儿 |
 
-**最坏等待：约 80 分钟**（20 分钟 enroll TTL + 最多 60 分钟 Cron 间隔）；用户下次打开列表/详情时 `refreshBooting` 或 `sweep` 会让它立即收敛。
+**最坏等待：约 80 分钟**（20 分钟 enroll TTL + 最多 60 分钟 Cron 间隔；`CREATING_REAP_BATCH = 20`，同一轮卡住超过 20 条时每多 20 条顺延一轮）；用户下次打开列表/详情时 `refreshBooting` 或 `sweep` 会让它立即收敛。
 
 **`runBilling` 内的次序**：`sweepStaleCreating` 必须排在「已收款但没有机器」的补建扫描**之前**——否则一条超龄 `creating` 行会先被补建扫描重新建一次；关单之后补建条件（`orders.state IN ('paid','provisioning')`）自然不命中，不会复活。5–10 分钟之间的行由补建扫描照常重试一次，不冲突。
 
@@ -194,7 +194,7 @@ HTTP 409
 
 ## 10. 风险与取舍
 
-- **用户不能在创建中取消**：这是用户明确要求的代价。误选地区/套餐只能等失败或成功后重建，最长约 80 分钟。
+- **用户不能在创建中取消**：这是用户明确要求的代价。误选地区/套餐只能等失败或成功后重建，最长约 80 分钟（同一轮卡住超过 20 条时按轮次顺延）。
 - **旧 App 文案只有通用句**：`message` 不下发是既有契约；新 App 才有准确文案。服务端不静默失败，但要接受旧版本看起来「点了没反应/没有改动」。
 - **`sweepStaleCreating` 的 10 分钟阈值**是按当前同步建机模型取的保守值（Host 超时 30 秒、Worker 请求上限远小于 10 分钟）。若以后改成异步建机 / Workflow，需要重估。
 - **孤儿 droplet**：Worker 在 DO 创建成功后、DB 写入前死亡时，行仍是 `creating` 且 `provider_id` 为空；靠 tag 反查删除，依赖 `veyl:srv:<id>` tag 已写入（现已写入）与 `listDropletsByTag` 接线（当前仅定义未使用）。若 DO 删除失败，仍会留一台付费实例——按既有 DO 失败重试口径处理，不在这里猜。
