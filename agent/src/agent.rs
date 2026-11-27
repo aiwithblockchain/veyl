@@ -141,12 +141,8 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
 
     // A unit with `Type=exec` is active as soon as `execve` succeeds — long
     // before the probe answers — so cloud-init cannot use `is-active` to learn
-    // whether this node can meter. This file is that signal. `/run` is a tmpfs
-    // that survives `systemctl restart`, so a stale file is removed first.
-    let ready = Path::new(READY_FILE);
-    if let Err(e) = host.remove(ready).await {
-        tracing::warn!(error = %e, "could not remove a stale readiness file");
-    }
+    // whether this node can meter. `/run/veyl-agent/ready` is that signal.
+    clear_ready(host.as_ref()).await;
 
     // Prove that metering works before enrolling: `/v1/agent/fail` only accepts
     // an unconsumed enrollment token, so a cold node that cannot read the
@@ -156,14 +152,7 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     // the desktop could no longer repair it, while under-counting is the safe
     // direction.
     match traffic::probe(host.as_ref()).await {
-        Ok(_) => {
-            // Written on a restored node too: harmless, and it keeps one code
-            // path. A failure here is only logged — the node can still serve,
-            // and cloud-init's own timeout is the backstop.
-            if let Err(e) = host.write(ready, b"ok\n", 0o644).await {
-                tracing::error!(error = %e, "could not write the readiness file");
-            }
-        }
+        Ok(_) => mark_ready(host.as_ref()).await,
         Err(e) if restored => tracing::error!(
             error = %e,
             "metering probe failed; continuing, this node will under-count traffic"
@@ -413,6 +402,24 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     Ok(())
 }
 
+/// Drop any readiness file left by a previous boot: `/run` is a tmpfs that
+/// survives `systemctl restart`, and cloud-init must not read last boot's
+/// signal for this one.
+async fn clear_ready(host: &dyn Host) {
+    if let Err(e) = host.remove(Path::new(READY_FILE)).await {
+        tracing::warn!(error = %e, "could not remove a stale readiness file");
+    }
+}
+
+/// Tell cloud-init the metering probe passed. Written on a restored node too —
+/// harmless, and it keeps one code path. A failure is only logged: the node can
+/// still serve, and cloud-init's own timeout is the backstop.
+async fn mark_ready(host: &dyn Host) {
+    if let Err(e) = host.write(Path::new(READY_FILE), b"ok\n", 0o644).await {
+        tracing::error!(error = %e, "could not write the readiness file");
+    }
+}
+
 /// Scheme host and port only: never log the path or query of a control-plane
 /// URL (they can carry one-time tokens).
 fn control_host(url: &str) -> String {
@@ -592,5 +599,24 @@ mod tests {
             body: "gone".into(),
         };
         assert!(!is_terminal_control_error(&other));
+    }
+
+    #[tokio::test]
+    async fn the_readiness_file_is_cleared_then_written() {
+        use crate::test_support::FakeHost;
+
+        let host = FakeHost::new();
+        let path = Path::new(READY_FILE);
+        host.put_file(path, b"stale\n".to_vec());
+
+        clear_ready(&host).await;
+        assert!(host.file(path).is_none(), "a stale file must not survive");
+
+        mark_ready(&host).await;
+        assert_eq!(
+            host.file(path).as_deref(),
+            Some(b"ok\n".as_slice()),
+            "cloud-init waits for exactly this file"
+        );
     }
 }

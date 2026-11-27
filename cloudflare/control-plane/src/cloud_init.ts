@@ -138,6 +138,8 @@ systemctl restart veyl-agent 2>>"\${ERR_FILE}"
 #    计量探针，所以这里等 agent 自己写的就绪文件。探针最坏要 ~24 秒（三次重试 + 建表），
 #    窗口给到 60 秒；期间没就绪就走 on_error 用**尚未消费的** token 销毁实例。
 #    这一段的失败归 stage=ready：systemd 早就成功了，报成 systemd 会误导排查。
+#    路径 /run/veyl-agent/ready 必须与 agent/src/agent.rs 的 READY_FILE 一致——
+#    两边各有一份字面量，改一处忘一处就是 60 秒后建机失败。
 STAGE=ready
 for _ in $(seq 1 60); do
   if systemctl is-active --quiet veyl-agent && [ -f /run/veyl-agent/ready ]; then
