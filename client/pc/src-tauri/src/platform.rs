@@ -20,6 +20,17 @@ pub const TUN_MTU: u32 = 9000;
 /// Clash API 只监听回环。
 pub const CLASH_LISTEN: &str = "127.0.0.1";
 
+/// TUN 入站宣告给系统的 DNS 地址。**必须落在本平台网段内**：服务端模板里的
+/// `dns_address` 属于它自己的网段，照抄会指向一个不在隧道里的地址，表现是
+/// 「连上了但域名解析不了」。
+pub fn dns_address() -> &'static str {
+    if cfg!(windows) {
+        "198.20.0.2"
+    } else {
+        "172.20.0.2"
+    }
+}
+
 /// 本平台使用的 TUN 网段。
 pub fn tun_address() -> &'static str {
     if cfg!(windows) {
@@ -40,5 +51,16 @@ mod tests {
         assert_ne!(TUN_ADDRESS_WINDOWS, "198.18.0.1/15");
         // 198.19.x 落在主客户端 /15 里。
         assert!(!TUN_ADDRESS_WINDOWS.starts_with("198.19."));
+    }
+
+    /// 宣告的 DNS 地址必须落在自己的网段里，否则域名解析会指向隧道外。
+    #[test]
+    fn the_announced_dns_address_lives_inside_our_range() {
+        let (network, prefix) = TUN_ADDRESS_MACOS.split_once('/').unwrap();
+        let octets: Vec<u32> = network.split('.').map(|part| part.parse().unwrap()).collect();
+        let dns: Vec<u32> = dns_address().split('.').map(|part| part.parse().unwrap()).collect();
+        assert_eq!(&octets[..3], &dns[..3]);
+        assert_eq!(prefix, "30");
+        assert!(dns[3] <= 3, "172.20.0.0/30 只有 .0–.3");
     }
 }

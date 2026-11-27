@@ -184,6 +184,12 @@ fn tun_inbound(config: &Value) -> Value {
     inbound.insert("auto_route".into(), Value::Bool(true));
     // 连接期系统解析器指向公网 DNS，查询进 TUN 后由它接管。
     inbound.insert("dns_mode".into(), Value::String("hijack".into()));
+    // 服务端模板里的 dns_address 属于它自己的网段，必须换成本平台网段内的地址；
+    // IPv6 不接管，模板里的 v6 项一并丢掉。
+    inbound.insert(
+        "dns_address".into(),
+        Value::Array(vec![Value::String(platform::dns_address().into())]),
+    );
     #[cfg(target_os = "windows")]
     {
         // 用 WFP 挡住 TUN 之外的 DNS / 流量泄漏。
@@ -221,7 +227,7 @@ mod tests {
             },
             "inbounds": [
                 {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 7890},
-                {"type": "tun", "tag": "server-tun", "address": ["172.19.0.1/30"], "stack": "mixed"}
+                {"type": "tun", "tag": "server-tun", "address": ["172.19.0.1/30"], "stack": "mixed", "dns_address": ["172.18.0.2", "fdfe:dcba:9876::2"]}
             ],
             "outbounds": [
                 {"type": "selector", "tag": "proxy", "outbounds": ["node-a"], "default": "node-a"},
@@ -258,6 +264,9 @@ mod tests {
         assert_eq!(inbounds[0]["mtu"], platform::TUN_MTU);
         assert_eq!(inbounds[0]["auto_route"], true);
         assert_eq!(inbounds[0]["dns_mode"], "hijack");
+        // 服务端模板宣告的 DNS 地址属于它自己的网段，必须换掉，且不再带 IPv6。
+        assert_eq!(inbounds[0]["dns_address"], json!([platform::dns_address()]));
+        assert!(!inbounds[0]["dns_address"].to_string().contains("172.18.0.2"));
     }
 
     #[test]
