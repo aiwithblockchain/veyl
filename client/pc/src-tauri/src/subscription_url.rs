@@ -95,6 +95,11 @@ impl SubscriptionUrl {
         }
     }
 
+    /// 不含凭据的请求地址。认证走 `Authorization` 头，令牌不进 URL 行。
+    pub fn request_url(&self) -> String {
+        format!("{}://{}{}", self.url.scheme(), self.host(), PROFILE_PATH)
+    }
+
     pub fn masked(&self) -> String {
         format!("{}://veyl:***@{}{}", self.url.scheme(), self.host(), PROFILE_PATH)
     }

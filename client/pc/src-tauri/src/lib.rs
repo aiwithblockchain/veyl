@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 pub mod error;
+pub mod fetch;
 pub mod fsutil;
 pub mod platform;
 pub mod subscription_url;
