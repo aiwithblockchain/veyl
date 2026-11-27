@@ -11044,15 +11044,18 @@ impl WiredServices {
                 "stop_tun",
                 false,
                 format!(
-                    "{message}；可尝试：sudo launchctl kickstart -k system/com.veyl.helper"
+                    "{message}；可尝试：sudo launchctl kickstart -k system/{}",
+                    crate::tun::protocol::mach_service()
                 ),
             ),
             TunStopOutcome::Failed(message) => reset_step(
                 "stop_tun",
                 false,
                 format!(
-                    "{message}；可尝试：sudo launchctl kickstart -k system/com.veyl.helper，\
-                     仍未停掉再执行 sudo pkill -f '/Library/Application Support/Veyl/runtime/.*/sing-box'"
+                    "{message}；可尝试：sudo launchctl kickstart -k system/{}，\
+                     仍未停掉再执行 sudo pkill -f '{}/runtime/.*/sing-box'",
+                    crate::tun::protocol::mach_service(),
+                    veyl_tun::identity::trust_root()
                 ),
             ),
         }
@@ -11340,7 +11343,7 @@ impl WiredServices {
                 if let Some(name) = crate::tun::device_name(&addrs) {
                     problems.push(format!(
                         "仍有 TUN 接口 {name}（{}）",
-                        crate::tun::TUN_ADDRESS
+                        crate::tun::tun_address()
                     ));
                 }
             }

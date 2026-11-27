@@ -13,7 +13,7 @@ pub use veyl_tun::windows;
 pub use veyl_tun::{
     collect, default_route_goes_through, describe_range, device_is_up, device_name, excludes,
     expected_takeover_ranges, fixed_excludes, host_prefixes, missing_takeover, routes_left,
-    subnets, try_collect, wait_until_device_up, LocalAddr, AUTO_ROUTE_BASE_V4, FIXED_EXCLUDES,
-    SNIFFERS, SNIFF_TIMEOUT, TUN_ADDRESS, TUN_ADDRESS_MACOS, TUN_ADDRESS_WINDOWS,
-    TUN_DNS_STRATEGY, TUN_MTU, TUN_STACK, V4Range,
+    subnets, try_collect, tun_address, tun_address_macos, tun_address_windows,
+    wait_until_device_up, LocalAddr, AUTO_ROUTE_BASE_V4, FIXED_EXCLUDES, SNIFFERS,
+    SNIFF_TIMEOUT, TUN_DNS_STRATEGY, TUN_MTU, TUN_STACK, V4Range,
 };

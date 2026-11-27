@@ -1,10 +1,10 @@
 # 契约：TUN 特权后端
 
-> 契约版本：`1.8.0`
+> 契约版本：`1.8.1`
 > 状态：**已定稿，实现已落地**（2026-11-05 定稿；macOS 已上线，Windows 后端已接入，真机待验收）
 > 定位：`TunBackend` 抽象、请求/回复信封、错误码、快照形状、四条不变式。**只定契约，不含实现。**
 > 上游：[`../tun-privilege-implementation-plan.md`](../tun-privilege-implementation-plan.md)（双平台计划）、[`../tun-privilege.md`](../tun-privilege.md)（macOS 信任模型）、[`../windows-tun.md`](../windows-tun.md)（Windows 设计）、[`../tun-mode.md`](../tun-mode.md)（连接语义与失败处理）
-> 实现方：Rust `src-tauri/src/tun/`（平台无关）+ `MacXpcBackend`（macOS）+ `WinPipeBackend`（Windows）
+> 实现方：共享 crate `crates/veyl-tun/`（主客户端与 veyl-cli 共用）+ `MacXpcBackend`（macOS）+ `WinPipeBackend`（Windows）
 > 变更记录：见 §10
 
 ---
@@ -443,15 +443,17 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 
 | 文件 | 职责 | 是否含平台 API |
 |---|---|---|
-| `tun/protocol.rs` | 信封解析、allowlist、四条不变式 | 否 |
-| `tun/backend.rs` | `TunBackend` trait、`TunError`、`StartReply`、`TunSnapshot` | 否 |
-| `tun/xpc.rs` | macOS 承载 + 对端验签 | 是 |
-| `tun/privilege/smappservice.rs` | macOS 注册与状态 | 是 |
-| `tun/pipe.rs`（新） | Windows 承载 + 对端校验 | 是 |
-| `tun/service_ctl.rs`（新） | Windows 服务安装/查询/启动 | 是 |
-| `tun/session.rs` | 会话状态、`TunLaunchMeta`、App 侧缓存 | 否（只依赖 trait） |
+| `crates/veyl-tun/src/protocol.rs` | 信封解析、allowlist、四条不变式 | 否 |
+| `crates/veyl-tun/src/backend.rs` | `TunBackend` trait、`TunError`、`StartReply`、`TunSnapshot` | 否 |
+| `crates/veyl-tun/src/xpc.rs` | macOS 承载 + 对端验签 | 是 |
+| `crates/veyl-tun/src/privilege/smappservice.rs` | macOS 注册与状态 | 是 |
+| `crates/veyl-tun/src/windows/pipe.rs` | Windows 承载 + 对端校验 | 是 |
+| `crates/veyl-tun/src/windows/scm.rs` | Windows 服务安装/查询/启动 | 是 |
+| `crates/veyl-tun/src/session.rs` | 会话状态、`TunLaunchMeta`、App 侧缓存 | 否（只依赖 trait） |
 
 `tun/session.rs` **不得**再直接 `use super::xpc`（现状是直接依赖）。这是实施计划 `§1.1` 要求的「避免两套会话逻辑分叉」。
+
+管道名、服务名、安装目录、launchd 标签与信任根是 **APP 身份**，不是隧道能力：它们由各 APP 在启动时注入 `veyl_tun::identity::Identity`（§2.3 参数化）。
 
 ---
 
@@ -491,6 +493,14 @@ allowlist 以 `src-tauri/src/tun/protocol.rs` 的常量为唯一来源，两端�
 macOS 侧没有 R1 / R2：XPC 的对端校验由 libxpc 基于连接上的审计令牌完成，不读路径、不依赖磁盘状态；签名有效性由系统在加载时判定。这也是 §6 第 3 项「机制不同」的实际含义——Windows 自己实现的那一侧，把 macOS 由系统兜住的保证接管过来，也就接管了它的边界。
 
 ## 10. 变更记录
+
+### 1.8.1（2026-11-27，实现迁移到共享 crate）
+
+| # | 变更 | 类型 | 决议来源 |
+|---|---|---|---|
+| 1 | 实现从 `src-tauri/src/tun/` 迁到 `crates/veyl-tun/`，由主客户端与 veyl-cli 共用；§7 的路径随之更新 | 实现位置变更（契约语义不变） | `client/docs/client-apps-technical.md` §2.2 / §12 M0 |
+| 2 | 管道名、服务名、安装目录、launchd 标签/plist、信任根、TUN 网段改为 APP 注入的身份参数（§2.3） | 参数化（主客户端取值不变） | 同上：两个 APP 并存时标识符冲突是安全边界问题 |
+| 3 | 本文件版本升到 `1.8.1` | 元数据 | — |
 
 ### 1.8.0（2026-11-25，presence 租约时序与「即将被拆」信号）
 

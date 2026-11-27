@@ -213,7 +213,7 @@ fn inbound(input: &BuildInput) -> Value {
                 "tag": "tun-in",
                 // 留空 interface_name：macOS 只接受 utunN，写死名字会 `bad tun name`；
                 // Windows 交给 Wintun 自己命名。
-                "address": [crate::tun::TUN_ADDRESS],
+                "address": [crate::tun::tun_address()],
                 // stack / mtu 两个平台一致，理由见 `tun::TUN_STACK` / `tun::TUN_MTU`。
                 // 不写这两个字段时 macOS 上 TCP 走内核 NAT、握手不完成（2026-11-09 实测）。
                 "stack": crate::tun::TUN_STACK,
@@ -374,11 +374,11 @@ fn validate_input(input: &BuildInput) -> RuntimeResult<()> {
         #[cfg(target_os = "windows")]
         if let Some(entry) = crate::tun::cidr::first_covering(
             input.tun_excludes.iter().map(String::as_str),
-            crate::tun::TUN_ADDRESS,
+            crate::tun::tun_address(),
         ) {
             return Err(RuntimeError::Config(format!(
                 "排除网段 {entry} 覆盖了 TUN 地址 {}：TUN 自己的流量会绕开隧道",
-                crate::tun::TUN_ADDRESS
+                crate::tun::tun_address()
             )));
         }
     } else {
@@ -769,7 +769,7 @@ mod tests {
 
         assert_eq!(tun["inbounds"][0]["type"], "tun");
         assert_eq!(tun["inbounds"][0]["tag"], "tun-in");
-        assert_eq!(tun["inbounds"][0]["address"][0], crate::tun::TUN_ADDRESS);
+        assert_eq!(tun["inbounds"][0]["address"][0], crate::tun::tun_address());
         assert_eq!(tun["inbounds"][0]["auto_route"], true);
         // 这两个字段不能省：空 `stack` 在 macOS 上落到 mixed，TCP 走内核 NAT，
         // 实测握手永远不完成；空 `mtu` 落到 65535，MSS 会变成 65495。
@@ -870,13 +870,13 @@ mod tests {
     fn the_windows_exclusion_table_can_hold_its_own_tun_address() {
         let excludes = crate::tun::cidr::remove_covering(
             crate::tun::FIXED_EXCLUDES.iter().copied(),
-            crate::tun::TUN_ADDRESS_WINDOWS,
+            crate::tun::tun_address_windows(),
         );
         assert!(!excludes.iter().any(|entry| entry == "198.18.0.0/15"));
         assert_eq!(
             crate::tun::cidr::first_covering(
                 excludes.iter().map(String::as_str),
-                crate::tun::TUN_ADDRESS_WINDOWS
+                crate::tun::tun_address_windows()
             ),
             None
         );
@@ -898,7 +898,7 @@ mod tests {
     fn windows_tun_inbound_uses_strict_route_and_the_gvisor_stack() {
         let config = build_routed(&tun_input(), &routed_plan()).unwrap();
         let inbound = &config["inbounds"][0];
-        assert_eq!(inbound["address"][0], crate::tun::TUN_ADDRESS_WINDOWS);
+        assert_eq!(inbound["address"][0], crate::tun::tun_address_windows());
         assert_eq!(inbound["stack"], crate::tun::TUN_STACK);
         assert_eq!(inbound["mtu"], crate::tun::TUN_MTU);
         assert_eq!(inbound["strict_route"], true);
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(
             crate::tun::cidr::first_covering(
                 excluded.iter().filter_map(|value| value.as_str()),
-                crate::tun::TUN_ADDRESS_WINDOWS
+                crate::tun::tun_address_windows()
             ),
             None
         );

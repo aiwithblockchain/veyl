@@ -38,18 +38,13 @@ pub mod xpc;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-/// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段。
-pub const TUN_ADDRESS_MACOS: &str = "172.19.0.1/30";
-
-/// Windows 用 fakeip 段，与 macOS 的 `172.19.0.1/30` **不能互换**。
-/// 地址段是本轮的决定，真机效果按 `docs/windows-tun-w3-handover.md` 验证；
-/// 在验证通过之前不要把它当成「已实测」。
-pub const TUN_ADDRESS_WINDOWS: &str = "198.18.0.1/15";
-
-#[cfg(target_os = "windows")]
-pub const TUN_ADDRESS: &str = TUN_ADDRESS_WINDOWS;
-#[cfg(not(target_os = "windows"))]
-pub const TUN_ADDRESS: &str = TUN_ADDRESS_MACOS;
+/// TUN 网段。它属于 APP 身份：两个 APP 同时接管时地址不能撞，所以由各 APP
+/// 注入（见 [`identity`]），不在共享 crate 里写死。
+///
+/// macOS 只接受 `utunN` 形式（或留空让系统分配），固定私有段；
+/// Windows 用 fakeip 段，与 macOS 的段**不能互换**。地址段是主客户端本轮的
+/// 决定，真机效果按 `docs/windows-tun-w3-handover.md` 验证。
+pub use identity::{tun_address, tun_address_macos, tun_address_windows};
 
 /// TUN 入站的协议栈，两个平台用同一个值。
 ///
@@ -89,7 +84,7 @@ pub fn device_is_up(addrs: &[LocalAddr]) -> bool {
 
 /// 带 TUN 地址的接口名（`utunN`）。设备没起来时是 None。
 pub fn device_name(addrs: &[LocalAddr]) -> Option<String> {
-    let tun_ip = TUN_ADDRESS.split('/').next().unwrap_or(TUN_ADDRESS);
+    let tun_ip = tun_address().split('/').next().unwrap_or(tun_address());
     addrs
         .iter()
         .find(|addr| addr.address.to_string() == tun_ip)
@@ -522,7 +517,7 @@ pub fn excludes(local: &[String], user: &[String]) -> Vec<String> {
 pub fn fixed_excludes() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
-        cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS)
+        cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), tun_address())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -760,12 +755,12 @@ mod tests {
     /// 否则 TUN 自己的流量会被判定为「绕开隧道」。
     #[test]
     fn the_windows_fixed_table_drops_the_range_that_holds_its_tun_address() {
-        let fixed = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS_WINDOWS);
+        let fixed = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), tun_address_windows());
         assert!(!fixed.iter().any(|entry| entry == "198.18.0.0/15"));
         assert!(fixed.iter().any(|entry| entry == "10.0.0.0/8"));
         assert_eq!(fixed.len(), FIXED_EXCLUDES.len() - 1);
         // macOS 的地址段不受影响，固定表保持原样。
-        let untouched = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), TUN_ADDRESS_MACOS);
+        let untouched = cidr::remove_covering(FIXED_EXCLUDES.iter().copied(), tun_address_macos());
         assert_eq!(
             untouched.len(),
             FIXED_EXCLUDES.len() - 1,
@@ -780,7 +775,7 @@ mod tests {
     fn the_platform_fixed_table_never_excludes_the_platform_tun_address() {
         let fixed = fixed_excludes();
         assert_eq!(
-            cidr::first_covering(fixed.iter().map(String::as_str), TUN_ADDRESS),
+            cidr::first_covering(fixed.iter().map(String::as_str), tun_address()),
             None,
             "固定表不能排除 TUN 自己的地址"
         );

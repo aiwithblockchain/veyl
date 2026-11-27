@@ -191,7 +191,7 @@ fn verify_server(pipe: &Handle) -> Result<(), IpcError> {
     }
 
     let status =
-        scm::query(super::SERVICE_NAME).map_err(|error| helper_missing(error.to_string()))?;
+        scm::query(crate::identity::service_name()).map_err(|error| helper_missing(error.to_string()))?;
     if status.state != SERVICE_RUNNING {
         return Err(unverified(format!(
             "服务状态不是运行中（state={}）",
@@ -208,7 +208,7 @@ fn verify_server(pipe: &Handle) -> Result<(), IpcError> {
 }
 
 fn connect_client(timeout: Duration) -> Result<Handle, IpcError> {
-    let name = super::wide(super::PIPE_NAME);
+    let name = super::wide(crate::identity::pipe_name());
     let deadline = Instant::now() + timeout;
 
     loop {
@@ -253,12 +253,12 @@ fn connect_exhausted(last_code: u32, timeout: Duration) -> IpcError {
         IpcError::HelperMissing(format!(
             "服务没有在运行（等待 {} ms 后 {} 仍不存在）",
             timeout.as_millis(),
-            super::PIPE_NAME
+            crate::identity::pipe_name()
         ))
     } else {
         IpcError::Timeout(format!(
             "等待 {} 超过 {} ms 仍未连上",
-            super::PIPE_NAME,
+            crate::identity::pipe_name(),
             timeout.as_millis()
         ))
     }
@@ -267,7 +267,7 @@ fn connect_exhausted(last_code: u32, timeout: Duration) -> IpcError {
 fn create_error(code: u32) -> IpcError {
     IpcError::HelperMissing(format!(
         "打开 {} 失败（Win32 {code}）；服务可能没有安装或没有权限",
-        super::PIPE_NAME
+        crate::identity::pipe_name()
     ))
 }
 
@@ -472,7 +472,7 @@ where
     let listener = Listener::new(&log)?;
     let pipe = listener.create_pipe()?;
     CURRENT_PIPE.store(pipe.raw() as usize, Ordering::SeqCst);
-    log.info(format!("命名管道已就绪：{}", super::PIPE_NAME));
+    log.info(format!("命名管道已就绪：{}", crate::identity::pipe_name()));
 
     while !STOP.load(Ordering::SeqCst) {
         match connect_server(&pipe) {
@@ -766,7 +766,7 @@ impl Listener {
     }
 
     fn create_pipe(&self) -> Result<Handle, String> {
-        let name = super::wide(super::PIPE_NAME);
+        let name = super::wide(crate::identity::pipe_name());
         let handle = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
@@ -783,7 +783,7 @@ impl Listener {
             let code = unsafe { GetLastError() };
             return Err(format!(
                 "创建命名管道 {} 失败（Win32 {code}）；同名管道可能已被其他进程占用",
-                super::PIPE_NAME
+                crate::identity::pipe_name()
             ));
         }
         Ok(Handle(handle))

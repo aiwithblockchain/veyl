@@ -98,6 +98,19 @@ crates/
 4. 主客户端 `Cargo.toml` 加 `veyl-tun = { path = "../crates/veyl-tun" }`；
 5. 抽取期间不调格式、不改实现；跑主客户端全量测试与桌面真机连接作为回归门禁。
 
+> **落地状态（2026-11-27，M0）**：`crates/veyl-tun` 已抽取，主客户端行为不变。
+>
+> 与上文的一处偏离：本轮只搬了 `DataPlaneGate`；`runtime::health::ClashApi` 与
+> `RuntimeError` 留在主客户端。`tun` 并不使用 `ClashApi`，搬它会把 reqwest /
+> rustls 拖进**以 root 运行的 helper 与 LocalSystem 服务**的依赖图。M1 需要
+> 节点热切与就绪判定时再搬（纯移动 + shim），并把 reqwest 放到默认关闭的
+> feature 后面。
+>
+> 另外，§2.3 的标识符与 `build.rs` 算出的 sha256 都由各 APP 在启动时注入
+> `veyl_tun::identity::Identity`；crate 内没有任何 `env!` / `option_env!`。
+> 未注入时 panic 而不是回退默认值——回退会让两个 APP 在 Windows 上抢同一个
+> 服务名。
+
 ### 2.3 必须参数化的硬编码（否则两个 APP 不能并存）
 
 | 常量（现状） | 位置 | 参数化后 |

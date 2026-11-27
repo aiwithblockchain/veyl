@@ -10,7 +10,7 @@ use super::*;
 use crate::windows::ipc::{Request, Response};
 use crate::windows::pipe::{self, IpcError};
 use crate::windows::scm::{self, ScmError};
-use crate::windows::SERVICE_NAME;
+use crate::identity::service_name;
 
 use windows_sys::Win32::System::Services::SERVICE_RUNNING;
 
@@ -93,8 +93,8 @@ impl TunBackend for WinPipeBackend {
 /// 契约 §2.1 的 Windows 映射：`enabled` = 服务存在且正在运行；
 /// `not_registered` = 没装或没在跑；`not_found` = 注册项在但 ImagePath 不可执行。
 fn availability() -> HelperStatus {
-    match scm::query(SERVICE_NAME) {
-        Ok(query) if query.state == SERVICE_RUNNING => match scm::binary_path(SERVICE_NAME) {
+    match scm::query(service_name()) {
+        Ok(query) if query.state == SERVICE_RUNNING => match scm::binary_path(service_name()) {
             Some(path) if !path.is_file() => HelperStatus::NotFound,
             _ => HelperStatus::Enabled,
         },

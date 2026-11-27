@@ -17,9 +17,6 @@ use super::{
     ERR_TUN_DENIED,
 };
 
-/// 必须与打包进 `Contents/Library/LaunchDaemons/` 的文件名一致。
-pub const DAEMON_PLIST: &str = "com.veyl.helper.plist";
-
 pub struct SmAppService;
 
 impl Registration for SmAppService {
@@ -163,7 +160,7 @@ fn ensure_registered_with(
 /// 类不存在＝系统版本低于 13。直接在 nil 上发消息是 UB，所以必须先查。
 fn service() -> Option<Retained<SMAppService>> {
     AnyClass::get(c"SMAppService")?;
-    let name = NSString::from_str(DAEMON_PLIST);
+    let name = NSString::from_str(crate::identity::daemon_plist());
     Some(unsafe { SMAppService::daemonServiceWithPlistName(&name) })
 }
 

@@ -709,7 +709,8 @@ mod macos {
     /// 绝不把 stderr 原文写进日志。
     pub(super) fn run_admin_restart() -> bool {
         let script = format!(
-            "do shell script \"/bin/launchctl kickstart -k system/com.veyl.helper\" with prompt {} with administrator privileges",
+            "do shell script \"/bin/launchctl kickstart -k system/{}\" with prompt {} with administrator privileges",
+            crate::identity::mach_service(),
             applescript_quote(ADMIN_PROMPT)
         );
         match std::process::Command::new("/usr/bin/osascript")

@@ -20,16 +20,7 @@ pub mod scm;
 #[allow(dead_code)]
 pub mod wintun;
 
-// `cidr.rs` 不在这里声明：主程序（`tun/mod.rs`）与服务二进制都直接
-// `#[path]` 引用它，在这里再声明一次会让主程序把同一份源码编两遍。
-
-/// 管道名与服务名。管道名沿用文档里的 `veyl-helper`，避免客户端两套名字。
-pub const PIPE_NAME: &str = r"\\.\pipe\veyl-helper";
-pub const SERVICE_NAME: &str = "VeylService";
-// 只给安装脚本用的显示名，Rust 侧不引用。
-#[allow(dead_code)]
-pub const SERVICE_DISPLAY_NAME: &str = "Veyl Privileged Service";
-pub const INSTALL_DIR_NAME: &str = "Veyl";
+// `cidr.rs` 在 crate 根，服务二进制与主程序共用同一份。
 
 /// 拉起子进程时不创建控制台窗口（服务运行在 session 0，没人能看见它）。
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -44,7 +35,7 @@ pub fn program_files_dir() -> PathBuf {
 
 /// 服务只从这里读二进制、运行时、规则。
 pub fn install_dir() -> PathBuf {
-    program_files_dir().join(INSTALL_DIR_NAME)
+    program_files_dir().join(crate::identity::install_dir_name())
 }
 
 /// 服务只往这里写状态、配置、日志。
@@ -53,7 +44,7 @@ pub fn program_data_dir() -> PathBuf {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-        .join(INSTALL_DIR_NAME)
+        .join(crate::identity::install_dir_name())
 }
 
 pub fn logs_dir() -> PathBuf {
