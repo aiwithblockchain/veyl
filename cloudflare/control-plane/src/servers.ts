@@ -357,6 +357,12 @@ async function destroyInstance(
      * 一台永远不扣费、也连不上的 active 幻影。
      */
     restoreOnFailure?: string;
+    /**
+     * 连带关单时写进 `orders.failure_stage` 的阶段。默认沿用 `row.state`，
+     * 但 `destroy_stuck` 这类行此时已经是 `destroying`，不是合法的失败阶段；
+     * 这类订单从未就绪，按建机阶段写 `creating`。
+     */
+    orderFailureStage?: string;
   } = {},
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
@@ -443,7 +449,7 @@ async function destroyInstance(
     statements.push(
       env.DB.prepare(
         "UPDATE orders SET state = 'failed', failure_code = ?, failure_stage = ? WHERE id = ? AND state != 'failed'",
-      ).bind(reason, row.state, row.order_id),
+      ).bind(reason, options.orderFailureStage ?? row.state, row.order_id),
     );
   }
 
@@ -2611,22 +2617,28 @@ export async function destroyUnpaidServer(
  * 这类行从没扣过费，不存在退款口径的选择题，所以可以直接补完销毁；`destroyInstance`
  * 本身幂等（DO 404 按成功处理、退款键唯一）。删远端失败时行留在 `destroying`
  * 而不是还原成 active，下一轮 Cron 继续重试。
+ *
+ * 三态返回：`destroyed` = 本轮真的补完了；`skipped` = 行已被别的路径收尾（不计入
+ * 报告、不告警）；`failed` = 这次没删成，下一轮再来。
  */
+export type StuckDestroyOutcome = "destroyed" | "skipped" | "failed";
+
 export async function destroyStuckServer(
   env: ServersEnv,
   serverId: string,
   accountId: string,
-): Promise<boolean> {
-  if (!env.DB) return false;
+): Promise<StuckDestroyOutcome> {
+  if (!env.DB) return "failed";
   const row = await loadServer(env.DB, accountId, serverId);
-  // 行已经没了或已被别的路径收尾：没有可做的事，但也不算失败。
-  if (!row || row.state === "destroyed") return true;
+  // 行已经没了或已被别的路径收尾：没有可做的事，也不算失败。
+  if (!row || row.state === "destroyed") return "skipped";
   // 只处理仍是 destroying 的行：夹在中间被谁改成别的状态时不动它。
-  if (row.state !== "destroying") return false;
+  if (row.state !== "destroying") return "skipped";
   const outcome = await destroyInstance(env, row, "destroy_stuck", {
     restoreOnFailure: "destroying",
+    orderFailureStage: "creating",
   });
-  return outcome.ok;
+  return outcome.ok ? "destroyed" : "failed";
 }
 
 async function credentials(request: Request, env: ServersEnv, serverId: string): Promise<Response> {

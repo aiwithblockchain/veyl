@@ -384,9 +384,9 @@ async function recoverStuckDestroying(
     for (const row of rows.results ?? []) {
       if (row.billing_state === "pending") {
         try {
-          if (await destroyStuckServer(env, row.id, row.account_id)) {
-            pendingDestroyed += 1;
-          } else {
+          const outcome = await destroyStuckServer(env, row.id, row.account_id);
+          if (outcome === "destroyed") pendingDestroyed += 1;
+          else if (outcome === "failed") {
             console.warn(`[billing] pending_destroy_failed server=${row.id}`);
           }
         } catch (error) {

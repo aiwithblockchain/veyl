@@ -61,6 +61,8 @@ export class FakeD1 {
   beforeProviderGoneMark?: () => void;
   /** 测试钩子：建机写回 `provider_id` 前触发，用来模拟「DO 建机这几秒里行被销毁」。 */
   beforeProvisionWrite?: () => void;
+  /** 测试钩子：卡住的 destroying 行被取到之后触发，用来模拟「别的路径先一步收尾」。 */
+  beforeStuckDestroy?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -395,10 +397,14 @@ export class FakeD1 {
       return null;
     }
     if (sql.startsWith("insert into audit_log") && sql.includes("where exists (select 1 from servers")) {
-      // 带存活守卫的审计（server.rotated）：行已销毁时不落痕。
-      const [at, accountId, serverId, detail, guardId] = a;
+      // 带存活守卫的审计（server.rotated / provision.created）：行已销毁时不落痕；
+      // 多带一个 provider_id 守卫时，只有写回真的落库才落痕。
+      const [at, accountId, serverId, detail, guardId, guardProviderId] = a;
       const server = this.tables.servers.find(
-        (row) => row.id === guardId && row.destroyed_at == null,
+        (row) =>
+          row.id === guardId &&
+          row.destroyed_at == null &&
+          (guardProviderId == null || String(row.provider_id) === String(guardProviderId)),
       );
       if (!server) return null;
       const literal = /'([a-z_.]+)'/.exec(sql)?.[1];
@@ -2118,7 +2124,7 @@ export class FakeD1 {
     if (sql.startsWith("select id, account_id, updated_at, billing_state from servers where state = 'destroying'")) {
       // 卡住的 destroying 清扫：只看状态与超时，参数是 [cutoff, limit]。
       // 两类行都要返回：pending 的补完销毁，其余恢复成 active。
-      return this.tables.servers
+      const rows = this.tables.servers
         .filter(
           (row) =>
             row.state === "destroying" &&
@@ -2132,6 +2138,9 @@ export class FakeD1 {
           updated_at: row.updated_at ?? 0,
           billing_state: row.billing_state,
         }));
+      // 钩子在这里触发：返回的是快照，调用方逐条处理时行可能已经被别的路径收尾。
+      this.beforeStuckDestroy?.();
+      return rows;
     }
     if (sql.startsWith("select id from servers where provider_gone_at is not null")) {
       // 报告里的「当前未销毁的冻结台数」：只数还没有 destroyed_at 的行。

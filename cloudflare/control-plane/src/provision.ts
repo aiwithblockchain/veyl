@@ -329,30 +329,46 @@ export async function provisionServer(
   // 写回带状态守卫：从查到这一行到 DO 建完机之间（1–3 秒）可能已被销毁（用户点销毁、
   // 欠费 / 流量超支、enroll 超时）。无条件写回会把 `destroyed` 改回 `booting`，
   // DO 上多一台没人管理、也不该存在的实例；这台机器刚落成，只能我们自己删。
-  const written = await env.DB.prepare(
-    "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
-      "enrollment_expires_at = ?, updated_at = ? " +
-      "WHERE id = ? AND state NOT IN ('destroying', 'destroyed')",
-  )
-    .bind(
+  //
+  // 写回与审计放在同一批：`provision.created` 只在这条 UPDATE 真的写了行时才落
+  //（`WHERE EXISTS` 复用刚写下的 `provider_id`），中途被踢不会出现「有机器、没记录」。
+  // 代价是审计写不进去会整批回滚、把这台刚建的机器删掉——审计因此是这条路径的硬依赖：
+  // 不要给 `audit_log` 加会被这条 INSERT 触发的约束（CHECK / 触发器）。
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
+        "enrollment_expires_at = ?, updated_at = ? " +
+        "WHERE id = ? AND state NOT IN ('destroying', 'destroyed')",
+    ).bind(
       created.value.providerId,
       created.value.ipv4,
       enrollHash,
       now + ENROLL_TTL_MS,
       now,
       server.id,
-    )
-    .run()
-    .catch(async (error: unknown) => {
-      // 机器已经建出来了但没记进库：立刻删掉，否则它会成为一台没有记录、无人管理的计费实例。
-      await deleteOrphanDroplet(doToken, created.value.providerId, server.id, "db_write_failed");
-      console.error(`[provision] db_write_failed server=${server.id} error=${String(error)}`);
-      return null;
-    });
+    ),
+    env.DB.prepare(
+      "INSERT INTO audit_log (at, account_id, server_id, action, detail) " +
+        "SELECT ?, ?, ?, 'provision.created', ? " +
+        "WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND provider_id = ? AND destroyed_at IS NULL)",
+    ).bind(
+      now,
+      server.account_id,
+      server.id,
+      JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
+      server.id,
+      created.value.providerId,
+    ),
+  ]).catch(async (error: unknown) => {
+    // 机器已经建出来了但没记进库：立刻删掉，否则它会成为一台没有记录、无人管理的计费实例。
+    await deleteOrphanDroplet(doToken, created.value.providerId, server.id, "db_write_failed");
+    console.error(`[provision] db_write_failed server=${server.id} error=${String(error)}`);
+    return null;
+  });
 
-  if (!written) return fail(env, server, "db_write_failed");
+  if (!results) return fail(env, server, "db_write_failed");
 
-  if (Number(written.meta?.changes ?? 0) === 0) {
+  if (Number(results[0]?.meta?.changes ?? 0) === 0) {
     // 行已进入销毁流程（或被删掉）：不碰它的状态、不碰订单——销毁路径会把订单收尾。
     await deleteOrphanDroplet(doToken, created.value.providerId, server.id, "row_destroying");
     console.warn(
@@ -360,20 +376,6 @@ export async function provisionServer(
     );
     return { ok: false, reason: "provision_aborted", retryable: false };
   }
-
-  await env.DB.prepare(
-    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.created', ?)",
-  )
-    .bind(
-      now,
-      server.account_id,
-      server.id,
-      JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
-    )
-    .run()
-    .catch((error: unknown) =>
-      console.warn(`[provision] audit_failed server=${server.id} error=${String(error)}`),
-    );
 
   return { ok: true, providerId: created.value.providerId, ip: created.value.ipv4 };
 }

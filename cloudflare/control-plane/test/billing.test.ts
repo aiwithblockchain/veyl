@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { recoverExpiredServers, runBilling, settleServer, type BillingRow } from "../src/billing";
 import { cycleIdOf, releasedBytes } from "../src/traffic_cycle";
 import { provisionPaidOrder } from "../src/orders";
+import { destroyStuckServer } from "../src/servers";
 import { FakeD1 } from "./helpers/fakeD1";
 
 afterEach(() => {
@@ -1503,6 +1504,8 @@ describe("卡住的 destroying 清扫", () => {
     expect(server.destroyed_at).toBeTruthy();
     expect(db.rows("orders")[0].state).toBe("failed");
     expect(db.rows("orders")[0].failure_code).toBe("destroy_stuck");
+    // 订单从未就绪：阶段按建机写 `creating`，不能把 `destroying` 当失败阶段写进契约字段。
+    expect(db.rows("orders")[0].failure_stage).toBe("creating");
     expect(calls).toContain("DELETE https://api.digitalocean.com/v2/droplets/4242");
     // 从没扣过钱：只能留「无扣款流水」审计，绝不能凭空写退款。
     expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
@@ -1575,6 +1578,59 @@ describe("卡住的 destroying 清扫", () => {
     expect(report.pendingDestroyed).toBe(0);
     expect(db.rows("servers")[0].state).toBe("destroying");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("行已被别的路径收尾：返回 skipped，不计数、不告警", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroyed",
+      billing_state: "pending",
+      destroyed_at: Date.now() - 60_000,
+      paid_until: 0,
+    });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const outcome = await destroyStuckServer(env as never, "srv_billing0000000000", ACCOUNT);
+
+    expect(outcome).toBe("skipped");
+    // 没有可删的远端、没有退款、没有重复写状态。
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.rows("servers")[0].state).toBe("destroyed");
+  });
+
+  it("清扫取到行之后、处理之前被别的路径收尾：不计数、不告警", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: Date.now() - 40 * 60 * 1000,
+      paid_until: 0,
+      provider_id: null,
+    });
+    // 快照已返回，逐条处理时行已经被并发销毁。
+    db.beforeStuckDestroy = () => {
+      const row = db.rows("servers")[0];
+      row.state = "destroyed";
+      row.destroyed_at = Date.now();
+    };
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const report = await runBilling(env as never);
+
+      expect(report.pendingDestroyed).toBe(0);
+      expect(
+        warn.mock.calls.some(([message]) => String(message).includes("pending_destroy_failed")),
+      ).toBe(false);
+      expect(db.rows("servers")[0].state).toBe("destroyed");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
