@@ -75,12 +75,14 @@
 
 > **2026-11-26 拍板**：不做 HTTP Basic，也不自建登录页，直接用 **Cloudflare Access**。
 
-- 独立 Worker，路由 `admin.dessage.xyz`，与 `edge` 平级（`cloudflare/admin/`）。
-- 身份由 Cloudflare Access 在边缘完成：self-hosted 应用 + 只允许管理员邮箱的策略，验证方式用邮箱一次性验证码或 Google 登录（自带 MFA）。**没有登录页、没有密码、没有会话 cookie。**
-- Worker 只校验 `Cf-Access-Jwt-Assertion`：RS256，用 `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs` 的 JWKS 验签，并校验 `aud === ACCESS_AUD`、`exp`、`iss`。
+- 独立 Worker（`cloudflare/admin/`，名 `veyl-admin`），与 `edge` 平级。
+- **入口目前是 `veyl-admin.<account>.workers.dev`**：`dessage.xyz` 的 DNS 托管在 GoDaddy、不是本账号的 zone，Worker 无法通过外部 CNAME 接入自定义主机名（Pages 可以，Worker 不行）。等域名迁入 Cloudflare 后再换成 `admin.dessage.xyz`。
+- 身份由 Cloudflare Access 完成：Access 应用覆盖该 workers.dev 地址（production 与 preview/deployment 都要覆盖），策略只允许管理员邮箱，验证方式用邮箱一次性验证码或 Google 登录（自带 MFA）。**没有登录页、没有密码、没有会话 cookie。**
+- Worker 只校验 `Cf-Access-Jwt-Assertion`：RS256，用 `${ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs` 的 JWKS 验签，并校验 `aud === ACCESS_AUD`、`exp`、`nbf`、`iss`。
 - **不信** `Cf-Access-Authenticated-User-Email` 头——客户端可以自己塞，必须验 JWT。
-- 缺头或验签失败一律 `401`，不重定向：Access 已在边缘拦掉未登录请求，能走到 Worker 就说明是绕过或伪造。
-- 部署时必须关掉 workers.dev 路由，否则那条路绕过 Access。
+- 缺头或验签失败一律 `401`，不重定向。**不能**把「Access 已在边缘拦住」当前提：官方明确请求可能因网络配置错误绕过 Access 直达 origin，Worker 自验 JWT 是必需而不是冗余。
+- 部署时 workers.dev 入口保持开启：地址可见不等于可访问，安全边界在 Worker 验签。`preview_urls` 保持关闭，但 Deployment URL 没有 wrangler 开关，所以 Access 应用的范围必须同时覆盖 production 与 preview/deployment。
+- `aud` 是**应用级**的：换入口（workers.dev ↔ 自定义域名）就是换应用，必须重新取 AUD；上线后应解一个真实 token 核对 `iss`/`aud`/`kid` 再填环境变量。
 - 只走 HTTPS。所有写动作（停服 / 恢复 / 标记失联）写 `audit_log`：谁、什么时候、对哪台、结果。
 
 ---

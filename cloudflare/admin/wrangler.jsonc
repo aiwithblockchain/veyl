@@ -3,11 +3,13 @@
   "name": "veyl-admin",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
-  // Access 只保护自定义域名，workers.dev 必须关掉，否则绕过 Access 直连 Worker。
-  // 例外：Access 可以直接保护 workers.dev 地址（按单个 Worker 限定），此时这条地址
-  // 本身就是被 Access 门禁的入口，不再算绕过。见文件末尾的路由说明。
+  // Access 可以直接保护 workers.dev 地址（按单个 Worker 限定），这条地址本身就是
+  // 被门禁的入口。安全边界在 Worker 自己验 `Cf-Access-Jwt-Assertion`，不在边缘：
+  // 地址可见不等于可访问，没有合法 JWT 一律 401。见文件末尾的路由说明。
   "workers_dev": true,
-  // 预览地址同样不受 Access 保护，钉死关闭，防止默认值将来变化。
+  // 关闭 Version URLs 与 workers.dev Preview URLs。Deployment URL 没有对应的
+  // wrangler 开关，官方建议把 Access 应用的范围设成同时覆盖 production 与
+  // preview/deployment，别只保护 production。
   "preview_urls": false,
   "observability": {
     "enabled": true
