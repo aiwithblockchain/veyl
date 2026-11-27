@@ -176,14 +176,17 @@ impl ConnectionManager {
 
     /// 启动时接手已在运行的隧道（上次 App 没拆干净、或崩溃残留）。
     ///
-    /// helper 只记 pid / Clash / since，不记是哪套配置，所以这里只如实报告
-    /// 「在跑」，`config_id` 留空、节点未知——界面据此显示已连接并可断开，
-    /// 但不会假装知道连接的是哪一套。
-    pub fn adopt_existing(&self) -> Option<ConnectionSnapshot> {
+    /// helper 只记 pid / Clash / since，不记是哪套配置，所以 `config_id` 留空；
+    /// 但控制口就在手边，可以问出当前 selector 和它指向的节点，界面据此显示
+    /// 「已连接 · <节点>」，节点切换也才用得上。
+    pub async fn adopt_existing(&self) -> Option<ConnectionSnapshot> {
         if !matches!(self.inner.lock().unwrap().state, ConnectionState::Idle) {
             return None;
         }
-        let TunState::Running { pid } = self.session.status() else {
+
+        let session = self.session.clone();
+        let probed = tauri::async_runtime::spawn_blocking(move || session.status()).await;
+        let TunState::Running { pid } = probed.ok()? else {
             return None;
         };
         let since = self.session.connected_since().unwrap_or_default();
@@ -202,6 +205,23 @@ impl ConnectionManager {
             };
         }
         self.emit();
+
+        // 尽力问出「当前是哪个节点组、指向哪个节点」；问不到也保持已连接。
+        if let Some(api) = self.session.clash_api() {
+            if let Some((selector, node)) = running_selector(&self.http, &api.addr, &api.secret).await
+            {
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.selector = Some(selector);
+                    inner.selected_node = node.clone();
+                    if let ConnectionState::Connected { node: current, .. } = &mut inner.state {
+                        *current = node;
+                    }
+                }
+                self.emit();
+            }
+        }
+
         Some(self.snapshot())
     }
 
@@ -532,6 +552,42 @@ pub fn selector_of(config: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 从控制口读回「当前节点组」与它指向的节点。
+///
+/// 配置里可能不止一个组；优先 Selector，其次 URLTest，多个时取第一个——
+/// 我们的模板只有一个节点组，多组的情形等真出现再细化。
+async fn running_selector(
+    http: &reqwest::Client,
+    addr: &str,
+    secret: &str,
+) -> Option<(String, Option<String>)> {
+    let response = http
+        .get(format!("http://{addr}/proxies"))
+        .bearer_auth(secret)
+        .timeout(VERSION_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let text = response.text().await.ok()?;
+    let body: Value = serde_json::from_str(&text).ok()?;
+    let proxies = body.get("proxies")?.as_object()?;
+
+    let pick = |wanted: &str| {
+        proxies.iter().find_map(|(tag, info)| {
+            let kind = info.get("type").and_then(Value::as_str)?;
+            if !kind.eq_ignore_ascii_case(wanted) {
+                return None;
+            }
+            let now = info.get("now").and_then(Value::as_str).map(str::to_string);
+            Some((tag.clone(), now))
+        })
+    };
+    pick("selector").or_else(|| pick("urltest"))
+}
+
 async fn clash_version(http: &reqwest::Client, addr: &str, secret: &str) -> bool {
     let Ok(response) = http
         .get(format!("http://{addr}/version"))
@@ -661,6 +717,8 @@ mod tests {
         running: AtomicBool,
         /// 后端报告的在跑 pid（0 = 没在跑）；接手用例用。
         running_pid: std::sync::atomic::AtomicU32,
+        /// 后端报告的控制口；接手后要能问出当前节点。
+        clash: Mutex<Option<ClashApi>>,
     }
 
     impl FakeBackend {
@@ -671,6 +729,7 @@ mod tests {
                 restores: AtomicUsize::new(0),
                 running: AtomicBool::new(false),
                 running_pid: std::sync::atomic::AtomicU32::new(0),
+                clash: Mutex::new(None),
             })
         }
     }
@@ -708,7 +767,7 @@ mod tests {
             Ok(TunSnapshot {
                 running: self.running.load(Ordering::SeqCst),
                 pid: (pid > 0).then_some(pid),
-                clash_api: None,
+                clash_api: self.clash.lock().unwrap().clone(),
                 since: (pid > 0).then(|| "2026-11-27T00:00:00Z".to_string()),
                 last_error: None,
                 dns_hijack: DnsHijack::default(),
@@ -750,6 +809,14 @@ mod tests {
                     }
                 } else if first.starts_with("GET /proxies/proxy") {
                     http_response("200 OK", &format!("{{\"now\":\"{}\"}}", n.lock().unwrap()))
+                } else if first.starts_with("GET /proxies") {
+                    http_response(
+                        "200 OK",
+                        &format!(
+                            "{{\"proxies\":{{\"proxy\":{{\"type\":\"Selector\",\"now\":\"{}\"}}}}}}",
+                            n.lock().unwrap()
+                        ),
+                    )
                 } else if first.starts_with("PUT /proxies/proxy") {
                     p.fetch_add(1, Ordering::SeqCst);
                     if let Some(body) = request.split("\r\n\r\n").nth(1) {
@@ -872,7 +939,7 @@ mod tests {
         backend.running_pid.store(4242, Ordering::SeqCst);
         let manager = manager(backend.clone(), &clash);
 
-        let snapshot = manager.adopt_existing().expect("应当接手已在跑的隧道");
+        let snapshot = manager.adopt_existing().await.expect("应当接手已在跑的隧道");
         match &snapshot.state {
             ConnectionState::Connected {
                 pid, config_id, ..
@@ -884,7 +951,7 @@ mod tests {
         }
         assert!(snapshot.uptime_seconds.is_some());
         // 只接手一次。
-        assert!(manager.adopt_existing().is_none());
+        assert!(manager.adopt_existing().await.is_none());
     }
 
     /// 没在跑就保持 Idle，不要凭空造一个已连接。
@@ -893,8 +960,41 @@ mod tests {
         let clash = fake_clash(true);
         let backend = FakeBackend::new(Ok(start_reply(&clash)));
         let manager = manager(backend, &clash);
-        assert!(manager.adopt_existing().is_none());
+        assert!(manager.adopt_existing().await.is_none());
         assert!(matches!(manager.snapshot().state, ConnectionState::Idle));
+    }
+
+    /// 接手之后还要能说出「当前是哪个节点」，否则界面只能显示「已连接」。
+    #[tokio::test]
+    async fn adoption_also_reads_the_current_node() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        backend.running.store(true, Ordering::SeqCst);
+        backend.running_pid.store(4242, Ordering::SeqCst);
+        *backend.clash.lock().unwrap() = Some(ClashApi {
+            addr: clash.addr.to_string(),
+            secret: "s".into(),
+        });
+        let manager = manager(backend.clone(), &clash);
+
+        let snapshot = manager.adopt_existing().await.unwrap();
+        match &snapshot.state {
+            ConnectionState::Connected { node, .. } => {
+                assert_eq!(node.as_deref(), Some("悉尼"));
+            }
+            other => panic!("期望已连接，拿到 {other:?}"),
+        }
+        assert_eq!(manager.selected_node().as_deref(), Some("悉尼"));
+
+        // 接手时也把 selector 问出来了，所以切换节点照样可用。
+        let switched = manager.switch_node("新加坡").await.unwrap();
+        match &switched.state {
+            ConnectionState::Connected { node, .. } => {
+                assert_eq!(node.as_deref(), Some("新加坡"));
+            }
+            other => panic!("期望已连接，拿到 {other:?}"),
+        }
+        assert_eq!(clash.puts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

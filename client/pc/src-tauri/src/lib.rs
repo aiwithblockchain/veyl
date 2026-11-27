@@ -53,9 +53,9 @@ pub fn run() {
             // 上一次 App 没拆干净时，helper 可能还在跑隧道：启动就把状态接过来，
             // 否则界面会显示「未连接」而流量还在隧道里。
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            tauri::async_runtime::spawn(async move {
                 let state = handle.state::<state::AppState>();
-                state.connection.adopt_existing();
+                state.connection.adopt_existing().await;
             });
             Ok(())
         })
