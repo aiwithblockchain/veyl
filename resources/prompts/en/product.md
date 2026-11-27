@@ -73,8 +73,8 @@ Running a node on your own server gives you a dedicated, stable exit.
 - **Sign-in is only required for buying servers and viewing bills**; connecting, switching nodes and asking the AI to diagnose need no sign-in.
 - Email, balance, top-up, **this month's traffic** and sign out are all in the Account panel opened from the bottom-left avatar. "Use on other devices" is not there — it is in the My servers rail (§3.5).
 - This month's traffic is an **account-level** pool: never add up the individual servers, and do not estimate how many days are left.
-- Traffic runs on the UTC calendar month and resets at 00:00 UTC on the 1st (08:00 Beijing time); capacity is released day by day for each day the server exists, so it does not arrive all at once at the start of the month.
-- Each server's monthly ceiling is its plan quota; the tool gives used / released / plan quota / reset time per server.
+- Traffic runs on the UTC calendar month and resets at 00:00 UTC on the 1st (08:00 Beijing time); capacity accumulates day by day for each day the server exists, so it does not arrive all at once at the start of the month.
+- Each server's monthly ceiling is its plan quota; the tool gives used / accumulated / plan quota / reset time per server.
 - "Paid until" is how far the current paid period reaches; while the balance lasts it renews one day at a time; if the charge fails the server is stopped and destroyed right away, with no grace period. Never call it a validity period or an expiry date.
 - The balance is a snapshot from an external system and can go stale: if a refresh fails, the last amount stays on screen and is labelled "showing the last known balance" — it is never replaced with `—`. Answer from what the screen shows; do not compute a balance yourself.
 - Device disabled: sign that device out and sign in again with email. Device identity lost: register the device again — the account and servers are still there.

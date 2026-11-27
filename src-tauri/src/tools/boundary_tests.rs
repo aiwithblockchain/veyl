@@ -605,7 +605,7 @@ async fn every_tool_survives_garbage_input() {
             let env = envelope(&result);
             // 盯文档字面量，而不是常量自己：常量漏改时这条才会红。
             assert_eq!(
-                env["contract_version"], "3.39.0",
+                env["contract_version"], "3.40.0",
                 "{name} 的信封契约版本不对：{env}"
             );
             assert!(
@@ -1259,7 +1259,7 @@ async fn my_servers_reports_the_account_pool_not_a_sum() {
     );
     let content = env["summary"].as_str().unwrap_or("");
     assert!(
-        content.contains("本月流量：已用 5.0 GiB / 已释放 93.1 GiB"),
+        content.contains("本月流量：已用 5.0 GiB / 已累计 93.1 GiB"),
         "首行必须是账号池：{content}"
     );
     assert_eq!(env["data"]["servers"][0]["traffic_state"], "ok");
