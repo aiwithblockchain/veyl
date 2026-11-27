@@ -477,6 +477,8 @@ for each server in batch:
 billing_cursor.cursor = batch 最后一个 id
 
 # B. 补建（订单已扣费但没服务器）
+#    守卫：机器行已销毁（destroyed_at 非空）或正在销毁（state='destroying'）的一律跳过——
+#    「没有 provider_id」不等于「没机器」，销毁流程收尾前补建会把正在销毁的机器重新建出来。
 for each order with state='paid' and paid_at < now - 5min and no servers row:
   n_now      = floor((now - order.paid_at) / 1d)          # 空档天数：扣费那一刻算第 0 天
   paidUntil  = max(order.paid_at + 1d, order.paid_at + (n_now + 1) * 1d)

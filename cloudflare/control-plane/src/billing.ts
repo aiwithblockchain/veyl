@@ -204,11 +204,14 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   // 已收款但没有机器：补建（unique(servers.order_id) 保证不会建第二台）。
   // `s.destroyed_at IS NULL` 是必须的：用户销毁失败态 / 建机中的机器后，订单可能还没关，
   // 少了这一条就会把这台机器重新建出来。
+  // `s.state <> 'destroying'` 同理：正在销毁、`provider_id` 还没落库（或建机请求死在半路）
+  // 的行会被「provider_id IS NULL」误判成「已付款没机器」，补建等于把一台正在销毁的机器
+  // 重新建出来。补完销毁由 `recoverStuckDestroying` 负责，这里只等，不碰。
   const orphaned = await db
     .prepare(
       "SELECT o.id FROM orders o LEFT JOIN servers s ON s.order_id = o.id " +
         "WHERE o.state IN ('paid', 'provisioning') AND o.charge_mode = 'upfront' AND o.created_at < ? " +
-        "AND s.destroyed_at IS NULL " +
+        "AND s.destroyed_at IS NULL AND COALESCE(s.state, '') <> 'destroying' " +
         "AND (s.id IS NULL OR s.provider_id IS NULL OR s.state = 'error') LIMIT 5",
     )
     .bind(now - 5 * 60 * 1000)

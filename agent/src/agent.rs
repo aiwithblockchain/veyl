@@ -273,6 +273,7 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         rotator,
         false,
         Some(replay_path),
+        Some(meter.clone()),
     )
     .await?;
 

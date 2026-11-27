@@ -281,7 +281,6 @@ pub trait VpnToolServices: Send + Sync {
 
     async fn default_profile_status(&self) -> anyhow::Result<Value>;
     async fn default_profile_refresh(&self, force: bool) -> anyhow::Result<Value>;
-    async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value>;
 
     async fn rules_status(&self) -> anyhow::Result<Value>;
     async fn category_list(
@@ -610,10 +609,6 @@ impl VpnToolServices for NotWiredServices {
         not_wired("刷新种子")
     }
 
-    async fn import_seed_file(&self, _path: &str) -> anyhow::Result<Value> {
-        not_wired("导入种子文件")
-    }
-
     async fn rules_status(&self) -> anyhow::Result<Value> {
         not_wired("规则数据状态")
     }
@@ -777,6 +772,19 @@ fn runtime_busy_error() -> anyhow::Error {
         "运行时正在执行长操作，稍后再试",
         json!({ "reason": "runtime_busy" }),
     )
+}
+
+/// 是不是「试用已到期」这一条错误（按 code + details.reason 识别）。
+fn is_trial_expired(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ServiceError>().is_some_and(|service| {
+        service.code == "PRECONDITION_FAILED"
+            && service
+                .details
+                .as_ref()
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                == Some("trial_expired")
+    })
 }
 
 /// 给切换接管方式的失败补上 `mode` / `previous_mode` 与回滚结果。
@@ -4785,6 +4793,22 @@ impl WiredServices {
         skip_duplicates: bool,
         select_first: bool,
     ) -> anyhow::Result<(Vec<configs::Node>, Vec<crate::nodes::SkippedNode>)> {
+        let conn = self.store.conn();
+        self.add_parsed_nodes_on(&conn, config_id, parsed, source, skip_duplicates, select_first)
+    }
+
+    /// 同 [`Self::add_parsed_nodes`]，但复用调用方已持有的连接。
+    ///
+    /// 种子物化要在「试用判定 + 写入」同一个连接守卫里完成，不能再抢 store 锁。
+    fn add_parsed_nodes_on(
+        &self,
+        conn: &rusqlite::Connection,
+        config_id: Option<&str>,
+        parsed: &[crate::nodes::ParsedNode],
+        source: &str,
+        skip_duplicates: bool,
+        select_first: bool,
+    ) -> anyhow::Result<(Vec<configs::Node>, Vec<crate::nodes::SkippedNode>)> {
         let mut added = Vec::new();
         let mut skipped = Vec::new();
         for node in parsed {
@@ -4793,12 +4817,9 @@ impl WiredServices {
             let password_ref = crate::nodes::password_ref(&id);
 
             if skip_duplicates {
-                let exists = {
-                    let conn = self.store.conn();
-                    configs::find_node_by_source_key(&conn, source, &key)
-                        .map_err(|error| svc_error(error.code(), error))?
-                        .is_some()
-                };
+                let exists = configs::find_node_by_source_key(conn, source, &key)
+                    .map_err(|error| svc_error(error.code(), error))?
+                    .is_some();
                 if exists {
                     skipped.push(crate::nodes::SkippedNode {
                         name: Some(node.name.clone()),
@@ -4814,9 +4835,8 @@ impl WiredServices {
                 .map_err(|error| svc_error("SECRET_STORE", error))?;
 
             let stored = (|| -> anyhow::Result<configs::Node> {
-                let conn = self.store.conn();
                 let stored = configs::upsert_node(
-                    &conn,
+                    conn,
                     &configs::NewNode {
                         id: &id,
                         name: &node.name,
@@ -4830,7 +4850,7 @@ impl WiredServices {
                 )
                 .map_err(|error| svc_error(error.code(), error))?;
                 if let Some(config_id) = config_id {
-                    configs::attach_node(&conn, config_id, &id)
+                    configs::attach_node(conn, config_id, &id)
                         .map_err(|error| svc_error(error.code(), error))?;
                 }
                 Ok(stored)
@@ -4848,13 +4868,12 @@ impl WiredServices {
 
         if let Some(config_id) = config_id {
             if !added.is_empty() {
-                let conn = self.store.conn();
-                let config = configs::get(&conn, config_id)
+                let config = configs::get(conn, config_id)
                     .map_err(|error| svc_error(error.code(), error))?
                     .ok_or_else(|| svc_error("NOT_FOUND", "配置不存在"))?;
                 if select_first && config.current_node_id.is_none() {
                     let _ = configs::update(
-                        &conn,
+                        conn,
                         config_id,
                         &configs::ConfigPatch {
                             current_node_id: Some(Some(added[0].id.clone())),
@@ -4898,13 +4917,20 @@ impl WiredServices {
 
     /// 种子缓存里的可用节点（已去掉用户排除项）。`None` = 现在没有种子可用。
     fn seed_parsed_nodes(&self) -> anyhow::Result<Option<Vec<crate::nodes::ParsedNode>>> {
-        let Some(nodes) = crate::seed::load_nodes(&self.store) else {
+        let conn = self.store.conn();
+        self.seed_parsed_nodes_with(&conn)
+    }
+
+    /// 同 [`Self::seed_parsed_nodes`]，复用调用方已持有的连接。
+    fn seed_parsed_nodes_with(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> anyhow::Result<Option<Vec<crate::nodes::ParsedNode>>> {
+        let Some(nodes) = crate::seed::load_nodes_with(conn) else {
             return Ok(None);
         };
-        let exclusions = {
-            let conn = self.store.conn();
-            configs::seed_exclusions(&conn).map_err(|error| svc_error(error.code(), error))?
-        };
+        let exclusions =
+            configs::seed_exclusions(conn).map_err(|error| svc_error(error.code(), error))?;
         Ok(Some(
             nodes
                 .into_iter()
@@ -4924,13 +4950,17 @@ impl WiredServices {
         ))
     }
 
-    /// 刷新成功后把种子节点并入全局配置：一个事务里落行 + 绑定，失败只记日志。
+    /// 刷新成功后的并入：试用到期必须原样上报，其他失败只记日志。
     ///
-    /// 刷新本身仍算成功——网络已经更新，没能并入池子不该让用户看到「刷新失败」；
-    /// 下一次刷新会补上（幂等）。
-    fn merge_seed_into_global_quietly(&self) {
-        if let Err(error) = self.merge_seed_into_global() {
-            log::warn!("刷新后把种子节点并入全局配置失败（下次刷新会重试）：{error}");
+    /// 网络已经更新，没能并入池子不该让用户看到「刷新失败」；下一次刷新会补上。
+    fn merge_after_refresh(&self) -> anyhow::Result<()> {
+        match self.merge_seed_into_global() {
+            Ok(()) => Ok(()),
+            Err(error) if is_trial_expired(&error) => Err(error),
+            Err(error) => {
+                log::warn!("刷新后把种子节点并入全局配置失败（下次刷新会重试）：{error}");
+                Ok(())
+            }
         }
     }
 
@@ -4960,6 +4990,9 @@ impl WiredServices {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|error| svc_error("INTERNAL", error))?;
+            // 写事务内复查：刷新成功与并入之间可能已经到期，拒绝时不落任何节点行。
+            crate::trial::ensure_seed_trial_active(&tx)
+                .map_err(|_| Self::seed_trial_expired())?;
             let (global, _) =
                 configs::ensure_global(&tx).map_err(|error| svc_error(error.code(), error))?;
             for node in parsed {
@@ -5017,13 +5050,53 @@ impl WiredServices {
         )
     }
 
+    /// 试用闸门对外的固定错误（`trial-seed-expiry.md` §5.1）。
+    fn seed_trial_expired() -> anyhow::Error {
+        svc_error_with_details(
+            "PRECONDITION_FAILED",
+            crate::trial::SEED_TRIAL_EXPIRED_MESSAGE,
+            json!({ "reason": "trial_expired" }),
+        )
+    }
+
+    /// 候选节点里有没有「新增的 seed」：只有差集非空才查试用状态。
+    ///
+    /// 已绑定的 seed 允许保留 / 编辑；`manual` / `owned` / `url` 一律放行。
+    fn ensure_candidate_seed_allowed(
+        &self,
+        conn: &rusqlite::Connection,
+        candidates: &[String],
+        bound: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<()> {
+        let mut adds_seed = false;
+        for id in candidates {
+            if bound.contains(id) {
+                continue;
+            }
+            let node = configs::get_node(conn, id)
+                .map_err(|error| svc_error(error.code(), error))?;
+            if node.is_some_and(|node| node.source == configs::SOURCE_SEED) {
+                adds_seed = true;
+                break;
+            }
+        }
+        if !adds_seed {
+            return Ok(());
+        }
+        crate::trial::ensure_seed_trial_active(conn).map_err(|_| Self::seed_trial_expired())
+    }
+
     /// 把种子缓存里的节点落到当前配置。种子只给节点，分流由配置自己决定。
-    fn materialize_seed_nodes(&self, config_id: &str) -> anyhow::Result<usize> {
+    fn materialize_seed_nodes_on(
+        &self,
+        conn: &rusqlite::Connection,
+        config_id: &str,
+    ) -> anyhow::Result<usize> {
         let parsed = self
-            .seed_parsed_nodes()?
+            .seed_parsed_nodes_with(conn)?
             .ok_or_else(Self::seed_unavailable)?;
         let (added, _) =
-            self.add_parsed_nodes(Some(config_id), &parsed, configs::SOURCE_SEED, false, false)?;
+            self.add_parsed_nodes_on(conn, Some(config_id), &parsed, configs::SOURCE_SEED, false, false)?;
         Ok(added.len())
     }
 
@@ -6488,20 +6561,10 @@ impl VpnToolServices for WiredServices {
         // 而连接成功路径用的是开始时的 is_active 快照，界面上就会分叉。
         let connection = self.connection_state().await;
         let running = connection.connected || connection.launching;
-        // 只返回 `seed_unavailable`，不在这里刷新重试：是否刷新由上层决定一次。
-        if source.as_deref() == Some("seed") && crate::seed::load_nodes(&self.store).is_none() {
-            return Err(svc_error_with_details(
-                "PRECONDITION_FAILED",
-                "现在拿不到 Veyl 免费节点",
-                json!({
-                    "reason": "seed_unavailable",
-                    "hint": "先刷新 Veyl 免费节点或手动添加节点"
-                }),
-            ));
-        }
 
         // 全局单配置：已有配置就拒绝，替代原来的 duplicate_name 路径。
         // 放在参数校验之后：非法参数仍按 INVALID_ARGUMENT 报，不被 config_exists 盖掉。
+        // 也放在试用判定之前：过期 + 已有配置 → CONFLICT（契约 §3.2 的顺序）。
         {
             let conn = self.store.conn();
             let existing =
@@ -6516,9 +6579,34 @@ impl VpnToolServices for WiredServices {
         }
 
         let id = format!("cfg_{:016x}", rand::random::<u64>());
+        // 「试用判定 + 建配置 + 物化 / 绑定」放在同一个连接守卫里：
+        // 到期事务插不进来，拒绝时也一个种子节点行、一条绑定都不写。
         let created = {
             let conn = self.store.conn();
-            configs::create(
+            if source.as_deref() == Some("seed") {
+                crate::trial::ensure_seed_trial_active(&conn)
+                    .map_err(|_| Self::seed_trial_expired())?;
+                // 只返回 `seed_unavailable`，不在这里刷新重试：是否刷新由上层决定一次。
+                if crate::seed::load_nodes_with(&conn).is_none() {
+                    return Err(svc_error_with_details(
+                        "PRECONDITION_FAILED",
+                        "现在拿不到 Veyl 免费节点",
+                        json!({
+                            "reason": "seed_unavailable",
+                            "hint": "先刷新 Veyl 免费节点或手动添加节点"
+                        }),
+                    ));
+                }
+            } else if let Some(node_ids) = input.node_ids.as_ref() {
+                // 新配置没有已绑定集合：候选 seed 全视为新增。
+                self.ensure_candidate_seed_allowed(
+                    &conn,
+                    node_ids,
+                    &std::collections::HashSet::new(),
+                )?;
+            }
+
+            let created = configs::create(
                 &conn,
                 &configs::NewConfig {
                     id: &id,
@@ -6530,20 +6618,20 @@ impl VpnToolServices for WiredServices {
                     tun_excludes: &tun_excludes,
                 },
             )
-            .map_err(|error| config_store_error(error))?
+            .map_err(|error| config_store_error(error))?;
+
+            if source.as_deref() == Some("seed") {
+                if let Err(error) = self.materialize_seed_nodes_on(&conn, &created.id) {
+                    let _ = configs::delete(&conn, &created.id);
+                    return Err(error);
+                }
+            } else if let Some(node_ids) = input.node_ids.as_ref() {
+                configs::replace_nodes(&conn, &created.id, node_ids)
+                    .map_err(|error| config_store_error(error))?;
+            }
+            created
         };
 
-        if source.as_deref() == Some("seed") {
-            if let Err(error) = self.materialize_seed_nodes(&created.id) {
-                let conn = self.store.conn();
-                let _ = configs::delete(&conn, &created.id);
-                return Err(error);
-            }
-        } else if let Some(node_ids) = input.node_ids.as_ref() {
-            let conn = self.store.conn();
-            configs::replace_nodes(&conn, &created.id, node_ids)
-                .map_err(|error| config_store_error(error))?;
-        }
         if !targets.is_empty() {
             let conn = self.store.conn();
             configs::set_route_targets(&conn, &created.id, &json!(targets))
@@ -6716,6 +6804,16 @@ impl VpnToolServices for WiredServices {
         };
         {
             let conn = self.store.conn();
+            if let Some(node_ids) = input.node_ids.as_ref() {
+                // 判定与写入同在一个连接守卫：拒绝时名称 / DNS / 关联 / 排除一个都不动。
+                let bound: std::collections::HashSet<String> =
+                    configs::list_nodes(&conn, config_id)
+                        .map_err(|error| svc_error(error.code(), error))?
+                        .into_iter()
+                        .map(|node| node.id)
+                        .collect();
+                self.ensure_candidate_seed_allowed(&conn, node_ids, &bound)?;
+            }
             configs::update(&conn, config_id, &patch).map_err(|error| config_store_error(error))?;
             if let Some(node_ids) = input.node_ids.as_ref() {
                 configs::replace_nodes(&conn, config_id, node_ids)
@@ -7242,6 +7340,13 @@ impl VpnToolServices for WiredServices {
             }
         }
 
+        // 过期后不再新增种子节点：判定先于缓存检查（`commands.md` §4.0 的错误顺序）。
+        if source.is_some() {
+            let conn = self.store.conn();
+            crate::trial::ensure_seed_trial_active(&conn)
+                .map_err(|_| Self::seed_trial_expired())?;
+        }
+
         // 种子先确认拿得到：拿不到就不该顺手建出一套空配置。
         let seed_nodes = if source.is_some() {
             Some(
@@ -7312,47 +7417,68 @@ impl VpnToolServices for WiredServices {
             })?,
         };
 
-        let candidates: Vec<String> = if let Some(parsed) = seed_nodes {
-            self.add_parsed_nodes(None, &parsed, configs::SOURCE_SEED, false, false)?;
-            let conn = self.store.conn();
-            let exclusions =
-                configs::seed_exclusions(&conn).map_err(|error| svc_error(error.code(), error))?;
-            configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
-                .map_err(|error| svc_error(error.code(), error))?
-                .into_iter()
-                .filter(|node| !exclusions.contains(&node.source_key))
-                .map(|node| node.id)
-                .collect()
-        } else {
-            let ids = node_ids.unwrap_or_default();
-            let missing = {
-                let conn = self.store.conn();
-                configs::missing_nodes(&conn, &ids)
-                    .map_err(|error| svc_error(error.code(), error))?
-            };
-            if !missing.is_empty() {
-                return Err(svc_error_with_details(
-                    "NOT_FOUND",
-                    "有节点不存在",
-                    json!({ "reason": "node_not_found", "node_ids": missing }),
-                ));
-            }
-            ids
-        };
-
-        // 同一批里重复的 id 只算第一次：attach_nodes 会把第二次报成「已存在」。
-        let mut unique = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for id in candidates {
-            if seen.insert(id.clone()) {
-                unique.push(id);
-            }
-        }
-
+        // upsert、来源判定与绑定放在同一个连接守卫与同一个事务里：
+        // 判定与写入对到期事务原子，也不会留下「行写了、没绑上」的半成品。
         let (attached, skipped) = {
             let conn = self.store.conn();
-            configs::attach_nodes(&conn, &global.id, &unique)
-                .map_err(|error| svc_error(error.code(), error))?
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| svc_error("INTERNAL", error))?;
+            let candidates: Vec<String> = if let Some(parsed) = seed_nodes {
+                // 写事务内复查：入口判定之后、到这里之前可能已经到期。
+                crate::trial::ensure_seed_trial_active(&tx)
+                    .map_err(|_| Self::seed_trial_expired())?;
+                self.add_parsed_nodes_on(
+                    &tx,
+                    None,
+                    &parsed,
+                    configs::SOURCE_SEED,
+                    false,
+                    false,
+                )?;
+                let exclusions = configs::seed_exclusions(&tx)
+                    .map_err(|error| svc_error(error.code(), error))?;
+                configs::list_nodes_by_source(&tx, configs::SOURCE_SEED)
+                    .map_err(|error| svc_error(error.code(), error))?
+                    .into_iter()
+                    .filter(|node| !exclusions.contains(&node.source_key))
+                    .map(|node| node.id)
+                    .collect()
+            } else {
+                let ids = node_ids.unwrap_or_default();
+                let missing = configs::missing_nodes(&tx, &ids)
+                    .map_err(|error| svc_error(error.code(), error))?;
+                if !missing.is_empty() {
+                    return Err(svc_error_with_details(
+                        "NOT_FOUND",
+                        "有节点不存在",
+                        json!({ "reason": "node_not_found", "node_ids": missing }),
+                    ));
+                }
+                // 只拦「未绑定的 seed」；托管节点静默入池依赖这里照常放行。
+                let bound: std::collections::HashSet<String> =
+                    configs::list_nodes(&tx, &global.id)
+                        .map_err(|error| svc_error(error.code(), error))?
+                        .into_iter()
+                        .map(|node| node.id)
+                        .collect();
+                self.ensure_candidate_seed_allowed(&tx, &ids, &bound)?;
+                ids
+            };
+
+            // 同一批里重复的 id 只算第一次：attach_nodes 会把第二次报成「已存在」。
+            let mut unique = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for id in candidates {
+                if seen.insert(id.clone()) {
+                    unique.push(id);
+                }
+            }
+
+            let result = configs::attach_nodes(&tx, &global.id, &unique)
+                .map_err(|error| svc_error(error.code(), error))?;
+            tx.commit().map_err(|error| svc_error("INTERNAL", error))?;
+            result
         };
         let node_count = {
             let conn = self.store.conn();
@@ -7948,7 +8074,8 @@ impl VpnToolServices for WiredServices {
             } => {
                 // 刷新成功后把种子节点并进全局配置：模型没有 node_attach 可调，
                 // 这一步不做，整条免费节点链路在 AI 侧就是断的。
-                self.merge_seed_into_global_quietly();
+                // 并入时发现到期必须原样上报，不能退化成成功。
+                self.merge_after_refresh()?;
                 Ok(self.seed_status_json(
                     "network",
                     true,
@@ -7960,9 +8087,10 @@ impl VpnToolServices for WiredServices {
                 ))
             }
             crate::seed::RefreshOutcome::Unchanged { .. } => {
-                self.merge_seed_into_global_quietly();
+                self.merge_after_refresh()?;
                 Ok(self.seed_status_json("network", false, None, Some(0), Some(0), None, None))
             }
+            crate::seed::RefreshOutcome::TrialExpired => Err(Self::seed_trial_expired()),
             crate::seed::RefreshOutcome::Offline {
                 cached: true,
                 reason,
@@ -7983,7 +8111,6 @@ impl VpnToolServices for WiredServices {
             } => {
                 let code = match reason {
                     crate::seed::OfflineReason::InvalidContent => "INVALID_ARGUMENT",
-                    crate::seed::OfflineReason::StaleSource => "UPSTREAM_ERROR",
                     crate::seed::OfflineReason::LocalWrite => "INTERNAL",
                     crate::seed::OfflineReason::Offline => "UPSTREAM_ERROR",
                 };
@@ -7994,77 +8121,6 @@ impl VpnToolServices for WiredServices {
                 ))
             }
         }
-    }
-
-    async fn import_seed_file(&self, path: &str) -> anyhow::Result<Value> {
-        const MAX_BYTES: u64 = 1024 * 1024;
-
-        let file_path = std::path::Path::new(path);
-        let is_json = file_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("json"))
-            .unwrap_or(false);
-        if !is_json {
-            return Err(svc_error_with_details(
-                "INVALID_ARGUMENT",
-                "只支持 .json 文件",
-                json!({ "reason": "not_json_file" }),
-            ));
-        }
-        let metadata = match std::fs::metadata(file_path) {
-            Ok(metadata) if metadata.is_file() => metadata,
-            _ => {
-                return Err(svc_error_with_details(
-                    "INVALID_ARGUMENT",
-                    "文件不存在或无法读取",
-                    json!({ "reason": "file_unreadable" }),
-                ))
-            }
-        };
-        if metadata.len() > MAX_BYTES {
-            return Err(svc_error_with_details(
-                "INVALID_ARGUMENT",
-                "文件超过 1 MB",
-                json!({ "reason": "file_too_large", "max_bytes": MAX_BYTES }),
-            ));
-        }
-        let bytes = std::fs::read(file_path).map_err(|_| {
-            svc_error_with_details(
-                "INVALID_ARGUMENT",
-                "文件不存在或无法读取",
-                json!({ "reason": "file_unreadable" }),
-            )
-        })?;
-
-        let (imported, added_ids) =
-            crate::seed::merge_file_nodes(&self.store, &bytes).map_err(|error| {
-                svc_error_with_details(
-                    "INVALID_ARGUMENT",
-                    "文件不是合法的种子 JSON",
-                    json!({ "reason": "invalid_json", "detail": error }),
-                )
-            })?;
-
-        // 窗口拖进来的种子节点也要进全局配置：节点行已由 merge_file_nodes 写好，
-        // 这里只补绑定（幂等、不改当前节点）。失败只记日志，文件本身已导入成功。
-        if let Err(error) = self.merge_seed_nodes(&[]) {
-            log::warn!("窗口拖入种子后并入全局配置失败（下次刷新会重试）：{error}");
-        }
-
-        let nodes = {
-            let conn = self.store.conn();
-            added_ids
-                .iter()
-                .filter_map(|id| configs::get_node(&conn, id).ok().flatten())
-                .collect::<Vec<_>>()
-        };
-
-        Ok(json!({
-            "imported": imported,
-            "skipped": [],
-            "nodes": nodes.iter().map(node_json).collect::<Vec<_>>(),
-        }))
     }
 
     async fn rules_status(&self) -> anyhow::Result<Value> {
@@ -14849,55 +14905,6 @@ mod config_service_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 窗口拖入 `.json` 种子文件：节点要进全局配置，否则单配置界面里看不见。
-    #[tokio::test]
-    async fn a_dropped_seed_file_merges_its_nodes_into_the_global_config() {
-        crate::test_support::install_test_secrets();
-        let dir = temp_dir();
-        let services = services(&dir);
-        let path = dir.join("veyl_seed.json");
-        std::fs::write(
-            &path,
-            r#"{
-              "version": 1,
-              "updated_at": "2026-11-17T00:00:00Z",
-              "nodes": [
-                { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
-                  "method": "aes-256-gcm", "password": "pw-a" },
-                { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
-                  "method": "aes-256-gcm", "password": "pw-b" }
-              ]
-            }"#,
-        )
-        .unwrap();
-
-        let data = services
-            .import_seed_file(path.to_str().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(data["imported"], 2);
-
-        let list = services.config_list().await.unwrap();
-        let configs = list["configs"].as_array().unwrap();
-        assert_eq!(configs.len(), 1, "空库时导入种子会懒创建全局配置");
-        assert_eq!(configs[0]["node_count"], 2);
-        assert!(configs[0]["current_node_id"].is_null());
-
-        // 重复导入同一文件：节点与绑定都不重复。
-        services
-            .import_seed_file(path.to_str().unwrap())
-            .await
-            .unwrap();
-        let detail = services
-            .config_detail(Some(configs[0]["config_id"].as_str().unwrap().to_string()))
-            .await
-            .unwrap();
-        assert_eq!(detail["node_count"], 2);
-        assert!(detail["current_node_id"].is_null());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// 守卫先于懒创建：被拒的 `node_attach` 不能先在空库里留下一套配置。
     #[tokio::test]
     async fn a_rejected_attach_does_not_create_an_empty_config() {
@@ -14946,6 +14953,626 @@ mod config_service_tests {
             .await
             .unwrap();
         assert_eq!(detail["nodes"][0]["source"], "manual");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 试用到期闸门（`trial-seed-expiry.md` §8.1 #9–#26） ----
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    fn set_trial(services: &WiredServices, started_at: i64, ended_at: Option<i64>) {
+        let conn = services.store.conn();
+        conn.execute(
+            "INSERT INTO trial_state (id, started_at, ended_at) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET started_at = excluded.started_at,
+                                           ended_at = excluded.ended_at",
+            rusqlite::params![started_at, ended_at],
+        )
+        .unwrap();
+    }
+
+    fn expire_trial(services: &WiredServices) {
+        set_trial(services, crate::store::now_ms() - 8 * DAY_MS, None);
+    }
+
+    /// 真的跑到期清理事务，而不只是把状态改过期。
+    fn expire_and_clean(services: &WiredServices) {
+        expire_trial(services);
+        let conn = services.store.conn();
+        assert!(
+            crate::trial::expire_if_needed(&conn, crate::store::now_ms())
+                .unwrap()
+                .is_some(),
+            "前置条件：到期清理应当执行"
+        );
+    }
+
+    fn activate_trial(services: &WiredServices) {
+        set_trial(services, crate::store::now_ms() - DAY_MS, None);
+    }
+
+    /// 两条种子缓存：`203.0.113.10` / `203.0.113.11`。返回内容哈希。
+    fn cache_two_seed_nodes(services: &WiredServices) -> String {
+        let body = r#"{
+          "version": 1,
+          "updated_at": "2026-11-17T00:00:00Z",
+          "nodes": [
+            { "name": "免费 A", "server": "203.0.113.10", "port": 8388,
+              "method": "aes-256-gcm", "password": "pw-a" },
+            { "name": "免费 B", "server": "203.0.113.11", "port": 8388,
+              "method": "aes-256-gcm", "password": "pw-b" }
+          ]
+        }"#;
+        let hash = crate::seed::content_sha256(body.as_bytes());
+        crate::secrets::set_secret(&format!("seed:{hash}"), body).unwrap();
+        let conn = services.store.conn();
+        crate::store::seed_cache::save(
+            &conn,
+            &crate::store::seed_cache::SeedCacheRow {
+                content_sha256: hash.clone(),
+                etag: None,
+                etag_source: None,
+                source_version: Some("1".into()),
+                source_updated_at: None,
+                node_count: 2,
+                fetched_at: 0,
+                checked_at: 0,
+            },
+        )
+        .unwrap();
+        hash
+    }
+
+    fn seed_node_id(name: &str, server: &str) -> String {
+        let key = crate::nodes::source_key(name, server, 8388, "aes-256-gcm");
+        crate::nodes::node_id(configs::SOURCE_SEED, &key)
+    }
+
+    fn insert_node(services: &WiredServices, id: &str, name: &str, server: &str, source: &str) {
+        let key = format!("{source}:{id}");
+        let conn = services.store.conn();
+        configs::upsert_node(
+            &conn,
+            &configs::NewNode {
+                id,
+                name,
+                server,
+                port: 8388,
+                method: "aes-256-gcm",
+                password_ref: &crate::nodes::password_ref(id),
+                source,
+                source_key: &key,
+            },
+        )
+        .unwrap();
+    }
+
+    fn assert_trial_expired(error: anyhow::Error) {
+        let service = error
+            .downcast_ref::<ServiceError>()
+            .expect("需要结构化的 ServiceError");
+        assert_eq!(service.code, "PRECONDITION_FAILED");
+        assert!(!service.retryable, "试用到期不可重试");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "trial_expired");
+        assert_eq!(service.message, crate::trial::SEED_TRIAL_EXPIRED_MESSAGE);
+    }
+
+    /// #9 过期后手动刷新：返回 `PRECONDITION_FAILED / trial_expired`，不能是 Ok + cache。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_default_profile_refresh() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        expire_trial(&services);
+
+        let error = services.default_profile_refresh(true).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #10 过期后读状态照常：不联网、不写库。
+    #[tokio::test]
+    async fn an_expired_trial_keeps_default_profile_status_readable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        expire_trial(&services);
+
+        let status = services.default_profile_status().await.unwrap();
+        assert_eq!(status["node_count"], 2, "缓存元数据仍然可读");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #11 到期清理已跑过：刷新仍然是同一个错误，不是网络失败。
+    #[tokio::test]
+    async fn a_cleaned_up_trial_still_rejects_refresh_with_trial_expired() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        services.merge_seed_into_global().unwrap();
+        {
+            let conn = services.store.conn();
+            crate::trial::mark_started(&conn, crate::store::now_ms() - 8 * DAY_MS).unwrap();
+            crate::trial::expire_if_needed(&conn, crate::store::now_ms()).unwrap();
+        }
+
+        let error = services.default_profile_refresh(true).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #12 过期 + 无配置 + 无缓存：试用判定先于 `seed_unavailable`。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_seed_config_create_before_seed_unavailable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        expire_trial(&services);
+
+        let mut input = create_input("试用");
+        input.source = Some("seed".into());
+        let error = services.config_create(input).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let list = services.config_list().await.unwrap();
+        assert!(list["configs"].as_array().unwrap().is_empty(), "不能建出配置");
+        let conn = services.store.conn();
+        assert!(configs::list_pool_nodes(&conn).unwrap().is_empty(), "不能物化节点行");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #13 过期后 `node_attach(source=seed)`：不 upsert、不绑定、不懒创建。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_attaching_seed_nodes() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        expire_trial(&services);
+
+        let error = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_trial_expired(error);
+
+        let conn = services.store.conn();
+        assert!(configs::list_pool_nodes(&conn).unwrap().is_empty());
+        assert!(configs::global(&conn).unwrap().is_none(), "拒绝时不能懒创建配置");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #14 active 下建配置并物化：闸门不能误伤试用开始流程。
+    #[tokio::test]
+    async fn an_active_trial_still_creates_a_seed_config() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        activate_trial(&services);
+
+        let mut input = create_input("试用");
+        input.source = Some("seed".into());
+        let created = services.config_create(input).await.unwrap();
+        assert_eq!(created["node_count"], 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #15 active 下 `node_attach(source=seed)` 照常入池并绑定。
+    #[tokio::test]
+    async fn an_active_trial_still_attaches_seed_nodes() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        activate_trial(&services);
+
+        let data = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap();
+        assert_eq!(data["attached_node_ids"].as_array().unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #16 过期后绑定用户自己的节点：照常成功。
+    #[tokio::test]
+    async fn an_expired_trial_still_attaches_manual_nodes() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        insert_node(&services, "nod_manual", "自建", "198.51.100.20", configs::SOURCE_MANUAL);
+        expire_trial(&services);
+
+        let data = services
+            .node_attach(None, Some(vec!["nod_manual".into()]), None)
+            .await
+            .unwrap();
+        assert_eq!(data["attached_node_ids"], serde_json::json!(["nod_manual"]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #17 过期后 `config_update({nodeIds:[manual]})`：照常替换关联。
+    #[tokio::test]
+    async fn an_expired_trial_still_updates_a_manual_node_set() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        insert_node(&services, "nod_manual", "自建", "198.51.100.20", configs::SOURCE_MANUAL);
+        expire_trial(&services);
+
+        let detail = services
+            .config_update(
+                &config_id,
+                ConfigUpdateInput {
+                    node_ids: Some(vec!["nod_manual".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail["node_count"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #18 参数校验先于试用判定。
+    #[tokio::test]
+    async fn node_attach_without_a_source_reports_that_before_the_trial_gate() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        expire_trial(&services);
+
+        let error = services.node_attach(None, None, None).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "INVALID_ARGUMENT");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "source_required");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #19 过期后把未绑定的 seed id 绑回来：拒绝且不绑定。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_binding_an_unbound_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        expire_trial(&services);
+
+        let error = services
+            .node_attach(None, Some(vec![seed_id.clone()]), Some(config_id.clone()))
+            .await
+            .unwrap_err();
+        assert_trial_expired(error);
+
+        let detail = services
+            .config_detail(Some(config_id))
+            .await
+            .unwrap();
+        assert_eq!(detail["node_count"], 0, "不能绑定");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #20 过期后 `config_update` 带回未绑定的 seed：整个命令不落改动。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_config_update_adding_a_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("原名")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        let key = crate::nodes::source_key("免费 A", "203.0.113.10", 8388, "aes-256-gcm");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        {
+            let conn = services.store.conn();
+            configs::record_seed_exclusion(&conn, &key).unwrap();
+        }
+        expire_trial(&services);
+
+        let error = services
+            .config_update(
+                &config_id,
+                ConfigUpdateInput {
+                    name: Some("改名".into()),
+                    node_ids: Some(vec![seed_id]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_trial_expired(error);
+
+        let detail = services
+            .config_detail(Some(config_id))
+            .await
+            .unwrap();
+        assert_eq!(detail["name"], "原名", "名称不能被部分写入");
+        assert_eq!(detail["node_count"], 0);
+        let conn = services.store.conn();
+        let exclusions = configs::seed_exclusions(&conn).unwrap();
+        assert!(exclusions.contains(&key), "拒绝时不能撤销排除");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #21 过期 + 已有配置：`CONFLICT / config_exists` 先于试用判定。
+    #[tokio::test]
+    async fn config_exists_wins_over_the_trial_gate() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        services.config_create(create_input("全局")).await.unwrap();
+        expire_trial(&services);
+
+        let mut input = create_input("第二套");
+        input.source = Some("seed".into());
+        let error = services.config_create(input).await.unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "CONFLICT");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "config_exists");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #22 active 下把未绑定的 seed id 绑进来：照常成功（防 over-block）。
+    #[tokio::test]
+    async fn an_active_trial_still_binds_an_unbound_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        activate_trial(&services);
+
+        let data = services
+            .node_attach(None, Some(vec![seed_id.clone()]), None)
+            .await
+            .unwrap();
+        assert_eq!(data["attached_node_ids"], serde_json::json!([seed_id]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #23 active 下 `config_update` 带回未绑定的 seed：照常替换关联。
+    #[tokio::test]
+    async fn an_active_trial_still_updates_in_an_unbound_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        activate_trial(&services);
+
+        let detail = services
+            .config_update(
+                &config_id,
+                ConfigUpdateInput {
+                    node_ids: Some(vec![seed_id]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail["node_count"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #24 过期 + 无配置 + `config_create({nodeIds:[seed]})`：不建配置、不绑定。
+    #[tokio::test]
+    async fn an_expired_trial_rejects_config_create_from_a_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        expire_trial(&services);
+
+        let mut input = create_input("试用");
+        input.node_ids = Some(vec![seed_id]);
+        let error = services.config_create(input).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let list = services.config_list().await.unwrap();
+        assert!(list["configs"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #25 过期、候选 seed 已绑定且只改名：成功，绑定与排除不变。
+    #[tokio::test]
+    async fn an_expired_trial_still_renames_with_a_bound_seed_id() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("原名")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        {
+            let conn = services.store.conn();
+            configs::attach_node(&conn, &config_id, &seed_id).unwrap();
+            configs::record_seed_exclusion(&conn, "another-seed-key").unwrap();
+        }
+        expire_trial(&services);
+
+        let detail = services
+            .config_update(
+                &config_id,
+                ConfigUpdateInput {
+                    name: Some("改名".into()),
+                    node_ids: Some(vec![seed_id.clone()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail["name"], "改名");
+        assert_eq!(detail["node_count"], 1, "已绑定的 seed 不能丢");
+
+        let conn = services.store.conn();
+        assert!(configs::seed_exclusions(&conn)
+            .unwrap()
+            .contains("another-seed-key"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #26 过期、候选 seed 已绑定：`node_attach` 幂等跳过，不误伤保留。
+    #[tokio::test]
+    async fn an_expired_trial_still_allows_attaching_an_already_bound_seed() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services.config_create(create_input("全局")).await.unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        insert_node(&services, &seed_id, "免费 A", "203.0.113.10", configs::SOURCE_SEED);
+        {
+            let conn = services.store.conn();
+            configs::attach_node(&conn, &config_id, &seed_id).unwrap();
+        }
+        expire_trial(&services);
+
+        let data = services
+            .node_attach(None, Some(vec![seed_id]), Some(config_id))
+            .await
+            .unwrap();
+        assert_eq!(data["attached_node_ids"], serde_json::json!([]));
+        assert_eq!(data["skipped_node_ids"], serde_json::json!([seed_node_id("免费 A", "203.0.113.10")]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 到期清理后本地不留种子数据：节点行、缓存元数据、密文都删；
+    /// 状态仍读得到 `expired`，缓存状态回落到空。
+    #[tokio::test]
+    async fn expiry_cleanup_purges_seed_rows_cache_and_secrets() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let hash = cache_two_seed_nodes(&services);
+        services.merge_seed_into_global().unwrap();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        assert!(
+            crate::secrets::get_secret(&crate::nodes::password_ref(&seed_id))
+                .unwrap()
+                .is_some(),
+            "前置条件：节点凭据已写入"
+        );
+
+        expire_and_clean(&services);
+
+        {
+            let conn = services.store.conn();
+            assert!(
+                configs::list_pool_nodes(&conn).unwrap().is_empty(),
+                "种子节点行必须删掉"
+            );
+            assert!(
+                crate::store::seed_cache::load(&conn).unwrap().is_none(),
+                "缓存元数据必须清空"
+            );
+        }
+        let status = services.default_profile_status().await.unwrap();
+        assert_eq!(status["node_count"], 0);
+        assert!(status["content_sha256"].is_null());
+        let trial = services.trial_status().await.unwrap();
+        assert_eq!(trial["state"], "expired");
+        assert_eq!(trial["seed_node_count"], 0);
+        assert!(
+            crate::secrets::get_secret(&crate::nodes::password_ref(&seed_id))
+                .unwrap()
+                .is_none(),
+            "节点凭据应删除"
+        );
+        assert!(
+            crate::secrets::get_secret(&format!("seed:{hash}"))
+                .unwrap()
+                .is_none(),
+            "缓存原文应删除"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后把原 seed id 绑回来：节点行已不存在，报 `NOT_FOUND` 而不是 `trial_expired`。
+    #[tokio::test]
+    async fn attaching_a_purged_seed_id_reports_node_not_found() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        services.merge_seed_into_global().unwrap();
+        let seed_id = seed_node_id("免费 A", "203.0.113.10");
+        expire_and_clean(&services);
+
+        let error = services
+            .node_attach(None, Some(vec![seed_id]), None)
+            .await
+            .unwrap_err();
+        let service = error.downcast_ref::<ServiceError>().unwrap();
+        assert_eq!(service.code, "NOT_FOUND");
+        assert_eq!(service.details.as_ref().unwrap()["reason"], "node_not_found");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后 `config_create(source="seed")`：试用判定先于 `seed_unavailable`。
+    #[tokio::test]
+    async fn config_create_from_seed_after_cleanup_is_trial_expired() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        expire_and_clean(&services);
+
+        let mut input = create_input("试用");
+        input.source = Some("seed".into());
+        let error = services.config_create(input).await.unwrap_err();
+        assert_trial_expired(error);
+
+        let list = services.config_list().await.unwrap();
+        assert!(list["configs"].as_array().unwrap().is_empty(), "不能建出配置");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清空之后 `node_attach(source="seed")` 报 `trial_expired`，不是「拿不到种子」。
+    #[tokio::test]
+    async fn attaching_seed_after_cleanup_is_trial_expired_not_unavailable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        cache_two_seed_nodes(&services);
+        expire_and_clean(&services);
+
+        let error = services
+            .node_attach(Some("seed".into()), None, None)
+            .await
+            .unwrap_err();
+        assert_trial_expired(error);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

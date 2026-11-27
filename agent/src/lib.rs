@@ -13,6 +13,7 @@ pub mod cert;
 pub mod client;
 pub mod config;
 pub mod control;
+pub mod health;
 pub mod host;
 pub mod identity;
 pub mod logging;
@@ -37,11 +38,29 @@ use crate::cert::CertPaths;
 use crate::identity::Identity;
 use crate::rotation::Rotator;
 use crate::server::ServerState;
+use crate::traffic::MeteringView;
 
 /// reqwest is built with `rustls-no-provider`; install the process provider
 /// before constructing any TLS client or server.
 pub fn init_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// When this process started. `get_status` reports it as `uptime_secs` because
+/// the in-memory health table is cleared by a restart: without the uptime, an
+/// empty table reads as "always healthy" rather than "healthy since restart".
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Record the start time. Call first thing in `main`; later calls are ignored.
+pub fn mark_process_start() {
+    PROCESS_START.get_or_init(std::time::Instant::now);
+}
+
+pub fn uptime_secs() -> u64 {
+    PROCESS_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
 }
 
 pub struct AgentHandle {
@@ -53,7 +72,11 @@ pub struct AgentHandle {
 }
 
 /// Start the MCP endpoint on an existing TLS identity. `replay_path` persists
-/// used jtis (production); dev helpers pass None.
+/// used jtis (production); dev helpers pass None. `metering` is the read-only
+/// view `get_status` reports — `None` when there is no meter (dev `serve`).
+// Each parameter is a distinct dependency of a one-shot bootstrap; bundling
+// them into a struct would only move the list somewhere else.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_agent_with_certs(
     addr: SocketAddr,
     identity: Arc<Identity>,
@@ -62,6 +85,7 @@ pub async fn start_agent_with_certs(
     rotator: Arc<dyn Rotator>,
     announce: bool,
     replay_path: Option<std::path::PathBuf>,
+    metering: Option<Arc<dyn MeteringView>>,
 ) -> Result<AgentHandle> {
     let listener = server::bind(addr).await?;
     let addr = listener.local_addr()?;
@@ -69,7 +93,7 @@ pub async fn start_agent_with_certs(
         Some(path) => AuthState::with_store(verifying_key, server_id, path),
         None => AuthState::new(verifying_key, server_id),
     };
-    let state = ServerState::new(Arc::new(auth), rotator, identity.clone());
+    let state = ServerState::new(Arc::new(auth), rotator, identity.clone(), metering);
     let certs = identity.certs().clone();
     let ct = CancellationToken::new();
     let task = tokio::spawn(server::serve(listener, state.clone(), ct.clone()));

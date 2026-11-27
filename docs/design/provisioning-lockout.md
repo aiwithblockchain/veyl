@@ -115,6 +115,9 @@ HTTP 409
 本批一并修：
 
 1. 补建扫描加守卫 `AND s.destroyed_at IS NULL`（`billing.ts:192` 的查询）；
+   再补一条 `AND s.state <> 'destroying'`：正在销毁、`provider_id` 还没落库的行会被
+   「`provider_id IS NULL`」误判成「已付款没机器」，补建等于把一台正在销毁的机器重新建出来
+   （2026-11-27 本地 105 行压测复现：超过批量上限的 5 条被补建、落 `error`）；
 2. 用户销毁 `error` 行时，若订单仍处于 `paid` / `provisioning`，同批把它置 `failed`（`failure_code = 'user_destroyed'`，`failure_stage` 保留原阶段），订单终态与机器终态一致，补建条件自然不命中；
 3. 退款口径不变：仍按 `refundPlan` 的 `reason = 'user'` 计算未开始的整天；没有 charge 流水时照旧跳过退款并写审计。
 

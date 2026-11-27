@@ -388,6 +388,7 @@ describe("字典覆盖", () => {
       "duplicate_name",
       "invalid_cidr",
       "seed_unavailable",
+      "trial_expired",
       "source_required",
       "use_config_set_mode",
       "insecure_url",

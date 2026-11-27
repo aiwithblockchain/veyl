@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use rusqlite::Connection;
+
 use crate::nodes;
 use crate::public_http;
 use crate::store::{self, configs, seed_cache, Store};
 
 pub const DEFAULT_SEED_URL: &str = "https://veyl.dessage.xyz/v1/seed";
-/// 主源故障时的兜底；跨源只认内容哈希，不共用 ETag。
-pub const FALLBACK_SEED_URL: &str = "https://meshnetprotocol.github.io/veyl_seed.json";
 pub const SEED_ID: &str = "veyl_seed";
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_SEED_BYTES: usize = 1024 * 1024;
@@ -100,14 +100,14 @@ pub enum RefreshOutcome {
         error: String,
         reason: OfflineReason,
     },
+    /// 试用已到期：没有联网，也没有改动任何缓存（`trial-seed-expiry.md` §3.2）。
+    TrialExpired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineReason {
     Offline,
     InvalidContent,
-    /// 兜底内容合法，但比缓存旧：过期来源，拒绝回退。
-    StaleSource,
     /// 本地写入失败（钥匙串、磁盘、数据库）；不是节点内容的问题。
     LocalWrite,
 }
@@ -117,7 +117,6 @@ impl OfflineReason {
         match self {
             OfflineReason::Offline => "offline",
             OfflineReason::InvalidContent => "invalid_content",
-            OfflineReason::StaleSource => "stale_source",
             OfflineReason::LocalWrite => "local_write",
         }
     }
@@ -141,7 +140,7 @@ pub fn content_sha256(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn secret_key(hash: &str) -> String {
+pub(crate) fn secret_key(hash: &str) -> String {
     format!("seed:{hash}")
 }
 
@@ -211,10 +210,15 @@ fn validate_seed_node(raw: RawNode) -> Result<SeedNode, String> {
 
 /// 读取当前缓存里的节点（解密后）。没有缓存或缓存损坏时返回 None。
 pub fn load_nodes(store: &Store) -> Option<Vec<SeedNode>> {
-    let row = {
-        let conn = store.conn();
-        seed_cache::load(&conn).ok().flatten()?
-    };
+    let conn = store.conn();
+    load_nodes_with(&conn)
+}
+
+/// 同 [`load_nodes`]，但复用调用方已经持有的连接。
+///
+/// 服务层要把「判定 + 物化」放进同一个连接守卫，不能在中途再抢 store 锁。
+pub fn load_nodes_with(conn: &Connection) -> Option<Vec<SeedNode>> {
+    let row = seed_cache::load(conn).ok().flatten()?;
     let raw = crate::secrets::get_secret(&secret_key(&row.content_sha256))
         .ok()
         .flatten()?;
@@ -223,12 +227,9 @@ pub fn load_nodes(store: &Store) -> Option<Vec<SeedNode>> {
 
 /// 拉取并应用种子。`running` 为真且内容变化时只标记「有新版本」，不碰在线连接。
 ///
-/// 顺序固定：先主源，失败再兜底；两源都失败才 `Offline`，**绝不清理已有缓存**。
+/// **只有主源**：失败或内容不合法且本地无缓存才 `Offline`，**绝不清理已有缓存**。
 pub async fn refresh(store: &Store, running: bool, force: bool) -> RefreshOutcome {
-    let mut sources = vec![source_url()];
-    if sources[0] != FALLBACK_SEED_URL {
-        sources.push(FALLBACK_SEED_URL.to_string());
-    }
+    let sources = vec![source_url()];
     refresh_with(store, running, force, sources, |url, etag| {
         let url = url.to_string();
         async move { public_http::get(&url, etag.as_deref(), MAX_SEED_BYTES).await }
@@ -249,6 +250,15 @@ where
     Fut: std::future::Future<Output = Result<crate::public_http::PublicResponse, String>>,
 {
     let _guard = REFRESH_LOCK.lock().await;
+
+    // 判定点 1：入口。读过缓存、发过请求之前就挡住，不联网也不写库。
+    {
+        let conn = store.conn();
+        if crate::trial::ensure_seed_trial_active(&conn).is_err() {
+            log::info!("试用已过期，跳过种子刷新");
+            return RefreshOutcome::TrialExpired;
+        }
+    }
 
     let current = {
         let conn = store.conn();
@@ -273,10 +283,9 @@ where
 
     let mut last_error = String::new();
     let mut last_reason = OfflineReason::Offline;
-    let primary = sources.first().cloned().unwrap_or_default();
 
     for source in &sources {
-        // ETag 只发给它自己的来源：跨源复用可能拿到不该有的 304。
+        // ETag 只发给产出它的来源：当前只有主源，判断保留是为了多源时不会误用。
         let etag = current
             .as_ref()
             .filter(|row| row.etag_source.as_deref() == Some(source.as_str()))
@@ -307,6 +316,16 @@ where
             };
         }
 
+        // 判定点 2：拿到响应后。必须在 needs_refetch 的重拉之后、304 / 200
+        // 分支之前——两处都会续命 `checked_at` 或写新内容。
+        {
+            let conn = store.conn();
+            if crate::trial::ensure_seed_trial_active(&conn).is_err() {
+                log::info!("试用已过期，种子响应不落库");
+                return RefreshOutcome::TrialExpired;
+            }
+        }
+
         if response.status == 304 {
             if !sent_etag || !cached_content_available(store) {
                 // 没发 ETag 却收到 304（或重拉仍是 304）：内容拿不回来。
@@ -330,22 +349,11 @@ where
             continue;
         }
 
-        // 正文不合法或没有可用节点时，同样换下一个源。
-        let parsed = match parse_seed(&response.body) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                log::warn!("种子源 {source} 内容不可用，尝试下一个源：{error}");
-                last_error = error;
-                last_reason = OfflineReason::InvalidContent;
-                continue;
-            }
-        };
-
-        // 兜底可能落后于一次密码轮换：比缓存旧就不允许写回。
-        if fallback_would_regress(current.as_ref(), source, &primary, &parsed) {
-            log::warn!("兜底内容比缓存旧，拒绝回退 source={source}");
-            last_error = "兜底内容比缓存旧，已拒绝回退".into();
-            last_reason = OfflineReason::StaleSource;
+        // 正文不合法或没有可用节点。
+        if let Err(error) = parse_seed(&response.body) {
+            log::warn!("种子源 {source} 内容不可用：{error}");
+            last_error = error;
+            last_reason = OfflineReason::InvalidContent;
             continue;
         }
 
@@ -355,44 +363,11 @@ where
     if last_error.is_empty() {
         last_error = "没有可用的种子源".into();
     }
-    log::warn!("所有种子源都失败，保留缓存：{last_error}");
+    log::warn!("种子源失败，保留缓存：{last_error}");
     RefreshOutcome::Offline {
         cached: cached_content_available(store),
         error: last_error,
         reason: last_reason,
-    }
-}
-
-/// 兜底不得把缓存回退到更旧的版本。
-///
-/// - 主源永远接受；
-/// - 两边的 `updated_at` 都能解析时，兜底更旧就拒绝；
-/// - 兜底没有可解析的时间、而缓存来自主源时，兜底只在无缓存时使用；
-/// - 缓存时间解析不出时不拦（无从比较，宁可让内容哈希决定）。
-fn fallback_would_regress(
-    current: Option<&seed_cache::SeedCacheRow>,
-    source: &str,
-    primary: &str,
-    parsed: &ParsedSeed,
-) -> bool {
-    if source == primary {
-        return false;
-    }
-    let Some(row) = current else {
-        return false;
-    };
-    let cached_at = row
-        .source_updated_at
-        .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
-    let incoming_at = parsed
-        .source_updated_at
-        .as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
-    match (cached_at, incoming_at) {
-        (Some(cached), Some(incoming)) => incoming < cached,
-        (_, None) => row.etag_source.as_deref() == Some(primary),
-        (None, Some(_)) => false,
     }
 }
 
@@ -437,6 +412,12 @@ async fn apply_fetch(
     if let Some(row) = current {
         if row.content_sha256 == hash && cached_content_available(store) {
             let conn = store.conn();
+            // 内容没变的「心跳」路径也续命 `checked_at`：判定放在 touch 之前，
+            // 过期时连时间戳都不推进。
+            if crate::trial::ensure_seed_trial_active(&conn).is_err() {
+                log::info!("试用已过期，不续命种子检查时间");
+                return RefreshOutcome::TrialExpired;
+            }
             let _ = seed_cache::touch(&conn, now, response.etag.as_deref(), Some(source));
             return RefreshOutcome::Unchanged {
                 node_count: row.node_count,
@@ -460,7 +441,13 @@ async fn apply_fetch(
 
     let sync = match sync_seed_nodes(store, &parsed.nodes) {
         Ok(sync) => sync,
-        Err(error) => {
+        Err(SyncSeedError::TrialExpired) => {
+            // 刚写进 `secrets.enc` 的这份内容没人用了：删掉，旧密文与缓存元数据不动。
+            let _ = crate::secrets::delete_secret(&secret_key(&hash));
+            log::info!("试用已过期，种子内容不落库");
+            return RefreshOutcome::TrialExpired;
+        }
+        Err(SyncSeedError::Local(error)) => {
             // 整体回滚，且**不写新哈希**：下一次刷新（含 force）还能再来一次。
             log::warn!("种子节点同步失败，整批回滚并保留旧缓存：{error}");
             return RefreshOutcome::Offline {
@@ -482,16 +469,25 @@ async fn apply_fetch(
         fetched_at: now,
         checked_at: now,
     };
-    if let Err(error) = {
+    {
         let conn = store.conn();
-        seed_cache::save(&conn, &row)
-    } {
-        log::warn!("种子元数据写入失败：{error}");
-        return RefreshOutcome::Offline {
-            cached: cached_content_available(store),
-            error: error.to_string(),
-            reason: OfflineReason::LocalWrite,
-        };
+        // 元数据也必须在同一个守卫里复查：`sync_seed_nodes` 提交之后、这里之前，
+        // 到期清理可能刚删光种子行与缓存；这时再写回一行缓存会让「过期 + 有缓存」复活。
+        if crate::trial::ensure_seed_trial_active(&conn).is_err() {
+            drop(conn);
+            let _ = crate::secrets::delete_secret(&secret_key(&hash));
+            log::info!("试用已过期，种子元数据不落库");
+            return RefreshOutcome::TrialExpired;
+        }
+        if let Err(error) = seed_cache::save(&conn, &row) {
+            drop(conn);
+            log::warn!("种子元数据写入失败：{error}");
+            return RefreshOutcome::Offline {
+                cached: cached_content_available(store),
+                error: error.to_string(),
+                reason: OfflineReason::LocalWrite,
+            };
+        }
     }
 
     // 只保留最新一份原文密文。
@@ -542,16 +538,32 @@ struct SeedSync {
     replacement_node_name: Option<String>,
 }
 
-fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, String> {
-    let (existing, exclusions, following_configs) = {
-        let conn = store.conn();
-        (
-            configs::list_nodes_by_source(&conn, configs::SOURCE_SEED)
-                .map_err(|error| error.to_string())?,
-            configs::seed_exclusions(&conn).map_err(|error| error.to_string())?,
-            configs::config_ids_with_seed_nodes(&conn).map_err(|error| error.to_string())?,
-        )
-    };
+/// 同步失败的两种性质：试用到期必须原样上报，其余按本地写入失败处理。
+#[derive(Debug)]
+enum SyncSeedError {
+    TrialExpired,
+    Local(String),
+}
+
+impl std::fmt::Display for SyncSeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncSeedError::TrialExpired => f.write_str(crate::trial::SEED_TRIAL_EXPIRED_MESSAGE),
+            SyncSeedError::Local(error) => f.write_str(error),
+        }
+    }
+}
+
+fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, SyncSeedError> {
+    // 判定点 3：最终判定。判定与写入区间只持这一把守卫，到期事务插不进来；
+    // 早退分支同样在判定之后。
+    let conn = store.conn();
+    crate::trial::ensure_seed_trial_active(&conn).map_err(|_| SyncSeedError::TrialExpired)?;
+
+    let local = |error: store::error::StoreError| SyncSeedError::Local(error.to_string());
+    let existing = configs::list_nodes_by_source(&conn, configs::SOURCE_SEED).map_err(local)?;
+    let exclusions = configs::seed_exclusions(&conn).map_err(local)?;
+    let following_configs = configs::config_ids_with_seed_nodes(&conn).map_err(local)?;
     if existing.is_empty() {
         return Ok(SeedSync {
             added: Some(0),
@@ -575,7 +587,6 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
     let previous_current: HashMap<String, String> = following_configs
         .iter()
         .filter_map(|config_id| {
-            let conn = store.conn();
             configs::get(&conn, config_id)
                 .ok()
                 .flatten()
@@ -583,19 +594,15 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
                 .map(|node_id| (config_id.clone(), node_id))
         })
         .collect();
-    let active_id = {
-        let conn = store.conn();
-        configs::active(&conn)
-            .ok()
-            .flatten()
-            .map(|config| config.id)
-    };
+    let active_id = configs::active(&conn)
+        .ok()
+        .flatten()
+        .map(|config| config.id);
 
     // 整层替换必须原子：任何一步失败都回滚，不能留下「部分新增、部分删除」。
-    let conn = store.conn();
     let tx = conn
         .unchecked_transaction()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| SyncSeedError::Local(error.to_string()))?;
 
     for node in seed_nodes {
         let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
@@ -604,7 +611,8 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
         }
         let id = nodes::node_id(configs::SOURCE_SEED, &key);
         let reference = nodes::password_ref(&id);
-        crate::secrets::set_secret(&reference, &node.password).map_err(|error| error.to_string())?;
+        crate::secrets::set_secret(&reference, &node.password)
+            .map_err(|error| SyncSeedError::Local(error.to_string()))?;
         configs::upsert_node(
             &tx,
             &configs::NewNode {
@@ -618,9 +626,9 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
                 source_key: &key,
             },
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(local)?;
         for config_id in &following_configs {
-            configs::attach_node(&tx, config_id, &id).map_err(|error| error.to_string())?;
+            configs::attach_node(&tx, config_id, &id).map_err(local)?;
         }
         if !existing.iter().any(|row| row.id == id) {
             added += 1;
@@ -636,7 +644,7 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
             continue;
         }
         if !keep.contains(&row.id) {
-            configs::delete_node(&tx, &row.id).map_err(|error| error.to_string())?;
+            configs::delete_node(&tx, &row.id).map_err(local)?;
             let _ = crate::secrets::delete_secret(&row.password_ref);
             removed += 1;
             changed.push(row.id);
@@ -671,7 +679,7 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
                 ..Default::default()
             },
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(local)?;
         if removed_node_name.is_none() {
             removed_node_name = removed_name;
             replacement_node_name = replacement.as_ref().map(|node| node.name.clone());
@@ -679,7 +687,8 @@ fn sync_seed_nodes(store: &Store, seed_nodes: &[SeedNode]) -> Result<SeedSync, S
         updated_configs.push(config_id.clone());
     }
 
-    tx.commit().map_err(|error| error.to_string())?;
+    tx.commit()
+        .map_err(|error| SyncSeedError::Local(error.to_string()))?;
     // 先释放连接再去发事件：事件读取同一把 store 锁，持有连接会死锁。
     drop(conn);
 
@@ -736,53 +745,6 @@ fn emit_config_updated(store: &Store, config_id: &str) {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
     );
-}
-
-/// 离线兜底：把一份 `veyl_seed.json` 文件合并进节点池。
-///
-/// **只增不删**：手工导入不能删掉种子拉取层已有的节点。
-pub fn merge_file_nodes(store: &Store, contents: &[u8]) -> Result<(usize, Vec<String>), String> {
-    let parsed = parse_seed(contents)?;
-    let mut imported = 0;
-    let mut added = Vec::new();
-    for node in &parsed.nodes {
-        let key = nodes::source_key(&node.name, &node.server, node.port, &node.method);
-        let exists = {
-            let conn = store.conn();
-            configs::find_node_by_source_key(&conn, configs::SOURCE_SEED, &key)
-                .map_err(|error| error.to_string())?
-                .is_some()
-        };
-        if exists {
-            continue;
-        }
-        let id = nodes::node_id(configs::SOURCE_SEED, &key);
-        let reference = nodes::password_ref(&id);
-        crate::secrets::set_secret(&reference, &node.password).map_err(|error| error.to_string())?;
-        {
-            let conn = store.conn();
-            configs::upsert_node(
-                &conn,
-                &configs::NewNode {
-                    id: &id,
-                    name: &node.name,
-                    server: &node.server,
-                    port: node.port,
-                    method: &node.method,
-                    password_ref: &reference,
-                    source: configs::SOURCE_SEED,
-                    source_key: &key,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        }
-        imported += 1;
-        added.push(id);
-    }
-    if !added.is_empty() {
-        emit_node_list_changed(store, "seed_refreshed", None, &added);
-    }
-    Ok((imported, added))
 }
 
 /// 只读状态，不联网。形状见 `commands.md` §8.1。
@@ -1362,6 +1324,355 @@ mod tests {
         two_node_body_at(tag, Some("2026-11-17T00:00:00Z"))
     }
 
+    /// 写一条缓存并把原文放进密文存储。
+    fn save_cache(store: &Store, body: &str, checked_at: i64) -> String {
+        let hash = content_sha256(body.as_bytes());
+        crate::secrets::set_secret(&secret_key(&hash), body).unwrap();
+        let conn = store.conn();
+        seed_cache::save(
+            &conn,
+            &seed_cache::SeedCacheRow {
+                content_sha256: hash.clone(),
+                etag: Some("\"v1\"".into()),
+                etag_source: Some(DEFAULT_SEED_URL.into()),
+                source_version: Some("1".into()),
+                source_updated_at: None,
+                node_count: 2,
+                fetched_at: 1,
+                checked_at,
+            },
+        )
+        .unwrap();
+        hash
+    }
+
+    fn start_trial(store: &Store, started_at_ms: i64) {
+        let conn = store.conn();
+        crate::trial::mark_started(&conn, started_at_ms).unwrap();
+    }
+
+    fn cache_row(store: &Store) -> seed_cache::SeedCacheRow {
+        let conn = store.conn();
+        seed_cache::load(&conn).unwrap().unwrap()
+    }
+
+    /// #1 未开始试用：刷新照常发请求、应用内容。
+    #[tokio::test]
+    async fn refresh_runs_when_the_trial_has_not_started() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let body = two_node_body("available");
+
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            |_url: &str, _etag: Option<String>| {
+                let body = body.clone();
+                async move {
+                    Ok(crate::public_http::PublicResponse {
+                        status: 200,
+                        etag: Some("\"v1\"".into()),
+                        body: body.into_bytes(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RefreshOutcome::Updated { node_count: 2, .. }),
+            "available 必须照常刷新：{outcome:?}"
+        );
+    }
+
+    /// #2 试用中：照常刷新。
+    #[tokio::test]
+    async fn refresh_runs_while_the_trial_is_active() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        start_trial(&store, store::now_ms() - 60 * 60 * 1000);
+        let body = two_node_body("active");
+
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            |_url: &str, _etag: Option<String>| {
+                let body = body.clone();
+                async move {
+                    Ok(crate::public_http::PublicResponse {
+                        status: 200,
+                        etag: Some("\"v1\"".into()),
+                        body: body.into_bytes(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RefreshOutcome::Updated { node_count: 2, .. }),
+            "active 必须照常刷新：{outcome:?}"
+        );
+    }
+
+    /// #3 开始 8 天前、还没跑清理：入口判定就挡住，不联网、不续命。
+    #[tokio::test]
+    async fn refresh_is_rejected_when_the_trial_started_eight_days_ago() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let _hash = save_cache(&store, &two_node_body("old"), 7);
+        start_trial(&store, store::now_ms() - 8 * 24 * 60 * 60 * 1000);
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorder = std::sync::Arc::clone(&calls);
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            move |_url: &str, _etag: Option<String>| {
+                let recorder = std::sync::Arc::clone(&recorder);
+                async move {
+                    recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("不该联网".to_string())
+                }
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, RefreshOutcome::TrialExpired), "{outcome:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(cache_row(&store).checked_at, 7, "过期不能续命检查时间");
+    }
+
+    /// #4 `ended_at` 非空：即使今天才开始，也算过期。
+    #[tokio::test]
+    async fn refresh_is_rejected_when_the_trial_ended_today() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let now = store::now_ms();
+        start_trial(&store, now);
+        {
+            let conn = store.conn();
+            conn.execute(
+                "UPDATE trial_state SET ended_at = ?1 WHERE id = 1",
+                rusqlite::params![now + 1],
+            )
+            .unwrap();
+        }
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorder = std::sync::Arc::clone(&calls);
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            move |_url: &str, _etag: Option<String>| {
+                let recorder = std::sync::Arc::clone(&recorder);
+                async move {
+                    recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("不该联网".to_string())
+                }
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, RefreshOutcome::TrialExpired), "{outcome:?}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// #5 入口放行后、响应回来前才过期：第二次判定挡住，200 也不落库。
+    #[tokio::test]
+    async fn an_expiry_during_the_fetch_discards_the_response() {
+        crate::test_support::install_test_secrets();
+        let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+        let old_body = two_node_body("before");
+        let old_hash = save_cache(&store, &old_body, 5);
+        let new_body = two_node_body("after");
+        let new_hash = content_sha256(new_body.as_bytes());
+
+        let backdate = std::sync::Arc::clone(&store);
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            move |_url: &str, _etag: Option<String>| {
+                let backdate = std::sync::Arc::clone(&backdate);
+                let body = new_body.clone();
+                async move {
+                    // 入口检查已经过了，这里把试用改到 8 天前再返回内容。
+                    {
+                        let conn = backdate.conn();
+                        crate::trial::mark_started(
+                            &conn,
+                            store::now_ms() - 8 * 24 * 60 * 60 * 1000,
+                        )
+                        .unwrap();
+                    }
+                    Ok(crate::public_http::PublicResponse {
+                        status: 200,
+                        etag: Some("\"v2\"".into()),
+                        body: body.into_bytes(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, RefreshOutcome::TrialExpired), "{outcome:?}");
+        assert_eq!(cache_row(&store).content_sha256, old_hash, "不推进 hash");
+        assert!(
+            crate::secrets::get_secret(&secret_key(&new_hash))
+                .ok()
+                .flatten()
+                .is_none(),
+            "过期时不能留下新密文"
+        );
+        let names: Vec<String> = load_nodes(&store)
+            .unwrap()
+            .into_iter()
+            .map(|node| node.name)
+            .collect();
+        assert!(names.iter().all(|name| name.starts_with("before-")), "{names:?}");
+    }
+
+    /// #5b 同样的时点但返回 304：不更新 `checked_at`。
+    #[tokio::test]
+    async fn an_expiry_during_a_304_does_not_touch_the_cache() {
+        crate::test_support::install_test_secrets();
+        let store = std::sync::Arc::new(Store::open_in_memory().unwrap());
+        let _hash = save_cache(&store, &two_node_body("cached"), 5);
+
+        let backdate = std::sync::Arc::clone(&store);
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            move |_url: &str, _etag: Option<String>| {
+                let backdate = std::sync::Arc::clone(&backdate);
+                async move {
+                    {
+                        let conn = backdate.conn();
+                        crate::trial::mark_started(
+                            &conn,
+                            store::now_ms() - 8 * 24 * 60 * 60 * 1000,
+                        )
+                        .unwrap();
+                    }
+                    Ok(crate::public_http::PublicResponse {
+                        status: 304,
+                        etag: Some("\"v1\"".into()),
+                        body: Vec::new(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert!(matches!(outcome, RefreshOutcome::TrialExpired), "{outcome:?}");
+        assert_eq!(cache_row(&store).checked_at, 5, "304 也不能续命");
+    }
+
+    /// #5c 写事务内的最终判定：直接调 `sync_seed_nodes` 也不写、不绑、不删。
+    #[test]
+    fn sync_is_rejected_inside_the_write_transaction_when_expired() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        let parsed = parse_seed(two_node_body("tx").as_bytes()).unwrap();
+        let existing = &parsed.nodes[0];
+        let key = nodes::source_key(&existing.name, &existing.server, existing.port, &existing.method);
+        let id = nodes::node_id(configs::SOURCE_SEED, &key);
+        let reference = nodes::password_ref(&id);
+        {
+            let conn = store.conn();
+            configs::create(
+                &conn,
+                &configs::NewConfig {
+                    id: "cfg_tx",
+                    name: "跟随种子",
+                    connection_mode: configs::CONNECTION_SYSTEM_PROXY,
+                    routing_mode: configs::ROUTING_PROXY_ALL,
+                    listen_port: None,
+                    dns: &json!({ "mode": "auto", "local": [], "remote": [] }),
+                    tun_excludes: &json!([]),
+                },
+            )
+            .unwrap();
+            crate::secrets::set_secret(&reference, &existing.password).unwrap();
+            configs::upsert_node(
+                &conn,
+                &configs::NewNode {
+                    id: &id,
+                    name: &existing.name,
+                    server: &existing.server,
+                    port: existing.port,
+                    method: &existing.method,
+                    password_ref: &reference,
+                    source: configs::SOURCE_SEED,
+                    source_key: &key,
+                },
+            )
+            .unwrap();
+            configs::attach_node(&conn, "cfg_tx", &id).unwrap();
+        }
+        start_trial(&store, store::now_ms() - 8 * 24 * 60 * 60 * 1000);
+
+        let result = sync_seed_nodes(&store, &parsed.nodes);
+        assert!(
+            matches!(result, Err(SyncSeedError::TrialExpired)),
+            "事务内必须返回 TrialExpired：{:?}",
+            result.err().map(|error| error.to_string())
+        );
+
+        let conn = store.conn();
+        let nodes = configs::list_nodes(&conn, "cfg_tx").unwrap();
+        assert_eq!(nodes.len(), 1, "不能删旧节点，也不能绑新节点");
+        assert_eq!(nodes[0].id, id);
+    }
+
+    /// #6 删掉 `trial_state` 行等于重置：下一次刷新恢复拉取。
+    #[tokio::test]
+    async fn deleting_the_trial_row_restores_refreshing() {
+        crate::test_support::install_test_secrets();
+        let store = Store::open_in_memory().unwrap();
+        start_trial(&store, store::now_ms() - 8 * 24 * 60 * 60 * 1000);
+        {
+            let conn = store.conn();
+            conn.execute("DELETE FROM trial_state", []).unwrap();
+        }
+        let body = two_node_body("reset");
+
+        let outcome = refresh_with(
+            &store,
+            false,
+            true,
+            vec![DEFAULT_SEED_URL.to_string()],
+            |_url: &str, _etag: Option<String>| {
+                let body = body.clone();
+                async move {
+                    Ok(crate::public_http::PublicResponse {
+                        status: 200,
+                        etag: Some("\"v1\"".into()),
+                        body: body.into_bytes(),
+                    })
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RefreshOutcome::Updated { node_count: 2, .. }),
+            "重置后必须恢复：{outcome:?}"
+        );
+    }
+
     fn two_node_body_at(tag: &str, updated_at: Option<&str>) -> String {
         let stamp = updated_at
             .map(|value| format!(r#""updated_at": "{value}","#))
@@ -1380,206 +1691,6 @@ mod tests {
         )
     }
 
-    /// 兜底落后一次密码轮换时，不能把作废的旧密码写回缓存。
-    #[tokio::test]
-    async fn an_older_fallback_does_not_overwrite_the_cache() {
-        crate::test_support::install_test_secrets();
-        let store = Store::open_in_memory().unwrap();
-        let nine_days_ago = (chrono::Utc::now() - chrono::Duration::days(9))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let ten_days_ago = (chrono::Utc::now() - chrono::Duration::days(10))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let cached_body = two_node_body_at("cached", Some(&nine_days_ago));
-        let stale_body = two_node_body_at("stale", Some(&ten_days_ago));
-        let cached_hash = content_sha256(cached_body.as_bytes());
-        crate::secrets::set_secret(&secret_key(&cached_hash), &cached_body).unwrap();
-        {
-            let conn = store.conn();
-            seed_cache::save(
-                &conn,
-                &seed_cache::SeedCacheRow {
-                    content_sha256: cached_hash.clone(),
-                    etag: Some("\"worker-old\"".into()),
-                    etag_source: Some(DEFAULT_SEED_URL.into()),
-                    source_version: Some("1".into()),
-                    source_updated_at: Some(nine_days_ago),
-                    node_count: 2,
-                    fetched_at: store::now_ms(),
-                    checked_at: 0,
-                },
-            )
-            .unwrap();
-        }
-
-        let outcome = refresh_with(
-            &store,
-            false,
-            true,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
-            |url: &str, _etag: Option<String>| {
-                let url = url.to_string();
-                let stale = stale_body.clone();
-                async move {
-                    if url == DEFAULT_SEED_URL {
-                        Err("connect timeout".to_string())
-                    } else {
-                        Ok(crate::public_http::PublicResponse {
-                            status: 200,
-                            etag: Some("\"pages-old\"".into()),
-                            body: stale.into_bytes(),
-                        })
-                    }
-                }
-            },
-        )
-        .await;
-
-        match outcome {
-            RefreshOutcome::Offline {
-                cached,
-                reason,
-                error,
-            } => {
-                assert!(cached);
-                assert_eq!(
-                    reason.as_str(),
-                    "stale_source",
-                    "过期来源不是内容损坏：{error}"
-                );
-            }
-            other => panic!("旧兜底不能算成功：{other:?}"),
-        }
-        let row = {
-            let conn = store.conn();
-            seed_cache::load(&conn).unwrap().unwrap()
-        };
-        assert_eq!(row.content_sha256, cached_hash, "旧兜底不能覆盖缓存");
-        let names: Vec<String> = load_nodes(&store)
-            .unwrap()
-            .into_iter()
-            .map(|node| node.name)
-            .collect();
-        assert!(names.iter().all(|name| name.starts_with("cached-")), "{names:?}");
-    }
-
-    /// 缓存来自主源、兜底又没有时间戳时，兜底只在无缓存时使用。
-    #[tokio::test]
-    async fn a_timestampless_fallback_is_rejected_when_cache_came_from_primary() {
-        crate::test_support::install_test_secrets();
-        let store = Store::open_in_memory().unwrap();
-        let cached_body = two_node_body_at("primary", Some("2026-11-17T00:00:00Z"));
-        let cached_hash = content_sha256(cached_body.as_bytes());
-        crate::secrets::set_secret(&secret_key(&cached_hash), &cached_body).unwrap();
-        {
-            let conn = store.conn();
-            seed_cache::save(
-                &conn,
-                &seed_cache::SeedCacheRow {
-                    content_sha256: cached_hash.clone(),
-                    etag: Some("\"worker\"".into()),
-                    etag_source: Some(DEFAULT_SEED_URL.into()),
-                    source_version: Some("1".into()),
-                    source_updated_at: Some("2026-11-17T00:00:00Z".into()),
-                    node_count: 2,
-                    fetched_at: store::now_ms(),
-                    checked_at: 0,
-                },
-            )
-            .unwrap();
-        }
-        let no_time = two_node_body_at("no-time", None);
-
-        let outcome = refresh_with(
-            &store,
-            false,
-            true,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
-            |url: &str, _etag: Option<String>| {
-                let url = url.to_string();
-                let body = no_time.clone();
-                async move {
-                    if url == DEFAULT_SEED_URL {
-                        Err("connect timeout".to_string())
-                    } else {
-                        Ok(crate::public_http::PublicResponse {
-                            status: 200,
-                            etag: None,
-                            body: body.into_bytes(),
-                        })
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert!(
-            matches!(outcome, RefreshOutcome::Offline { .. }),
-            "主源缓存不能被无时间戳的兜底替换：{outcome:?}"
-        );
-        let row = {
-            let conn = store.conn();
-            seed_cache::load(&conn).unwrap().unwrap()
-        };
-        assert_eq!(row.content_sha256, cached_hash);
-    }
-
-    /// 缓存时间解析不出时不拦：无从比较，交给内容哈希。
-    #[tokio::test]
-    async fn an_unparseable_cached_time_does_not_block_the_fallback() {
-        crate::test_support::install_test_secrets();
-        let store = Store::open_in_memory().unwrap();
-        let old_body = two_node_body_at("broken-cache", Some("2026-11-01T00:00:00Z"));
-        let old_hash = content_sha256(old_body.as_bytes());
-        crate::secrets::set_secret(&secret_key(&old_hash), &old_body).unwrap();
-        {
-            let conn = store.conn();
-            seed_cache::save(
-                &conn,
-                &seed_cache::SeedCacheRow {
-                    content_sha256: old_hash.clone(),
-                    etag: None,
-                    etag_source: Some(DEFAULT_SEED_URL.into()),
-                    source_version: Some("1".into()),
-                    source_updated_at: Some("not-a-date".into()),
-                    node_count: 2,
-                    fetched_at: store::now_ms(),
-                    checked_at: 0,
-                },
-            )
-            .unwrap();
-        }
-        let fresh_body = two_node_body_at("fresh", Some("2026-11-17T00:00:00Z"));
-
-        let outcome = refresh_with(
-            &store,
-            false,
-            true,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
-            |url: &str, _etag: Option<String>| {
-                let url = url.to_string();
-                let body = fresh_body.clone();
-                async move {
-                    if url == DEFAULT_SEED_URL {
-                        Err("connect timeout".to_string())
-                    } else {
-                        Ok(crate::public_http::PublicResponse {
-                            status: 200,
-                            etag: None,
-                            body: body.into_bytes(),
-                        })
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert!(
-            matches!(outcome, RefreshOutcome::Updated { .. }),
-            "缓存时间不可解析时不应阻止兜底：{outcome:?}"
-        );
-    }
-
-    /// 主源失败 → 同一次刷新内改走兜底；缓存记下兜底来源。
     #[test]
     fn the_shared_golden_fixture_matches_the_client_rules() {
         #[derive(serde::Deserialize)]
@@ -1614,50 +1725,9 @@ mod tests {
         }
     }
 
+    /// 唯一来源失败 → `Offline`，已有缓存与节点一个都不能丢。
     #[tokio::test]
-    async fn a_primary_failure_falls_back_to_the_pages_source() {
-        crate::test_support::install_test_secrets();
-        let store = Store::open_in_memory().unwrap();
-        let body = two_node_body("fallback");
-
-        let outcome = refresh_with(
-            &store,
-            false,
-            false,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
-            |url: &str, _etag: Option<String>| {
-                let url = url.to_string();
-                let body = body.clone();
-                async move {
-                    if url == DEFAULT_SEED_URL {
-                        Err("connect timeout".to_string())
-                    } else {
-                        Ok(crate::public_http::PublicResponse {
-                            status: 200,
-                            etag: Some("\"pages-v1\"".into()),
-                            body: body.into_bytes(),
-                        })
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert!(
-            matches!(outcome, RefreshOutcome::Updated { node_count: 2, .. }),
-            "兜底源应当把节点写进缓存：{outcome:?}"
-        );
-        let row = {
-            let conn = store.conn();
-            seed_cache::load(&conn).unwrap().unwrap()
-        };
-        assert_eq!(row.etag_source.as_deref(), Some(FALLBACK_SEED_URL));
-        assert_eq!(load_nodes(&store).map(|nodes| nodes.len()), Some(2));
-    }
-
-    /// 两个源都失败 → `Offline`，已有缓存与节点一个都不能丢。
-    #[tokio::test]
-    async fn both_sources_failing_keeps_the_cached_nodes() {
+    async fn a_failed_source_keeps_the_cached_nodes() {
         crate::test_support::install_test_secrets();
         let store = Store::open_in_memory().unwrap();
         let body = two_node_body("keep");
@@ -1685,7 +1755,7 @@ mod tests {
             &store,
             false,
             true,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
+            vec![DEFAULT_SEED_URL.to_string()],
             |_url: &str, _etag: Option<String>| async move {
                 Err("offline".to_string())
             },
@@ -1694,7 +1764,7 @@ mod tests {
 
         match outcome {
             RefreshOutcome::Offline { cached, .. } => assert!(cached, "必须承认缓存还在"),
-            other => panic!("两源都失败不能报成功：{other:?}"),
+            other => panic!("源失败不能报成功：{other:?}"),
         }
         let row = {
             let conn = store.conn();
@@ -1704,72 +1774,9 @@ mod tests {
         assert_eq!(load_nodes(&store).map(|nodes| nodes.len()), Some(2));
     }
 
-    /// ETag 只发给产出它的那个源：主源失败后，兜底源才带自己的 ETag。
+    /// 同一份内容再来一次：哈希不变就不重写缓存，只更新时间戳与 ETag。
     #[tokio::test]
-    async fn etag_is_never_sent_to_another_source() {
-        crate::test_support::install_test_secrets();
-        let store = Store::open_in_memory().unwrap();
-        let body = two_node_body("etag");
-        let hash = content_sha256(body.as_bytes());
-        crate::secrets::set_secret(&secret_key(&hash), &body).unwrap();
-        {
-            let conn = store.conn();
-            seed_cache::save(
-                &conn,
-                &seed_cache::SeedCacheRow {
-                    content_sha256: hash,
-                    etag: Some("\"pages-v1\"".into()),
-                    etag_source: Some(FALLBACK_SEED_URL.into()),
-                    source_version: Some("1".into()),
-                    source_updated_at: None,
-                    node_count: 2,
-                    fetched_at: store::now_ms(),
-                    checked_at: 0,
-                },
-            )
-            .unwrap();
-        }
-
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorder = std::sync::Arc::clone(&calls);
-        let outcome = refresh_with(
-            &store,
-            false,
-            true,
-            vec![DEFAULT_SEED_URL.to_string(), FALLBACK_SEED_URL.to_string()],
-            move |url: &str, etag: Option<String>| {
-                let recorder = std::sync::Arc::clone(&recorder);
-                let url = url.to_string();
-                async move {
-                    recorder.lock().unwrap().push((url.clone(), etag.clone()));
-                    if url == DEFAULT_SEED_URL {
-                        Err("connect timeout".to_string())
-                    } else {
-                        Ok(crate::public_http::PublicResponse {
-                            status: 304,
-                            etag: Some("\"pages-v1\"".into()),
-                            body: Vec::new(),
-                        })
-                    }
-                }
-            },
-        )
-        .await;
-
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0], (DEFAULT_SEED_URL.to_string(), None));
-        assert_eq!(
-            calls[1],
-            (FALLBACK_SEED_URL.to_string(), Some("\"pages-v1\"".to_string())),
-            "兜底的 ETag 不能被带到主源，也不能反着用"
-        );
-        assert!(matches!(outcome, RefreshOutcome::Unchanged { node_count: 2 }));
-    }
-
-    /// 换源但内容相同：哈希不变就不重写缓存，只更新时间戳与来源。
-    #[tokio::test]
-    async fn the_same_hash_from_another_source_is_not_rewritten() {
+    async fn the_same_hash_is_not_rewritten_on_the_primary() {
         crate::test_support::install_test_secrets();
         let store = Store::open_in_memory().unwrap();
         let body = two_node_body("same");
@@ -1781,8 +1788,8 @@ mod tests {
                 &conn,
                 &seed_cache::SeedCacheRow {
                     content_sha256: hash.clone(),
-                    etag: Some("\"pages-v1\"".into()),
-                    etag_source: Some(FALLBACK_SEED_URL.into()),
+                    etag: Some("\"worker-old\"".into()),
+                    etag_source: Some(DEFAULT_SEED_URL.into()),
                     source_version: Some("1".into()),
                     source_updated_at: None,
                     node_count: 2,

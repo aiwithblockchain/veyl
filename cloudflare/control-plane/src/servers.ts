@@ -1770,7 +1770,7 @@ async function refreshBooting(env: ServersEnv, rows: ServerRow[]): Promise<void>
       "UPDATE servers SET ip = ?, updated_at = ?, " +
         "state = CASE WHEN state = 'booting' THEN 'installing' ELSE state END, " +
         "installing_at = CASE WHEN state = 'booting' THEN ? ELSE installing_at END " +
-        "WHERE id = ?",
+        "WHERE id = ? AND destroyed_at IS NULL",
     )
       .bind(row.ip, Date.now(), row.installing_at ?? Date.now(), row.id)
       .run();

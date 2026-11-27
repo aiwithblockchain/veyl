@@ -34,6 +34,8 @@
 - 误判评审（Felix 白盒 + Tess 外部事实 + Soren 裁决）后的两处收尾：审计只在真改到行时写、报告加 `providerGoneActive`（`0262634`）。
 - AI 工具 content 与两份 product 提示词统一「已累计」（与界面同一个词）。
 - `state='destroying' AND billing_state='pending'` 卡死行：改由计费 Cron 的 `recoverStuckDestroying` 在 30 分钟后补完销毁（非 pending 行仍恢复 `active`）；DO 删不掉时留在 `destroying` 保留下轮重试，落 `destroyed` 时同批关单、从不凭空退款。报告加 `pendingDestroyed` 计数。Felix 评审「过」（0 P0/P1/P2）；遗留 P3：`orders.failure_stage` 会写成 `destroying`（客户端不可见）、并发已销毁时计数多 1、失败告警不去重。
+- 本地 105 行压测发现补建扫描缺 `state <> 'destroying'` 守卫：超过批量上限、没被本轮收走的 pending 行会被当成「已付款没机器」重新建机（无 DO 令牌时落 `error`）。已加守卫，超出部分只顺延到下一轮，`rebuilt` 恒为 0。
+- 建机写回与销毁的竞态（Felix P3-1）：`provision.ts` 写回 `provider_id` / `booting` 的 UPDATE 加 `state NOT IN ('destroying','destroyed')`；`changes = 0` 时删掉刚建的 droplet、不碰行与订单。真实 D1 已验证：destroying 行 no-op、creating 行照常写回；单测含变异红证。
 
 **未开始**
 

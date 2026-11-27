@@ -1768,6 +1768,7 @@ verify 端口不通                        → destroy(droplet) → 订单 faile
 - `DELETE /v2/droplets/{id}` → **204**；404 视为已不存在（成功）。删除是异步的，所以销毁后仍以 `provider_id` 做一次 404 复核（Cron 负责）。
 - 销毁失败（5xx / 超时）：同步重试 3 次（2s / 10s / 30s），仍失败则 `servers.state = destroying`；还原状态由 `destroyInstance` 自己负责，用户也可以在界面上再点一次销毁。
 - **状态先落库再动作**：先把 `destroying` 写进 D1（并写 `destroy_requested_at`），再调 API。进程/Workflow 恰好在「删远端 → 落库」之间死掉时，这一行会卡在 `destroying`，按 `billing_state` 分两种收尾（都在计费 Cron 里，超过 30 分钟才动）：正常计费过的行**恢复成 `active`**（写 `server.destroying_recovered` 审计），**不补完销毁**——不知道当初为什么销毁、该按哪种退款口径，猜错就是钱的事；恢复之后由正常的几条线接管：到期扫描照常计费，DO 侧真没了的机器由 `markProviderGone` 发现，用户也可以自己再点销毁。`billing_state = 'pending'`（建机阶段）的行**由计费 Cron 补完销毁**：它们一分钱没扣过，没有退款口径的选择题，恢复成 active 只会变成一台不扣费、也连不上的幻影。补完走与普通销毁同一条路（DO 404 按成功、退款撞唯一键），删远端失败时行留在 `destroying` 等下一轮。
+- **建机写回也带状态守卫**：DO 建机请求返回后写回 `provider_id` / `booting` 的 UPDATE 带 `AND state NOT IN ('destroying','destroyed')`。从查到这一行到 DO 建完机之间（1–3 秒）行可能已进入销毁；无条件写回会把 `destroyed` 改回 `booting`，DO 上多一台无人管理的实例。`changes = 0` 时删掉刚建的 droplet、不碰行与订单（销毁路径负责收尾）。
 - 订单终态只有 `failed` / `cancelled` / `ready`；**不允许 `paid` 或 `provisioning` 停留超过 25 分钟**。
 
 #### 19.6.5 对账 Cron（每 5 分钟）

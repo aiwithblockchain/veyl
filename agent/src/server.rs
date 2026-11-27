@@ -1,6 +1,6 @@
 //! MCP Streamable HTTP server behind tokio-rustls, with a bearer-token gate in
-//! front of *every* request (including `initialize`) and two tools:
-//! `rotate_credentials` and `upgrade_singbox`.
+//! front of *every* request (including `initialize`) and three tools:
+//! `rotate_credentials`, `upgrade_singbox` and the read-only `get_status`.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +35,7 @@ use crate::auth::{AuthError, AuthState};
 use crate::cert;
 use crate::identity::Identity;
 use crate::rotation::{RotateError, Rotator};
+use crate::traffic::MeteringView;
 
 /// Bound on the `active` re-announcement that runs before every tool call, so a
 /// dead control plane cannot delay the call itself.
@@ -50,6 +51,10 @@ pub struct ServerState {
     pub rotator: Arc<dyn Rotator>,
     /// Leaf/CA and the dynamic Host allow-list.
     pub identity: Arc<Identity>,
+    /// The metering module's read-only view, supplied at construction. `None`
+    /// means it was never attached (the dev `serve` command); `get_status`
+    /// reports that as `metering_attached: false`, never as "healthy".
+    metering: Option<Arc<dyn MeteringView>>,
 }
 
 impl ServerState {
@@ -57,6 +62,7 @@ impl ServerState {
         auth: Arc<AuthState>,
         rotator: Arc<dyn Rotator>,
         identity: Arc<Identity>,
+        metering: Option<Arc<dyn MeteringView>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             auth,
@@ -64,6 +70,7 @@ impl ServerState {
             last_result: std::sync::Mutex::new(None),
             rotator,
             identity,
+            metering,
         })
     }
 }
@@ -76,7 +83,7 @@ struct NodeAgentServer {
 impl ServerHandler for NodeAgentServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Veyl node agent: rotate_credentials, upgrade_singbox")
+            .with_instructions("Veyl node agent: rotate_credentials, upgrade_singbox, get_status")
     }
 
     async fn list_tools(
@@ -97,6 +104,11 @@ impl ServerHandler for NodeAgentServer {
             "properties": {},
             "additionalProperties": false
         });
+        let status_schema = json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        });
         let tools = vec![
             Tool::new(
                 "rotate_credentials",
@@ -107,6 +119,11 @@ impl ServerHandler for NodeAgentServer {
                 "upgrade_singbox",
                 "Install the sing-box version the control plane currently ships, then restart and self-check. Takes no arguments.",
                 upgrade_schema.as_object().cloned().unwrap_or_default(),
+            ),
+            Tool::new(
+                "get_status",
+                "Read this agent's metering state and in-memory error table. Takes no arguments and changes nothing.",
+                status_schema.as_object().cloned().unwrap_or_default(),
             ),
         ];
         Ok(ListToolsResult {
@@ -122,6 +139,14 @@ impl ServerHandler for NodeAgentServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         self.state.executions.fetch_add(1, Ordering::SeqCst);
+        let name = request.name.as_ref();
+
+        // A purely local read: no control-plane round trip, so it still answers
+        // when the control plane is down, and it cannot be delayed by one.
+        if name == "get_status" {
+            let view = self.state.metering.as_deref();
+            return Ok(self.success(status_payload(view)));
+        }
 
         // Heal an `active` report that never landed before doing anything else.
         // Bounded: a control plane that accepts the connection and never answers
@@ -133,7 +158,7 @@ impl ServerHandler for NodeAgentServer {
             tracing::warn!("active re-announce timed out; continuing with the tool call");
         }
 
-        match request.name.as_ref() {
+        match name {
             "rotate_credentials" => {
                 let reason = request
                     .arguments
@@ -190,6 +215,47 @@ impl NodeAgentServer {
         *self.state.last_result.lock().expect("last_result poisoned") = Some(body.clone());
         CallToolResult::error(vec![Content::text(body.to_string())])
     }
+}
+
+/// Body of `get_status`. Takes the view directly so it can be exercised without
+/// a live server (no auth, TLS or rotator).
+///
+/// `uptime_secs` is not optional: the health table is cleared by a restart, so
+/// without it an empty table reads as "always healthy".
+fn status_payload(metering: Option<&dyn MeteringView>) -> Value {
+    let metering_json = match metering.and_then(|view| view.status()) {
+        Some(status) => json!({
+            "counter_last": status.counter_last,
+            "pending_bytes": status.pending_bytes,
+            "seq": status.seq,
+            "last_read_at": status.last_read_at,
+            "consecutive_read_failures": status.consecutive_read_failures,
+        }),
+        None => Value::Null,
+    };
+    let mut health = serde_json::Map::new();
+    if let Some(view) = metering {
+        for (key, entry) in view.health().entries() {
+            health.insert(
+                key.as_str().to_string(),
+                json!({
+                    "count": entry.count,
+                    "last_at": entry.last_at,
+                    "last_error": entry.last_error,
+                }),
+            );
+        }
+    }
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_secs": crate::uptime_secs(),
+        // Distinguishes "the module is not attached" (dev only) from "attached
+        // but nothing read yet" (a cold node). Both have `metering: null`, and
+        // without this flag the first would read as an all-green dashboard.
+        "metering_attached": metering.is_some(),
+        "metering": metering_json,
+        "health": health,
+    })
 }
 
 /// Number of `tools/call` messages in a JSON-RPC body. Batches are counted too,
@@ -662,5 +728,116 @@ mod tests {
         assert_ne!(before, after, "the re-signed leaf must be used");
         assert_eq!(after, identity.leaf_fingerprint());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn get_status_reports_metering_and_the_health_table() {
+        use crate::config::TrafficConfig;
+        use crate::control::{ControlApi, ControlError, DesiredState, ReportRequest};
+        use crate::test_support::FakeHost;
+        use crate::traffic::{MeteringView, TrafficMeter};
+        use async_trait::async_trait;
+
+        struct SilentControl;
+
+        #[async_trait]
+        impl ControlApi for SilentControl {
+            async fn report(&self, _body: &ReportRequest) -> Result<(), ControlError> {
+                Ok(())
+            }
+
+            async fn desired_state(&self) -> Result<DesiredState, ControlError> {
+                Err(ControlError::Transport("not used in this test".into()))
+            }
+
+            async fn traffic(&self, _seq: u64, _delta_bytes: u64) -> Result<(), ControlError> {
+                Ok(())
+            }
+        }
+
+        let host = Arc::new(FakeHost::new());
+        host.set_command_output(
+            "ip",
+            0,
+            "default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.5 metric 100\n",
+            "",
+        );
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                // The table exists, so the read is `Broken`, not `Missing`.
+                (
+                    0,
+                    r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"inet","name":"veyl_meter"}}]}"#,
+                    "",
+                ),
+                (
+                    0,
+                    r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"rule":{"family":"inet","table":"veyl_meter","chain":"out","expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"ens3"}},{"counter":{"packets":7,"bytes":4096}}]}}]}"#,
+                    "",
+                ),
+            ],
+        );
+
+        let meter = Arc::new(TrafficMeter::new(
+            host.clone(),
+            Arc::new(SilentControl),
+            std::env::temp_dir().join(format!("veyl-agent-status-{}.json", std::process::id())),
+            TrafficConfig::default(),
+        ));
+        let view: Arc<dyn MeteringView> = meter.clone();
+
+        // A cold node whose very first read fails has no state to report, but
+        // the failure itself must be visible.
+        meter.tick(1_000).await;
+        let body = status_payload(Some(view.as_ref()));
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["metering_attached"], true);
+        assert!(
+            body["uptime_secs"].as_u64().is_some(),
+            "the table is cleared by a restart; uptime says how long it covers"
+        );
+        assert!(body["metering"].is_null(), "nothing was read yet");
+        assert_eq!(body["health"]["nft_read"]["count"], 1);
+        assert_eq!(body["health"]["nft_read"]["last_at"], 1_000);
+        assert!(body["health"]["nft_read"]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("Operation not permitted"));
+        assert_eq!(
+            body["health"]["report"]["count"], 0,
+            "a wired key is reported with count 0 when it has not failed"
+        );
+        assert!(
+            body["health"].get("singbox_apply").is_none(),
+            "an unwired key must be absent: a zeroed entry would be a false green light"
+        );
+
+        // The next window reads fine: the metering block appears and the run of
+        // failures is cleared.
+        meter.tick(1_030).await;
+        let body = status_payload(Some(view.as_ref()));
+        assert_eq!(body["metering"]["counter_last"], 4_096);
+        assert_eq!(body["metering"]["pending_bytes"], 0);
+        assert!(body["metering"]["seq"].as_u64().is_some());
+        assert_eq!(body["metering"]["last_read_at"], 1_030);
+        assert_eq!(body["metering"]["consecutive_read_failures"], 0);
+        assert_eq!(
+            body["health"]["nft_read"]["count"], 1,
+            "counts never go down"
+        );
+    }
+
+    #[test]
+    fn get_status_distinguishes_an_unattached_meter() {
+        let body = status_payload(None);
+        assert_eq!(body["metering_attached"], false);
+        assert!(body["metering"].is_null());
+        assert_eq!(
+            body["health"],
+            json!({}),
+            "no module means no health claims"
+        );
     }
 }

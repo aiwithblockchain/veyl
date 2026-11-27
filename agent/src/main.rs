@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use veyl_agent::{agent, init_crypto_provider};
+use veyl_agent::{agent, init_crypto_provider, mark_process_start};
 
 #[cfg(feature = "dev")]
 use {
@@ -81,6 +81,7 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    mark_process_start();
     init_crypto_provider();
     let cli = Cli::parse();
 
@@ -115,6 +116,8 @@ async fn main() -> Result<()> {
                 verifying_key,
                 Arc::new(StubRotator::default()),
                 true,
+                None,
+                // No meter here: the dev server has nothing to meter.
                 None,
             )
             .await?;

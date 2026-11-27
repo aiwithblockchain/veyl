@@ -4,6 +4,8 @@
 export interface Env {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
+  /** 控制面的库（运维看板直接读）。见 agent/docs/agent-health.md §5.6。 */
+  DB?: D1Database;
 }
 
 const CERTS_TTL_MS = 5 * 60_000;
@@ -206,6 +208,7 @@ export default {
     if (!email) return new Response("Unauthorized", { status: 401, headers: baseHeaders() });
 
     const { pathname } = new URL(request.url);
+
     if (pathname === "/" && request.method.toUpperCase() === "GET") {
       return new Response(homePage(email), {
         status: 200,

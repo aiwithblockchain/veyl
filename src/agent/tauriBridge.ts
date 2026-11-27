@@ -27,7 +27,6 @@ import type {
   CoreInfo,
   DeepSeekKeyState,
   DefaultProfileStatus,
-  ImportSeedResult,
   IssueReportPreference,
   LlmProvider,
   LlmProviderInput,
@@ -2253,15 +2252,6 @@ export class TauriAgentBridge implements AgentBridge {
 
   async deleteSession(sessionId: string): Promise<void> {
     await call("chat_delete", { sessionId });
-  }
-
-  async importSeedFile(path: string): Promise<ImportSeedResult> {
-    const raw = await call<ImportSeedResult>("import_seed_file", { path });
-    return {
-      imported: raw.imported ?? 0,
-      skipped: raw.skipped ?? [],
-      nodes: raw.nodes ?? [],
-    };
   }
 
   async getDeepSeekKey(): Promise<DeepSeekKeyState> {

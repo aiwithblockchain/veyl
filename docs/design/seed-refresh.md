@@ -6,6 +6,8 @@
 > 涉及：`src/components/Settings.tsx`（高级）、`src-tauri/src/seed.rs`、
 > `src-tauri/src/tools/net.rs`（`CatalogRefresh`）
 >
+> **刷新入口受试用闸门约束**：试用到期后停止更新，见 `trial-seed-expiry.md`。
+>
 > **这份文档解决什么**：后端早就有 `default_profile_refresh(force)`，AI 也有 `CatalogRefresh`，
 > 但设置页没有手动入口。用户只能等 6 小时的后台刷新，或者去问 AI。
 

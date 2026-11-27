@@ -274,6 +274,8 @@ async fn main() -> Result<()> {
         Arc::new(StubRotator::default()),
         false,
         None,
+        // The demo exercises auth and rotation, not metering.
+        None,
     )
     .await?;
     let url = agent.mcp_url();

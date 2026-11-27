@@ -392,6 +392,77 @@ describe("settings-point（AI 指路）", () => {
   }, 15_000);
 });
 
+describe("设置页试用节点到期", () => {
+  const EXPIRED = {
+    state: "expired" as const,
+    started_at: new Date(0).toISOString(),
+    expires_at: new Date(86_400_000).toISOString(),
+    remaining_ms: 0,
+    seed_node_count: 0,
+  };
+  const ACTIVE = {
+    state: "active" as const,
+    started_at: new Date(0).toISOString(),
+    expires_at: new Date(7 * 86_400_000).toISOString(),
+    remaining_ms: 7 * 86_400_000,
+    seed_node_count: 1,
+  };
+
+  function trialRow(): HTMLElement {
+    return screen
+      .getByText("更新试用节点", { selector: ".settings-row__label" })
+      .closest(".settings-row") as HTMLElement;
+  }
+
+  it("读到 expired 后打开设置：该行只有过期文案，没有按钮", async () => {
+    vi.spyOn(bridge, "trialStatus").mockResolvedValue(EXPIRED);
+    render(<App />);
+    await waitFor(() => expect(bridge.trialStatus).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
+    await screen.findByText("更新试用节点");
+
+    expect(
+      trialRow().querySelector(".settings-row__value")?.textContent,
+    ).toBe("试用节点已过期");
+    expect(within(trialRow()).queryByRole("button", { name: "检查更新" })).toBeNull();
+  }, 15_000);
+
+  it("设置页已打开时收到 trial-expired 事件：行立即转过期态", async () => {
+    vi.spyOn(bridge, "trialStatus")
+      .mockResolvedValueOnce(ACTIVE)
+      .mockResolvedValue(EXPIRED);
+    render(<App />);
+    await waitFor(() => expect(bridge.trialStatus).toHaveBeenCalled());
+
+    fireEvent.click(await screen.findByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "连接" }));
+    await screen.findByText("更新试用节点");
+    expect(within(trialRow()).getByRole("button", { name: "检查更新" })).toBeTruthy();
+
+    act(() => {
+      emit({
+        name: AGENT_EVENTS.trialExpired,
+        payload: {
+          contract_version: CONTRACT_VERSION,
+          ended_at: new Date().toISOString(),
+          removed_node_count: 0,
+          disconnected: false,
+          emitted_at: "",
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        trialRow().querySelector(".settings-row__value")?.textContent,
+      ).toBe("试用节点已过期"),
+    );
+    expect(within(trialRow()).queryByRole("button", { name: "检查更新" })).toBeNull();
+  }, 15_000);
+});
+
 describe("余额刷新的门禁（App 接线）", () => {
   function prepareWallet() {
     vi.spyOn(bridge, "myServerAccount").mockResolvedValue({

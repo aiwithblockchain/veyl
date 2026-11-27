@@ -1921,7 +1921,7 @@ check("DefaultProfileResult 的刷新字段（契约）", () => {
     problems.push("DefaultProfileResult 缺少 reason");
   } else {
     const vals = [...reasonM[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1]).sort();
-    const expected = ["invalid_content", "local_write", "offline", "stale_source"];
+    const expected = ["invalid_content", "local_write", "offline"];
     if (vals.join(",") !== expected.join(",")) {
       problems.push(`reason 取值必须是 ${expected.join(" | ")} | null，实际是 ${vals.join(" | ")}`);
     }
@@ -1932,7 +1932,7 @@ check("DefaultProfileResult 的刷新字段（契约）", () => {
   if (!/changed\s*:\s*boolean/.test(block)) problems.push("changed 必须是 boolean");
 
   const md = read("docs/contracts/commands.md");
-  for (const phrase of ["离线且有缓存仍返回 `Ok`", "分不出「离线」「内容异常」「来源过期」「本地写入失败」", "不得合并", "原来的 X 已下架，已切换到 Y"]) {
+  for (const phrase of ["离线且有缓存仍返回 `Ok`", "分不出「离线」「内容异常」「本地写入失败」", "不得合并", "原来的 X 已下架，已切换到 Y"]) {
     if (!md.includes(phrase)) problems.push(`commands.md 缺少说明：${phrase}`);
   }
   for (const bad of ["previous_node_name", "new_node_name"]) {
@@ -2047,7 +2047,7 @@ check("OfflineReason 的取值与契约一致（实现）", () => {
   const m = rs.match(/impl OfflineReason \{[\s\S]*?fn as_str\(self\)[\s\S]*?match self \{([\s\S]*?)\n        \}/);
   if (!m) return ["seed.rs 找不到 OfflineReason::as_str"];
   const values = [...m[1].matchAll(/=> "([a-z_]+)"/g)].map((x) => x[1]);
-  const expected = ["offline", "invalid_content", "stale_source", "local_write"];
+  const expected = ["offline", "invalid_content", "local_write"];
   const missing = expected.filter((v) => !values.includes(v));
   const extra = values.filter((v) => !expected.includes(v));
   const problems = [];
@@ -2499,8 +2499,8 @@ check("data-model §3.6 登记 seed_cache.etag_source（契约）", () => {
   if (!/etag_source\s+TEXT/.test(s36)) {
     problems.push("seed_cache 的 DDL 没有 etag_source 列");
   }
-  if (!s36.includes("跨源不复用")) {
-    problems.push("§3.6 没有写明 etag 跨源不复用（etag_source 记录来源）");
+  if (!s36.includes("etag_source")) {
+    problems.push("§3.6 没有登记 etag_source 的来源说明");
   }
   return problems;
 });

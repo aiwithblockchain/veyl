@@ -16,7 +16,6 @@ import type {
   NodeUpdateInput,
   NodeUpdateResult,
   NodeImportResult,
-  NodeImportSkipped,
   NodeProbeData,
   NodeProbeMethod,
   NodeProbePhase,
@@ -70,17 +69,6 @@ export interface RenamedSession {
   id: string;
   title: string;
   createdAt: number;
-}
-
-/**
- * `import_seed_file` 的返回（commands.md §8.3）。形状与 `NodeImportResult` 相同，
- * 但语义不同：种子导入的 `skipped` 恒为空，`nodes[].source` 写死为 `seed`。
- * **永远不含 password**。
- */
-export interface ImportSeedResult {
-  imported: number;
-  skipped: NodeImportSkipped[];
-  nodes: NodeSummary[];
 }
 
 /** `issue_report_reveal` / `issue_report_mail` 的返回（commands.md §7.12）。 */
@@ -1331,8 +1319,6 @@ export interface AgentBridge {
   renameSession(sessionId: string, title: string): Promise<RenamedSession>;
   /** 删除会话（R31）：不可恢复；有进行中的请求时先 cancel 再调用。 */
   deleteSession(sessionId: string): Promise<void>;
-  /** 拖拽导入：只传路径，文件内容由 Host 读，WebView 不碰明文密码。 */
-  importSeedFile(path: string): Promise<ImportSeedResult>;
   /** 读取 Key 的配置状态（只返回打码值，永不返回明文）。 */
   getDeepSeekKey(): Promise<DeepSeekKeyState>;
   /** 保存 Key；只进本机加密存储。 */

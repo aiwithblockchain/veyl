@@ -104,9 +104,9 @@ https://github.com/<owner>/<repo>/releases/latest/download/latest.json
 
 ### 3.5 例外：默认节点的种子包
 
-`veyl_seed.json` **不走随包基线**，只从控制面 `https://veyl.dessage.xyz/v1/seed` 拉取并缓存（主源，2026-11-17 起），GitHub Pages 作兜底。原因见 `docs/config-execution.md` §9——打包进安装包的节点凭据会被提取滥用。
+`veyl_seed.json` **不走随包基线**，只从控制面 `https://veyl.dessage.xyz/v1/seed` 拉取并缓存（唯一来源，2026-11-27 起正文存 D1、Pages 兜底已退役）。原因见 `docs/config-execution.md` §9——打包进安装包的节点凭据会被提取滥用。
 
-它**只含节点**，421 字节，由 4.6KB 的 `bootstrap.json` 抽取而来。**分流规则不进种子**——那是 AI 在对话里问出来的用户偏好，覆盖种子时不能动它。
+它**只含节点**，由 4.6KB 的 `bootstrap.json` 抽取而来。**分流规则不进种子**——那是 AI 在对话里问出来的用户偏好，覆盖种子时不能动它。
 
 文件很小，变更检测直接比对内容哈希，不依赖手写的 `version` 字段。
 

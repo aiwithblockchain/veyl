@@ -59,7 +59,7 @@
 | H1 | 运行时 | 行 + `ghost`/`primary`（`RuntimeUpgrade.tsx:704-860`） | 「建立连接时实际运行的程序。」；状态含「随包版本」等 | 检查、升级、回滚运行时 | `coreInfo` / `coreCheckUpdates` / `coreUpgrade` / `coreCancelUpgrade` / `coreRollback` | 高级 tab 里唯一会出现 `primary` 的项（仅「可升级」时） |
 | H2 | 测试节点 | 行 + `检查更新`（`Settings.tsx:1576-1583` + `SeedRefreshRow`） | 摘要「v3 · 12 个节点 · 3 小时前检查」+ 七种状态 | 拉取并合并默认节点池 | `defaultProfileRefresh` → `seed::refresh(force = true)`（`commands.rs:513`） | 连接中显示「下次连接生效」，属实：`running` 时只标记新版本（`seed.rs:216`、`420`） |
 | H3 | 后台组件 | 行 + `检查并更新`（`TunHelper.tsx`） | 「接管全部流量所需的系统服务。」+ 五种状态 | 更新/授权特权组件 | `tunHelperInfo` / `tunHelperRestart` | 文案已按 §4.3.2 对齐 |
-| H4 | 测试节点地址 | 只读 URL + 问 AI（`1586-1598`） | `https://meshnetprotocol.github.io/bootstrap.json` | **什么都不改变** | **没有**；且值错误——后端实际是 `https://meshnetprotocol.github.io/veyl_seed.json`（`seed.rs:21`） | 与 H2 是同一件事，拆成两行 |
+| H4 | 测试节点地址 | 只读 URL + 问 AI（`1586-1598`） | `https://meshnetprotocol.github.io/bootstrap.json` | **什么都不改变** | **没有**；且值错误——后端主源实际是 `https://veyl.dessage.xyz/v1/seed`（Pages 兜底已于 2026-11-27 删除） | 与 H2 是同一件事，拆成两行 |
 | H5 | 日志级别 | 只读 + 问 AI（`1600-1612`） | 「info（固定）」 | 什么都不改变 | **没有**；而且不「固定」：`RUST_LOG` 可覆盖文件级别（`logging.rs:289-293`） | 不是设置项 |
 | H6 | 诊断信息 | `ghost` 复制（`1616-1642`） | 「复制当前状态，便于排查问题；不包含 Key。」 | 复制一段 JSON 到剪贴板 | 本地组装（`runtime` + `bridge.mode`） | 与运行时/测试节点失败块里的「复制诊断」是同类 |
 | H7 | 接管诊断 | 仅 DEV 构建（`1645`） | — | 调 `tun_probe` | `TunDiagnosticsRow` | release 不显示，符合预期 |

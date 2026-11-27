@@ -322,6 +322,49 @@ describe("orders", () => {
     expect(server.transfer_gib).toBe(1000);
   });
 
+  it("建机期间行被销毁：删掉刚建的 Droplet，不把 destroyed 写回 booting", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    stubCatalog();
+    const baseFetch = globalThis.fetch;
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        return baseFetch(input as never, init as never);
+      }),
+    );
+    // 模拟 DO 建机的 1–3 秒里用户点了销毁：写回时行已经是 destroying。
+    db.beforeProvisionWrite = () => {
+      const row = db.rows("servers")[0];
+      row.state = "destroying";
+    };
+
+    const created = (await (
+      await handleOrders(orderRequest(env.token, "idem-key-race"), env as never)
+    )!.json()) as { order_id: string };
+    db.rows("accounts")[0].balance_cents = 2000;
+
+    const checkout = await handleOrders(
+      new Request(`https://example.com/v1/orders/${created.order_id}/checkout`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.token}`, "Idempotency-Key": "idem-checkout-race" },
+      }),
+      env as never,
+    );
+
+    expect(checkout?.status).toBe(502);
+    const body = (await checkout!.json()) as { details: { reason: string } };
+    expect(body.details.reason).toBe("provision_aborted");
+    // 行仍是销毁中：没有被写回 booting，provider_id 也没落库。
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(db.rows("servers")[0].provider_id).toBeNull();
+    // 刚建出来的 Droplet 立刻删掉，不留一台没人管理的计费实例。
+    expect(calls).toContain("DELETE https://api.digitalocean.com/v2/droplets/424242");
+    expect(db.rows("audit_log").some((row) => row.action === "provision.created")).toBe(false);
+  });
+
   it("余额不足 7 天日价时拒绝建机，details 带门槛值", async () => {
     const db = new FakeD1();
     const env = await envWith(db, await signingJwk());

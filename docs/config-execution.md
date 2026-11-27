@@ -171,20 +171,21 @@ Method    aes-256-gcm
 
 ## 9. Veyl 免费节点的凭据从哪来
 
-**决定：不随包，只从种子 URL 拉。**
+**决定：不随包，客户端只从 `/v1/seed` 拉；正文存在控制面 D1。**
 
 ```
-https://veyl.dessage.xyz/v1/seed                    # 主源：控制面 Worker 直出（2026-11-17 起）
-https://meshnetprotocol.github.io/veyl_seed.json    # 兜底源：主源失败时才用
+https://veyl.dessage.xyz/v1/seed   # 唯一来源：控制面 Worker 读 D1 seed_payload 后原样返回
 ```
 
-主源的数据就是 control-plane Worker 源码里的 `src/seed.ts`，改完部署即生效；两源用同一份内容哈希判定更新。设计见 `docs/design/seed-publishing.md`。
+种子正文是一行 JSON，存在控制面 D1 的 `seed_payload`（版本 / 更新时刻 / 正文 / 正文 sha256）。改节点用 `scripts/seed/publish-d1.ts` 发布进 D1，**不需要重新部署 Worker**；D1 无行时接口返回 503 `seed_unavailable`，客户端按离线处理。更新仍只按内容哈希判定。设计见 `docs/design/seed-publishing.md`。
 
-> **术语（不要混用）**：对外统一叫**「Veyl 免费节点」**（选项里写「Veyl 免费节点（仅供试用）」）——它只供试用，稳定性和长期可用性都不承诺，产品方向是用户自建节点与供应商接入。代码里的机制名仍是「种子」「默认节点」（`veyl_seed.json`、`default_profile.rs`、日志「默认节点刷新」、`ConfigCreate(source: "seed")`），**不改名**，本文提到机制时也沿用这些名字。两个名字指同一批服务器，别把机制名当成对外叫法。
+匿名的 `/v1/seed` 是种子分发的**唯一暴露面**：没有签名、没有鉴权，读到正文就等于拿到全部节点凭据；D1 写入权限与 Worker 部署权限同级，不经过这个接口。
+
+> **术语（不要混用）**：对外统一叫**「Veyl 免费节点」**（选项里写「Veyl 免费节点（仅供试用）」）——它只供试用，稳定性和长期可用性都不承诺，产品方向是用户自建节点与供应商接入。代码里的机制名仍是「种子」「默认节点」（`seed_payload`、`default_profile.rs`、日志「默认节点刷新」、`ConfigCreate(source: "seed")`），**不改名**，本文提到机制时也沿用这些名字。两个名字指同一批服务器，别把机制名当成对外叫法。
 
 | 项 | 做法 |
 |---|---|
-| Git 仓库 | 放**源文件**（可 review、可回滚），但**客户端不读仓库**，只读上面的 URL |
+| Git 仓库 | **不存节点数据**；正文只在 D1，发布脚本读仓库外（或已 gitignore）的本地 JSON |
 | 安装包 | **不预置** |
 | 首次启动 | 从 URL 拉取，**落盘缓存** |
 | 之后启动 | 直接用缓存，不依赖网络 |
@@ -240,14 +241,14 @@ https://meshnetprotocol.github.io/veyl_seed.json    # 兜底源：主源失败�
 ### 怎么拉
 
 - **每次直接拉全文，自己算内容哈希比对**，不依赖 `version` 字段
-- 理由：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。文件才 421 字节，没必要为省这点流量冒这个险
+- 理由：`version` 要人手动改，「改了文件忘了改版本号」正是 TweetPilot 那次事故的根因（`docs/issues/tweetpilot-resource-version-gap.md`）。正文只有几百字节，没必要为省这点流量冒这个险
 - 先带 `If-None-Match` 发条件请求，304 就直接结束——服务器说没变就不用下
 - **同一时刻只允许一个请求在飞**，避免并发写坏缓存
 - **失败要重试**：每次重试发起新请求（系统重新解析 DNS），已连接时可改走代理兜底；三次都失败就保留旧缓存，下一轮再试。不要复用上一次的连接或 IP
 
-### 我们消费的文件
+### 我们消费的正文
 
-`veyl_seed.json`，421 字节：
+`/v1/seed` 返回的 JSON（几百字节）：
 
 ```json
 {
@@ -260,7 +261,7 @@ https://meshnetprotocol.github.io/veyl_seed.json    # 兜底源：主源失败�
 }
 ```
 
-上游是 `bootstrap.json`（4686 字节，含服务商元数据、完整 sing-box 配置、`routing_rules`）。我们从中**只抽取节点**，生成这个精简文件。
+上游是 `bootstrap.json`（4686 字节，含服务商元数据、完整 sing-box 配置、`routing_rules`）。我们从中**只抽取节点**，发布脚本把这份精简正文写进 D1。
 
 ### 分流不在这里
 
@@ -274,7 +275,7 @@ https://meshnetprotocol.github.io/veyl_seed.json    # 兜底源：主源失败�
 
 | 层 | 来源 | 覆盖种子时 |
 |---|---|---|
-| 节点 | `veyl_seed.json` | 整层替换 |
+| 节点 | `/v1/seed` 正文（D1 `seed_payload`） | 整层替换 |
 | 分流 | AI 对话 + 用户手动调整 | **永不动** |
 
 ### 可达性实测（2026-11-03）

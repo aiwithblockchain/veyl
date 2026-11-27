@@ -368,6 +368,10 @@ pub fn run() {
                         crate::seed::RefreshOutcome::Offline { cached, error, .. } => {
                             log::warn!("默认节点刷新失败（cached={cached}）：{error}")
                         }
+                        // 到期只停更新，不永久退出循环：本地重置试用后无需重启即可恢复。
+                        crate::seed::RefreshOutcome::TrialExpired => {
+                            log::info!("试用已过期，种子刷新暂停")
+                        }
                         outcome => log::info!("默认节点刷新：{outcome:?}"),
                     }
                     tokio::time::sleep(crate::seed::REFRESH_INTERVAL).await;
@@ -478,7 +482,6 @@ pub fn run() {
                 agent::commands::route_targets_set,
                 agent::commands::default_profile_status,
                 agent::commands::default_profile_refresh,
-                agent::commands::import_seed_file,
                 agent::commands::rules_status,
                 agent::commands::category_list,
                 agent::commands::system_region,
@@ -585,7 +588,6 @@ pub fn run() {
                 agent::commands::route_targets_set,
                 agent::commands::default_profile_status,
                 agent::commands::default_profile_refresh,
-                agent::commands::import_seed_file,
                 agent::commands::rules_status,
                 agent::commands::category_list,
                 agent::commands::system_region,

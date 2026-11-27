@@ -28,7 +28,7 @@
 | 1 | **删「用哪个节点」** | 同意。主界面底部已有节点切换，两处一旦不同步，用户会怀疑哪边对。删除时一并清掉 `openNodeSheetSignal` 专线；已确认布局持久化（`veyl-ui.usePaneLayout` 的 rail / assistant 宽度）里没有对该信号的引用。 |
 | 2 | **从 skill 移除「接管方式」「默认配置源」的问 AI 项** | 方向同意，但**先别动 skill**：`veyl-ui` 正等产品负责人拍板「规范更新到现实现」还是「外壳退回旧规范」，skill 会整体更新一次，届时一并改，避免改两遍互相打架。本文只记待办（§8 T7）。 |
 | 3 | **`node_import_file` 已实现，随本批次验证** | 导入走错命令是真 bug，记在 §1.7 P1；新命令契约在 2.16.14 定稿（`commands.md` §4.1.2），**后端命令与设置页文件入口均已落地（未提交）**，按验收手册对应条目验证。 |
-| 4 | **窗口拖放不迁到 `node_import_file`** | 拖入的只可能是种子 `.json`（`{ version, updated_at, nodes[] }`），与逐行 `ss://` 是两种格式；迁过去会把一份可用文件判成「没有可用节点」。拖放继续调 `import_seed_file`，只收 `.json`；种子分发退场后再定去向。B 批次只做设置页文件入口（§4.1、§4.2）。 |
+| 4 | **窗口拖放不迁到 `node_import_file`** | 已随 2.91.0 退役：窗口拖放与 `import_seed_file` 一并删除（`trial-seed-expiry.md` §4.2）。B 批次只做设置页文件入口（§4.1、§4.2）。 |
 
 ---
 
@@ -448,16 +448,15 @@ node_import_file { path, configId? } → NodeImportResult
 - **不按扩展名过滤**；与 `node_import_text` 同一套解析：`ss://` 列表（含 base64 整段）或 Clash 配置的 `proxies:` 子集（2.83.0 起）；都不命中才落到 `not_node_text`。
 - 命令编号 #69，`commands.md` 版本 `2.16.14`，完整条目见 §4.1.2。
 - 前端行为：系统对话框选文件 → 显示文件名并确认 → 调命令。**不把文件内容填进文本框**（需要前端读文件或命令回显全文，两者都不做）。
-- **窗口拖放不接这条命令**（2026-11-11 决议）：拖入的只可能是种子文件，格式与逐行 `ss://` 不同，继续走 `import_seed_file`。拖入非 `.json` 时的提示要指向本页的「添加节点」，不能只说「请换一个文件」。
+- **窗口拖放已随 2.91.0 删除**，本命令没有拖放入口；用户拖文件到窗口不再有任何行为。
 
 **备选（不推荐）**：给 `node_import_text` 加可选 `path`，二选一。这样会让「不发网络请求、也不读文件系统」的文本命令多一种能力，边界变模糊，也更容易被调用方误用。
 
-### 4.2 需要保留但从设置页退出：`import_seed_file`
+### 4.2 已退役：`import_seed_file`
 
-- 继续注册（离线兜底、开发测试仍可能用），但目标状态是设置页不再调用。
-- **当前状态**：只剩**窗口级拖放**在调用它（`App.tsx:341-375` 的 `onDragDropEvent` → `importPath` → `importSeedFile`，只收 `.json` 种子文件）。设置页的粘贴 / 订阅 / 文件入口在 A、B 批次分别接 `node_import_text` / `node_import_url` / `node_import_file`，不再调它。窗口拖放**不迁**（见 §4.1），种子分发退场后再定去向——那时才可能把 UI 调用方降到零。
-- 在 `commands.md` 的 #24 与 §8.3 写的是「**目标状态：UI 不再使用**」并列出当前调用方；不要只写「UI 不再使用」——那会让文档第二次说谎。
-- 不从代码里删除，避免影响种子分发路径。
+- **已随 2.91.0 删除**，连同窗口级拖放一起退役（`docs/design/trial-seed-expiry.md` §4.2）。种子节点唯一的网络更新入口是 `default_profile_refresh`；用户要加自己的节点走设置 › 连接 ›「添加节点」（§4.1）。
+- 删除理由：没有界面入口、没有用户认知，而且它不查试用状态也不查排除表，是过期后把试用节点加回来的暗路。
+- 删除前已经导入的节点留在库里（`source = "seed"`），继续可用；删除命令不会清数据。
 
 ### 4.3 不需要改契约的改动
 
@@ -528,14 +527,14 @@ node_import_file { path, configId? } → NodeImportResult
 
 - 没有新增设置键，没有改键的形状。
 - 没有改 `settings` 表结构，`user_version` 保持 1。
-- 旧的 `import_seed_file` 导入结果已经在 `nodes` 表里（`source = "seed"`），继续可用；新通道写入 `source = "manual"`，两者并存。
+- 旧命令 `import_seed_file`（2.91.0 已删除）导入过的结果已经在 `nodes` 表里（`source = "seed"`），继续可用；新通道写入 `source = "manual"`，两者并存。
 - 已废弃的 `listen_port` 不参与展示，也不迁移（`model.ts:27`）。
 
 ### 5.4 回滚
 
 - 前端改动可整体回退；数据格式未变，回退后仍能读。
 - `node_import_file` 是新增命令，回退后不被调用即可；已导入的节点留在库里，不需要清理。
-- `import_seed_file` 未删除，回退后设置页可恢复旧调用。
+- `import_seed_file` 已删除（2.91.0），回退需要连同前端拖放一起恢复；数据格式未变。
 
 ---
 
@@ -606,7 +605,7 @@ node_import_file { path, configId? } → NodeImportResult
 |---|---|---|
 | **A（前端，可立即做）** | A1 删「用哪个节点」+ 清 `openNodeSheetSignal` 专线；A2 添加节点接文本 / 订阅；A3 端口说明改用 `port_fallback`；A4 连接方式只看 `connect_mode` 分文案；A5 重置网络改名 + 成功结果折叠；A6 无配置空态；A7 tab 改名 / 页内标题 / tab 语义；A8 关于页（版本 + 数据去向）；A9 文案清理；A10 问 AI 返回原 tab | 无 |
 | **E（新建配置重构）** | 见 `simplified-config-create.md`：两问弹窗 + 审视页；控制台 hero 第二行「流量范围」开关；左栏标签只看 `connect_mode`；设置页只跟随，不新增地区控件 | 与 A 同轮；地区链路有后端契约变更（commands 2.18 / events 2.12 / tools 3.10） |
-| **B（后端 + 前端）** | `node_import_file`（#69，仅 UI；契约 2.16.14）+ 文件通道界面；**已实现（未提交），随本批次验证**。**不含窗口拖放**（拖放仍走 `import_seed_file`，种子分发退场后再定） | 设置 IA 定稿；与 A 同一轮或紧随 |
+| **B（后端 + 前端）** | `node_import_file`（#69，仅 UI；契约 2.16.14）+ 文件通道界面；**已实现（未提交），随本批次验证**。窗口拖放与 `import_seed_file` 已随 2.91.0 删除（`trial-seed-expiry.md` §4.2） | 设置 IA 定稿；与 A 同一轮或紧随 |
 | **C（规范）** | `veyl-ui` §2.2 端口事实、§5 问 AI 清单 | 等产品负责人拍板 skill 整体更新方向 |
 | **D（产品输入）** | 关于页开源 / 反馈 URL；`flush_dns` 是否补正式入口 | 产品；本轮建议只改文档标注 |
 
