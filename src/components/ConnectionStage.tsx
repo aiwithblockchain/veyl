@@ -129,6 +129,9 @@ type TabSource = "owned" | "custom";
 /** 到期提醒点过「知道了」就记住，避免每次启动都再弹一次。 */
 const TRIAL_EXPIRED_DISMISSED_KEY = "veyl.ui.trialExpiredDismissed.v1";
 
+/** 余额预估只在快用完时出现：剩余天数小于 7 才提醒，正常余额不常驻一行。 */
+const BALANCE_RUNWAY_WARN_DAYS = 7;
+
 /** 读数里的数字用等宽：账号面板的余额是整串等宽，这里只等宽数字本身。 */
 function withMonoDigits(text: string) {
   // 只包数字；金额的 $ 与中文量词留在正文字体里。
@@ -1382,7 +1385,9 @@ export function ConnectionStage({
             />
           ) : null}
 
-          {balanceRunway && balanceRunway.remainingDays !== null ? (
+          {balanceRunway &&
+          balanceRunway.remainingDays !== null &&
+          balanceRunway.remainingDays < BALANCE_RUNWAY_WARN_DAYS ? (
             <button
               type="button"
               className="stage-runway"

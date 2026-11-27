@@ -3180,16 +3180,28 @@ describe("自定义节点移除", () => {
 });
 
 describe("余额预估", () => {
-  it("有剩余天数：一行写清每天金额与还能用几天，数字等宽", () => {
+  it("快用完（3 天）：一行写清每天金额与还能用几天，数字等宽", () => {
     renderStage({
-      balanceRunway: { dailyCents: 360, remainingDays: 10 },
+      balanceRunway: { dailyCents: 360, remainingDays: 3 },
     });
 
     const row = screen.getByRole("button", {
-      name: "账户每天约 $3.60 · 约 10 天后余额用尽",
+      name: "账户每天约 $3.60 · 约 3 天后余额用尽",
     });
-    expect(row.textContent).toBe("账户每天约 $3.60 · 约 10 天后余额用尽");
+    expect(row.textContent).toBe("账户每天约 $3.60 · 约 3 天后余额用尽");
     expect(row.querySelectorAll(".num")).toHaveLength(2);
+  });
+
+  it("正好 7 天：还没到提醒线，整行不渲染", () => {
+    renderStage({ balanceRunway: { dailyCents: 360, remainingDays: 7 } });
+
+    expect(screen.queryByRole("button", { name: /每天约/ })).toBeNull();
+  });
+
+  it("余额充足（10 天）：不常驻提醒，整行不渲染", () => {
+    renderStage({ balanceRunway: { dailyCents: 360, remainingDays: 10 } });
+
+    expect(screen.queryByRole("button", { name: /每天约/ })).toBeNull();
   });
 
   it("剩余 0 天：只说余额不足，不再报每天多少钱", () => {
