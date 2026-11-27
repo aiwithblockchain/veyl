@@ -17,7 +17,7 @@ pub struct AppState {
     pub store: Store,
     pub secrets: Arc<dyn SecretStore>,
     pub http: reqwest::Client,
-    pub connection: ConnectionManager,
+    pub connection: Arc<ConnectionManager>,
     /// 退出流程是否已经开始：`RunEvent::ExitRequested` 会再来一次，不能重复拦。
     pub shutdown_started: AtomicBool,
 }
@@ -29,7 +29,7 @@ impl AppState {
         let secrets = secrets::open(&data_dir, service);
         let http = crate::fetch::client()?;
         let session = Arc::new(veyl_tun::session::TunSession::new(veyl_tun::privilege::select()));
-        let connection = ConnectionManager::new(session, http.clone());
+        let connection = Arc::new(ConnectionManager::new(session, http.clone()));
         Ok(Self {
             data_dir,
             store,
@@ -48,7 +48,7 @@ impl AppState {
         Self {
             store: Store::new(&data_dir).expect("测试目录可写"),
             secrets: Arc::new(secrets::MemoryStore::new()),
-            connection: ConnectionManager::new(session, http.clone()),
+            connection: Arc::new(ConnectionManager::new(session, http.clone())),
             http,
             data_dir,
             shutdown_started: AtomicBool::new(false),

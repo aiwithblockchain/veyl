@@ -55,6 +55,15 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<state::AppState>();
+                // 先挂上 presence 租约：即便进程被强杀，helper 也会在宽限期后
+                // 停掉隧道；再去接手可能已经在跑的隧道。
+                {
+                    let connection = state.connection.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        connection.hold_presence_lease();
+                    })
+                    .await;
+                }
                 state.connection.adopt_existing().await;
             });
             Ok(())
@@ -89,17 +98,30 @@ pub fn run() {
                 return;
             }
             api.prevent_exit();
+            eprintln!("veyl-cli: 收到退出请求，先断开隧道");
             let handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<state::AppState>();
                 // 先拒绝新的连接：退出过程中刚点下的那次 connect 也不能再拉起隧道。
                 state.connection.begin_shutdown();
+
+                // 等已经在飞的 connect 落地（它会看到 closing 并自行收尾）。
+                // 只等 3 秒：helper 的 start 上限远大于这个数，剩下的交给
+                // presence 租约兜底，不能让用户按了退出还卡着。
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                while state.connection.inflight_connections() > 0
+                    && tokio::time::Instant::now() < deadline
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+
                 // 清理最多等 15 秒；helper 的停止预算本身是 10 秒。
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(15),
                     state.connection.disconnect(),
                 )
                 .await;
+                eprintln!("veyl-cli: 退出前的清理结束");
                 drop(state);
                 handle.exit(0);
             });

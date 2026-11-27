@@ -843,10 +843,10 @@ mod tests {
             data_dir: data.path().to_path_buf(),
             store: Store::new(data.path()).unwrap(),
             secrets: Arc::new(FailingStore),
-            connection: crate::connection::ConnectionManager::new(
+            connection: Arc::new(crate::connection::ConnectionManager::new(
                 Arc::new(veyl_tun::session::TunSession::new(veyl_tun::privilege::select())),
                 http.clone(),
-            ),
+            )),
             http,
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
         };

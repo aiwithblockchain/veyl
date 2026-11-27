@@ -1,10 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConnectionSnapshot, ProfileDetail } from "../api";
+import type { ConnectionSnapshot, ProfileDetail as ProfileDetailData } from "../api";
 import { ProfileDetail } from "./ProfileDetail";
 
-function detail(nodeCount = 2): ProfileDetail {
+function detail(nodeCount = 2): ProfileDetailData {
   return {
     profile: {
       id: "p1",

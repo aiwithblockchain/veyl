@@ -666,6 +666,8 @@ export const zh = {
   "console.probe.allFailed": "这次都没测通。",
   "console.probe.allUntested": "这次没测成。",
   "console.probe.mixed": "{count} 个没测成。",
+  "console.probe.needsReconnectOne": "有 {count} 个节点要重新连接后才能测。",
+  "console.probe.needsReconnect": "有 {count} 个节点要重新连接后才能测。",
   "console.selfOwnedUnreachable":
     "连不上不一定是机器的问题，你当前的网络到那个地区的线路不通很常见。可以销毁重建，当天已扣的费用不退。",
   "console.group.owned": "我的服务器",

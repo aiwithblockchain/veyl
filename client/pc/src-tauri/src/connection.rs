@@ -78,6 +78,11 @@ pub struct ConnectionManager {
     cancel: std::sync::atomic::AtomicBool,
     /// 应用正在退出。sticky：一旦置位，后续 `connect` 一律拒绝。
     closing: std::sync::atomic::AtomicBool,
+    /// 进程存活期间持有的 presence 租约。进程一消失（含被强杀）helper 会在
+    /// 宽限期后自己停掉隧道——退出钩子来不及跑时这是最后一道兜底。
+    lease: Mutex<Option<veyl_tun::backend::TunLease>>,
+    /// 正在进行的 connect 数量：退出时要等它们落地，不能抢先退出把隧道留下。
+    inflight: std::sync::atomic::AtomicUsize,
     observer: Mutex<Option<Observer>>,
 }
 
@@ -106,6 +111,8 @@ impl ConnectionManager {
             op: tokio::sync::Mutex::new(()),
             cancel: std::sync::atomic::AtomicBool::new(false),
             closing: std::sync::atomic::AtomicBool::new(false),
+            lease: Mutex::new(None),
+            inflight: std::sync::atomic::AtomicUsize::new(0),
             observer: Mutex::new(None),
         }
     }
@@ -128,7 +135,29 @@ impl ConnectionManager {
             op: tokio::sync::Mutex::new(()),
             cancel: std::sync::atomic::AtomicBool::new(false),
             closing: std::sync::atomic::AtomicBool::new(false),
+            lease: Mutex::new(None),
+            inflight: std::sync::atomic::AtomicUsize::new(0),
             observer: Mutex::new(None),
+        }
+    }
+
+    /// 正在进行的连接数。退出流程用它判断「有没有还没落地的 connect」。
+    pub fn inflight_connections(&self) -> usize {
+        self.inflight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 拿一条 presence 租约并持有到进程退出。失败只记一笔，不影响使用。
+    pub fn hold_presence_lease(&self) {
+        let mut slot = self.lease.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        match self.session.acquire_presence_lease() {
+            Ok(Some(lease)) => *slot = Some(lease),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("veyl-cli: presence 租约没拿到（helper 未就绪或版本旧）：{error}");
+            }
         }
     }
 
@@ -261,6 +290,17 @@ impl ConnectionManager {
     // -----------------------------------------------------------------------
 
     pub async fn connect(&self, profile: &Profile, raw: &str) -> AppResult<ConnectionSnapshot> {
+        struct InflightGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for InflightGuard<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        self.inflight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _inflight = InflightGuard(&self.inflight);
+
         let _guard = self.op.lock().await;
         if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(AppError::new("SHUTTING_DOWN", "应用正在退出，不能再发起连接")

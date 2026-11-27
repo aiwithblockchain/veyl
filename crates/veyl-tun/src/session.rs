@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::backend::{
-    ClashApi, DnsHijack, StartReply, TunBackend, TunError, TunErrorCode, TunSnapshot,
+    ClashApi, DnsHijack, StartReply, TunBackend, TunError, TunErrorCode, TunLease, TunSnapshot,
     TUN_REPLY_DEADLINE_CONTROL,
 };
 use crate::privilege::{HelperStatus, Registration};
@@ -898,6 +898,15 @@ impl TunSession {
         let pid = (*self.pid.lock().unwrap())?;
         let meta = self.meta.lock().unwrap().clone()?;
         Some((pid, meta))
+    }
+
+    /// 拿一条 presence 租约：helper 据此判断 App 是否还在，App 进程一消失
+    /// （包括被强杀）helper 会在宽限期后停掉隧道。持有到进程退出即可。
+    ///
+    /// 平台不支持、或 helper 版本太旧时返回 `Ok(None)`；租约是崩溃兜底，
+    /// 不是连接的前提，调用方不该因此让连接失败。
+    pub fn acquire_presence_lease(&self) -> Result<Option<TunLease>, TunError> {
+        self.backend.acquire_lease()
     }
 
     /// 没有缓存时的一次性接手：先判就绪，再问后端。
