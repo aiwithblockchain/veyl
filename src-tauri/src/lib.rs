@@ -28,6 +28,7 @@ pub mod store;
 pub mod tools;
 pub mod trial;
 pub mod tun;
+mod tun_identity;
 
 #[cfg(test)]
 mod test_support;
@@ -68,6 +69,8 @@ fn catalog_base_url(store: &Store) -> String {
 }
 
 pub fn run() {
+    // 身份最先注入：后面任何一步都可能碰到 TUN 层，未注入会直接 panic。
+    crate::tun_identity::install();
     let data_dir = crate::runtime::default_app_data_dir();
     // 空目录首次启动：`~/.veyl` 0700、helper-logs 0755。失败留给后面的读写去报。
     if let Err(error) = crate::runtime::prepare_app_data_dir(&data_dir) {

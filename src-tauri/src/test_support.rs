@@ -17,6 +17,18 @@ pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 这把锁；只有读的断言也一样要用，否则读到的是别人写了一半的状态。
 pub static AUTH_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 整个测试进程只安装一次 TUN 身份。
+///
+/// 触及 `veyl_tun::identity()` 的测试都要先调这个：没注入会 panic，而不是
+/// 回退到某个默认身份。与 `install_test_secrets` 同一约定。
+#[allow(dead_code)]
+pub fn install_test_identity() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = veyl_tun::identity::install(crate::tun_identity::build());
+    });
+}
+
 /// 整个测试进程只安装一次本机凭据存储（`secrets.enc`）。
 pub fn install_test_secrets() {
     static ONCE: OnceLock<()> = OnceLock::new();

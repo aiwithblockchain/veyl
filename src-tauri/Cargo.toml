@@ -69,6 +69,11 @@ futures = "0.3"
 log = { version = "0.4", features = ["std"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# TUN 接管与提权协议层：主客户端与 veyl-cli 共用同一份实现。
+# 必须放在这个 [dependencies] 段内——放到后面任何 [target.'cfg(..)'.dependencies]
+# 段之后，会变成平台专属依赖。
+veyl-tun = { path = "../crates/veyl-tun" }
+
 # Claurst 以 crate 链接进主进程（git submodule，固定 commit，不修改源码）。
 # 必须放在 [dependencies] 段内——放到后面任何 [target.'cfg(..)'.dependencies]
 # 段之后，会变成平台专属依赖，macOS 上直接链接不到。

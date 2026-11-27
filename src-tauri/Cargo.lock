@@ -5855,10 +5855,29 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "veyl-tun",
  "windows-sys 0.59.0",
  "winreg 0.52.0",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "veyl-tun"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "chrono",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "objc2-service-management",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
