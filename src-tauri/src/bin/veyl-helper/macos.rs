@@ -12,14 +12,11 @@
 #[path = "../../veyl_paths.rs"]
 #[allow(dead_code)]
 mod veyl_paths;
-#[path = "../../tun/protocol.rs"]
-mod protocol;
-#[path = "../../tun/trust.rs"]
-#[allow(dead_code)]
-mod trust;
-#[path = "../../tun/xpc.rs"]
-#[allow(dead_code)] // 与主程序共用同一份绑定，helper 只用服务端那几个
-mod xpc;
+// 身份参数：与主程序共用同一份组装逻辑（二进制各自注入一次）。
+#[path = "../../tun_identity.rs"]
+mod tun_identity;
+
+use veyl_tun::{protocol, trust, xpc};
 
 use std::ffi::{c_char, c_void};
 use std::io::Write;
@@ -256,6 +253,7 @@ extern "C" fn on_signal(_signal: libc::c_int) {
 }
 
 pub fn run() {
+    tun_identity::install();
     if !is_root() {
         eprintln!("veyl-helper: 必须以 root 运行");
         std::process::exit(1);
@@ -350,7 +348,7 @@ pub fn run() {
 fn serve(supervisor: Arc<Supervisor>) -> ! {
     use block2::RcBlock;
 
-    let listener = xpc::create_listener(protocol::MACH_SERVICE);
+    let listener = xpc::create_listener(protocol::mach_service());
     if listener.is_null() {
         eprintln!("veyl-helper: 无法创建监听（Mach service 未注册？）");
         std::process::exit(3);
@@ -2354,7 +2352,7 @@ fn bundle_signature_valid(bundle: &Path) -> Result<(), String> {
 fn staged_runtime_signature_valid(path: &Path) -> Result<(), String> {
     let requirement = format!(
         "anchor apple generic and identifier \"{RUNTIME_IDENTIFIER}\" and certificate leaf[subject.OU] = \"{}\"",
-        protocol::TEAM_ID
+        protocol::team_id()
     );
     // universal 二进制的两片都要是我们签的，所以查全部架构。
     static_requirement_check(path, false, &requirement, 1)
@@ -2729,7 +2727,7 @@ fn describe_exit(status: &std::process::ExitStatus) -> String {
 fn prepare_trust_root() -> Result<PathBuf, trust::TrustError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = PathBuf::from(trust::TRUST_ROOT);
+    let root = PathBuf::from(trust::trust_root());
     let parent = root
         .parent()
         .ok_or_else(|| trust::TrustError::Io("信任根没有父目录".into()))?

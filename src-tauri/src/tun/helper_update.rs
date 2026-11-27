@@ -898,7 +898,7 @@ mod macos {
         format!(
             "anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{}\"",
             super::HELPER_BINARY_NAME,
-            crate::tun::protocol::TEAM_ID
+            crate::tun::protocol::team_id()
         )
     }
 
@@ -1025,7 +1025,7 @@ mod macos {
                 let identifier = dict_string(info, "identifier");
                 let team = dict_string(info, "teamid");
                 let matches = identifier.as_deref() == Some(super::HELPER_BINARY_NAME)
-                    && team.as_deref() == Some(crate::tun::protocol::TEAM_ID);
+                    && team.as_deref() == Some(crate::tun::protocol::team_id());
                 if matches {
                     unique_hex(info)
                 } else {

@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
-pub const MACH_SERVICE: &str = "com.veyl.helper";
+/// macOS XPC Mach service 标签。名字属于 APP 身份，从注入的 [`crate::identity`] 取。
+pub use crate::identity::mach_service;
 
 /// 配置内容上限。真实配置 10 KB 上下，512 KB 留足余量又不至于被塞爆内存。
 pub const MAX_CONFIG_BYTES: usize = 512 * 1024;
@@ -29,15 +30,19 @@ pub const ERR_TUN_START_FAILED: &str = "tun_start_failed";
 /// `restart` 在 start 进行中会被拒绝；调用方稍后重试。
 pub const ERR_PRECONDITION_FAILED: &str = "precondition_failed";
 
-/// 从 `tauri.conf.json` 编译进来的 bundle identifier（见 `build.rs`）。
-/// 不要在别处再写一遍字面量——写错一次就是所有 XPC 连接被拒。
-pub const BUNDLE_IDENTIFIER: &str = env!("VEYL_BUNDLE_IDENTIFIER");
-pub const TEAM_ID: &str = env!("VEYL_TEAM_ID");
+/// 签名身份：bundle identifier 与 Team ID 都来自 APP 注入的 [`crate::identity`]。
+/// 不要在别处再写字面量——写错一次就是所有 XPC 连接被拒。
+pub use crate::identity::{bundle_identifier, team_id};
 
 /// helper 用来判定「对端是不是我们签名的 App」的 designated requirement。
 pub fn app_requirement() -> String {
+    app_requirement_for(bundle_identifier(), team_id())
+}
+
+/// 纯函数版本：测试与多 APP 场景不必先注入全局身份。
+pub fn app_requirement_for(bundle_identifier: &str, team_id: &str) -> String {
     format!(
-        "anchor apple generic and identifier \"{BUNDLE_IDENTIFIER}\" and certificate leaf[subject.OU] = \"{TEAM_ID}\""
+        "anchor apple generic and identifier \"{bundle_identifier}\" and certificate leaf[subject.OU] = \"{team_id}\""
     )
 }
 
@@ -148,8 +153,8 @@ impl std::fmt::Display for ProtocolError {
 /// `runtime_missing`，而不是去猜一个路径。
 #[cfg(unix)]
 pub fn runtime_sha256() -> Option<&'static str> {
-    let digest = env!("VEYL_RUNTIME_SHA256");
-    super::trust::is_full_sha256(digest).then_some(digest)
+    let digest = crate::identity::runtime_sha256();
+    crate::trust::is_full_sha256(digest).then_some(digest)
 }
 
 /// 规则归档的 sha256，由 `build.rs` 从**构建时那个归档**算出来。
@@ -164,8 +169,8 @@ pub fn runtime_sha256() -> Option<&'static str> {
 /// 它的作用是让 helper 不必从包里读 manifest 再自证：先认这个值，再认归档里的清单。
 #[cfg(unix)]
 pub fn rules_archive_sha256() -> Option<&'static str> {
-    let digest = env!("VEYL_RULES_ARCHIVE_SHA256");
-    super::trust::is_full_sha256(digest).then_some(digest)
+    let digest = crate::identity::rules_archive_sha256();
+    crate::trust::is_full_sha256(digest).then_some(digest)
 }
 
 /// 把 App 送来的配置改写成**由 helper 决定路径**的版本。
@@ -697,30 +702,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 这条字符串写错一次就是所有连接被拒，而且编译期、单测都不会发现。
-    /// 所以不靠人眼：直接从 tauri.conf.json 读出来比对。
     #[test]
-    fn the_requirement_uses_the_real_bundle_identifier() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
-        let text = std::fs::read_to_string(&path).expect("读取 tauri.conf.json");
-        let key = "\"identifier\"";
-        let after = &text[text.find(key).expect("配置里没有 identifier") + key.len()..];
-        let after = &after[after.find(':').expect("格式不对") + 1..];
-        let start = after.find('"').expect("格式不对") + 1;
-        let identifier = &after[start..start + after[start..].find('"').unwrap()];
-
-        let requirement = app_requirement();
-        assert!(
-            requirement.contains(&format!("identifier \"{identifier}\"")),
-            "requirement 里的 identifier 与 tauri.conf.json 不一致：{requirement}"
-        );
-        assert!(
-            !requirement.contains("com.veyl.app"),
-            "这是之前写错的那个值"
-        );
-        assert!(
-            requirement.contains(&format!("subject.OU] = \"{TEAM_ID}\"")),
-            "Team ID 必须进 requirement：{requirement}"
-        );
+    fn the_requirement_is_built_from_the_injected_identity() {
+        let requirement = app_requirement_for("com.example.client", "TEAMID1234");
+        assert!(requirement.contains("identifier \"com.example.client\""));
+        assert!(requirement.contains("subject.OU] = \"TEAMID1234\""));
     }
 }

@@ -1,6 +1,6 @@
 //! 信任根的校验：**每次使用前**逐级看，而不是建的时候看一眼。
 //!
-//! 主程序与 helper 共用这一份（helper 用 `#[path]` 引入）。
+//! 主程序与 helper 共用这一份。
 //!
 //! 规则只有三条，但对每一级都必须成立：
 //! 1. 是真实目录，不是软链接；
@@ -15,7 +15,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// helper 的状态根。系统级、属主 root、用户建不了东西在里面。
-pub const TRUST_ROOT: &str = "/Library/Application Support/Veyl";
+///
+/// 目录名是 APP 身份的一部分（两个 APP 不能共用一个信任根），所以从注入的
+/// [`crate::identity`] 取。
+pub use crate::identity::trust_root;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustError {

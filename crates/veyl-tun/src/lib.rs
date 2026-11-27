@@ -15,3 +15,8 @@ pub mod defaults;
 pub mod gate;
 pub mod identity;
 pub mod netcfg;
+pub mod protocol;
+#[cfg(unix)]
+pub mod trust;
+#[cfg(target_os = "macos")]
+pub mod xpc;

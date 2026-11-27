@@ -341,7 +341,7 @@ mod macos {
 
     use super::*;
     use crate::tun::privilege::{app_location_hint, Registration};
-    use crate::tun::protocol::MACH_SERVICE;
+    use crate::tun::protocol::mach_service;
     use crate::tun::xpc::{self, Reply, XpcError};
 
     /// `start` 超时后核对真实状态的宽限：helper 可能只差几秒就完成。
@@ -373,7 +373,7 @@ mod macos {
 
         fn start(&self, config: &str) -> Result<StartReply, TunError> {
             match xpc::call_with_timeout(
-                MACH_SERVICE,
+                mach_service(),
                 "start",
                 Some(config.as_bytes()),
                 TUN_REPLY_DEADLINE_START,
@@ -421,7 +421,7 @@ mod macos {
         }
 
         fn stop_with_deadline(&self, deadline: Duration) -> Result<(), TunError> {
-            match xpc::call_with_timeout(MACH_SERVICE, "stop", None, deadline) {
+            match xpc::call_with_timeout(mach_service(), "stop", None, deadline) {
                 Ok(_) => Ok(()),
                 Err(error) => Err(map_xpc_error(error)),
             }
@@ -429,7 +429,7 @@ mod macos {
 
         fn flush_dns(&self) -> Result<(), TunError> {
             match xpc::call_with_timeout(
-                MACH_SERVICE,
+                mach_service(),
                 "flush_dns",
                 None,
                 TUN_REPLY_DEADLINE_CONTROL,
@@ -445,7 +445,7 @@ mod macos {
 
         fn restore_dns(&self) -> Result<(), TunError> {
             match xpc::call_with_timeout(
-                MACH_SERVICE,
+                mach_service(),
                 "restore_dns",
                 None,
                 TUN_REPLY_DEADLINE_CONTROL,
@@ -461,7 +461,7 @@ mod macos {
 
         fn status(&self) -> Result<TunSnapshot, TunError> {
             match xpc::call_with_timeout_peer(
-                MACH_SERVICE,
+                mach_service(),
                 "status",
                 None,
                 TUN_REPLY_DEADLINE_CONTROL,
@@ -506,7 +506,7 @@ mod macos {
         }
 
         fn restart(&self) -> Result<(), TunError> {
-            match xpc::call_with_timeout(MACH_SERVICE, "restart", None, TUN_REPLY_DEADLINE_CONTROL)
+            match xpc::call_with_timeout(mach_service(), "restart", None, TUN_REPLY_DEADLINE_CONTROL)
             {
                 Ok(Reply::Restarted) => Ok(()),
                 Ok(_) => Err(TunError::new(
@@ -520,7 +520,7 @@ mod macos {
         }
 
         fn acquire_lease(&self) -> Result<Option<TunLease>, TunError> {
-            xpc::open_lease(MACH_SERVICE, TUN_REPLY_DEADLINE_CONTROL)
+            xpc::open_lease(mach_service(), TUN_REPLY_DEADLINE_CONTROL)
                 .map(Some)
                 .map_err(map_xpc_error)
         }

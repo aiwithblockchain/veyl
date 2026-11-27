@@ -9,13 +9,13 @@ pub mod backend;
 pub use veyl_tun::cidr;
 pub mod helper_update;
 pub mod privilege;
-pub mod protocol;
+pub use veyl_tun::protocol;
 pub mod session;
 #[cfg(unix)]
-pub mod trust;
+pub use veyl_tun::trust;
 
 #[cfg(target_os = "macos")]
-pub mod xpc;
+pub use veyl_tun::xpc;
 
 // Windows 的通道是命名管道 + 服务，与 XPC 没有可复用的代码。
 // 主程序侧用 `windows::pipe::call`（对端校验在服务端做），

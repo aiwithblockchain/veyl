@@ -32,7 +32,7 @@ pub const RUNTIME_IDENTIFIER: &str = "sing-box";
 pub fn runtime_requirement() -> String {
     format!(
         "anchor apple generic and identifier \"{RUNTIME_IDENTIFIER}\" and certificate leaf[subject.OU] = \"{}\"",
-        crate::tun::protocol::TEAM_ID
+        crate::tun::protocol::team_id()
     )
 }
 
@@ -237,7 +237,7 @@ mod tests {
         assert!(
             requirement.contains(&format!(
                 "subject.OU] = \"{}\"",
-                crate::tun::protocol::TEAM_ID
+                crate::tun::protocol::team_id()
             )),
             "{requirement}"
         );

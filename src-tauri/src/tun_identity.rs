@@ -43,6 +43,14 @@ pub fn install() {
     });
 }
 
+/// 测试进程不经过 `run()`，没有入口点能调 `install()`；这里补上。
+/// 主客户端 lib 与两个 bin 的测试共享这一份，漏注入会以 panic 暴露而非静默回退。
+#[cfg(test)]
+#[ctor::ctor]
+fn install_for_tests() {
+    install();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +71,30 @@ mod tests {
         assert_eq!(id.tun_address_windows, "198.18.0.1/15");
         assert_eq!(id.helper_binary_name, "veyl-helper");
         assert_eq!(id.bundle_identifier, "io.github.aiwithblockchain.veyl");
+    }
+
+    /// requirement 字符串写错一次就是所有连接被拒，而且编译期、单测都不会发现。
+    /// 所以不靠人眼：直接从 tauri.conf.json 读出来比对。
+    #[test]
+    fn the_requirement_uses_the_real_bundle_identifier() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let text = std::fs::read_to_string(&path).expect("读取 tauri.conf.json");
+        let key = "\"identifier\"";
+        let after = &text[text.find(key).expect("配置里没有 identifier") + key.len()..];
+        let after = &after[after.find(':').expect("格式不对") + 1..];
+        let start = after.find('"').expect("格式不对") + 1;
+        let identifier = &after[start..start + after[start..].find('"').unwrap()];
+
+        let id = build();
+        assert_eq!(
+            id.bundle_identifier, identifier,
+            "build.rs 注入的 identifier 与 tauri.conf.json 不一致"
+        );
+
+        let requirement =
+            veyl_tun::protocol::app_requirement_for(id.bundle_identifier, id.team_id);
+        assert!(requirement.contains("anchor apple generic"));
+        assert!(!requirement.contains("com.veyl.app"), "这是之前写错的那个值");
+        assert!(requirement.contains(&format!("subject.OU] = \"{}\"", id.team_id)));
     }
 }
