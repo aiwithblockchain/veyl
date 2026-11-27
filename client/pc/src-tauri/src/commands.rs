@@ -1003,7 +1003,20 @@ pub async fn connect(
         AppError::new("CONFIG_MISSING", "找不到这套配置的内容")
             .with_hint("重新导入一次。")
     })?;
-    app_state.connection.connect(&profile, &raw).await
+    match app_state.connection.connect(&profile, &raw).await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            // 连接失败已经作为 `Failed` 状态发布给界面（含 reason / hint）；
+            // 再抛一次错会让界面把同一段文案显示两遍。真正的命令层错误
+            // （配置被删、上一次还没结束）才往上抛。
+            let snapshot = app_state.connection.snapshot();
+            if matches!(snapshot.state, crate::connection::ConnectionState::Failed { .. }) {
+                Ok(snapshot)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[tauri::command]

@@ -65,7 +65,7 @@ struct SavedDns {
     /// `State:/Network/Service/<uuid>/DNS` 里的 uuid。
     service: String,
     /// 我们写进去的地址。恢复前用它判断「现在的值还是不是我们的」。
-    /// 转发器模式下是两条（`127.0.0.1` 首选 + 公网次选），回退路径下只有一条。
+    /// 转发器模式下是两条（本 APP 的回环地址首选 + 公网次选），回退路径下只有一条。
     written: Vec<String>,
     /// 原本有没有这条状态键。没有 = 系统自动（DHCP）。
     had_state: bool,
@@ -179,7 +179,7 @@ fn strip_stale_targets(
         return had_state;
     }
     servers.retain(|value| value != loopback && !targets.iter().any(|target| target == value));
-    eprintln!("veyl-helper: 忽略上次残留的 DNS（{targets:?}）作为原始值");
+    crate::helper_note!("忽略上次残留的 DNS（{targets:?}）作为原始值");
     if servers.is_empty() {
         search.clear();
         return false;
@@ -373,7 +373,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(400);
 ///
 /// 调用方**不要**因此让连接失败——照常连，把 `applied=false` 报给界面。
 ///
-/// 转发器模式写两条地址（`127.0.0.1` 首选 + 公网次选）：次选是兜底，转发器
+/// 转发器模式写两条地址（本 APP 的回环地址首选 + 公网次选）：次选是兜底，转发器
 /// 线程挂了或 helper 被强杀时，mDNSResponder 会自动退到它，机器不会失去解析。
 /// 回退路径（转发器起不来）只写一条公网地址。还原逻辑按「整组是否都还是我们写的」判定。
 pub(super) fn activate_with_targets(targets: &[String]) -> DnsHijack {
@@ -393,7 +393,7 @@ fn activate_with(mut attempt: impl FnMut() -> Result<(), String>) -> DnsHijack {
             match attempt() {
                 Ok(()) => DnsHijack::applied(),
                 Err(second) => {
-                    eprintln!("veyl-helper: 系统 DNS 未接管（第一次：{first}；重试：{second}）");
+                    crate::helper_note!("系统 DNS 未接管（第一次：{first}；重试：{second}）");
                     DnsHijack::failed(second)
                 }
             }
@@ -467,8 +467,8 @@ fn activate_once(targets: &[String]) -> Result<(), String> {
         let report = restore_locked(&mut guard, None);
         return Err(join_restore_error(error, &report));
     }
-    eprintln!(
-        "veyl-helper: 系统 DNS 已指向 {refs:?}（查询走隧道，由 hijack-dns 回答；服务 {service}）"
+    crate::helper_note!(
+        "系统 DNS 已指向 {refs:?}（查询走隧道，由 hijack-dns 回答；服务 {service}）"
     );
     Ok(())
 }
@@ -523,11 +523,11 @@ pub(super) fn restore_at_exit() {
     // 这里没有 Supervisor，写不了用户日志；保留 stderr 兜底。
     let report = restore_locked(&mut guard, deadline);
     for line in report.lines() {
-        eprintln!("veyl-helper: [diag] {line}");
+        crate::helper_note!("[diag] {line}");
     }
 }
 
-/// 不变量兜底：**转发器不在运行、系统 DNS 却仍含 `127.0.0.1`** 时，立刻把
+/// 不变量兜底：**转发器不在运行、系统 DNS 却仍含本 APP 的回环地址** 时，立刻把
 /// 服务级 DNS 改写成剩下的公网地址并 flush。
 ///
 /// 不能把「不断网」押在 mDNSResponder 会回落到次选上：监听假死、回滚失败、
@@ -610,7 +610,7 @@ fn ensure_no_dangling_loopback_within(deadline: Option<Instant>) -> Result<bool,
     if !external_commands_are_simulated() && !deadline_passed(deadline) {
         let _ = super::flush_system_dns_within(deadline);
     }
-    eprintln!("veyl-helper: 转发器不在，已把系统 DNS 从回环改回 {refs:?}");
+    crate::helper_note!("转发器不在，已把系统 DNS 从回环改回 {refs:?}");
     Ok(true)
 }
 
@@ -1021,8 +1021,8 @@ fn apply_restore(
     match restore_action(&current, saved) {
         RestoreAction::Nothing => {
             report.branch = "nothing";
-            eprintln!(
-                "veyl-helper: 系统 DNS 已被别处改写（当前 {current:?}），不写回旧网络的原始值"
+            crate::helper_note!(
+                "系统 DNS 已被别处改写（当前 {current:?}），不写回旧网络的原始值"
             );
         }
         RestoreAction::Write { servers, search } => {
@@ -1067,7 +1067,7 @@ fn apply_restore(
     if !deadline_passed(deadline) && !external_commands_are_simulated() {
         let _ = super::flush_system_dns_within(deadline);
     }
-    eprintln!("veyl-helper: 系统 DNS 已还原");
+    crate::helper_note!("系统 DNS 已还原");
     Ok(())
 }
 
@@ -1278,8 +1278,8 @@ fn rescue_service_dns(
         .iter()
         .all(|value| PUBLIC_DNS.contains(&value.as_str()));
     if used_public {
-        eprintln!(
-            "veyl-helper: [warn] 读不到任何全局 DNS，已写入兜底 DNS {servers:?}（阿里/腾讯）：用户可在系统设置里改回"
+        crate::helper_note!(
+            "[warn] 读不到任何全局 DNS，已写入兜底 DNS {servers:?}（阿里/腾讯）：用户可在系统设置里改回"
         );
     }
     let refs: Vec<&str> = servers.iter().map(String::as_str).collect();
@@ -1333,8 +1333,8 @@ fn verify_written(
             let primary = targets.first().map(String::as_str).unwrap_or_default();
             let hint = primary_nameserver();
             if hint.as_deref() != Some(primary) {
-                eprintln!(
-                    "veyl-helper: 服务级 DNS 已含 {targets:?}，但 resolver #1 是 {hint:?}；按写入成功处理"
+                crate::helper_note!(
+                    "服务级 DNS 已含 {targets:?}，但 resolver #1 是 {hint:?}；按写入成功处理"
                 );
                 log_resolver_head();
             }
@@ -1353,7 +1353,7 @@ fn log_resolver_head() {
         return;
     };
     let head: Vec<&str> = text.lines().take(8).collect();
-    eprintln!("veyl-helper: scutil --dns 头部：{}", head.join(" | "));
+    crate::helper_note!("scutil --dns 头部：{}", head.join(" | "));
 }
 
 fn primary_nameserver() -> Option<String> {

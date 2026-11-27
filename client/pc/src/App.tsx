@@ -45,11 +45,29 @@ export default function App() {
   useEffect(() => {
     void reload();
     connectionApi.status().then(setConnection).catch(() => setConnection(null));
-    const unlisten = listen<ConnectionSnapshot>("connection-changed", (event) => {
-      setConnection(event.payload);
-    });
+    const stops: Promise<() => void>[] = [
+      listen<ConnectionSnapshot>("connection-changed", (event) => {
+        setConnection(event.payload);
+      }),
+      // 配置/同步状态可能在别处被改动（菜单栏、后台刷新）；订阅它们，
+      // 界面才不会停在旧数据上。
+      listen("profiles-changed", () => {
+        void reload();
+      }),
+      listen<Profile>("sync-changed", (event) => {
+        const updated = event.payload;
+        setProfiles((current) =>
+          current.map((item) => (item.id === updated.id ? updated : item)),
+        );
+        setDetail((current) =>
+          current && current.profile.id === updated.id
+            ? { ...current, profile: updated }
+            : current,
+        );
+      }),
+    ];
     return () => {
-      void unlisten.then((stop) => stop());
+      stops.forEach((stop) => void stop.then((off) => off()));
     };
   }, [reload]);
 

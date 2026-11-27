@@ -141,10 +141,11 @@ sign_cli_app() {
 
   if [ -z "$identity" ]; then
     tun_note "使用 ad-hoc 签名（TUN 在真机上不可用）"
-    codesign --force --deep --sign - "$app" || return 1
-    return 0
+    identity="-"
   fi
 
+  # 先签嵌套 Mach-O、再签 .app，**不用 --deep**：--deep 会把随包 runtime 一起
+  # 重签，改掉 build.rs 编进二进制里的哈希（ad-hoc 构建里会变成 runtime_missing）。
   local list
   list="$(mktemp "${TMPDIR:-/tmp}/veyl-cli-sign.XXXXXX")"
   find "$app/Contents" -type f -print0 2>/dev/null |

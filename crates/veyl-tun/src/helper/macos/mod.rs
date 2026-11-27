@@ -34,7 +34,7 @@ extern "C" fn restore_dns_at_exit() {
     // 还原失败时系统 DNS 可能仍停在回环上：退出前最后兜一次。
     // 退出路径带 500ms 预算（try_lock + scutil 都受控），绝不拖慢 launchd 拉起。
     if let Err(error) = dns::ensure_no_dangling_loopback_at_exit() {
-        eprintln!("veyl-helper: 退出时回环兜底改写失败：{error}");
+        crate::helper_note!("退出时回环兜底改写失败：{error}");
     }
 }
 
@@ -247,7 +247,7 @@ extern "C" fn on_signal(_signal: libc::c_int) {
 
 pub fn run() {
     if !is_root() {
-        eprintln!("veyl-helper: 必须以 root 运行");
+        crate::helper_note!("必须以 root 运行");
         std::process::exit(1);
     }
     // 任何 exit 路径都先把系统 DNS 还回去（含 restart 的 exit(75)）。
@@ -257,13 +257,13 @@ pub fn run() {
         Ok(root) => root,
         Err(error) => {
             // 不合规就退出，不降级、不「修好」——修好等于把别人建的东西合法化。
-            eprintln!("veyl-helper: 信任根校验失败：{error}");
+            crate::helper_note!("信任根校验失败：{error}");
             std::process::exit(2);
         }
     };
 
     if crash_loop_tripped_now(&root) {
-        eprintln!("veyl-helper: 10 分钟内第 3 次启动，正常退出以打断崩溃循环");
+        crate::helper_note!("10 分钟内第 3 次启动，正常退出以打断崩溃循环");
         std::process::exit(0);
     }
     let _ = HELPER_BUILD.set(self_cdhash().unwrap_or_default());
@@ -342,7 +342,7 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
 
     let listener = xpc::create_listener(protocol::mach_service());
     if listener.is_null() {
-        eprintln!("veyl-helper: 无法创建监听（Mach service 未注册？）");
+        crate::helper_note!("无法创建监听（Mach service 未注册？）");
         std::process::exit(3);
     }
 
@@ -350,14 +350,14 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
     if let Err(error) =
         unsafe { xpc::set_peer_code_signing_requirement(listener, &protocol::app_requirement()) }
     {
-        eprintln!("veyl-helper: {error}");
+        crate::helper_note!("{error}");
         std::process::exit(4);
     }
 
     let listener_handler: RcBlock<dyn Fn(xpc_object_t)> =
         RcBlock::new(move |event: xpc_object_t| {
             if unsafe { xpc::is_error(event) } {
-                eprintln!("veyl-helper: 监听器事件：{}", unsafe {
+                crate::helper_note!("监听器事件：{}", unsafe {
                     xpc::describe(event)
                 });
                 return;
@@ -369,7 +369,7 @@ fn serve(supervisor: Arc<Supervisor>) -> ! {
             if let Err(error) = unsafe {
                 xpc::set_peer_code_signing_requirement(connection, &protocol::app_requirement())
             } {
-                eprintln!("veyl-helper: 拒绝连接：{error}");
+                crate::helper_note!("拒绝连接：{error}");
                 unsafe { xpc::cancel(connection) };
                 return;
             }
@@ -588,7 +588,7 @@ fn flush_system_dns() -> Result<(), String> {
 /// `deadline` 是退出路径的总预算：flush 只是收尾，超了就跳过，不能拖住 launchd。
 fn flush_system_dns_within(deadline: Option<Instant>) -> Result<(), String> {
     if deadline.is_some_and(|at| Instant::now() >= at) {
-        eprintln!("veyl-helper: [warn] 还原超过退出时限，跳过 DNS 缓存刷新");
+        crate::helper_note!("[warn] 还原超过退出时限，跳过 DNS 缓存刷新");
         return Ok(());
     }
     let mut failures = Vec::new();
@@ -895,13 +895,13 @@ impl Supervisor {
             }
         }
         let Some((home, gid)) = peer_account(uid) else {
-            eprintln!("veyl-helper: 无法解析 uid {uid} 的 home，日志只写 stderr");
+            crate::helper_note!("无法解析 uid {uid} 的 home，日志只写 stderr");
             return None;
         };
         let logs = match UserLogs::open(&home, uid, gid) {
             Ok(logs) => Arc::new(logs),
             Err(error) => {
-                eprintln!("veyl-helper: uid {uid} 的用户日志不可用，只写 stderr：{error}");
+                crate::helper_note!("uid {uid} 的用户日志不可用，只写 stderr：{error}");
                 return None;
             }
         };
@@ -932,7 +932,7 @@ impl Supervisor {
         let line = self.stamped(message);
         match self.logs_for(uid) {
             Some(logs) => logs.append_helper(&line),
-            None => eprintln!("veyl-helper: 用户日志不可用，本行只写 stderr"),
+            None => crate::helper_note!("用户日志不可用，本行只写 stderr"),
         }
     }
 
@@ -965,7 +965,7 @@ impl Supervisor {
     }
 
     fn emit_note(&self, message: &str) {
-        eprintln!("veyl-helper: {message}");
+        crate::helper_note!("{message}");
     }
 
     fn stamped(&self, message: &str) -> String {
@@ -1181,16 +1181,16 @@ impl Supervisor {
         // 还在**取一次对端：删掉之后只能靠常量猜。公网地址不清（见 `dns` 模块）。
         let legacy = dns::legacy_peer_from_config(&self.config_path());
         let _ = dns::restore_or_clear(legacy.as_deref(), &|line| self.note(line));
-        // 崩溃后系统 DNS 可能停在 [127.0.0.1, 223.5.5.5]：转发器此刻不在，
+        // 崩溃后系统 DNS 可能停在 [本 APP 的回环地址, 223.5.5.5]：转发器此刻不在，
         // 按不变量改回公网，别让用户开机就顶着一个死回环。
         if let Err(error) = dns::ensure_no_dangling_loopback() {
             self.note(&format!("[warn] 启动清扫时回环兜底改写失败：{error}"));
         }
         for path in [self.config_path(), self.pid_path()] {
             match std::fs::remove_file(&path) {
-                Ok(()) => eprintln!("veyl-helper: 清理残留 {}", path.display()),
+                Ok(()) => crate::helper_note!("清理残留 {}", path.display()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => eprintln!("veyl-helper: 清理 {} 失败：{error}", path.display()),
+                Err(error) => crate::helper_note!("清理 {} 失败：{error}", path.display()),
             }
         }
     }
@@ -1266,22 +1266,22 @@ impl Supervisor {
                     "DNS 转发器已停止（解析退到次选公网 DNS）：{error}"
                 ));
                 if outcome != current {
-                    eprintln!("veyl-helper: DNS 转发器重建失败：{error}");
+                    crate::helper_note!("DNS 转发器重建失败：{error}");
                     *self.last_dns.lock().unwrap() = Some(outcome);
                 }
                 // 不变量兜底：转发器不在就不能让系统 DNS 停在回环上。
                 if let Err(fix) = dns::ensure_no_dangling_loopback() {
-                    eprintln!("veyl-helper: 回环兜底改写失败：{fix}");
+                    crate::helper_note!("回环兜底改写失败：{fix}");
                 }
                 return;
             } else {
-                eprintln!("veyl-helper: DNS 转发器已重建");
+                crate::helper_note!("DNS 转发器已重建");
             }
         }
         let probe = dns::target_still_applied(&target);
         if let Err(error) = &probe {
             // 读不到系统 DNS 不等于失效：保留上一次的结论，下次再查。
-            eprintln!("veyl-helper: 复核系统 DNS 失败：{error}");
+            crate::helper_note!("复核系统 DNS 失败：{error}");
         }
         let Some(outcome) = dns_recheck_outcome(probe) else {
             return;
@@ -1292,9 +1292,9 @@ impl Supervisor {
         // 双向：用户把 DNS 改回来、或网络恢复后，界面要能回到「已接管」，
         // 不能一降级就锁死到下次重连。
         if outcome.applied {
-            eprintln!("veyl-helper: 系统 DNS 已重新含我们写入的地址，恢复接管状态");
+            crate::helper_note!("系统 DNS 已重新含我们写入的地址，恢复接管状态");
         } else {
-            eprintln!("veyl-helper: 系统 DNS 已不再含我们写入的地址（连接期间网络或 DNS 设置变了）");
+            crate::helper_note!("系统 DNS 已不再含我们写入的地址（连接期间网络或 DNS 设置变了）");
         }
         *self.last_dns.lock().unwrap() = Some(outcome);
     }
@@ -1608,7 +1608,7 @@ impl Supervisor {
             // 换了解析目标必须清缓存，否则 mDNSResponder 会继续用旧（被污染）的答案。
             let _ = flush_system_dns();
         } else {
-            // 转发器已经没有用了：不要把 127.0.0.1:53 继续占着。
+            // 转发器已经没有用了：不要把本 APP 的回环地址:53 继续占着。
             dns_forwarder::stop();
             // 接管失败且回滚也失败时，系统 DNS 可能还停在回环上——兜底改回公网。
             if let Err(fix) = dns::ensure_no_dangling_loopback() {
@@ -1754,7 +1754,7 @@ impl Supervisor {
         let report = dns::restore_within(started + Duration::from_secs(9));
         // 顺序不能反：系统 DNS 先还原，查询不会再打到回环，然后才停监听。
         dns_forwarder::stop();
-        // 还原失败时系统 DNS 可能仍是 [127.0.0.1, 223.5.5.5]：兜底改回公网。
+        // 还原失败时系统 DNS 可能仍是 [本 APP 的回环地址, 223.5.5.5]：兜底改回公网。
         if let Err(error) = dns::ensure_no_dangling_loopback() {
             self.note(&format!("[warn] 停止时回环兜底改写失败：{error}"));
         }
@@ -1811,7 +1811,7 @@ impl Supervisor {
             return;
         }
 
-        eprintln!("veyl-helper: 收掉上次遗留的 sing-box pid={pid}");
+        crate::helper_note!("收掉上次遗留的 sing-box pid={pid}");
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -2511,7 +2511,7 @@ fn crash_loop_tripped_now(root: &Path) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     if let Err(error) = std::fs::write(&path, text) {
-        eprintln!("veyl-helper: 写启动记录失败：{error}");
+        crate::helper_note!("写启动记录失败：{error}");
     }
     tripped
 }
@@ -2532,7 +2532,7 @@ fn clear_start_record(root: &Path) {
         .collect();
     lines.pop();
     if let Err(error) = std::fs::write(&path, lines.join("\n")) {
-        eprintln!("veyl-helper: 清理启动记录失败：{error}");
+        crate::helper_note!("清理启动记录失败：{error}");
     }
 }
 

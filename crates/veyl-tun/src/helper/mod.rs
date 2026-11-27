@@ -5,5 +5,14 @@
 
 pub mod paths;
 
+/// helper 的诊断输出：前缀用注入的 helper 二进制名（`veyl-helper` / `veyl-cli-helper`），
+/// 不写死任何一个 APP 的名字。
+#[macro_export]
+macro_rules! helper_note {
+    ($($arg:tt)*) => {
+        eprintln!("{}: {}", $crate::identity::helper_binary_name(), format_args!($($arg)*))
+    };
+}
+
 #[cfg(target_os = "macos")]
 pub mod macos;

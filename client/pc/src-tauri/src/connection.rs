@@ -47,6 +47,8 @@ pub struct ConnectionSnapshot {
     pub state: ConnectionState,
     /// 已连接的秒数；未连接为 null。
     pub uptime_seconds: Option<u64>,
+    /// 用户选中的节点（未连接时也在）：界面据此高亮，连接时自动应用。
+    pub selected_node: Option<String>,
 }
 
 struct Inner {
@@ -133,6 +135,7 @@ impl ConnectionManager {
         ConnectionSnapshot {
             state: inner.state.clone(),
             uptime_seconds,
+            selected_node: inner.selected_node.clone(),
         }
     }
 

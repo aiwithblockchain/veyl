@@ -75,8 +75,10 @@ export function ProfileDetail({
   const connecting = state === "connecting";
   const disconnecting = state === "disconnecting";
   const uptime = useUptime(connection);
+  // 未连接时也要显示用户选过哪个节点（后端会把它带在快照里）。
   const currentNode =
-    connection?.state === "connected" ? connection.node : null;
+    connection?.selected_node ??
+    (connection?.state === "connected" ? connection.node : null);
 
   const startEditing = () => {
     savedRef.current = false;

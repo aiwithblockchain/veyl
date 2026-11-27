@@ -73,6 +73,8 @@ export type ConnectionState =
 
 export type ConnectionSnapshot = ConnectionState & {
   uptime_seconds: number | null;
+  /** 用户选中的节点；未连接时也有，界面据此高亮。 */
+  selected_node?: string | null;
 };
 
 export const connectionApi = {

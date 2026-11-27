@@ -1,4 +1,4 @@
-//! 回环 DNS 中继：mDNSResponder → `127.0.0.1:53` → 隧道。
+//! 回环 DNS 中继：mDNSResponder → 注入的回环地址:53（主客户端 127.0.0.1、veyl-cli 127.0.0.2）→ 隧道。
 //!
 //! 为什么需要它：macOS 的 mDNSResponder 按网络服务绑定物理接口发查询，
 //! 发往物理网卡之外的地址时**绕过路由表**，查询永远进不了 TUN（`tun-dns-pf.md`）。
@@ -120,7 +120,7 @@ impl Core {
             Arc::new(AtomicUsize::new(0)),
         );
 
-        eprintln!("veyl-helper: DNS 转发器已监听 {listen} → {upstream} (utun={utun_index:?})");
+        crate::helper_note!("DNS 转发器已监听 {listen} → {upstream} (utun={utun_index:?})");
         Self {
             running,
             utun,
@@ -154,7 +154,7 @@ impl Drop for Core {
     }
 }
 
-/// 全局唯一实例：helper 是系统里唯一该占 `127.0.0.1:53` 的进程，退出路径
+/// 全局唯一实例：helper 是系统里唯一该占本 APP 回环地址:53 的进程，退出路径
 /// （atexit）也要能停它，所以放在模块级而不是 Supervisor 里，与 `dns.rs` 的
 /// 快照同一个模式。
 static ACTIVE: Mutex<Option<Core>> = Mutex::new(None);
@@ -184,7 +184,7 @@ pub fn stop() {
         .take();
     if let Some(mut core) = core {
         core.shutdown();
-        eprintln!("veyl-helper: DNS 转发器已停止");
+        crate::helper_note!("DNS 转发器已停止");
     }
 }
 

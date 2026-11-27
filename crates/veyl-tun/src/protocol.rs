@@ -53,7 +53,9 @@ pub fn app_requirement_for(bundle_identifier: &str, team_id: &str) -> String {
 // 其余一律拒绝，并在错误里点名是哪一段的哪个键。
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL: &[&str] = &[
+/// 顶层允许出现的键。客户端在把配置交给 helper 之前也用它做早拒绝，
+/// 两边共用这一份，避免各抄一份之后漂移。
+pub const TOP_LEVEL: &[&str] = &[
     "log",
     "dns",
     "inbounds",
@@ -63,7 +65,7 @@ const TOP_LEVEL: &[&str] = &[
 ];
 // `output` 放行进来是为了**删掉它**：由 force_log 处理，不是采信它的值。
 const LOG_KEYS: &[&str] = &["level", "timestamp", "disabled", "output"];
-const INBOUND_KEYS: &[&str] = &[
+pub const INBOUND_KEYS: &[&str] = &[
     "type",
     "tag",
     "address",
@@ -101,7 +103,7 @@ const DNS_RULE_KEYS: &[&str] = &[
     "domain_suffix",
     "domain_keyword",
 ];
-const ROUTE_KEYS: &[&str] = &[
+pub const ROUTE_KEYS: &[&str] = &[
     "rules",
     "rule_set",
     "final",

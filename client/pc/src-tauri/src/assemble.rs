@@ -395,16 +395,6 @@ mod tests {
 // 交给 helper 的形态
 // ---------------------------------------------------------------------------
 
-/// helper 的 allowlist 比技术设计 §3.2 更窄（见 `crates/veyl-tun/src/protocol.rs`）：
-/// 顶层只认这五个，路由只认这几个键。这里各自留一份，改动时要两边一起改。
-const HELPER_TOP_LEVEL: [&str; 5] = ["log", "dns", "inbounds", "outbounds", "route"];
-const HELPER_ROUTE_KEYS: [&str; 5] = [
-    "rules",
-    "rule_set",
-    "final",
-    "auto_detect_interface",
-    "default_domain_resolver",
-];
 
 /// 把装配结果改成交给 helper 的最终形态。
 ///
@@ -454,7 +444,7 @@ pub fn for_helper(config: &Value) -> AppResult<Value> {
 
         if let Some(unknown) = route
             .keys()
-            .find(|key| !HELPER_ROUTE_KEYS.contains(&key.as_str()))
+            .find(|key| !veyl_tun::protocol::ROUTE_KEYS.contains(&key.as_str()))
         {
             return Err(AppError::new(
                 "CONFIG_FORBIDDEN",
@@ -474,7 +464,7 @@ pub fn for_helper(config: &Value) -> AppResult<Value> {
 
     if let Some(unknown) = object
         .keys()
-        .find(|key| !HELPER_TOP_LEVEL.contains(&key.as_str()))
+        .find(|key| !veyl_tun::protocol::TOP_LEVEL.contains(&key.as_str()))
     {
         return Err(AppError::new(
             "CONFIG_FORBIDDEN",
