@@ -18,7 +18,12 @@ import { dataPlaneDown } from "../ui/dataPlane";
 import { formatClock } from "../ui/format";
 import { failureHeadline } from "../ui/middleArea";
 import { displayNodeNames, formatLatency } from "../ui/nodeList";
-import { nodeTombstoneWord, trialGroupHint, trialPhase } from "../myservers/labels";
+import {
+  formatUsdCents,
+  nodeTombstoneWord,
+  trialGroupHint,
+  trialPhase,
+} from "../myservers/labels";
 import type { PendingServerNode } from "../myservers/pendingServerNodes";
 import { nodeUnreachableAsk } from "../ui/assistantPrompts";
 import type { ActionCard } from "../ui/actionCard";
@@ -107,6 +112,10 @@ interface Props {
   onStaleConfigRetry?: () => void;
   /** 服务器已就绪、节点还在等断开后 attach：灰显列出，告诉用户重新连接后可用。 */
   pendingServerNodes?: PendingServerNode[];
+  /** 余额预估：每日消耗与剩余天数；null = 未登录 / 没取到钱包 / 没有计费中的机器。 */
+  balanceRunway?: { dailyCents: number; remainingDays: number | null } | null;
+  /** 点「余额预估」打开账号弹层。 */
+  onOpenAccount: () => void;
 }
 
 /** 待接入节点类型对外导出：调用方与测试都从这里取。 */
@@ -119,6 +128,20 @@ type TabSource = "owned" | "custom";
 
 /** 到期提醒点过「知道了」就记住，避免每次启动都再弹一次。 */
 const TRIAL_EXPIRED_DISMISSED_KEY = "veyl.ui.trialExpiredDismissed.v1";
+
+/** 读数里的数字用等宽：账号面板的余额是整串等宽，这里只等宽数字本身。 */
+function withMonoDigits(text: string) {
+  // 只包数字；金额的 $ 与中文量词留在正文字体里。
+  return text.split(/(\d+(?:\.\d+)?)/).map((part, index) =>
+    /^\d+(?:\.\d+)?$/.test(part) ? (
+      <span key={index} className="num">
+        {part}
+      </span>
+    ) : (
+      part
+    ),
+  );
+}
 
 /** 测速入口的转速表图标：指针用聚焦紫红，表盘跟当前文字色（深灰）。 */
 function SpeedIcon() {
@@ -187,6 +210,8 @@ export function ConnectionStage({
   staleConfigNode = false,
   onStaleConfigRetry,
   pendingServerNodes = [],
+  balanceRunway = null,
+  onOpenAccount,
 }: Props) {
   const t = useT();
   const [now, setNow] = useState(() => Date.now());
@@ -1400,6 +1425,23 @@ export function ConnectionStage({
               reportBusy={reportBusy}
               onAskAi={onAskAi}
             />
+          ) : null}
+
+          {balanceRunway && balanceRunway.remainingDays !== null ? (
+            <button
+              type="button"
+              className="stage-runway"
+              onClick={onOpenAccount}
+            >
+              {balanceRunway.remainingDays > 0
+                ? withMonoDigits(
+                    t("console.balanceRunway", {
+                      amount: formatUsdCents(balanceRunway.dailyCents),
+                      days: balanceRunway.remainingDays,
+                    }),
+                  )
+                : t("console.balanceRunwayEmpty")}
+            </button>
           ) : null}
         </div>
 

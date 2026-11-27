@@ -631,6 +631,8 @@ export const zh = {
   "console.state.connected": "已连接",
   "console.state.degraded": "连接不稳定",
   "console.srNoTraffic": "已连接，不通。{action}",
+  "console.balanceRunway": "账户每天约 {amount} · 约 {days} 天后余额用尽",
+  "console.balanceRunwayEmpty": "余额不足，服务即将停止",
   "console.node.switching": "切换中",
   "console.node.unreachable": "测不通",
   "console.node.untested": "未测",

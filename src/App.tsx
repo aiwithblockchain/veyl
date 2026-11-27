@@ -3223,6 +3223,16 @@ export default function App() {
           onReconnectAndTest={handleReconnectAndTest}
           staleConfigNode={staleConfigNode !== null}
           onStaleConfigRetry={() => setStaleConfigNode(null)}
+          balanceRunway={
+            myServers.wallet?.daily_cents != null &&
+            myServers.wallet?.remaining_days != null
+              ? {
+                  dailyCents: myServers.wallet.daily_cents,
+                  remainingDays: myServers.wallet.remaining_days,
+                }
+              : null
+          }
+          onOpenAccount={() => openAccount()}
         />
       ) : (
         <StartChoice

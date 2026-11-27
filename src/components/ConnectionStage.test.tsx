@@ -198,6 +198,8 @@ interface StageOverrides {
   staleConfigNode?: boolean;
   onStaleConfigRetry?: () => void;
   pendingServerNodes?: PendingServerNode[];
+  balanceRunway?: { dailyCents: number; remainingDays: number | null } | null;
+  onOpenAccount?: () => void;
 }
 
 function stageElement(over: StageOverrides = {}) {
@@ -238,6 +240,8 @@ function stageElement(over: StageOverrides = {}) {
       staleConfigNode={over.staleConfigNode}
       onStaleConfigRetry={over.onStaleConfigRetry}
       pendingServerNodes={over.pendingServerNodes}
+      balanceRunway={over.balanceRunway ?? null}
+      onOpenAccount={over.onOpenAccount ?? vi.fn()}
     />
   );
 }
@@ -324,6 +328,7 @@ describe("连接舞台", () => {
         failedAfterConnected={false}
         helperPreparing={false}
         onDiagnose={onDiagnose}
+        onOpenAccount={() => {}}
       />,
     );
 
@@ -348,6 +353,7 @@ describe("连接舞台", () => {
         failedAfterConnected={false}
         helperPreparing={false}
         onDiagnose={onDiagnose}
+        onOpenAccount={() => {}}
       />,
     );
 
@@ -386,6 +392,7 @@ describe("连接舞台", () => {
         failedAfterConnected={false}
         helperPreparing={false}
         onReportProblem={onReport}
+        onOpenAccount={() => {}}
       />,
     );
 
@@ -3292,5 +3299,46 @@ describe("自定义节点移除", () => {
 
     expect(onRemoveNode).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
+describe("余额预估", () => {
+  it("有剩余天数：一行写清每天金额与还能用几天，数字等宽", () => {
+    renderStage({
+      balanceRunway: { dailyCents: 360, remainingDays: 10 },
+    });
+
+    const row = screen.getByRole("button", {
+      name: "账户每天约 $3.60 · 约 10 天后余额用尽",
+    });
+    expect(row.textContent).toBe("账户每天约 $3.60 · 约 10 天后余额用尽");
+    expect(row.querySelectorAll(".num")).toHaveLength(2);
+  });
+
+  it("剩余 0 天：只说余额不足，不再报每天多少钱", () => {
+    renderStage({ balanceRunway: { dailyCents: 360, remainingDays: 0 } });
+
+    expect(
+      screen.getByRole("button", { name: "余额不足，服务即将停止" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /每天约/ })).toBeNull();
+  });
+
+  it("没有剩余天数（未登录 / 无计费中机器）整行不渲染", () => {
+    renderStage({ balanceRunway: null });
+
+    expect(screen.queryByRole("button", { name: /余额/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /每天约/ })).toBeNull();
+  });
+
+  it("点击打开账号弹层", () => {
+    const onOpenAccount = vi.fn();
+    renderStage({
+      balanceRunway: { dailyCents: 120, remainingDays: 3 },
+      onOpenAccount,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /每天约/ }));
+    expect(onOpenAccount).toHaveBeenCalledTimes(1);
   });
 });

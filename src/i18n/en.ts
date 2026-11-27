@@ -659,6 +659,8 @@ export const en: Record<MessageKey, string> = {
   "console.state.connected": "Connected",
   "console.state.degraded": "Unstable connection",
   "console.srNoTraffic": "Connected, no traffic. {action}",
+  "console.balanceRunway": "About {amount}/day · balance runs out in {days} days",
+  "console.balanceRunwayEmpty": "Balance is too low — service will stop soon.",
   "console.node.switching": "Switching",
   "console.node.unreachable": "Unreachable",
   "console.node.untested": "Not tested",

@@ -7015,6 +7015,31 @@ details[open] > .settings-fold__summary::before {
   inset: -12px -4px;
 }
 
+/* 余额预估：hero 最底一行，纯文字按钮，点开账号弹层。 */
+.stage-runway {
+  position: relative;
+  align-self: flex-start;
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stage-runway:hover { color: var(--ink-2); text-decoration: underline; }
+
+/* 12px 行高命中区太小：只向下与左右扩，不向上——上方 chip 的隐形命中区
+   延伸到行下 12px，向上扩会抢走那一条的点击。 */
+.stage-runway::after {
+  content: "";
+  position: absolute;
+  inset: 0 -4px -10px;
+}
+
 /* 两个弱底 chip：形状说明「这是控件」，箭头说明「点开有得选」。 */
 .stage-quick__chip {
   position: relative;
