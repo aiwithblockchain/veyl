@@ -3,7 +3,10 @@ use serde::Serialize;
 pub mod error;
 pub mod fetch;
 pub mod fsutil;
+pub mod models;
 pub mod platform;
+pub mod secrets;
+pub mod store;
 pub mod subscription_url;
 
 #[derive(Serialize)]

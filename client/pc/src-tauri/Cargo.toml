@@ -41,5 +41,9 @@ keyring = { version = "3", default-features = false, features = [
     "windows-native",
 ] }
 
+# 本地加密凭据文件的密钥派生要用机器标识。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [dev-dependencies]
 tempfile = "3"
