@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod state;
 pub mod store;
 pub mod subscription_url;
+mod tun_identity;
 
 #[derive(serde::Serialize)]
 struct AppInfo {
@@ -31,6 +32,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // 身份最先注入：连接路径一碰 TUN 就会读它。
+            tun_identity::install();
             let data_dir = app
                 .path()
                 .app_data_dir()

@@ -33,6 +33,7 @@ impl AppState {
 
     #[cfg(test)]
     pub fn for_tests(data_dir: PathBuf) -> Self {
+        crate::tun_identity::install();
         Self {
             store: Store::new(&data_dir).expect("测试目录可写"),
             secrets: Arc::new(secrets::MemoryStore::new()),
