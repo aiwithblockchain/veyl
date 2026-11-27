@@ -243,3 +243,25 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 由同事在真机上逐条执行，结果按用户转述为**全部通过**：2.1 订阅地址（`NodeImport` + `source = "url"`，不传 `config_id`）、2.2 粘贴 `ss://`（`source = "text"`）、2.3 手动填写（`source = "manual"`，不回显密码）、2.5 缺字段（追问或缺字段报错，不写入半个节点）、2.6 来源与字段不匹配（`url` 不带 `password`）。具体 `tool_calls` 记录未回传，本行按执行人结论记录。
 
 前四组此前已逐条实测通过（1.1–1.3、2.1–2.6、3.1–3.3）。
+
+---
+
+## 7. 运行记录
+
+### 2026-11-27 第 3 组（2.1–2.3、2.5、2.6，HEAD `197b9fc`）
+
+> 包：用 `scripts/dev/tun-dev.sh` 从 **HEAD `197b9fc`** 的干净 worktree 构建（debug + Apple Development 签名），装到 `/Applications/Veyl.app`。测试前确认包内提示词是 main 版：工作区里未提交的 `product.md` / `faq.md` 仍是旧文案（含 `设置 › 账户`），不能用来测；`~/.veyl/prompts` 已随新包刷新。
+> 环境：已登录、AI Key 可用；连接已建立（TUN）；测试订阅与密码均为一次性测试数据；节点池测试前清空自定义节点（保留种子与服务器节点）。
+
+| 条目 | 结果(通过/不通过) | 模型调用的工具 | 实际表现与不通过的具体点 |
+|---|---|---|---|
+| 2.1 订阅地址 | 通过 | `NodeImport`（`source="url"`，无 `config_id`）、`HttpCheck` | 首轮分流为「直连」时订阅站 TLS 被重置，工具如实报「连接失败」并给下一步，未编数量；切「全局」后重试，导入 166、跳过 331（`unsupported_scheme` 303、`unsupported_method` 28），回复数量与返回一致，未回帖订阅地址。工具用法全程正确，首轮阻断属环境问题。 |
+| 2.2 粘贴分享链接 | 通过 | `NodeImport`（`source="text"`，无 `config_id`） | 导入 1、跳过 0；回复给出名称、`server:port`、加密方式，说明「已进池、未切换」，未回显 `ss://` 链接与密码，未声称已测速。 |
+| 2.3 手动填写 | 通过 | `NodeImport`（`source="manual"`） | 五个字段齐全（`name` / `server` / `port` / `method` / `password`），`password` 在参数记录里为掩码；回复给出节点名与 `203.0.113.7:8388`、加密方式，未出现密码，未自动连接。观察：池里已有同名同参数节点时写入是同 id upsert，工具仍回「已创建」，不会多一条记录。 |
+| 2.5 缺字段 | 通过 | `AskUserQuestion`（未调 `NodeImport`） | 先追问端口、加密方式、密码与名字；`203.0.113.8` 在节点表 0 条，没有写入半个节点。观察：首次 `AskUserQuestion` 未带 `options` 被拒（`INVALID_ARGUMENT`），模型自行补选项重试成功。 |
+| 2.6 来源与字段不匹配 | 通过 | `NodeImport`（`source="url"`，参数无 `password`） | 导入 0、跳过 497（`duplicate` 166、`unsupported_scheme` 303、`unsupported_method` 28），与工具返回一致；回复明确说「订阅导入不读取密码字段」，未把密码贴进回复。 |
+
+运行中的环境问题（与本组工具判定无关，但会阻塞冒烟）：
+
+- 12:08 切到「全局」后 App 重建 TUN，读取路由表 `/usr/sbin/netstat` 连续三次 2 秒超时，判为「TUN 接管不完整」并回滚，界面停在「正在确认出口」，连接被拆掉；同一时刻手动执行 `netstat` 仅 7ms，属偶发阻塞，重启并重连后恢复。
+- 2.3 期间界面「添加节点」表单建出的两条同名测试节点不是 AI 通道产物（无 `tool_calls` / 无会话消息），已在记录中区分；重跑走 AI 对话后判定。

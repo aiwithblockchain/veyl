@@ -248,12 +248,17 @@ export interface DiagnosisDeps {
   syncConfig?: () => Promise<SyncOutcome>;
   /** 只重测一次，不重启隧道；null = 没测成（untested）。 */
   reprobe?: () => Promise<ProbeOutcome>;
-  /** 最近一次 untested 的 Host 原因（connection_busy / node_not_in_config / node_not_in_running_config / clash_unavailable）；没有为 null。 */
+  /** 最近一次 untested 的 Host 原因（connection_busy / node_not_in_config / node_not_in_running_config / running_config_stale / clash_unavailable）；没有为 null。 */
   probeUntestedReason?: () => string | null;
   /** stop → start → 重测；重连失败与重连后测不通要分开。 */
   reconnectAndProbe?: () => Promise<ReconnectOutcome>;
   /** 更换这台节点的端口与密码（`node_rotate_credentials`）。 */
   rotateCredentials?: () => Promise<RotateOutcome>;
+  /**
+   * node 档「重新连接」：断开并重建运行配置，再连回当前节点。
+   * 运行配置里的凭据过期时，只有重建才能让同步下来的新凭据生效。
+   */
+  reconnectCurrent?: () => void;
   /** 打开右栏，把诊断清单作为一条系统消息交给 AI。返回 false = 被拦下（AI 未配置）。 */
   openAi?: (context: DiagnosisContext) => boolean;
   /** 「去销毁并重建」只做导航；销毁仍在服务器详情页确认。 */
@@ -298,6 +303,8 @@ export type DiagnosisConclusion =
   | { kind: "config-reconnect-failed" }
   | { kind: "config-recovered"; changed: boolean }
   | { kind: "config-failed"; changed: boolean }
+  /** 运行配置还是同步前的旧凭据：断线重连后才会生效。 */
+  | { kind: "config-stale" }
   /** 配置有变化，但隧道没在跑：不自动连接，提示重新连接后生效。 */
   | { kind: "config-applied-idle" }
   /** 配置没有变化，且隧道没在跑：结论中性，下一步给更换连接密码。 */
@@ -461,6 +468,9 @@ function deriveAction(
     case "config-failed":
       // 配置可能是别的设备改的：ICMP 通说明 IP 没被封，更换通常还能救回来。
       return "resetPort";
+    case "config-stale":
+      // 运行配置拿的还是旧凭据：复测必然失败，直接给重建入口。
+      return "reconnect";
     case "rotate-untested":
       // 更换后最多再测 2 次，仍没测成才交 AI；更换本身不再给第二次。
       return postRotateRetests < 2 ? "retest" : "askAi";
@@ -896,6 +906,16 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     );
 
     if (outcome.reachable === null) {
+      if (outcome.reason === "running_config_stale") {
+        // 运行配置还是旧凭据：不是「测不了」，是必须先断开重连。
+        replaceLast({
+          id: "probe",
+          status: "unknown",
+          conclusion: { kind: "config-stale" },
+        });
+        updatePhase("awaiting");
+        return;
+      }
       replaceLast({
         id: "probe",
         status: "unknown",
@@ -1177,12 +1197,22 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
     if (!mountedRef.current) return;
 
     if (ok === null) {
-      // 没测成不是不通：给「同步配置」再测一次，不给更换密码。
-      replaceLast({
-        id: "config",
-        status: "unknown",
-        conclusion: { kind: "config-untested", reason: untestedReason() },
-      });
+      const reason = untestedReason();
+      if (reason === "running_config_stale") {
+        // 运行配置还是同步前的旧凭据：复测注定失败，提示断开重连。
+        replaceLast({
+          id: "config",
+          status: "unknown",
+          conclusion: { kind: "config-stale" },
+        });
+      } else {
+        // 没测成不是不通：给「同步配置」再测一次，不给更换密码。
+        replaceLast({
+          id: "config",
+          status: "unknown",
+          conclusion: { kind: "config-untested", reason },
+        });
+      }
       updatePhase("awaiting");
     } else if (ok) {
       replaceLast({
@@ -1772,9 +1802,16 @@ export function useNodeDiagnosis(deps: DiagnosisDeps): NodeDiagnosis {
         );
         break;
       case "reconnect":
-        finishConnection("reconnect", () =>
-          depsRef.current.connection?.reconnect?.(),
-        );
+        if (isConnectionProfile()) {
+          finishConnection("reconnect", () =>
+            depsRef.current.connection?.reconnect?.(),
+          );
+        } else {
+          // node 档：运行配置过期，重建一次才会拿到同步下来的新凭据。
+          log("info", "action=reconnect");
+          updatePhase("done");
+          depsRef.current.reconnectCurrent?.();
+        }
         break;
       case "askAi":
         if (isConnectionProfile()) handOffConnectionToAi();

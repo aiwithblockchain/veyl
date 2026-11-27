@@ -27,11 +27,11 @@ export function displayNodeNames(
   });
 }
 
-/** 批次在飞时正在被探测的节点：最多 6 个，按队列补充。 */
+/** 批次在飞时正在被探测的节点：按并发上限补满队列（与后端 `CONCURRENCY` 一致）。 */
 export function nextProbing(
   probing: ReadonlySet<string>,
   queue: string[],
-  concurrency = 6,
+  concurrency = 16,
 ): { probing: Set<string>; queue: string[] } {
   const next = new Set(probing);
   const rest = [...queue];

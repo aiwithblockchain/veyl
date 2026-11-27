@@ -91,6 +91,75 @@ describe("errorText", () => {
     ).toBe("读写本地数据失败，稍后再试。");
   });
 
+  it("TUN 接管失败：回滚确认过才说「已回滚」，否则先让用户强制重置", () => {
+    const takeover = (detail: Record<string, unknown>) => ({
+      code: "tun_start_failed",
+      details: { reason: "tun_start_failed", detail },
+    });
+    // 停干净、无残留、DNS 已刷新：与 connect_changed = restored 的判据一致。
+    expect(
+      errorText(
+        takeover({
+          reason: "takeover_incomplete",
+          stopped: true,
+          residual_routes: false,
+          dns_flushed: true,
+        }),
+        FALLBACK,
+      ),
+    ).toBe(
+      "接管全部流量没有准备就绪，已自动停止并回滚。可以重试；仍失败就到设置里强制重置网络。",
+    );
+    // 有残留路由：不能再声称已回滚，先强制重置。
+    expect(
+      errorText(
+        takeover({
+          reason: "takeover_incomplete",
+          stopped: true,
+          residual_routes: true,
+          dns_flushed: true,
+        }),
+        FALLBACK,
+      ),
+    ).toBe(
+      "接管全部流量没有准备就绪，自动停止也没能确认清理干净。先到设置里执行「强制重置网络」，再重试。",
+    );
+    // 停不掉也一样。
+    expect(
+      errorText(
+        takeover({
+          reason: "takeover_incomplete",
+          stopped: false,
+          residual_routes: false,
+          dns_flushed: true,
+        }),
+        FALLBACK,
+      ),
+    ).toBe(
+      "接管全部流量没有准备就绪，自动停止也没能确认清理干净。先到设置里执行「强制重置网络」，再重试。",
+    );
+  });
+
+  it("TUN 启动失败但没有接管细节：只说没起来，不承诺已回滚", () => {
+    expect(errorText({ code: "tun_start_failed" }, FALLBACK)).toBe(
+      "接管全部流量没有起来。可以重试；仍失败就到设置里强制重置网络。",
+    );
+  });
+
+  it("当前节点域名解析失败：说清连接没开始，不教人重置网络", () => {
+    expect(
+      errorText(
+        {
+          code: "tun_start_failed",
+          details: { reason: "node_server_unresolved" },
+        },
+        FALLBACK,
+      ),
+    ).toBe(
+      "当前节点的服务器地址解析不出来，连接没有开始。检查网络或换一个节点后再试。",
+    );
+  });
+
   it("Clash 配置没有可用的 Shadowsocks 节点时说清格式，不让用户去查地址", () => {
     expect(
       errorText(

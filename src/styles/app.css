@@ -15,8 +15,6 @@
 
   --hair: rgba(20, 22, 28, 0.1);
   --hair-strong: rgba(20, 22, 28, 0.18);
-  /* 仪表轨道：比 hair 再淡一点，6px 条才像底槽而不是分隔线。 */
-  --track: rgba(20, 22, 28, 0.08);
 
   /* 新色板：强调只做装饰/进度；文字链接与聚焦分开。旧变量名继续指向粉色系。 */
   --accent: #F6537B;
@@ -114,7 +112,6 @@
 
     --hair: rgba(255, 255, 255, 0.1);
     --hair-strong: rgba(255, 255, 255, 0.16);
-    --track: rgba(255, 255, 255, 0.1);
 
     --accent: #F6537B;
     --accent-soft: rgba(246, 83, 123, 0.18);
@@ -1728,307 +1725,45 @@ body[data-resizing] {
   word-break: break-all;
 }
 
-/* 账户弹层：720 宽、单层单滚动；一屏一个焦点，余额是唯一的大数字。 */
-.account-surface {
-  width: min(720px, calc(100vw - 48px));
-  max-height: min(86vh, 780px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.account-surface__body {
-  /* 弹层里唯一的滚动容器：header / footer 固定，账单不再自己滚。 */
+/* 设置 › 账户：邮箱整行省略，金额与账号菜单同一格式。 */
+.settings-account__identity {
   flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  scroll-padding-top: 8px;
-  display: flex;
-  flex-direction: column;
-  /* 分组靠留白与两条 hair，不再给每个区块叠间距。 */
-  gap: 0;
-  padding: 22px 28px 8px;
-}
-
-/* 未登录时 body 是最后一个子元素：补回与有 footer 时相同的底边距。 */
-.account-surface > .account-surface__body:last-child {
-  padding-bottom: 22px;
-}
-
-/* 弹层头部不画线：全页只有两条 hair。 */
-.account-surface .modal__head {
-  padding: 16px 28px 0;
-  border-bottom: 0;
-}
-
-.account-surface__footer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: none;
-  padding: 14px 28px 16px;
-}
-
-.account-surface__footer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.account-surface__who {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
   min-width: 0;
-  font-size: 12px;
-  color: var(--ink-3);
 }
 
-.account-surface__email {
-  min-width: 0;
-  font-size: 12px;
-  color: var(--ink-2);
+.settings-account__email {
+  margin-top: 2px;
+  font-size: 15px;
+  color: var(--ink);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.account-surface__who-sep {
-  flex: none;
-  color: var(--ink-3);
-}
-
-.account-surface__copy {
-  flex: none;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: 12px;
-  color: var(--ink-3);
-  cursor: pointer;
-}
-
-.account-surface__copy:hover {
-  color: var(--ink-2);
-  text-decoration: underline;
-}
-
-.account-surface__logout {
-  flex: none;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: 13px;
-  color: var(--red);
-  cursor: pointer;
-}
-
-.account-surface__logout:disabled {
-  color: var(--ink-3);
-  cursor: default;
-}
-
-.account-surface__logout:not(:disabled):hover {
-  text-decoration: underline;
-}
-
-.account-surface__footer-error {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--err-text);
-}
-
-.account-surface__label {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-/* 余额：唯一焦点，34/600 mono；标签在上、说明在下，按钮与标签同一顶端。 */
-.account-surface__balance {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  min-width: 0;
-}
-
-.account-surface__balance-main {
-  min-width: 0;
-}
-
-.account-surface__balance-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-
-.account-surface__balance > .btn {
-  flex: none;
-}
-
-.account-surface__amount {
-  margin-top: 6px;
-  font-family: var(--mono);
-  font-size: 34px;
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.02em;
+.settings-account__amount {
+  margin: 2px 0 0;
+  font-size: 20px;
+  line-height: 1.2;
+  letter-spacing: 0;
   color: var(--ink);
 }
 
-.account-surface__daily {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.account-surface__daily + .settings-note {
+.settings-account__amount + .settings-note {
   margin-top: 4px;
 }
 
-/* 充值展开：只动 grid 行高；内容常驻，收起时 inert。 */
-.account-surface__reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 120ms ease-out;
-}
-
-.account-surface__reveal.is-open {
-  grid-template-rows: 1fr;
-  transition-duration: 160ms;
-}
-
-.account-surface__reveal-inner {
-  min-height: 0;
-  overflow: hidden;
-  overflow: clip;
-}
-
-.account-surface__topup-body {
-  padding-top: 16px;
-}
-
-/* 两条 hair：钱 / 用量 / 账单之间。 */
-.account-surface__hair {
-  flex: none;
-  height: 1px;
-  margin: 22px 0;
-  background: var(--line);
-}
-
-/* 流量：仪表。标签与重置日一行，通栏 6px 条，数字压在条下面。 */
-.account-surface__traffic-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.account-surface__traffic-bar {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--track);
-  overflow: hidden;
-}
-
-.account-surface__traffic-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--ink-2);
-}
-
-.account-surface__traffic-fill.is-near,
-.account-surface__traffic-fill.is-over {
-  background: var(--amber);
-}
-
-.account-surface__traffic-line {
-  margin: 10px 0 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--ink-2);
-}
-
-.account-surface__traffic-over,
-.account-surface__traffic-near {
-  color: var(--amber);
-}
-
-.account-surface__traffic-reset {
-  flex: none;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.account-surface__error {
+.settings-account__error {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  margin-top: 6px;
+  margin: 2px 0 0;
   font-size: 12px;
   line-height: 1.45;
   color: var(--amber);
 }
 
-.account-surface__recovery {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--line);
-}
-
-.account-surface__signed-out {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-/* 账单在 720 宽里占满一行：固定列宽，机器列吃剩余，金额列不被裁。
-   展开后只有账户 body 一个滚动容器，表头 sticky 在它上面。 */
-.account-surface__bills-block .billing-table {
-  table-layout: fixed;
-}
-
-.account-surface__bills-block .billing-table th {
-  background: var(--bg-card);
-}
-
-.account-surface__bills-block .billing-table th,
-.account-surface__bills-block .billing-table td {
-  padding: 9px 10px;
-}
-
-.account-surface__bills-block .billing-table th:first-child,
-.account-surface__bills-block .billing-table td:first-child {
-  padding-left: 0;
-}
-
-/* 金额列右边缘留出与左列相同的 10px，最后一位不被滚动容器裁掉。 */
-.account-surface__bills-block .billing-table th:last-child,
-.account-surface__bills-block .billing-table td:last-child {
-  padding-right: 10px;
-}
-
-/* 固定布局只取表头第一行的宽度：列宽必须写在 th 上。
-   三列：类别吃剩余宽度（机器名在第二行），日期与金额固定。 */
-.account-surface__bills-block .billing-table th:nth-child(2) {
-  width: 96px;
-}
-
-.account-surface__bills-block .billing-table th:nth-child(3) {
-  width: 108px;
-}
-
-.account-surface__bills-block .billing-footnote {
-  padding: 10px 0 4px;
+.settings-account__error + .settings-note {
+  margin-top: 4px;
 }
 
 .settings-row__aside {
@@ -2610,195 +2345,6 @@ body[data-resizing] {
 
 .reset-last--warn {
   color: var(--warn-text);
-}
-
-/* 账单（账户弹层内）：默认只有一行入口；展开才请求，内容常驻以便收动画。
-   表头 sticky 相对账户 body：reveal 用 overflow: clip，不新建滚动容器。 */
-
-.billing-inline {
-  display: flex;
-  flex-direction: column;
-}
-
-.billing-disclosure {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink-2);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-}
-
-.billing-disclosure--toggle {
-  cursor: pointer;
-}
-
-.billing-disclosure--toggle:hover {
-  color: var(--ink);
-}
-
-.billing-disclosure__text {
-  min-width: 0;
-}
-
-.billing-disclosure__action {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.billing-disclosure__chevron {
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-1px) rotate(-45deg);
-  transition: transform 120ms ease-out;
-}
-
-.billing-disclosure__chevron.is-open {
-  transform: translateY(1px) rotate(-135deg);
-}
-
-/* 与充值同一套 grid 行高动画：收起 120ms、展开 160ms。 */
-.billing-reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 120ms ease-out;
-}
-
-.billing-reveal.is-open {
-  grid-template-rows: 1fr;
-  transition-duration: 160ms;
-}
-
-.billing-reveal__inner {
-  min-height: 0;
-  overflow: hidden;
-  overflow: clip;
-}
-
-.billing-reveal__body {
-  padding-top: 14px;
-}
-
-.billing-empty {
-  margin: 0;
-  padding: 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.billing-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  padding: 2px 0 4px;
-  font-size: 13px;
-  color: var(--ink-2);
-}
-
-.billing-status--failed span {
-  color: var(--amber);
-}
-
-/* 骨架是静态灰条：一屏只保留两处展开动效。 */
-.billing-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 4px 0 6px;
-}
-
-.billing-skeleton__row {
-  height: 12px;
-  border-radius: 4px;
-  background: var(--line);
-}
-
-.billing-skeleton__row:last-child {
-  width: 65%;
-}
-
-.billing-more {
-  padding-top: 10px;
-}
-
-.billing-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.billing-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding: 10px 20px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--hair);
-  color: var(--ink-3);
-  font-size: 12px;
-  font-weight: 500;
-  text-align: left;
-}
-
-.billing-table td {
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--hair);
-  vertical-align: top;
-}
-
-.billing-table tr:last-child td {
-  border-bottom: 0;
-}
-
-.billing-table__amount-head,
-.billing-table__amount {
-  text-align: right;
-}
-
-.billing-table__kind {
-  white-space: nowrap;
-}
-
-.billing-table__server {
-  display: block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--ink-3);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.billing-table__date {
-  color: var(--ink-2);
-  white-space: nowrap;
-}
-
-.billing-table__amount {
-  color: var(--ink);
-  white-space: nowrap;
-}
-
-.billing-footnote {
-  margin: 0;
-  padding: 10px 0 2px;
-  color: var(--ink-3);
-  font-size: 12px;
 }
 
 /* provider 列表与表单 */
@@ -3670,16 +3216,6 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
-.myservers__traffic {
-  color: var(--ink-2);
-}
-
-.myservers__traffic-reset {
-  margin-left: 12px;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
 .myservers__notice {
   margin: 0;
   font-size: 12px;
@@ -3759,183 +3295,19 @@ body[data-resizing] {
 }
 
 .myservers-topup {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  width: min(420px, calc(100vw - 48px));
 }
 
-/* 6 个等大方块：档位来自 wallet，末尾固定一个「其他」，3 列。 */
 .myservers-topup__grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.myservers-topup__denom {
-  padding: 12px 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--bg-card);
-  color: var(--ink);
-  font: inherit;
+.myservers-topup__option {
+  min-height: 44px;
   font-size: 15px;
-  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  cursor: pointer;
-}
-
-.myservers-topup__denom:not(:disabled):hover {
-  border-color: var(--ink-2);
-}
-
-.myservers-topup__denom:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-}
-
-.myservers-topup__denom:disabled {
-  color: var(--ink-3);
-  cursor: default;
-}
-
-.myservers-topup__denom.is-open {
-  border-color: var(--ink-2);
-}
-
-.myservers-topup__custom {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.myservers-topup__custom-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.myservers-topup__input {
-  height: 44px;
-  min-width: 0;
-  padding: 0 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--bg-card);
-  color: var(--ink);
-  font: inherit;
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
-}
-
-.myservers-topup__input:focus {
-  outline: 0;
-  border-color: var(--link);
-}
-
-.myservers-topup__submit {
-  height: 44px;
-  padding: 0 18px;
-  font-size: 14px;
-}
-
-.myservers-topup__hint {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ink-3);
-}
-
-/* 等待付款：档位整块换成一条状态，不留置灰控件。 */
-.myservers-topup__wait {
-  padding: 14px 16px 12px;
-  border-radius: 10px;
-  background: var(--bg-hover);
-}
-
-.myservers-topup__wait-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.myservers-topup__wait-title {
-  font-size: 13px;
-  color: var(--ink);
-}
-
-.myservers-topup__wait-amt {
-  font-size: 13px;
-  color: var(--ink-2);
-}
-
-.myservers-topup__wait-note {
-  margin: 6px 0 0;
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.myservers-topup__wait-actions {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 12px;
-}
-
-.myservers-topup__reopen {
-  font-size: 12px;
-}
-
-/* 在途不用 disabled：焦点留在按钮上，点击由 aria-disabled 拦下。 */
-.myservers-topup__reopen[aria-disabled="true"] {
-  opacity: 0.38;
-  cursor: default;
-}
-
-.myservers-topup__reopen[aria-disabled="true"]:hover {
-  background: transparent;
-  color: var(--ink-2);
-}
-
-.myservers-topup__change {
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: 12px;
-  color: var(--ink-3);
-  cursor: pointer;
-}
-
-.myservers-topup__change:hover {
-  color: var(--ink);
-}
-
-.myservers-topup__change:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-/* 已到账：绿点 6×6、圆角 2px；不自动收起。 */
-.myservers-topup__paid {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 13px;
-  color: var(--ink);
-}
-
-.myservers-topup__paid:focus {
-  outline: 0;
-}
-
-.myservers-topup__dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--green);
 }
 
 .myservers__detail {
@@ -3960,7 +3332,7 @@ body[data-resizing] {
   color: var(--ink);
 }
 
-/* 标题区第一行：左「返回 + 标题」；放不下时整行换行。 */
+/* 标题区第一行：左「返回 + 标题」，右「让 AI 帮我选」；放不下时整颗换行。 */
 .myservers__wizard-head {
   display: flex;
   align-items: flex-start;
@@ -4546,6 +3918,133 @@ body[data-resizing] {
   color: var(--err-text);
 }
 
+/* 我的服务器详情 · 创建记录（第四块，位于事实区与危险块之间）
+   标题行是折叠按钮；列表只有时间列 + 圆点 + 文本，行间 8。 */
+.myservers__events {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.myservers__events-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: stretch;
+  height: 24px;
+  margin-left: -6px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+  font-weight: 500;
+  text-align: left;
+}
+
+.myservers__events-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.myservers__events-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.myservers__events-count {
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.myservers__events-chevron {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--ink-3);
+}
+
+.myservers__events-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.myservers__events-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 收起时用 hidden 常驻面板；类选择器的 display 会盖过 UA 的 [hidden]。 */
+.myservers__events-panel[hidden] {
+  display: none;
+}
+
+.myservers__events-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 时间列按最长格式定宽：12px mono 实测跨年 `2026-11-24 14:32` 117.5px、
+   英文同年 `Nov 24, 14:32` 95.5px；设计稿的 64px 连中文同年 80.8px 都放不下。 */
+.myservers__event {
+  display: grid;
+  grid-template-columns: 120px 6px minmax(0, 1fr);
+  column-gap: 12px;
+  align-items: start;
+}
+
+.myservers__event-time {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.myservers__event-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: 2px;
+  background: var(--ink-4);
+}
+
+/* 失败类事件用红点；成功不用绿色，一屏最多两种彩色。 */
+.myservers__event-dot.is-failure {
+  background: var(--red);
+}
+
+.myservers__event-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.myservers__event-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* 加载 / 空 / 失败 / 截断共用一行：给 min-height，展开时不把下方危险块顶走。 */
+.myservers__events-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 20px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
 .myservers__footer {
   display: flex;
   align-items: flex-end;
@@ -4703,12 +4202,6 @@ body[data-resizing] {
 
 .myservers__confirm p {
   margin: 0;
-}
-
-.myservers__confirm-note {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ink-3);
 }
 
 /* ---------- 流量范围开关（hero 第二行） ---------- */
@@ -5580,6 +5073,187 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+/* 账号菜单：透明遮罩，点空白处关闭。 */
+.account-menu__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: transparent;
+}
+
+/* 账号菜单：锚在导航头像右侧（全仓只有这一种布局）。 */
+.account-menu {
+  position: absolute;
+  left: calc(100% + 12px);
+  bottom: -8px;
+  z-index: 61;
+  width: 280px;
+  padding: 8px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow:
+    0 8px 24px rgba(23, 22, 20, 0.12),
+    0 1px 2px rgba(23, 22, 20, 0.06);
+}
+
+/* 头部只留邮箱：头像就是锚点，菜单里不再重复。 */
+.account-menu__email {
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 36px;
+  color: var(--ink-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.account-menu__balance {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.account-menu__balance-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.account-menu__label {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.account-menu__amount {
+  font-family: var(--mono);
+  font-size: 20px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.account-menu__amount-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.account-menu__refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.account-menu__spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+.account-menu__balance-error {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--amber);
+}
+
+.account-menu__topup {
+  flex: none;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.account-menu__divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--hair);
+}
+
+.account-menu__error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--red);
+}
+
+.account-menu__link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--link);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.account-menu__identity {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.account-menu__recover {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.account-menu__recover:hover {
+  background: var(--bg-hover);
+}
+
+.account-menu__recover--secondary {
+  color: var(--ink-2);
+  font-weight: 400;
+}
+
+.account-menu__logout {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.account-menu__logout:hover {
+  background: var(--bg-hover);
+}
+
 .rail__error {
   display: flex;
   flex-direction: column;
@@ -6341,7 +6015,8 @@ details[open] > .settings-fold__summary::before {
   display: flex;
   align-items: stretch;
   justify-content: center;
-  padding: 24px;
+  /* 顶部留更多呼吸：连接卡片不贴着窗口上沿。 */
+  padding: 88px 24px 24px;
   /* 右侧多 4px：滚动条不贴着助手分栏。 */
   padding-right: 28px;
   overflow-y: auto;
@@ -6351,6 +6026,8 @@ details[open] > .settings-fold__summary::before {
    只加 overflow 不改对齐，居中溢出会把顶部裁掉。 */
 .connection-stage--new-node {
   align-items: flex-start;
+  /* 向导不是连接卡片，保持原来的顶部间距。 */
+  padding-top: 24px;
 }
 
 /* 新建节点：版心 960，并作为宽度容器给向导排版（<900 单列 + 吸底栏，≥900 两栏）。 */
@@ -6375,10 +6052,15 @@ details[open] > .settings-fold__summary::before {
 }
 
 /* 状态、主按钮与连接参数：固定在顶部，节点再多也不会被推走。 */
+/* 状态与主操作也收进一张卡片，和节点卡同一边框、底色与圆角。 */
 .stage-hero {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  padding: 0 16px 14px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-md);
+  background: var(--card);
 }
 
 /* 卡片与 AI 编排区：Hero 下方的唯一滚动区。 */
@@ -6412,7 +6094,7 @@ details[open] > .settings-fold__summary::before {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
+  height: 48px;
   border-bottom: 1px solid var(--hair);
   font-size: 13px;
   line-height: 1.4;
@@ -7556,6 +7238,11 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 标题区右上角的 ghost 按钮：不抢创建主按钮。 */
+.wizard-ask-ai {
+  flex: none;
 }
 
 .myservers__failure .btn {

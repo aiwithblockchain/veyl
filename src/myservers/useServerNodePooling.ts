@@ -5,8 +5,24 @@ import type { ActionResult, VpnConnectionState } from "../config/useVpnSession";
 interface Args {
   servers: MyServer[];
   connection: VpnConnectionState;
+  /** 当前配置里已有的节点 id：已在池里的不再入队，避免无谓 attach 与残留队列。 */
+  configuredNodeIds?: ReadonlySet<string>;
   credentials: (serverId: string) => Promise<MyServerCredentialNode>;
   attach: (nodeIds: string[]) => Promise<ActionResult>;
+}
+
+const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * attach 报 `node_not_found` 时队列里混进了已删除的节点 id：整批会一直失败。
+ * 只保留仍在活跃服务器上、或已进入配置的 id；其余剔除后重试。
+ */
+export function pruneQueuedNodes(
+  queued: Iterable<string>,
+  alive: ReadonlySet<string>,
+  configured: ReadonlySet<string>,
+): string[] {
+  return [...queued].filter((id) => alive.has(id) || configured.has(id));
 }
 
 /** 取凭据失败后的冷却：开通期快照轮询会反复带着同一台服务器进来。 */
@@ -27,6 +43,7 @@ function isReady(state: MyServer["state"]): boolean {
 export function useServerNodePooling({
   servers,
   connection,
+  configuredNodeIds = EMPTY_IDS,
   credentials,
   attach,
 }: Args): void {
@@ -55,6 +72,8 @@ export function useServerNodePooling({
 
   const serversRef = useRef(servers);
   serversRef.current = servers;
+  const configuredNodeIdsRef = useRef(configuredNodeIds);
+  configuredNodeIdsRef.current = configuredNodeIds;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   const credentialsRef = useRef(credentials);
@@ -110,6 +129,33 @@ export function useServerNodePooling({
     void Promise.resolve(attachRef.current(nodeIds))
       .then((result) => {
         if (!result.ok) {
+          if (result.reason === "node_not_found") {
+            // 队列里混进了已删除的节点：整批 attach 会一直 NOT_FOUND，
+            // 新节点就永远进不了配置。剔除死 id，只重试仍有效的。
+            const alive = new Set<string>();
+            for (const server of serversRef.current) {
+              if (!isReady(server.state)) continue;
+              const id = server.local_node_id ?? server.node_id;
+              if (id) alive.add(id);
+            }
+            const keep = new Set(
+              pruneQueuedNodes(
+                queued.current,
+                alive,
+                configuredNodeIdsRef.current,
+              ),
+            );
+            for (const nodeId of [...queued.current]) {
+              if (keep.has(nodeId)) continue;
+              queued.current.delete(nodeId);
+              sentThisSession.current.delete(nodeId);
+            }
+            waitingToFlush.current = false;
+            if (queued.current.size === 0) return;
+            waitingToFlush.current = true;
+            scheduleFlush();
+            return;
+          }
           warnOnce(
             `attach:${nodeIds.join(",")}`,
             "节点进池失败，稍后重试",
@@ -146,6 +192,11 @@ export function useServerNodePooling({
       // 首次签发时两者同值（nodes.id = nd_…），只有控制面重签发后才可能不同。attach 用本地行的 id。
       const localNodeId = server.local_node_id ?? null;
       if (localNodeId !== null) {
+        // 已经在配置里：没有需要绑的；也避免 app 重启后把池里的旧节点再入队。
+        if (configuredNodeIdsRef.current.has(localNodeId)) {
+          attached.current.add(localNodeId);
+          continue;
+        }
         // 本地已经有节点行（含重启前绑失败的）：没绑过就入队；重复 attach 幂等。
         if (attached.current.has(localNodeId)) continue;
         if (sentThisSession.current.has(localNodeId)) continue;

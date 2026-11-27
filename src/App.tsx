@@ -680,6 +680,9 @@ export default function App() {
   useServerNodePooling({
     servers: myServers.servers,
     connection: vpn.connection,
+    configuredNodeIds: new Set(
+      vpn.activeConfig?.nodes.map((node) => node.node_id) ?? [],
+    ),
     credentials: (serverId) => bridge.myServerCredentials(serverId),
     attach: (nodeIds) => vpn.attachNodes({ nodeIds }),
   });
@@ -703,6 +706,13 @@ export default function App() {
     // nodeProbes 每次渲染都是新对象，只跟着配置与可用性走。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination, stageReady, vpn.activeConfig, vpn.nodeProbeAvailable]);
+  // 停止测速 / 连接打断批次：控制层备好的收尾话用一次 toast 说清（已停止 · 已测 X/Y）。
+  useEffect(() => {
+    const notice = nodeProbes.notice;
+    if (!notice) return;
+    if (notice.configId !== vpn.activeConfig?.config_id) return;
+    setAppNotice({ level: "info", text: notice.text });
+  }, [nodeProbes.notice, vpn.activeConfig?.config_id]);
   // 断点只看窗口宽度：三栏宽度、助手停靠/浮层都由它决定。
   const dockedRef = useRef(true);
   useEffect(() => {
@@ -2230,7 +2240,7 @@ export default function App() {
         const result = await bridge.nodeProbe(localNodeId);
         nodeProbes.recordResults([result]);
         if (result.status === "untested") {
-          // untested = 没测成（connection_busy / node_not_in_config / node_not_in_running_config / clash_unavailable），不是不通。
+          // untested = 没测成（connection_busy / node_not_in_config / node_not_in_running_config / running_config_stale / clash_unavailable），不是不通。
           probeUntestedReason =
             result.error?.reason ?? result.error?.code ?? null;
           uiLog(
@@ -2367,6 +2377,10 @@ export default function App() {
         const probed = await probeNode();
         if (probed === null) return "probe-untested";
         return probed ? "ok" : "probe-failed";
+      },
+      // 运行配置里的凭据过期：断开重连才会重新渲染配置，让同步下来的新凭据生效。
+      reconnectCurrent: () => {
+        void handleReconnectAndTest();
       },
       rotateCredentials: async () => {
         try {
@@ -2609,6 +2623,12 @@ export default function App() {
       config.config_id,
       targets,
     );
+  };
+
+  /** 停止批量测速：只收掉这一批，已出的结果留在缓存里。 */
+  const handleProbeCancel = () => {
+    lastActionRef.current = { id: "client.probe" };
+    void nodeProbes.cancel();
   };
 
   // action_card 的按钮只上报：hidden 消息 + context.last_action，不直接调命令。
@@ -3237,6 +3257,7 @@ export default function App() {
             )
           }
           onProbe={handleProbe}
+          onProbeCancel={handleProbeCancel}
           onAddNode={openAddNode}
           manualProbed={
             vpn.activeConfig

@@ -370,6 +370,54 @@ describe("节点诊断面板", () => {
     ).toBeTruthy();
   });
 
+  it("运行配置还是旧凭据：结论是断开重连后生效，不再报仍然不通", async () => {
+    const reconnectAndProbe = vi.fn(async () => "ok" as const);
+    const reprobe = vi.fn(async () => null);
+    const reconnectCurrent = vi.fn();
+    const deps = makeDeps({
+      // 跑的是别的节点：只重测、不 restart。
+      isTunnelRunning: () => false,
+      isRuntimeRunning: () => true,
+      syncConfig: vi.fn(async () => ({ changed: true, port: 30902 })),
+      reprobe,
+      probeUntestedReason: () => "running_config_stale",
+      reconnectAndProbe,
+      reconnectCurrent,
+    });
+    open(deps);
+
+    await startAndUpdate();
+
+    expect(
+      await screen.findByText("配置已更新，断开并重新连接后生效"),
+    ).toBeTruthy();
+    expect(screen.queryByText("配置已同步，但仍然不通")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+    expect(reconnectCurrent).toHaveBeenCalledTimes(1);
+    expect(reconnectAndProbe).not.toHaveBeenCalled();
+  });
+
+  it("代理探测因运行配置过期没测成：直接提示断开重连", async () => {
+    const reconnectCurrent = vi.fn();
+    const deps = makeDeps({
+      probeProxy: vi.fn(async () => ({
+        reachable: null,
+        reason: "running_config_stale",
+        latencyMs: null,
+      })),
+      reconnectCurrent,
+    });
+    open(deps);
+
+    await start();
+
+    expect(
+      await screen.findByText("配置已更新，断开并重新连接后生效"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+    expect(reconnectCurrent).toHaveBeenCalledTimes(1);
+  });
+
   it("更换失败：结论带 reason，下一步是去问 AI", async () => {
     const openAi = vi.fn();
     const deps = makeDeps({

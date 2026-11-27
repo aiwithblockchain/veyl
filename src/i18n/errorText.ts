@@ -47,6 +47,9 @@ export const ERROR_CODE_TEXT: Record<string, MessageKey> = {
   RUNTIME_CRASH_LOOP: "error.code.runtimeCrashLoop",
   RUNTIME_EXITED: "error.code.runtimeExited",
   RUNTIME_HEALTH_FAILED: "error.code.runtimeHealthFailed",
+  // TUN 启动失败、没有 takeover_incomplete 细节（helper 起不来等）：只说没起来，
+  // 不承诺已回滚；接管阶段的回滚是否确认见 reason 表里的 tun_start_failed。
+  tun_start_failed: "error.code.tunStartFailed",
 };
 
 /** reason 词表见 commands.md §1.6；已有同类 key 的直接复用，避免两套说法。 */
@@ -175,6 +178,33 @@ export const ERROR_REASON_TEXT: Record<string, ReasonEntry> = {  // 登录 / 账
   connected: "error.reason.configInUse",
   switch_in_progress: "error.reason.switchInProgress",
   runtime_busy: "error.reason.runtimeBusy",
+  // 当前节点的服务器域名解析不出来：连接还没开始，不要按「TUN 启动失败已回滚」讲。
+  node_server_unresolved: "error.reason.nodeServerUnresolved",
+  /**
+   * TUN 接管校验失败：`details.detail` 里带着回滚是否确认的证据（`stopped` /
+   * `residual_routes` / `dns_flushed`，与 connect_changed 的 restored 判据同源）。
+   * 没确认清理干净时不能再说「已回滚」，要先让用户强制重置网络。
+   * 没有 takeover 细节（helper 起不来等）用 code 级的中性句，不承诺回滚。
+   */
+  tun_start_failed: (details) => {
+    const detail = details?.detail;
+    if (typeof detail !== "object" || detail === null) {
+      return { key: "error.code.tunStartFailed" };
+    }
+    const takeover = detail as Record<string, unknown>;
+    if (takeover.reason !== "takeover_incomplete") {
+      return { key: "error.code.tunStartFailed" };
+    }
+    const cleaned =
+      takeover.stopped === true &&
+      takeover.residual_routes !== true &&
+      takeover.dns_flushed === true;
+    return {
+      key: cleaned
+        ? "error.reason.tunTakeoverRolledBack"
+        : "error.reason.tunTakeoverUncertain",
+    };
+  },
 
   // 配置 / 节点
   duplicate_name: "error.reason.duplicateName",

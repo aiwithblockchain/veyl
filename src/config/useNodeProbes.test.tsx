@@ -121,7 +121,7 @@ afterEach(() => {
 });
 
 describe("useNodeProbes", () => {
-  it("开始批次后先进入准备态，探测阶段最多 6 个节点处于测速中", async () => {
+  it("开始批次后先进入准备态，行内最多按并发上限点亮测速中", async () => {
     const { result, emit } = harness();
     await act(async () => {
       await result.current.start("cfg-1", IDS);
@@ -134,20 +134,46 @@ describe("useNodeProbes", () => {
       phase: "preparing",
     });
     // 命令一发出就点亮行内「测速中」，命令返回后仍保持，不必等第一批事件。
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length);
 
     emit(progress("run-1", 0, null, "cfg-1", "probing", "clash"));
     expect(result.current.run).toMatchObject({ phase: "probing", method: "clash" });
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length);
     expect(result.current.probing.has("n1")).toBe(true);
-    expect(result.current.probing.has("n7")).toBe(false);
 
     emit(progress("run-1", 1, probe("n1", 38)));
     expect(result.current.results.n1).toMatchObject({ latency_ms: 38 });
     expect(result.current.run?.done).toBe(1);
     expect(result.current.probing.has("n1")).toBe(false);
-    expect(result.current.probing.has("n7")).toBe(true);
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length - 1);
+  });
+
+  it("并发上限是 16：20 个节点只点亮 16 行，完成一个补一个", async () => {
+    const many = Array.from({ length: 20 }, (_, index) => `n${index + 1}`);
+    const { result, emit } = harness();
+    await act(async () => {
+      await result.current.start("cfg-1", many);
+    });
+    expect(result.current.probing.size).toBe(16);
+    expect(result.current.probing.has("n17")).toBe(false);
+
+    emit({
+      name: AGENT_EVENTS.nodeProbeProgress,
+      payload: {
+        contract_version: CONTRACT_VERSION,
+        run_id: "run-1",
+        config_id: "cfg-1",
+        phase: "probing",
+        method: "clash",
+        done: 1,
+        total: 20,
+        result: probe("n1", 38),
+        emitted_at: new Date().toISOString(),
+      },
+    } as AgentEvent);
+    expect(result.current.probing.has("n1")).toBe(false);
+    expect(result.current.probing.has("n17")).toBe(true);
+    expect(result.current.probing.size).toBe(16);
   });
 
   it("同一窗口发起的批次里，有缓存的行也会进入测速中（旧值降级）", async () => {
@@ -168,7 +194,7 @@ describe("useNodeProbes", () => {
     });
     emit(progress("run-1", 0, null, "cfg-1", "probing", "clash"));
     expect(result.current.probing.has("n1")).toBe(true);
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length);
   });
 
   it("重开面板时仍在准备阶段：恢复 preparing，不伪造探测行", async () => {
@@ -214,7 +240,7 @@ describe("useNodeProbes", () => {
     });
     expect(result.current.run).toMatchObject({ runId: "run-1", done: 5 });
     expect(result.current.results.n1).toMatchObject({ latency_ms: 38 });
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length - 1);
 
     // 重开后先到一条更早的迟到事件：按 done 去重，不覆盖已有结果。
     emit(progress("run-1", 3, probe("n2", 12)));
@@ -257,6 +283,32 @@ describe("useNodeProbes", () => {
     });
     expect(result.current.finished).toMatchObject({ cancelled: true });
     expect(result.current.results.n1).toMatchObject({ latency_ms: 38 });
+  });
+
+  it("取消的完成事件晚于本地收尾：终态与「已停止」提示都不能丢", async () => {
+    // 双击停止：第一次真取消；第二次后端回「批次已结束」，此时 finished 事件还没派发。
+    const cancel = vi
+      .fn()
+      .mockResolvedValueOnce({ cancelled: true })
+      .mockResolvedValueOnce({ cancelled: false });
+    const { result, emit } = harness({ nodeProbeCancel: cancel });
+    await act(async () => {
+      await result.current.start("cfg-1", IDS);
+    });
+    emit(progress("run-1", 1, probe("n1", 38)));
+    await act(async () => {
+      await result.current.cancel();
+      await result.current.cancel();
+    });
+    expect(result.current.run).toBeNull();
+    expect(result.current.finished).toBeNull();
+
+    emit(finished("run-1", { ok: 1, failed: 0, cancelled: true }));
+    expect(result.current.finished).toMatchObject({ cancelled: true, ok: 1 });
+    expect(result.current.notice).toEqual({
+      configId: "cfg-1",
+      text: "已停止 · 已测 1/8",
+    });
   });
 
   it("全部失败且离线时记录 network=offline", async () => {
@@ -396,7 +448,7 @@ describe("点击后的即时反馈", () => {
       started = result.current.start("cfg-1", IDS);
     });
     expect(result.current.starting).toBe(true);
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length);
 
     await act(async () => {
       release({
@@ -411,7 +463,7 @@ describe("点击后的即时反馈", () => {
     expect(result.current.starting).toBe(false);
     expect(result.current.run?.runId).toBe("run-1");
     // 命令返回后仍保持「测速中」，等探测事件推进。
-    expect(result.current.probing.size).toBe(6);
+    expect(result.current.probing.size).toBe(IDS.length);
   });
 
   it("外部逐节点探测可以点亮再清掉行内的测速中", () => {

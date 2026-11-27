@@ -171,6 +171,7 @@ interface StageOverrides {
   trialState?: "available" | "active" | "expired" | null;
   danglingNodeIds?: ReadonlySet<string>;
   onProbe?: () => void;
+  onProbeCancel?: () => void;
   onAddNode?: () => void;
   manualProbed?: boolean;
   onProbeAvailabilityChange?: (available: boolean) => void;
@@ -220,6 +221,7 @@ function stageElement(over: StageOverrides = {}) {
       trialState={over.trialState ?? null}
       danglingNodeIds={over.danglingNodeIds}
       onProbe={over.onProbe}
+      onProbeCancel={over.onProbeCancel}
       onAddNode={over.onAddNode}
       manualProbed={over.manualProbed ?? false}
       onProbeAvailabilityChange={over.onProbeAvailabilityChange}
@@ -758,9 +760,25 @@ describe("连接舞台", () => {
     ).toBe("true");
   });
 
-  it("测速中入口禁用并显示三点，点击不重复触发", () => {
+  it("批次在跑：测速入口变成「停止测速」，点击调取消", () => {
     const onProbe = vi.fn();
-    renderStage({ nodeProbes: probes({ run: probeRun("r1") }), onProbe });
+    const onProbeCancel = vi.fn();
+    renderStage({
+      nodeProbes: probes({ run: probeRun("r1") }),
+      onProbe,
+      onProbeCancel,
+    });
+
+    const stop = screen.getByRole("button", { name: "停止测速" });
+    expect((stop as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(stop);
+    expect(onProbeCancel).toHaveBeenCalledTimes(1);
+    expect(onProbe).not.toHaveBeenCalled();
+  });
+
+  it("命令刚发出、批次还没回来：仍显示测速中且禁用", () => {
+    const onProbe = vi.fn();
+    renderStage({ nodeProbes: probes({ starting: true }), onProbe });
 
     const button = screen.getByRole("button", { name: /测速中/ });
     expect((button as HTMLButtonElement).disabled).toBe(true);

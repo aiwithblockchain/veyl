@@ -21,7 +21,9 @@ use crate::store::{configs, Store};
 
 use super::services::{clash_delay, probe_ok, probe_unreachable, probe_untested};
 
-pub const CONCURRENCY: usize = 6;
+/// 同时在飞的探测数。探测请求打的是本机 Clash API，再高也只是压本地；
+/// 16 路让「导入几十上百个节点」的批次从几分钟压到半分钟以内。
+pub const CONCURRENCY: usize = 16;
 
 /// 单节点测速留下的空闲运行时：60 秒内再点测直接复用，不冷启动。
 pub const IDLE_TTL: Duration = Duration::from_secs(60);
@@ -830,9 +832,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrency_never_exceeds_six() {
+    async fn concurrency_reaches_the_configured_limit() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 24, "clash").unwrap();
+        let started = state.start("cfg_1", 64, "clash").unwrap();
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
         let probe = {
@@ -851,11 +853,17 @@ mod tests {
                 }
             }
         };
-        let nodes: Vec<Node> = (0..24).map(node).collect();
+        let nodes: Vec<Node> = (0..64).map(node).collect();
         let outcome = run_batch(Arc::clone(&state), started.meta, nodes, probe).await;
-        assert_eq!(outcome.done, 24);
-        assert_eq!(outcome.ok, 24);
-        assert!(max.load(Ordering::SeqCst) <= 6, "并发超过 6");
+        assert_eq!(outcome.done, 64);
+        assert_eq!(outcome.ok, 64);
+        // 节点数远超并发上限：同时在飞的应正好压到上限，既不缩水也不超。
+        // 16 路是契约值（commands.md §4.4）：少了它，174 个节点就是 29 轮 × 3 秒。
+        assert_eq!(
+            max.load(Ordering::SeqCst),
+            16,
+            "批量测速并发应为 16 路"
+        );
     }
 
     #[tokio::test]
@@ -884,17 +892,25 @@ mod tests {
     #[tokio::test]
     async fn cancel_stops_further_probes_and_keeps_finished_results() {
         let state = Arc::new(ProbeBatchState::default());
-        let started = state.start("cfg_1", 20, "clash").unwrap();
+        // 至少两轮：取消点不能被"一轮就全跑完"吃掉（并发数变了这个用例也得成立）。
+        let total = CONCURRENCY * 2;
+        let started = state.start("cfg_1", total, "clash").unwrap();
         let probes = Arc::new(AtomicUsize::new(0));
-        let nodes: Vec<Node> = (0..20).map(node).collect();
+        let nodes: Vec<Node> = (0..total).map(node).collect();
         let probe = {
             let probes = Arc::clone(&probes);
             move |node: &Node| {
                 let id = node.id.clone();
+                let index = id
+                    .trim_start_matches("nod_")
+                    .parse::<usize>()
+                    .unwrap_or(usize::MAX);
                 let probes = Arc::clone(&probes);
                 async move {
                     probes.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    // 第一轮很快出结果；其余卡住，取消时正好还有在飞的探测。
+                    let wait = if index < CONCURRENCY { 5 } else { 200 };
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
                     result(&id, true)
                 }
             }
@@ -903,18 +919,19 @@ mod tests {
         let cancel = Arc::clone(&state);
         let run_id = started.run_id.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
             assert!(cancel.cancel(&run_id));
         });
         let outcome = run_batch(Arc::clone(&state), started.meta, nodes, probe).await;
 
         assert!(outcome.cancelled);
-        assert!(outcome.done < 20, "取消后不应跑完全部");
+        assert_eq!(outcome.done, CONCURRENCY, "第一轮已出结果，第二轮在飞时被取消");
+        assert!(outcome.done < total, "取消后不应跑完全部");
         assert!(
             probes.load(Ordering::SeqCst) >= outcome.done,
             "已发出的结果不能多于实际探测数"
         );
-        let ids: Vec<String> = (0..20).map(|i| format!("nod_{i}")).collect();
+        let ids: Vec<String> = (0..total).map(|i| format!("nod_{i}")).collect();
         let (results, run) = state.snapshot("cfg_1", &ids);
         assert_eq!(results.len(), outcome.done, "已出的结果必须保留");
         assert!(run.is_none(), "取消后批次要清掉");

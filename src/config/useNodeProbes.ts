@@ -12,7 +12,8 @@ import type {
 } from "../agent/protocol";
 import { nextProbing } from "../ui/nodeList";
 
-const CONCURRENCY = 6;
+/** 与 `src-tauri/src/tools/probe_batch.rs` 的 `CONCURRENCY` 保持一致：只决定行内同时亮几个「测速中」。 */
+const CONCURRENCY = 16;
 const NOTICE_MS = 4000;
 
 export interface ActiveProbeRun extends NodeProbeRun {
@@ -39,7 +40,7 @@ export interface NodeProbesController {
   run: ActiveProbeRun | null;
   /** 命令已发出、批次还没回来：入口立刻显示「测速中」，避免看起来没反应。 */
   starting: boolean;
-  /** 正在被这一批探测的节点，最多 6 个；行内据此显示「测速中」。 */
+  /** 正在被这一批探测的节点，最多 `CONCURRENCY` 个；行内据此显示「测速中」。 */
   probing: ReadonlySet<string>;
   finished: ProbeFinishedInfo | null;
   /** 取消后的短暂汇总；带 configId，切到别的配置时不会串台。 */
@@ -104,6 +105,11 @@ export function useNodeProbes({
   const freshRun = useRef<string | null>(null);
   const startingConfigRef = useRef<string | null>(null);
   const noticeTimer = useRef<number | null>(null);
+  /**
+   * 取消时已经在本地收过收尾、但 `node-probe-finished` 还没到的批次。
+   * 事件可能晚于 `node_probe_cancel` 的响应到达；记住它，别把终态和提示一起丢掉。
+   */
+  const pendingFinish = useRef<string | null>(null);
 
   useEffect(() => {
     resultsRef.current = results;
@@ -265,8 +271,10 @@ export function useNodeProbes({
 
   const onFinished = useCallback(
     (payload: NodeProbeFinishedPayload) => {
-      const current = runRef.current;
-      if (!current || current.runId !== payload.run_id) return;
+      // 取消时本地可能已经先收尾（事件的到达顺序不保证）：pendingFinish 里的 runId 同样要处理。
+      const expected = runRef.current?.runId ?? pendingFinish.current;
+      if (!expected || expected !== payload.run_id) return;
+      pendingFinish.current = null;
       applyRun(null);
       applyProbing(new Set(), []);
       startingConfigRef.current = null;
@@ -383,6 +391,7 @@ export function useNodeProbes({
       const scope = nodeIds ?? knownNodeIds.current;
       if (scope.length === 0) return { ok: false, message: translate("probe.error.noConfigNodes") };
       clearNotice();
+      pendingFinish.current = null;
       runScope.current = scope;
       startingConfigRef.current = configId;
       // 命令往返期间就把行内「测速中」点亮：用户点了要有反应。
@@ -444,8 +453,10 @@ export function useNodeProbes({
     if (!current) return;
     try {
       const result = await bridge.nodeProbeCancel(current.runId);
-      if (!result.cancelled) {
-        // 批次已经结束：本地收尾，等不等得到 finished 都不影响。
+      // 批次已经结束：本地先收尾。`node-probe-finished` 可能还在路上——
+      // 记下 runId，让 onFinished 照样补上终态与「已停止」提示。
+      if (!result.cancelled && runRef.current?.runId === current.runId) {
+        pendingFinish.current = current.runId;
         applyRun(null);
         applyProbing(new Set(), []);
         startingConfigRef.current = null;

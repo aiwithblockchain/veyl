@@ -75,18 +75,53 @@ pub struct LaunchSlot<'a> {
     session: &'a TunSession,
     seq: u64,
     settled: AtomicBool,
+    /// 提交成功那一刻的 `intent_seq`。之后用户断开、切配置或又一次新启动都会让它落后，
+    /// 据此把「别人的操作抢先了」和「我们自己的失败回滚」分开。
+    /// 只在提交成功后写入；`u64::MAX` = 还没成功提交。
+    intent_seq_at_commit: AtomicU64,
 }
 
 impl<'a> LaunchSlot<'a> {
     /// 这次启动在 helper 动手期间是否已被取消（stop / 切配置）。
+    /// **只看「登记还是不是自己」**：成功提交后登记会被清掉，所以提交之后
+    /// 这个值恒为 true。要判断「这次启动是否被取代」，用 `superseded()`。
     pub fn cancelled(&self) -> bool {
         !self.session.launch_is_current(self.seq)
     }
 
+    /// 这次启动是否已被更晚的启动 / 用户断开取代。
+    ///
+    /// 提交成功后的失败**不自动算被取代**：启动已经落地，后续的失败（例如
+    /// TUN 路由接管不完整）属于这次连接自己；改写成 `cancelled` 会让界面
+    /// 静默收尾、连失败事件都不发，主按钮永远停在「连接中」。
+    /// 但如果用户在这期间断开、或者又有一次新启动，那就确实是取代。
+    pub fn superseded(&self) -> bool {
+        match self.session.launching_seq() {
+            Some(seq) => seq != self.seq,
+            None if !self.settled.load(Ordering::SeqCst) => true,
+            None => {
+                self.session.intent_seq() != self.intent_seq_at_commit.load(Ordering::SeqCst)
+            }
+        }
+    }
+
+    /// 本次启动是否已经成功提交。
+    pub fn settled(&self) -> bool {
+        self.settled.load(Ordering::SeqCst)
+    }
+
     /// 本次启动生效：把 pid 与连接上下文写进状态。返回 false 表示已被取消。
     pub fn commit(&self, meta: &TunLaunchMeta, reply: &StartReply) -> bool {
+        // 先记下意图代次再写状态：并发的断开 / 新启动只会让代次变大，不能被我们追平。
+        let intent_seq = self.session.intent_seq();
+        if !self.session.commit_launch(self.seq, meta, reply) {
+            return false;
+        }
+        // 只有真的提交成功才算 settled（失败时 Drop 仍会清登记，abandon 只清属于自己的）。
+        // 先写代次再置 settled：读到 settled = true 时，提交时的代次已经可见。
+        self.intent_seq_at_commit.store(intent_seq, Ordering::SeqCst);
         self.settled.store(true, Ordering::SeqCst);
-        self.session.commit_launch(self.seq, meta, reply)
+        true
     }
 }
 
@@ -148,6 +183,10 @@ pub struct TunSession {
     stop_done: std::sync::Condvar,
     /// 启动代次发生器。stop / 切配置会作废旧代次，迟到的 start 不得再写状态。
     launch_seq: AtomicU64,
+    /// 意图代次：用户断开 / 切配置（`cancel_launch`）与每次**新启动**（`begin_launch`）
+    /// 都递增。提交过的启动靠它判断「这次失败是不是已经被更晚的意图取代」——
+    /// 自己的失败回滚不走这两个入口，所以不会把这次连接误判成被取代。
+    intent_seq: AtomicU64,
     /// 数据面探测结果。只由健康循环写，`runtime_status` 读；
     /// 去抖口径与代理模式共用 `DataPlaneGate`（契约 §2.3.1）。
     data_plane: Mutex<DataPlaneSnapshot>,
@@ -241,6 +280,7 @@ impl TunSession {
             stop_in_flight: Mutex::new(false),
             stop_done: std::sync::Condvar::new(),
             launch_seq: AtomicU64::new(0),
+            intent_seq: AtomicU64::new(0),
             data_plane: Mutex::new(DataPlaneSnapshot::fresh(now_iso())),
             observer: Mutex::new(None),
             stopping: AtomicBool::new(false),
@@ -306,6 +346,9 @@ impl TunSession {
     /// 登记一次在途启动。调用方从拿到凭据的那一刻起就算「正在连」，
     /// 直到 `LaunchSlot::commit` 或它被丢弃。
     pub fn begin_launch(&self, config_id: &str) -> LaunchSlot<'_> {
+        // 新启动也是一次意图变更：已提交的旧启动即使登记早被清掉，之后的失败
+        // 也要让位给这次启动（哪怕这次启动很快结束，也不能把它当成旧连接的失败）。
+        self.intent_seq.fetch_add(1, Ordering::SeqCst);
         // 先取号再登记：切配置可能在两步之间把登记清掉，那时这次启动立即作废。
         let seq = self.launch_seq.fetch_add(1, Ordering::SeqCst) + 1;
         *self.launching.lock().unwrap() = Some(Launching {
@@ -317,6 +360,7 @@ impl TunSession {
             session: self,
             seq,
             settled: AtomicBool::new(false),
+            intent_seq_at_commit: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -389,7 +433,9 @@ impl TunSession {
     /// 作废在途启动（切配置 / 断开）。返回是否确实有在途启动。
     ///
     /// 只清登记、不碰进程：调用方随后要自己 `stop`，那一步会排到在途 start 后面。
+    /// 意图代次在这里递增：已提交的启动据此认出「这次失败是被用户断开取代的」。
     pub fn cancel_launch(&self) -> bool {
+        self.intent_seq.fetch_add(1, Ordering::SeqCst);
         self.launching.lock().unwrap().take().is_some()
     }
 
@@ -400,6 +446,20 @@ impl TunSession {
             .as_ref()
             .map(|launch| launch.seq)
             == Some(seq)
+    }
+
+    /// 当前在途启动的代次；没有在途启动时为 None。
+    fn launching_seq(&self) -> Option<u64> {
+        self.launching
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|launch| launch.seq)
+    }
+
+    /// 累计的意图代次（断开 / 切配置 / 新启动都算）。
+    fn intent_seq(&self) -> u64 {
+        self.intent_seq.load(Ordering::SeqCst)
     }
 
     fn mark_start_sent(&self, seq: u64) {
@@ -1780,6 +1840,112 @@ mod tests {
             2,
             "断开停一次，迟到的实例还要再停一次"
         );
+    }
+
+    /// 提交之后的失败属于这次连接自己，不能被判成「被取代」——
+    /// 否则界面拿不到 Failed 事件，主按钮永远停在「连接中」。
+    #[test]
+    fn a_committed_launch_is_not_superseded() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let slot = session.begin_launch("cfg_test");
+        let started = session
+            .launch_registered(&slot, "{}", &meta())
+            .expect("helper 拉起成功");
+        assert_eq!(started.pid, 4242);
+        assert!(slot.settled(), "成功提交后必须标记为已落地");
+        assert!(slot.cancelled(), "提交会清掉登记：旧口径在这里是 true");
+        assert!(!slot.superseded(), "提交后的失败不是「被取代」");
+    }
+
+    /// 提交之后用户断开：迟到的失败不能再报成连接失败，否则会盖掉断开的 Idle。
+    #[test]
+    fn a_stop_after_commit_marks_the_launch_superseded() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let slot = session.begin_launch("cfg_test");
+        session
+            .launch_registered(&slot, "{}", &meta())
+            .expect("helper 拉起成功");
+        assert!(!slot.superseded(), "没有新操作时不算被取代");
+
+        session.stop().expect("断开要成功");
+        assert!(slot.superseded(), "用户断开之后的失败必须当作被取代");
+    }
+
+    /// 提交之后的失败回滚不能把这次启动判成「被取代」：
+    /// `stop_for_failed_launch` 必须绕开 `stop()` / `cancel_launch`，否则提交后的
+    /// 失败又会被静默收掉，界面回到「连接中」卡死。
+    #[test]
+    fn a_failed_launch_rollback_does_not_mark_it_superseded() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let slot = session.begin_launch("cfg_test");
+        let started = session
+            .launch_registered(&slot, "{}", &meta())
+            .expect("helper 拉起成功");
+        assert!(slot.settled(), "成功提交后才能谈失败回滚");
+
+        session
+            .stop_for_failed_launch(started.pid)
+            .expect("回滚要停掉刚拉起的实例");
+
+        assert!(
+            !slot.superseded(),
+            "自己的失败回滚不是「被取代」——否则失败会被改写成 cancelled"
+        );
+    }
+
+    /// 提交失败（登记已被清掉 / 被新启动占走）不能算 settled：
+    /// settled 只表示「真的提交了」，Drop 才能据此决定是否清登记。
+    #[test]
+    fn a_failed_commit_is_not_settled_and_is_superseded() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let slot = session.begin_launch("cfg_test");
+        assert!(session.cancel_launch());
+        let reply = StartReply {
+            pid: 4242,
+            clash_api: ClashApi {
+                addr: "127.0.0.1:51234".into(),
+                secret: "s".into(),
+            },
+            since: "2026-11-05T00:00:00Z".into(),
+            dns_hijack: Default::default(),
+        };
+
+        assert!(!slot.commit(&meta(), &reply));
+        assert!(!slot.settled(), "提交失败不能算已落地");
+        assert!(slot.superseded());
+    }
+
+    /// 新启动一旦开始，已提交的旧启动就该让位——即使新启动很快结束、登记已经清空。
+    #[test]
+    fn a_newer_launch_supersedes_a_settled_one_even_after_it_finishes() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let first = session.begin_launch("cfg_a");
+        let started = session
+            .launch_registered(&first, "{}", &meta())
+            .expect("第一次拉起成功");
+        assert_eq!(started.pid, 4242);
+        assert!(!first.superseded(), "没有新意图时不算被取代");
+
+        // 第二次启动开始并完成：提交后登记已清空，但第一次的迟到失败仍要算被取代。
+        let second = session.begin_launch("cfg_b");
+        session
+            .launch_registered(&second, "{}", &meta())
+            .expect("第二次拉起成功");
+
+        assert!(
+            first.superseded(),
+            "新启动开始后，旧启动的迟到失败必须让位"
+        );
+        assert!(!second.superseded());
+    }
+
+    #[test]
+    fn a_launch_cancelled_before_commit_is_superseded() {
+        let session = TunSession::with_backend(Arc::new(FakeBackend::new()), "fake");
+        let slot = session.begin_launch("cfg_test");
+        assert!(session.cancel_launch());
+        assert!(!slot.settled());
+        assert!(slot.superseded());
     }
 
     /// 新连接已经把 start 发出去：helper 的替换语义会收掉旧实例，

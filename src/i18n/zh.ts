@@ -662,6 +662,7 @@ export const zh = {
   "console.nodes.countTrial": "{count} 个节点 · 7 天试用",
   "console.probe.action": "测速",
   "console.probe.again": "再试一次",
+  "console.probe.stop": "停止测速",
   "console.probe.allFailed": "这次都没测通。",
   "console.probe.allUntested": "这次没测成。",
   "console.probe.mixed": "{count} 个没测成。",
@@ -1732,6 +1733,8 @@ export const zh = {
   "error.reason.configInUse": "这套配置正在使用，先断开再删除。",
   "error.reason.switchInProgress": "正在切换配置或接管方式，稍后再试。",
   "error.reason.runtimeBusy": "后台组件正在忙，前一个操作结束后再试。",
+  "error.reason.nodeServerUnresolved":
+    "当前节点的服务器地址解析不出来，连接没有开始。检查网络或换一个节点后再试。",
 
   /* 批次 4 补词：配置 / 节点。 */
   "error.reason.duplicateName": "名字重复了，换一个。",
@@ -1756,6 +1759,12 @@ export const zh = {
   "error.code.runtimeCrashLoop": "后台组件反复崩溃，已停止重试。",
   "error.code.runtimeExited": "后台组件已退出。",
   "error.code.runtimeHealthFailed": "连接健康检查没通过。",
+  "error.code.tunStartFailed":
+    "接管全部流量没有起来。可以重试；仍失败就到设置里强制重置网络。",
+  "error.reason.tunTakeoverRolledBack":
+    "接管全部流量没有准备就绪，已自动停止并回滚。可以重试；仍失败就到设置里强制重置网络。",
+  "error.reason.tunTakeoverUncertain":
+    "接管全部流量没有准备就绪，自动停止也没能确认清理干净。先到设置里执行「强制重置网络」，再重试。",
   "error.code.runtimeGeneric": "后台组件没能正常运行。",
 
   /* 批次 4 补词：节点凭据。 */
@@ -1800,6 +1809,7 @@ export const zh = {
   "diagnosis.untested.runtimeMissing": "本地运行时没有安装",
   "diagnosis.untested.runtimeFailed": "本地运行时已经停止",
   "diagnosis.untested.runtimeTimeout": "本地运行时没有响应",
+  "diagnosis.untested.runningConfigStale": "运行中的配置还是旧凭据",
   "diagnosis.untested.probeTimeout": "测速超时，没能完成",
   "diagnosis.untested.noLocalNode": "这个节点还没同步到本机，稍后再试",
   "diagnosis.untested.probeError": "测速没能执行",
@@ -1833,6 +1843,7 @@ export const zh = {
     "同步配置还没返回结果，可能仍在进行；稍后再看连接是否恢复。",
   "diagnosis.config.untested":
     "这次没能重测：探针没有跑起来，不能当成不通。",
+  "diagnosis.config.stale": "配置已更新，断开并重新连接后生效",
   "diagnosis.config.untestedReason": "这次没能重测：{reason}。",
   "diagnosis.config.reconnectFailed": "配置已同步，但没能重连。",
   "diagnosis.config.recovered": "配置已同步，连接已恢复",

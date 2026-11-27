@@ -74,9 +74,10 @@ interface Props {
   } | null;
   /** 预选应用后通知 Host 消费掉，避免切走再回来二次应用。 */
   onPreselectApplied?: (nonce: number) => void;
-  /** 手动测速：只更新延迟，不改选中、不连接。 */
   /** 测速当前分组里的这些节点（只读，不改选中）。 */
   onProbe?: (nodeIds: string[]) => void;
+  /** 批次在跑时把入口换成「停止测速」：点了就取消这一批。 */
+  onProbeCancel?: () => void;
   /** 节点卡「添加节点」：打开导入 / 手动填写弹层。 */
   onAddNode?: () => void;
   /** 本会话已手动测过速：收尾句去掉数字。 */
@@ -143,7 +144,7 @@ function SpeedIcon() {
 }
 
 /**
- * 连接舞台：44px 状态带 + 400 居中卡片 + 整宽主按钮。
+ * 连接舞台：48px 状态带 + 400 居中卡片 + 整宽主按钮。
  * 旧 Console 的结构（大计时器 + 右侧小按钮 + 底部节点面板）不再使用。
  */
 export function ConnectionStage({
@@ -172,6 +173,7 @@ export function ConnectionStage({
   preselect = null,
   onPreselectApplied,
   onProbe,
+  onProbeCancel,
   onAddNode,
   manualProbed = false,
   onProbeAvailabilityChange,
@@ -603,6 +605,68 @@ export function ConnectionStage({
     : switching !== null || starting || stopping || helperPreparing
       ? t("console.probeLocked")
       : undefined;
+
+  /**
+   * 测速入口的三种形态：空闲是「测速」；命令刚发出是禁用的「测速中」；
+   * 批次在跑时换成「停止测速」——否则一批几十秒时用户只能干等。
+   */
+  const renderProbeControl = (nodeIds: string[], scope: "free" | TabSource) => {
+    if (!onProbe || nodeIds.length === 0) return null;
+    if (probeRunning) {
+      if (nodeProbes.run !== null && onProbeCancel !== undefined) {
+        return (
+          <button
+            type="button"
+            className="stage-probe"
+            onClick={() => {
+              manualProbeRef.current = true;
+              onProbeCancel();
+            }}
+          >
+            {t("console.probe.stop")}
+          </button>
+        );
+      }
+      return (
+        <button
+          type="button"
+          className="stage-probe"
+          disabled
+          title={probeTitle}
+        >
+          <span className="stage-step__dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          {t("console.probing")}
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="stage-probe"
+        disabled={!canProbe}
+        title={probeTitle}
+        onClick={() => {
+          if (!canProbe) return;
+          manualProbeRef.current = true;
+          setProbeScope(scope);
+          onProbe(nodeIds);
+        }}
+      >
+        {noteHome === scope && probeAllFailed ? (
+          t("console.probe.again")
+        ) : (
+          <>
+            <SpeedIcon />
+            <span className="sr-only">{t("console.probe.action")}</span>
+          </>
+        )}
+      </button>
+    );
+  };
 
   /** hero 的「重新连接」：先清提示，再 stop → start，最后重测当前节点。 */
   const retryStaleConfig = async () => {
@@ -1357,40 +1421,7 @@ export function ConnectionStage({
                     {t("console.nodes.count", { count: freeEntries.length })}
                   </p>
                   <div className="stage-card__actions">
-                    {onProbe && freeNodeIds.length > 0 ? (
-                      <button
-                        type="button"
-                        className="stage-probe"
-                        disabled={!canProbe}
-                        title={probeTitle}
-                        onClick={() => {
-                          if (!canProbe) return;
-                          manualProbeRef.current = true;
-                          setProbeScope("free");
-                          onProbe(freeNodeIds);
-                        }}
-                      >
-                        {probeRunning ? (
-                          <>
-                            <span className="stage-step__dots" aria-hidden="true">
-                              <span />
-                              <span />
-                              <span />
-                            </span>
-                            {t("console.probing")}
-                          </>
-                        ) : noteHome === "free" && probeAllFailed ? (
-                          t("console.probe.again")
-                        ) : (
-                          <>
-                            <SpeedIcon />
-                            <span className="sr-only">
-                              {t("console.probe.action")}
-                            </span>
-                          </>
-                        )}
-                      </button>
-                    ) : null}
+                    {renderProbeControl(freeNodeIds, "free")}
                   </div>
                 </div>
                 <p className="stage-trial-note">
@@ -1430,40 +1461,7 @@ export function ConnectionStage({
                   })}
                 </p>
                 <div className="stage-card__actions">
-                  {onProbe && activeNodeIds.length > 0 ? (
-                    <button
-                      type="button"
-                      className="stage-probe"
-                      disabled={!canProbe}
-                      title={probeTitle}
-                      onClick={() => {
-                        if (!canProbe) return;
-                        manualProbeRef.current = true;
-                        setProbeScope(activeSource);
-                        onProbe(activeNodeIds);
-                      }}
-                    >
-                      {probeRunning ? (
-                        <>
-                          <span className="stage-step__dots" aria-hidden="true">
-                            <span />
-                            <span />
-                            <span />
-                          </span>
-                          {t("console.probing")}
-                        </>
-                      ) : noteHome === activeSource && probeAllFailed ? (
-                        t("console.probe.again")
-                      ) : (
-                        <>
-                          <SpeedIcon />
-                          <span className="sr-only">
-                            {t("console.probe.action")}
-                          </span>
-                        </>
-                      )}
-                    </button>
-                  ) : null}
+                  {renderProbeControl(activeNodeIds, activeSource)}
                   {onAddNode ? (
                     <button
                       type="button"

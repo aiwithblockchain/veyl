@@ -3550,6 +3550,7 @@ fn probe_untested_message(reason: &str) -> &'static str {
         "connection_busy" => "正在连接或切换，稍后再测",
         "node_not_in_config" => "这个节点还没进节点池，先把它加到当前配置",
         "node_not_in_running_config" => "节点还没进运行中的配置，重新连接后再测",
+        "running_config_stale" => "运行中的配置还是旧凭据，断开重新连接后再测",
         "no_credentials" => "这个节点缺少凭据，先重新添加",
         "clash_unavailable" => "已连接，但读不到测速接口，重新连接一次再试",
         _ => "暂时测不了，稍后再试",
@@ -3753,6 +3754,84 @@ impl RegistrationGate {
     }
 }
 
+/// 最近一次成功启动的运行配置里，每个节点的端口与密码。
+///
+/// 运行中的 sing-box 只在启动时读一次配置；之后「同步配置」把新凭据写进库，
+/// 运行配置仍旧拿着旧的端口/密码。探测前先比这里，避免拿过期凭据测出假「连不通」。
+#[derive(Clone, Debug, Default)]
+struct RunningConfigSnapshot {
+    config_id: Option<String>,
+    nodes: std::collections::HashMap<String, RunningNodeCredentials>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RunningNodeCredentials {
+    port: u16,
+    password: Option<String>,
+}
+
+impl RunningConfigSnapshot {
+    /// 运行配置里的这个节点是否落后于库里的最新凭据。
+    /// 端口或密码任一不同即过期；运行配置里没有这个节点时不在这里判定。
+    fn is_stale_for(&self, node_id: &str, port: u16, current_secret: Option<&str>) -> bool {
+        let Some(running) = self.nodes.get(node_id) else {
+            return false;
+        };
+        if running.port != port {
+            return true;
+        }
+        match (running.password.as_deref(), current_secret) {
+            (Some(old), Some(new)) => old != new,
+            // 运行配置里没有密码字段（非 shadowsocks）时只比端口。
+            _ => false,
+        }
+    }
+}
+
+/// 从渲染好的 sing-box 配置里提取每个节点的端口与密码。
+fn snapshot_running_credentials(
+    config_id: Option<String>,
+    value: &Value,
+) -> RunningConfigSnapshot {
+    let mut nodes = std::collections::HashMap::new();
+    let Some(outbounds) = value.get("outbounds").and_then(Value::as_array) else {
+        return RunningConfigSnapshot { config_id, nodes };
+    };
+    for outbound in outbounds {
+        let Some(node_id) = outbound
+            .get("tag")
+            .and_then(Value::as_str)
+            .and_then(|tag| tag.strip_prefix("node-"))
+        else {
+            continue;
+        };
+        let port = outbound
+            .get("server_port")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u16;
+        let password = outbound
+            .get("password")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        nodes.insert(node_id.to_string(), RunningNodeCredentials { port, password });
+    }
+    RunningConfigSnapshot { config_id, nodes }
+}
+
+/// 快照存在时判断节点是否过期；没有快照（例如 App 重启后接管老 TUN）不新增判断。
+fn running_credentials_stale_in(
+    snapshot: Option<&RunningConfigSnapshot>,
+    node: &configs::Node,
+) -> bool {
+    let Some(snapshot) = snapshot else {
+        return false;
+    };
+    let secret = crate::secrets::get_secret(&node.password_ref)
+        .ok()
+        .flatten();
+    snapshot.is_stale_for(&node.id, node.port, secret.as_deref())
+}
+
 pub struct WiredServices {
     store: Arc<Store>,
     manager: Arc<RuntimeManager>,
@@ -3765,6 +3844,8 @@ pub struct WiredServices {
     tun: Arc<crate::tun::session::TunSession>,
     helper: Arc<crate::tun::helper_update::HelperUpdater>,
     probes: Arc<crate::tools::probe_batch::ProbeBatchState>,
+    /// 最近一次成功启动的运行配置里各节点的凭据；见 [`RunningConfigSnapshot`]。
+    running_credentials: Arc<std::sync::RwLock<Option<RunningConfigSnapshot>>>,
     /// 单节点测速冷启动的串行闸门：同时点测多个节点只付一次启动成本。
     probe_start: tokio::sync::Mutex<()>,
     /// 按配置串行：同配置的第二个切换请求直接 `CONFLICT / switch_in_progress`。
@@ -3891,6 +3972,7 @@ impl WiredServices {
             tun,
             helper,
             probes: Arc::new(crate::tools::probe_batch::ProbeBatchState::default()),
+            running_credentials: Arc::new(std::sync::RwLock::new(None)),
             probe_start: tokio::sync::Mutex::new(()),
             mode_switches: ModeSwitches::default(),
             tun_event_state: std::sync::Mutex::new(crate::runtime::RuntimeState::Idle),
@@ -4182,6 +4264,42 @@ impl WiredServices {
             None
         };
         resolve_clash_endpoint(tun_connected, plan, tun)
+    }
+
+    /// 记录这份运行配置的节点凭据；启动成功后调用。
+    fn remember_running_credentials(&self, config_id: Option<String>, value: &Value) {
+        let snapshot = snapshot_running_credentials(config_id, value);
+        let mut slot = self
+            .running_credentials
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(snapshot);
+    }
+
+    /// 取当前运行配置快照：配置 id 与在跑的连接对不上时视为不可信。
+    fn running_credentials_for(
+        &self,
+        connected_config: Option<&str>,
+    ) -> Option<RunningConfigSnapshot> {
+        let slot = self
+            .running_credentials
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = slot.clone()?;
+        match (snapshot.config_id.as_deref(), connected_config) {
+            (Some(rendered), Some(connected)) if rendered != connected => None,
+            _ => Some(snapshot),
+        }
+    }
+
+    /// 运行配置里这个节点是否落后于库里的最新凭据。
+    fn running_credentials_stale(
+        &self,
+        node: &configs::Node,
+        connected_config: Option<&str>,
+    ) -> bool {
+        let snapshot = self.running_credentials_for(connected_config);
+        running_credentials_stale_in(snapshot.as_ref(), node)
     }
 
     /// TUN 接手（App 重启 / 崩溃后 helper 还在跑）时 `launch_meta` 是空的：
@@ -7575,6 +7693,10 @@ impl VpnToolServices for WiredServices {
 
             // 运行时在跑：单配置下连接配置恒等于全局配置，直接用当前 Clash 测。
             if connection.connected {
+                // 同步配置只改库，不会重建运行配置；拿旧凭据去测只会得到假「连不通」。
+                if self.running_credentials_stale(&node, connection.config_id.as_deref()) {
+                    return Ok(probe_untested(node_id, "running_config_stale"));
+                }
                 let Some((addr, secret)) = self.clash_endpoint(connection.tun).await else {
                     return Ok(probe_untested(node_id, "clash_unavailable"));
                 };
@@ -7675,6 +7797,13 @@ impl VpnToolServices for WiredServices {
             BatchRoute::Idle(self.ensure_runtime().await.ok())
         };
 
+        // 运行配置可能仍是旧凭据：批量也先比一次，别拿过期配置测出假「连不通」。
+        let running_snapshot = Arc::new(if connection.connected {
+            self.running_credentials_for(connection.config_id.as_deref())
+        } else {
+            None
+        });
+
         let method = match &route {
             BatchRoute::Clash(_) => "clash",
             BatchRoute::Untested(_) => "none",
@@ -7708,7 +7837,13 @@ impl VpnToolServices for WiredServices {
                     let probe = move |node: &configs::Node| {
                         let node = node.clone();
                         let target = target.clone();
-                        async move { probe_batch::probe_node(&node, &target).await }
+                        let snapshot = Arc::clone(&running_snapshot);
+                        async move {
+                            if running_credentials_stale_in(snapshot.as_ref().as_ref(), &node) {
+                                return probe_untested(&node.id, "running_config_stale");
+                            }
+                            probe_batch::probe_node(&node, &target).await
+                        }
                     };
                     let _ = probe_batch::run_batch(state, meta, nodes, probe).await;
                 }
@@ -10228,8 +10363,11 @@ impl WiredServices {
             .await;
         // 任何早退（节点解析、建配置、helper 检查……）之后都要再看一眼代次：
         // 被取代的连接不能「迟到的失败」把新连接的事件链打断。
+        // **提交成功后的失败不算被取代**：helper 已经把实例拉起来了，之后的路由
+        // 接管校验失败属于这次连接自己；改写成取消会跳过下面的 Failed 事件，
+        // 前端权威就永远停在 Starting（主按钮一直「连接中」）。
         match result {
-            Err(_) if launch.cancelled() => {
+            Err(_) if launch.superseded() => {
                 log::info!("连接已被新的操作取代，放弃这次 TUN 启动：{}", config.id);
                 Err(cancelled_connection_error())
             }
@@ -10268,11 +10406,13 @@ impl WiredServices {
                 &current.name
             };
             log::error!("当前节点「{label}」的服务器域名解析失败，拒绝启动 TUN");
+            // 顶层 reason 写具体原因：这时还没碰 helper，界面不能按「TUN 启动失败、
+            // 已回滚」来讲。`detail.reason` 保留给 connect_changed 与日志。
             return Err(svc_error_with_details(
                 "tun_start_failed",
                 format!("节点「{label}」的服务器域名解析失败，请检查网络或换一个节点"),
                 json!({
-                    "reason": "tun_start_failed",
+                    "reason": "node_server_unresolved",
                     "permission_problem": false,
                     "wire_code": null,
                     "local_code": null,
@@ -10422,6 +10562,8 @@ impl WiredServices {
             log::info!("TUN 接管已确认 pid={pid} tun={name} routes=完整");
             (json!(true), json!(true))
         };
+        // 运行配置到这里才真正生效：记下它的凭据，供后续探测判断运行配置是否过期。
+        self.remember_running_credentials(Some(config.id.clone()), &value);
         Ok(json!({
             "contract_version": crate::runtime::CONTRACT_VERSION,
             "state": "running",
@@ -10568,6 +10710,8 @@ impl WiredServices {
         let mut data = serde_json::to_value(status).map_err(|e| svc_error("INTERNAL", e))?;
         data["exit_ip"] = exit_ip.map(Value::String).unwrap_or(Value::Null);
 
+        // 运行配置到这里才真正生效：记下它的凭据，供后续探测判断运行配置是否过期。
+        self.remember_running_credentials(db_config_id.clone(), &value);
         guard.disarm();
         Ok(data)
     }
@@ -13548,6 +13692,219 @@ mod config_service_tests {
         assert_eq!(probe["probe_method"], "none");
         assert_eq!(probe["error"]["code"], "PROBE_UNAVAILABLE");
         assert_eq!(probe["error"]["reason"], "no_credentials");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 渲染运行配置时记下的凭据快照：端口或密码任一不同都算过期。
+    #[test]
+    fn a_rendered_credential_snapshot_compares_port_and_password() {
+        let rendered = snapshot_running_credentials(
+            Some("cfg_1".to_string()),
+            &json!({
+                "outbounds": [
+                    {
+                        "tag": "node-nd_1",
+                        "type": "shadowsocks",
+                        "server": "203.0.113.10",
+                        "server_port": 30482,
+                        "password": "old-secret"
+                    },
+                    { "tag": "direct", "type": "direct" }
+                ]
+            }),
+        );
+
+        assert!(!rendered.is_stale_for("nd_1", 30482, Some("old-secret")));
+        assert!(rendered.is_stale_for("nd_1", 30902, Some("old-secret")));
+        assert!(rendered.is_stale_for("nd_1", 30482, Some("new-secret")));
+        // 运行配置里没有这个节点：交给 Clash 的 ProxyNotFound 报未测，不在这一层判过期。
+        assert!(!rendered.is_stale_for("nd_other", 1, Some("whatever")));
+    }
+
+    /// 非 shadowsocks 的 outbound 没有 password 字段：只比端口，不能拿 None 当「变了」。
+    #[test]
+    fn a_rendered_credential_without_a_password_only_compares_the_port() {
+        let rendered = snapshot_running_credentials(
+            None,
+            &json!({ "outbounds": [{ "tag": "node-nd_2", "server_port": 443 }] }),
+        );
+
+        assert!(!rendered.is_stale_for("nd_2", 443, Some("whatever")));
+        assert!(rendered.is_stale_for("nd_2", 444, Some("whatever")));
+    }
+
+    /// 运行配置里还是轮换前的端口/密码：探测必须报「未测」而不是「连不通」。
+    #[tokio::test]
+    async fn a_probe_through_a_stale_running_config_is_untested_not_unreachable() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("过期运行配置"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "纽约".into(),
+                server: "203.0.113.20".into(),
+                port: 30902,
+                password: "new-secret".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        // 运行中的配置还是轮换前的端口与密码。
+        let rendered = json!({
+            "outbounds": [{
+                "tag": format!("node-{node_id}"),
+                "type": "shadowsocks",
+                "server": "203.0.113.20",
+                "server_port": 30482,
+                "password": "old-secret"
+            }]
+        });
+        services.remember_running_credentials(Some(config_id.clone()), &rendered);
+
+        let addr = spawn_delay_api("200 OK", r#"{"delay": 120}"#);
+        services.tun.force_running_with_clash_for_test(
+            4345,
+            &config_id,
+            None,
+            &addr,
+            "tun-secret",
+        );
+
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "untested", "{probe}");
+        assert_eq!(probe["error"]["reason"], "running_config_stale", "{probe}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 运行配置与库里的最新凭据一致时照常测速，不能把没过期的节点也标成未测。
+    #[tokio::test]
+    async fn a_probe_through_a_fresh_running_config_still_runs() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("最新运行配置"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "纽约".into(),
+                server: "203.0.113.21".into(),
+                port: 30902,
+                password: "same-secret".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let rendered = json!({
+            "outbounds": [{
+                "tag": format!("node-{node_id}"),
+                "type": "shadowsocks",
+                "server": "203.0.113.21",
+                "server_port": 30902,
+                "password": "same-secret"
+            }]
+        });
+        services.remember_running_credentials(Some(config_id.clone()), &rendered);
+
+        let addr = spawn_delay_api("200 OK", r#"{"delay": 120}"#);
+        services.tun.force_running_with_clash_for_test(
+            4346,
+            &config_id,
+            None,
+            &addr,
+            "tun-secret",
+        );
+
+        let probe = services.node_probe(&node_id).await.unwrap();
+        assert_eq!(probe["status"], "ok", "{probe}");
+        assert_eq!(probe["latency_ms"], 120, "{probe}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 运行配置过期时批量测速同样报未测，不能整批显示「连不通」。
+    #[tokio::test]
+    async fn a_batch_probe_through_a_stale_running_config_is_untested() {
+        crate::test_support::install_test_secrets();
+        let dir = temp_dir();
+        let services = services(&dir);
+        let created = services
+            .config_create(create_input("批量过期运行配置"))
+            .await
+            .unwrap();
+        let config_id = created["config_id"].as_str().unwrap().to_string();
+        let node = services
+            .node_create(NodeCreateInput {
+                config_id: Some(config_id.clone()),
+                name: "纽约".into(),
+                server: "203.0.113.22".into(),
+                port: 30902,
+                password: "new-secret".into(),
+                method: "aes-256-gcm".into(),
+            })
+            .await
+            .unwrap();
+        let node_id = node["node_id"].as_str().unwrap().to_string();
+
+        let rendered = json!({
+            "outbounds": [{
+                "tag": format!("node-{node_id}"),
+                "server_port": 30482,
+                "password": "old-secret"
+            }]
+        });
+        services.remember_running_credentials(Some(config_id.clone()), &rendered);
+
+        let addr = spawn_delay_api("200 OK", r#"{"delay": 120}"#);
+        services.tun.force_running_with_clash_for_test(
+            4348,
+            &config_id,
+            None,
+            &addr,
+            "tun-secret",
+        );
+
+        services
+            .node_probe_all(Some(config_id.clone()), None)
+            .await
+            .unwrap();
+        let mut snapshot = services
+            .node_probe_snapshot(Some(config_id.clone()))
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if snapshot["run"].is_null() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            snapshot = services
+                .node_probe_snapshot(Some(config_id.clone()))
+                .await
+                .unwrap();
+        }
+        assert!(snapshot["run"].is_null(), "批次没有结束：{snapshot}");
+        let results = snapshot["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1, "{snapshot}");
+        assert_eq!(results[0]["status"], "untested", "{snapshot}");
+        assert_eq!(
+            results[0]["error"]["reason"], "running_config_stale",
+            "{snapshot}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

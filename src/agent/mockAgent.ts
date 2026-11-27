@@ -2836,7 +2836,7 @@ export class MockAgentBridge implements AgentBridge {
       runId: run.runId,
       configId: run.configId,
       total: run.total,
-      concurrency: 6,
+      concurrency: 16,
       ignoredNodeIds: ignored,
     };
   }

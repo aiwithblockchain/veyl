@@ -195,6 +195,10 @@ pub fn run(program: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// 带超时的命令执行：到点 kill 并返回错误，绝不无限期等一个卡住的系统命令。
+///
+/// **stdout 必须并发读走**：管道缓冲只有几十 KB，TUN 接管后路由表上千条、
+/// 输出约 200 KB。只等子进程退出再读，子进程会卡在 write 上永远不退出，
+/// 等待方只会看到一条「超时」——这正是「读取路由表失败」的真凶。
 pub fn run_with_timeout(
     program: &str,
     args: &[&str],
@@ -209,15 +213,19 @@ pub fn run_with_timeout(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("执行 {program} 失败：{error}"))?;
+    // 读线程独立跑：子进程写、这里读，互不阻塞；kill 之后管道关闭，它自然收尾。
+    let reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut stdout = Vec::new();
+            let _ = pipe.read_to_end(&mut stdout);
+            stdout
+        })
+    });
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    pipe.read_to_end(&mut stdout)
-                        .map_err(|error| format!("读取 {program} 输出失败：{error}"))?;
-                }
+                let stdout = reader.and_then(|handle| handle.join().ok()).unwrap_or_default();
                 if !status.success() {
                     return Err(format!("{program} 返回 {status}"));
                 }
@@ -229,11 +237,17 @@ pub fn run_with_timeout(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(handle) = reader {
+                    let _ = handle.join();
+                }
                 return Err(format!("{program} 超时（{:?}）已终止", timeout));
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(handle) = reader {
+                    let _ = handle.join();
+                }
                 return Err(format!("等待 {program} 失败：{error}"));
             }
         }
@@ -509,6 +523,21 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("超时"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    /// 输出大于管道缓冲时必须能读完。
+    ///
+    /// TUN 接管后路由表会到上千条（实测 1958 条、约 200 KB）：等待方不边等边读，
+    /// 子进程就会卡在 write 上永远不退出，最后只剩一条假的「超时」。
+    #[test]
+    fn a_large_output_is_drained_instead_of_timing_out() {
+        let output = run_with_timeout(
+            "/bin/sh",
+            &["-c", "yes x | head -c 200000"],
+            std::time::Duration::from_secs(3),
+        )
+        .expect("大输出必须读完，不能卡在管道缓冲");
+        assert_eq!(output.len(), 200_000);
     }
 
     /// 解析探测在等待侧有硬上限：断网时单次 getaddrinfo 能等 5–7 秒。

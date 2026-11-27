@@ -3,7 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MyServer, MyServerCredentialNode } from "../agent/bridge";
 import type { ActionResult, VpnConnectionState } from "../config/useVpnSession";
-import { useServerNodePooling } from "./useServerNodePooling";
+import { pruneQueuedNodes, useServerNodePooling } from "./useServerNodePooling";
 
 function server(over: Partial<MyServer> = {}): MyServer {
   return {
@@ -152,6 +152,57 @@ describe("useServerNodePooling", () => {
     rerender({ servers: [server()], connection: "idle" });
     await act(async () => {});
     expect(attach).toHaveBeenCalledTimes(2);
+  });
+
+  it("队列混进已删除的节点：只保留仍在活跃服务器或配置里的 id", () => {
+    expect(
+      pruneQueuedNodes(
+        ["nd_dead", "nd_alive", "nd_configured"],
+        new Set(["nd_alive"]),
+        new Set(["nd_configured"]),
+      ),
+    ).toEqual(["nd_alive", "nd_configured"]);
+  });
+
+  it("attach 报节点不存在：剔除死 id 后只重试仍有效的节点", async () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 19, 10, 0, 0) });
+    const dead = server({
+      server_id: "srv_dead",
+      local_node_id: "nd_dead",
+      state: "active",
+    });
+    const alive = server({
+      server_id: "srv_alive",
+      local_node_id: "nd_alive",
+      state: "active",
+    });
+    const credentials = vi.fn(async () => credentialNode());
+    const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    attach.mockResolvedValueOnce({ ok: false, reason: "node_not_found" });
+    const { rerender } = renderHook(
+      (props: { servers: MyServer[]; connection: VpnConnectionState }) =>
+        useServerNodePooling({
+          servers: props.servers,
+          connection: props.connection,
+          credentials,
+          attach,
+        }),
+      { initialProps: { servers: [dead, alive], connection: "connected" } },
+    );
+    await act(async () => {});
+    expect(attach).not.toHaveBeenCalled();
+
+    // 连接断开后冲刷：死服务器已经不在了，只剩在配置外的有效节点。
+    rerender({ servers: [alive], connection: "idle" });
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledWith(["nd_dead", "nd_alive"]);
+
+    // 冷却后重试：死 id 不该再被带上，否则整批永久失败。
+    await act(async () => {
+      vi.advanceTimersByTime(10_001);
+    });
+    await act(async () => {});
+    expect(attach).toHaveBeenLastCalledWith(["nd_alive"]);
   });
 
   it("取凭据失败静默且冷却：10 秒内不重试，过后再试", async () => {

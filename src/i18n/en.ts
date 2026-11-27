@@ -692,6 +692,7 @@ export const en: Record<MessageKey, string> = {
   "console.nodes.countTrial": "{count} nodes · 7-day trial",
   "console.probe.action": "Test",
   "console.probe.again": "Try again",
+  "console.probe.stop": "Stop testing",
   "console.probe.allFailed": "None connected this time.",
   "console.probe.allUntested": "Testing didn't complete this time.",
   "console.probe.mixed": "{count} couldn't be tested.",
@@ -1814,6 +1815,8 @@ export const en: Record<MessageKey, string> = {
   "error.reason.configInUse": "This config is in use. Disconnect before deleting it.",
   "error.reason.switchInProgress": "A config or mode switch is in progress. Try again shortly.",
   "error.reason.runtimeBusy": "The background component is busy. Try again after the current action finishes.",
+  "error.reason.nodeServerUnresolved":
+    "Couldn't resolve the current node's server address, so the connection didn't start. Check your network or pick another node.",
 
   /* Batch 4 addendum: configs / nodes. */
   "error.reason.duplicateName": "That name is already taken. Pick another.",
@@ -1838,6 +1841,12 @@ export const en: Record<MessageKey, string> = {
   "error.code.runtimeCrashLoop": "The background component kept crashing; retries stopped.",
   "error.code.runtimeExited": "The background component exited.",
   "error.code.runtimeHealthFailed": "The connection failed its health check.",
+  "error.code.tunStartFailed":
+    "Full takeover didn't start. Try again; if it keeps failing, force-reset the network in Settings.",
+  "error.reason.tunTakeoverRolledBack":
+    "Full takeover wasn't ready, so it stopped and rolled back. Try again; if it keeps failing, force-reset the network in Settings.",
+  "error.reason.tunTakeoverUncertain":
+    "Full takeover wasn't ready, and the cleanup couldn't be confirmed. Force-reset the network in Settings first, then try again.",
   "error.code.runtimeGeneric": "The background component isn't running properly.",
 
   /* Batch 4 addendum: node credentials. */
@@ -1884,6 +1893,8 @@ export const en: Record<MessageKey, string> = {
   "diagnosis.untested.runtimeMissing": "the local runtime isn't installed",
   "diagnosis.untested.runtimeFailed": "the local runtime has stopped",
   "diagnosis.untested.runtimeTimeout": "the local runtime isn't responding",
+  "diagnosis.untested.runningConfigStale":
+    "the running config still uses the old credentials",
   "diagnosis.untested.probeTimeout": "the probe timed out",
   "diagnosis.untested.noLocalNode":
     "this node hasn't synced to this device yet, try again later",
@@ -1924,6 +1935,8 @@ export const en: Record<MessageKey, string> = {
     "Syncing the config hasn't returned yet; it may still be running. Check the connection again later.",
   "diagnosis.config.untested":
     "Couldn't re-test this time: the probe didn't run, so this isn't a failure.",
+  "diagnosis.config.stale":
+    "Config updated; disconnect and reconnect to apply",
   "diagnosis.config.untestedReason": "Couldn't re-test this time: {reason}.",
   "diagnosis.config.reconnectFailed": "Config synced, but reconnecting failed.",
   "diagnosis.config.recovered": "Config synced; connection restored",

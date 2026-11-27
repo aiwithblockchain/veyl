@@ -65,6 +65,7 @@ const UNTESTED_REASON_KEY: Record<string, MessageKey> = {
   runtime_missing: "diagnosis.untested.runtimeMissing",
   runtime_failed: "diagnosis.untested.runtimeFailed",
   runtime_timeout: "diagnosis.untested.runtimeTimeout",
+  running_config_stale: "diagnosis.untested.runningConfigStale",
   timeout: "diagnosis.untested.probeTimeout",
   no_local_node: "diagnosis.untested.noLocalNode",
   probe_error: "diagnosis.untested.probeError",
@@ -211,6 +212,8 @@ export function DiagnosisPanel({
           ? t("diagnosis.config.untestedReason", { reason: t(key) })
           : t("diagnosis.config.untested");
       }
+      case "config-stale":
+        return t("diagnosis.config.stale");
       case "config-reconnect-failed":
         return t("diagnosis.config.reconnectFailed");
       case "config-recovered":
