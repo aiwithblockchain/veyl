@@ -177,6 +177,21 @@ table inet veyl_meter
 - `json_lists_table()` 只看 `nftables[].table.family == "inet"` 且 `name == "veyl_meter"`；`json_schema_version`、`handle` 这类额外字段被忽略。
 - `lists_table()` 匹配的是去掉首尾空白后**整行等于** `table inet veyl_meter`。
 
+默认路由和带计数器的表本身也在同一台机器上抓过：
+
+```
+$ ip route show default
+default via 146.190.144.1 dev eth0 proto static
+
+$ nft -j list table inet veyl_meter
+{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}, {"chain": {"family": "inet", "table": "veyl_meter", "name": "out", "handle": 1, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}, {"rule": {"family": "inet", "table": "veyl_meter", "chain": "out", "handle": 2, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "eth0"}}, {"counter": {"packets": 3083298, "bytes": 2935574562}}]}}]}
+```
+
+- `parse_default_iface()` 取 `default` 行里 `dev` 之后的值，`eth0@if3` 这类在 `@` 处截断；实测只有一行默认路由。
+- `parse_counter()` 在 `rule.expr[]` 里找 `match.left.meta.key == "oifname"` 取 `right`（字符串）作为网卡，找 `counter.bytes`（整数）作为字节数。单测夹具 `nft_json()` 与这份输出逐字段同构，只省略了 `handle` / `json_schema_version` 这些不读的字段。
+- `bytes` 以 JSON 整数输出，`serde_json` 按 u64 精确解析，不存在浮点精度问题。
+- 半成品判定用到的 `metainfo.json_schema_version` 在带 rule 的输出里同样存在且为 `1`。
+
 判 `Missing` 的前提仍然是「**没有任何信号给出『表在』**」，共三种组合：
 
 | # | JSON 列表 | 文本列表 | 结果 |

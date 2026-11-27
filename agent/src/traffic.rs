@@ -1740,4 +1740,26 @@ mod tests {
         assert_eq!(parse_counter("not json"), None);
         assert_eq!(parse_counter(r#"{"nftables":[]}"#), None);
     }
+
+    /// Verbatim `nft -j list table inet veyl_meter` captured on node
+    /// `veyl-iiIXYokol5Ss` (nft 1.0.9, "Old Doc Yak #3"), 2026-11-27.
+    /// `nft_json()` stays as the arbitrary-bytes fixture the other tests use;
+    /// this one only pins the shape a real host produces.
+    const REAL_TABLE_JSON: &str = r#"{"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "inet", "name": "veyl_meter", "handle": 1}}, {"chain": {"family": "inet", "table": "veyl_meter", "name": "out", "handle": 1, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}, {"rule": {"family": "inet", "table": "veyl_meter", "chain": "out", "handle": 2, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "eth0"}}, {"counter": {"packets": 3083298, "bytes": 2935574562}}]}}]}"#;
+
+    #[test]
+    fn a_counter_read_from_a_real_node_parses() {
+        assert_eq!(
+            parse_counter(REAL_TABLE_JSON),
+            Some(("eth0".to_string(), 2_935_574_562))
+        );
+    }
+
+    #[test]
+    fn a_default_route_from_a_real_node_parses() {
+        assert_eq!(
+            parse_default_iface("default via 146.190.144.1 dev eth0 proto static\n").as_deref(),
+            Some("eth0")
+        );
+    }
 }
