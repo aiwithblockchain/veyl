@@ -88,7 +88,7 @@ end <= cycleStart → 0
 | 机器已不存在、余额为 0 | 先命中失联：不扣也不销毁（不存在的机器不该被打上「余额不足已停机」） |
 | 失联后又收到 agent 上报 | 清标记，下一轮按正常机器结算 |
 
-实现上：`collectDue` 的 WHERE 加 `provider_gone_at IS NULL`，`recoverExpiredServers` 同样加，循环里先 `markProviderGone` 再 `settleServer`。
+实现上：`collectDue` 的 WHERE 加 `provider_gone_at IS NULL`，`recoverExpiredServers` 同样加，循环里先 `markProviderGone` 再 `settleServer`。**`settleServer` 自己也短路**：`liveServerState` 带回 `provider_gone_at`，非空就返回 `reason: "gone"`，`runBilling` 按 `destroyed` 同样跳过（不销毁、不写 `billing_state`）。只靠账本守卫不够——守卫不成立会让 `recordLedgerEntry` 落到 `insufficient`，而 `runBilling` 对 `insufficient` 是停机销毁，那就会给一台已经不存在的机器走退款。
 
 ## 7. 顺带修掉的同类漏洞：从未结算就被销毁的机器
 

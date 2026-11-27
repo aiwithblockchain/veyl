@@ -35,7 +35,7 @@ const ORPHAN_ACCOUNT_BATCH = 200;
 
 export interface BillingEnv extends OrdersEnv {}
 
-interface BillingRow {
+export interface BillingRow {
   id: string;
   account_id: string;
   daily_price_cents: number;
@@ -68,6 +68,8 @@ export interface BillingReport {
   refunded: number;
   reaped: number;
   settleReaped: number;
+  /** 卡在 `destroying`（Worker 在删远端与落库之间死掉）被恢复成 active 的台数。 */
+  destroyingRecovered: number;
   archived: number;
   /** 超龄的历史 `server_traffic` 行（保留每台机器的最大 last_seq 行）。 */
   trafficPruned: number;
@@ -101,7 +103,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -112,6 +114,9 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   // 再清掉 enrollment 过期还没回传的机器：它们已经不可能建成，
   // 这一步放在计费之前，免得同一轮又把没人认领的机器扣一天。
   report.reaped = await sweepExpiredEnrollments(env);
+  // 先把卡住的 destroying 恢复成 active：这类行既不被 collectDue 取到、也不会自己
+  // 恢复，不清理就会「机器还在跑、却永远不再扣费」。要在收集到期之前做。
+  report.destroyingRecovered = await recoverStuckDestroying(env, now);
   const due = await collectDue(env, now);
 
   for (const server of due) {
@@ -127,6 +132,31 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
       const result = await settleServer(env, server, now, { delinquent: false });
       // 收集之后才被销毁：销毁已按当时 paid_until 退款，这里不能再扣。
       if (result.reason === "destroyed") continue;
+      // 收集之后才被确认 DO 侧已不存在：停扣，不销毁、不写 billing_state。
+      // 正常路径在 markProviderGone 就 continue 了，这里兜的是「标记在两步之间才落库」。
+      if (result.reason === "gone") {
+        report.providerGone += 1;
+        await db
+          .prepare(
+            "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'billing.gone_at_settle', ?)",
+          )
+          .bind(
+            now,
+            server.account_id,
+            server.id,
+            JSON.stringify({
+              provider_gone_at: result.providerGoneAt ?? null,
+              paid_until: result.paidUntil,
+            }),
+          )
+          .run()
+          .catch((error) =>
+            console.warn(
+              `[billing] audit_failed action=billing.gone_at_settle server=${server.id} error=${String(error)}`,
+            ),
+          );
+        continue;
+      }
       if (result.reason === "ok") {
         report.renewed += 1;
         continue;
@@ -280,6 +310,70 @@ async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> 
 }
 
 /**
+ * 卡住的 `destroying`：`destroyInstance` 先写状态再删远端，失败会自己还原；
+ * Worker 恰好在两步之间被踢时，行会永久停在 `destroying`——`collectDue` 不取它，
+ * 于是 droplet 还在跑却再也不会扣费。
+ *
+ * 这里只恢复成 `active`，**不补完销毁**：我们不知道当初为什么销毁、该按哪种退款
+ * 口径，猜错就是钱的事。恢复后正常的几条线会接管——到期扫描照常计费，DO 侧真没了的
+ * 机器会被 `markProviderGone` 发现，用户也可以自己再点销毁。
+ *
+ * `billing_state = 'pending'` 的行不能恢复：那是建机阶段，扣费扫描永远不取它，
+ * 而两个收割器只认 booting / installing / verifying、孤儿补建要求 provider_id 为空或
+ * state='error'——恢复成 active 就会变成一台「运行中却连不上」的永久幻影。
+ * 它们维持原状，界面仍有「重试销毁」；让 enroll 收割器补完销毁是更彻底的解法，待办。
+ */
+const DESTROYING_STUCK_MS = 30 * 60 * 1000;
+const DESTROYING_RECOVER_BATCH = 100;
+
+async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB!;
+  let recovered = 0;
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT id, account_id, updated_at FROM servers " +
+          "WHERE state = 'destroying' AND destroyed_at IS NULL AND updated_at < ? " +
+          "AND billing_state <> 'pending' LIMIT ?",
+      )
+      .bind(now - DESTROYING_STUCK_MS, DESTROYING_RECOVER_BATCH)
+      .all<{ id: string; account_id: string; updated_at: number }>();
+    for (const row of rows.results ?? []) {
+      // `updated_at` 一起比对：并发的销毁刚好刷新过这行时不能把它改回 active。
+      const updated = await db
+        .prepare(
+          "UPDATE servers SET state = 'active', updated_at = ? " +
+            "WHERE id = ? AND state = 'destroying' AND destroyed_at IS NULL AND updated_at = ?",
+        )
+        .bind(now, row.id, row.updated_at)
+        .run();
+      if (Number((updated as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) continue;
+      recovered += 1;
+      await db
+        .prepare(
+          "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'server.destroying_recovered', ?)",
+        )
+        .bind(
+          now,
+          row.account_id,
+          row.id,
+          JSON.stringify({ previous_updated_at: Number(row.updated_at) }),
+        )
+        .run()
+        .catch((error) =>
+          console.warn(
+            `[billing] audit_failed action=server.destroying_recovered server=${row.id} error=${String(error)}`,
+          ),
+        );
+    }
+  } catch (error) {
+    // 清扫失败不能拖垮整轮计费：下一轮再来。
+    console.error(`[billing] destroying_sweep_failed error=${String(error)}`);
+  }
+  return recovered;
+}
+
+/**
  * 取本轮到期的服务器：游标分页，避免「永远只扣前 50 台」。
  * expired 不参与（§4.6：停机期间不产生费用），只由充值后的恢复路径处理。
  */
@@ -398,21 +492,34 @@ async function markProviderGone(
   return { verdict: "gone", probed: true };
 }
 
-/** 当前是否还能扣费；行不存在、已销毁、正在销毁都不能。 */
+/** 当前是否还能扣费；行不存在、已销毁、正在销毁、DO 侧已确认不存在都不能。 */
 async function liveServerState(
   db: D1Database,
   server: BillingRow,
-): Promise<{ live: boolean; state: string | null; paidUntil: number }> {
+): Promise<{
+  live: boolean;
+  state: string | null;
+  paidUntil: number;
+  providerGoneAt: number | null;
+}> {
   const row = await db
     .prepare("SELECT * FROM servers WHERE id = ? AND account_id = ?")
     .bind(server.id, server.account_id)
-    .first<{ state?: string; destroyed_at?: number | null; paid_until?: number }>();
-  if (!row) return { live: false, state: null, paidUntil: Number(server.paid_until) };
+    .first<{ state?: string; destroyed_at?: number | null; paid_until?: number; provider_gone_at?: number | null }>();
+  if (!row) {
+    return {
+      live: false,
+      state: null,
+      paidUntil: Number(server.paid_until),
+      providerGoneAt: null,
+    };
+  }
   const state = row.destroyed_at != null ? "destroyed" : (row.state ?? null);
   return {
     live: state !== "destroying" && state !== "destroyed",
     state,
     paidUntil: Number(row.paid_until ?? server.paid_until),
+    providerGoneAt: row.provider_gone_at == null ? null : Number(row.provider_gone_at),
   };
 }
 
@@ -423,6 +530,7 @@ async function liveServerState(
 type SettleReason =
   | "ok"
   | "destroyed"
+  | "gone"
   | "unbillable"
   | "missing_account"
   | "unavailable"
@@ -434,10 +542,12 @@ interface SettleOutcome {
   charged: boolean;
   paidUntil: number;
   reason: SettleReason;
+  /** `reason === "gone"` 时标记的原值：审计要写，别的路径不带。 */
+  providerGoneAt?: number | null;
 }
 
 /** 把一台服务器的账补到 now 之后；返回最终状态。 */
-async function settleServer(
+export async function settleServer(
   env: WalletEnv,
   server: BillingRow,
   now: number,
@@ -471,6 +581,19 @@ async function settleServer(
       reason: "destroyed",
     };
   }
+  // DO 侧已确认不存在（`provider_gone_at` 非空）：停扣，但**不是** destroyed。
+  // 只靠账本守卫拦的话，扣不动会落到 insufficient，runBilling 会按欠费去销毁一台
+  // 已经不存在的机器、走退款流程——所以必须在结算这层先短路。
+  if (live.providerGoneAt != null) {
+    return {
+      state: live.state ?? server.billing_state,
+      days: 0,
+      charged: false,
+      paidUntil: live.paidUntil,
+      reason: "gone",
+      providerGoneAt: live.providerGoneAt,
+    };
+  }
 
   let paidUntil = live.paidUntil;
   let days = 0;
@@ -486,10 +609,12 @@ async function settleServer(
       amountCents: -amount,
       refType: "server_day",
       refId: `${server.id}:${bucket}`,
-      // 守卫和记账在同一条 INSERT 里：服务器一旦进入 destroyed / destroying，
-      // 这一格就不写账，避免销毁之后继续扣。
+      // 守卫和记账在同一条 INSERT 里：服务器一旦进入 destroyed / destroying、
+      // 或在 DO 侧被确认已不存在，这一格就不写账，避免销毁之后继续扣。
       guard: {
-        sql: "SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL AND state NOT IN ('destroying', 'destroyed')",
+        sql:
+          "SELECT 1 FROM servers WHERE id = ? AND destroyed_at IS NULL " +
+          "AND state NOT IN ('destroying', 'destroyed') AND provider_gone_at IS NULL",
         args: [server.id],
       },
       followUps: (ledgerId) => [

@@ -1765,15 +1765,15 @@ verify 端口不通                        → destroy(droplet) → 订单 faile
 ```
 
 - `DELETE /v2/droplets/{id}` → **204**；404 视为已不存在（成功）。删除是异步的，所以销毁后仍以 `provider_id` 做一次 404 复核（Cron 负责）。
-- 销毁失败（5xx / 超时）：同步重试 3 次（2s / 10s / 30s），仍失败则 `servers.state = destroying` 留待 Cron，**每 5 分钟重试并告警**。
-- **状态先落库再动作**：先把 `destroying` 写进 D1（并写 `destroy_requested_at`），再调 API。进程/Workflow 中途死掉，Cron 也能接着销毁。
+- 销毁失败（5xx / 超时）：同步重试 3 次（2s / 10s / 30s），仍失败则 `servers.state = destroying`；还原状态由 `destroyInstance` 自己负责，用户也可以在界面上再点一次销毁。
+- **状态先落库再动作**：先把 `destroying` 写进 D1（并写 `destroy_requested_at`），再调 API。进程/Workflow 恰好在「删远端 → 落库」之间死掉时，这一行会卡在 `destroying`：**计费 Cron 在 30 分钟后把它恢复成 `active`**（写 `server.destroying_recovered` 审计），**不补完销毁**——不知道当初为什么销毁、该按哪种退款口径，猜错就是钱的事。恢复之后由正常的几条线接管：到期扫描照常计费，DO 侧真没了的机器由 `markProviderGone` 发现，用户也可以自己再点销毁。`billing_state = 'pending'`（建机阶段）的行不参与恢复，保持原状让界面继续给出「重试销毁」——把它们恢复成 active 会变成一台连不上的「运行中」幻影。
 - 订单终态只有 `failed` / `cancelled` / `ready`；**不允许 `paid` 或 `provisioning` 停留超过 25 分钟**。
 
 #### 19.6.5 对账 Cron（每 5 分钟）
 
 1. `orders` 停在 `paid` / `provisioning` 超过 25 分钟 → `failed` + 销毁。
 2. `servers` 停在 `creating/booting/installing/verifying` 超过 30 分钟 → `error` + 销毁。
-3. `servers` 停在 `destroying` 超过 10 分钟 → 再发一次 `DELETE`；超过 1 小时 → 告警。
+3. `servers` 停在 `destroying` 超过 30 分钟、且 `billing_state <> 'pending'` → 恢复成 `active`（不补完销毁，见 §19.6.4）；`pending` 的行保持原状。
 4. **按 tag 反查**：`GET /v2/droplets?tag_name=veyl:env:<env>` 与本环境 `servers.provider_id` 求差集；有 droplet 但 D1 没有 → **孤儿，直接销毁并告警**（这是「Workflow 崩了也不留计费实例」的兜底）。
 5. 清理 24 小时前的幂等键、过期订单。
 6. 对账结果写 `audit_log`；单次最多处理 20 台，避免一次跑爆。

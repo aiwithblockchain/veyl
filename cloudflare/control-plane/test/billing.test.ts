@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { recoverExpiredServers, runBilling } from "../src/billing";
+import { recoverExpiredServers, runBilling, settleServer, type BillingRow } from "../src/billing";
 import { cycleIdOf, releasedBytes } from "../src/traffic_cycle";
 import { provisionPaidOrder } from "../src/orders";
 import { FakeD1 } from "./helpers/fakeD1";
@@ -543,11 +543,18 @@ describe("提前续费（到期前 1 小时）", () => {
     expect(db.rows("servers")[0].state).toBe("active");
   });
 
-  it("destroying / destroyed 的机器即使进了窗口也不扣", async () => {    const db = new FakeD1();
+  it("destroying / destroyed 的机器即使进了窗口也不扣", async () => {
+    const db = new FakeD1();
     const env = envWith(db);
     db.rows("accounts")[0].balance_cents = 1000;
     const paidUntil = Date.now() + 59 * MIN;
-    seedServer(db, { id: "srv_destroying0000000", state: "destroying", paid_until: paidUntil });
+    // `updated_at` 是新鲜的：真实的 destroying 就是刚写的，不能被卡住清扫恢复成 active。
+    seedServer(db, {
+      id: "srv_destroying0000000",
+      state: "destroying",
+      paid_until: paidUntil,
+      updated_at: Date.now(),
+    });
     seedServer(db, {
       id: "srv_destroyed00000000",
       state: "destroyed",
@@ -1309,6 +1316,130 @@ describe("DO 侧已删除的机器（用户在 DO 后台直接删 droplet）", (
 
     expect(report.renewed).toBe(1);
     expect(db.rows("wallet_ledger")).toHaveLength(1);
+  });
+
+  it("收集之后才落库的失联标记：结算短路成 gone，留一条 billing.gone_at_settle 审计", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    const paidUntil = Date.now() - 60_000;
+    // 心跳新鲜，markProviderGone 不会去问 DO；这里模拟另一条线在本轮收集之后落标记。
+    seedServer(db, { paid_until: paidUntil, last_seen_at: Date.now() - 60_000 });
+    const goneAt = Date.now() - 5000;
+    db.onBillingCursor = () => {
+      db.rows("servers")[0].provider_gone_at = goneAt;
+    };
+
+    const report = await runBilling(env as never);
+
+    expect(report.providerGone).toBe(1);
+    expect(report.renewed).toBe(0);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+    expect(db.rows("servers")[0].destroyed_at).toBeNull();
+    expect(db.rows("servers")[0].billing_state).toBe("active");
+    const audits = db.rows("audit_log").filter((row) => row.action === "billing.gone_at_settle");
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].detail))).toEqual({
+      provider_gone_at: goneAt,
+      paid_until: paidUntil,
+    });
+  });
+
+  it("直接结算一台已标记 provider_gone_at 的机器：不写账、不销毁、余额不动", async () => {
+    const db = new FakeD1();
+    // 余额足够：短路线要是没写，账本会真扣掉一天的钱（余额为 0 时又会落到 insufficient
+    // 而让 runBilling 去销毁一台已经不存在的机器——两头都不能走）。
+    const env = envWith(db);
+    db.rows("accounts")[0].balance_cents = 1000;
+    seedServer(db, {
+      paid_until: Date.now() - 60_000,
+      provider_gone_at: Date.now() - 1000,
+    });
+    const row = db.rows("servers")[0];
+    const billingRow: BillingRow = {
+      id: String(row.id),
+      account_id: String(row.account_id),
+      daily_price_cents: Number(row.daily_price_cents),
+      billing_anchor_at: Number(row.billing_anchor_at),
+      paid_until: Number(row.paid_until),
+      billing_state: String(row.billing_state),
+    };
+
+    const outcome = await settleServer(env, billingRow, Date.now());
+
+    expect(outcome.reason).toBe("gone");
+    expect(outcome.days).toBe(0);
+    expect(outcome.charged).toBe(false);
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    expect(db.rows("servers")[0].destroyed_at).toBeNull();
+    expect(db.rows("servers")[0].state).toBe("healthy");
+    expect(db.rows("servers")[0].billing_state).toBe("active");
+    expect(db.rows("accounts")[0].balance_cents).toBe(1000);
+  });
+});
+
+describe("卡住的 destroying 清扫", () => {
+  it("超过 30 分钟仍停在 destroying：恢复成 active，并留一条审计", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    const stuckAt = Date.now() - 40 * 60 * 1000;
+    // paid_until 在未来：恢复后不该顺带扣一天，这里只验状态机。
+    seedServer(db, {
+      state: "destroying",
+      updated_at: stuckAt,
+      paid_until: Date.now() + DAY,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.destroyingRecovered).toBe(1);
+    expect(db.rows("servers")[0].state).toBe("active");
+    expect(db.rows("wallet_ledger")).toHaveLength(0);
+    const audits = db.rows("audit_log").filter(
+      (row) => row.action === "server.destroying_recovered",
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].detail)).previous_updated_at).toBe(stuckAt);
+  });
+
+  it("不到 30 分钟的不动：可能还有一次销毁正在进行", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroying",
+      updated_at: Date.now() - 5 * 60 * 1000,
+      paid_until: Date.now() + DAY,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.destroyingRecovered).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
+    ).toHaveLength(0);
+  });
+  it("建机阶段（pending）卡住的 destroying 不动：恢复成 active 会变成永久幻影", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    // 扣费扫描不收 pending，收割器只认 booting/installing/verifying，孤儿补建也不接——
+    // 恢复成 active 就是一台「运行中却连不上」的机器。维持原状，界面还能重试销毁。
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: Date.now() - 40 * 60 * 1000,
+      paid_until: 0,
+    });
+
+    const report = await runBilling(env as never);
+
+    expect(report.destroyingRecovered).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(db.rows("servers")[0].billing_state).toBe("pending");
+    expect(
+      db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
+    ).toHaveLength(0);
   });
 });
 

@@ -160,8 +160,8 @@ describe("POST /v1/agent/traffic", () => {
     expect(november?.bytes).toBe(GIB);
     expect(december?.bytes).toBe(2 * GIB);
     expect(december?.charged_cents).toBe(0);
-    // 新周期从 12 月 1 日 00:00 UTC 起算：12 月 2 日 = 存活 1 天 + 预付 1 天。
-    expect(december?.released_bytes).toBe(Math.floor(((500 * GIB) / 28) * 2));
+    // 不再落额度快照：额度一律由 `releasedBytes` 现算，这一列只保留 schema 默认值。
+    expect(december?.released_bytes).toBe(0);
   });
 
   it("超支按账号口径扣费：floor(超出 GiB × 2 分)", async () => {
@@ -283,7 +283,7 @@ describe("POST /v1/agent/traffic", () => {
         server_id: id,
         cycle_id: "2026-11",
         bytes: 100 * GIB,
-        released_bytes: Math.floor((500 * GIB) / 28),
+        released_bytes: 0,
         charged_cents: 0,
         last_seq: 0,
         updated_at: now,

@@ -9,7 +9,7 @@
 import { sha256B64u } from "./lib/crypto";
 import { json } from "./lib/http";
 import { destroyUnpaidServer, type ServersEnv } from "./servers";
-import { GIB, cycleIdOf, releasedBytes, type ReleasedRow } from "./traffic_cycle";
+import { GIB, cycleIdOf, type ReleasedRow } from "./traffic_cycle";
 import { accountTotals, type TrafficTotals } from "./traffic_pool";
 import { balanceCents, recordLedgerEntry } from "./wallet";
 
@@ -194,19 +194,19 @@ export async function handleTraffic(
     return agentJson({ ok: true });
   }
 
-  const released = releasedBytes(server, cycleId, now);
   // 同一笔写入里累加并推进 last_seq；last_seq 已被并发请求推高时 changes = 0，按重复处理。
+  // 不写 `released_bytes`：额度一律由 `releasedBytes` 现算，这一列只写不读，
+  // 落下来只会变成「停扣后仍停在旧值」的假权威快照（列本身 NOT NULL DEFAULT 0，停写不用改 schema）。
   const written = await db
     .prepare(
-      "INSERT INTO server_traffic (server_id, cycle_id, bytes, released_bytes, charged_cents, last_seq, updated_at) " +
-        "VALUES (?, ?, ?, ?, 0, ?, ?) " +
+      "INSERT INTO server_traffic (server_id, cycle_id, bytes, charged_cents, last_seq, updated_at) " +
+        "VALUES (?, ?, ?, 0, ?, ?) " +
         "ON CONFLICT(server_id, cycle_id) DO UPDATE SET " +
         "bytes = server_traffic.bytes + excluded.bytes, " +
-        "released_bytes = MAX(server_traffic.released_bytes, excluded.released_bytes), " +
         "last_seq = excluded.last_seq, updated_at = excluded.updated_at " +
         "WHERE server_traffic.last_seq < excluded.last_seq",
     )
-    .bind(server.id, cycleId, delta, released, seq, now)
+    .bind(server.id, cycleId, delta, seq, now)
     .run();
   if (Number((written as { meta?: { changes?: number } }).meta?.changes ?? 0) !== 1) {
     return agentJson({ ok: true });

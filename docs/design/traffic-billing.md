@@ -323,7 +323,7 @@ elif pending >= 256 MB || now - last_ok_at >= 30 分钟:
 | `server_id` | 服务器 id |
 | `cycle_id` | `YYYY-MM`（UTC 自然月，**控制面按收到上报的时间判定**） |
 | `bytes` | 本周期已用出站字节 |
-| `released_bytes` | 本周期已释放额度**快照**（写于最近一次上报，仅供审计；账号池按 §4.3 从 `servers` 表现算，不读这一列） |
+| `released_bytes` | 历史列，**已不再写入**（2026-11-27 起）。额度一律由 `releasedBytes` 现算，这一列只写不读，落下来只会变成「停扣后仍停在旧值」的假权威快照；老行里的非零值会一直留着 |
 | `charged_cents` | 本周期已扣的超支金额 |
 | `last_seq` | 已接受的最大上报序号（去重用，按 server 记、跨周期不清零） |
 | `updated_at` | 最后上报时间 |

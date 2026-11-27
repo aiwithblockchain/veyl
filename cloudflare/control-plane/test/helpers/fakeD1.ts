@@ -302,14 +302,14 @@ export class FakeD1 {
     }
     if (sql.startsWith("insert into server_traffic")) {
       // 累加并推进 last_seq；并发请求已经把序号推高时守卫拦下（changes = 0，见 run()）。
-      const [serverId, cycleId, delta, released, seq, updatedAt] = a;
+      // `released_bytes` 不再写：额度全部现算，这一列只有 schema 默认值 0。
+      const [serverId, cycleId, delta, seq, updatedAt] = a;
       const row = this.tables.server_traffic.find(
         (entry) => entry.server_id === serverId && entry.cycle_id === cycleId,
       );
       if (row) {
         if (Number(row.last_seq) < Number(seq)) {
           row.bytes = Number(row.bytes) + Number(delta);
-          row.released_bytes = Math.max(Number(row.released_bytes), Number(released));
           row.last_seq = seq;
           row.updated_at = updatedAt;
         }
@@ -318,7 +318,7 @@ export class FakeD1 {
           server_id: serverId,
           cycle_id: cycleId,
           bytes: Number(delta),
-          released_bytes: Number(released),
+          released_bytes: 0,
           charged_cents: 0,
           last_seq: seq,
           updated_at: updatedAt,
@@ -1282,6 +1282,21 @@ export class FakeD1 {
       }
       return null;
     }
+    if (sql.startsWith("update servers set state = 'active'") && sql.includes("state = 'destroying'")) {
+      // 卡在 destroying 的清扫：`updated_at` 一起比对，模拟并发销毁的保护。
+      const [updatedAt, id, expectedUpdatedAt] = a;
+      const server = this.tables.servers.find((s) => s.id === id);
+      if (
+        server &&
+        server.state === "destroying" &&
+        server.destroyed_at == null &&
+        Number(server.updated_at) === Number(expectedUpdatedAt)
+      ) {
+        server.state = "active";
+        server.updated_at = updatedAt;
+      }
+      return null;
+    }
     if (sql.startsWith("update servers set state = 'active'")) {
       // 行为跟着 SQL 里的守卫走：带 `state IN (...)` 时只允许从这些阶段前进到 active。
       const guarded = sql.includes("state in ('booting', 'installing', 'verifying')");
@@ -1539,7 +1554,8 @@ export class FakeD1 {
           !server ||
           server.destroyed_at != null ||
           server.state === "destroying" ||
-          server.state === "destroyed"
+          server.state === "destroyed" ||
+          (sql.includes("provider_gone_at is null") && server.provider_gone_at != null)
         ) {
           return null;
         }
@@ -2033,6 +2049,24 @@ export class FakeD1 {
         .slice(0, 5)
         .map((order) => ({ id: order.id }));
     }
+    if (sql.startsWith("select id, account_id, updated_at from servers where state = 'destroying'")) {
+      // 卡住的 destroying 清扫：只看状态与超时，参数是 [cutoff, limit]。
+      // pending 是建机阶段，恢复成 active 会变成永久幻影，SQL 侧已排除。
+      return this.tables.servers
+        .filter(
+          (row) =>
+            row.state === "destroying" &&
+            row.destroyed_at == null &&
+            row.billing_state !== "pending" &&
+            Number(row.updated_at ?? 0) < Number(a[0]),
+        )
+        .slice(0, Number(a[1]))
+        .map((row) => ({
+          id: row.id,
+          account_id: row.account_id,
+          updated_at: row.updated_at ?? 0,
+        }));
+    }
     if (
       sql.startsWith(
         "select id, account_id, daily_price_cents, billing_anchor_at, paid_until, billing_state from servers where account_id",
@@ -2306,6 +2340,18 @@ export class FakeStatement {
       const server = this.db.rows("servers").find((s) => s.id === id);
       changes =
         server && server.destroyed_at == null && server.state === from ? 1 : 0;
+    } else if (sql.startsWith("update servers set state = 'active'") && sql.includes("state = 'destroying'")) {
+      const [, id, expectedUpdatedAt] = this.statement.args;
+      const server = this.db
+        .rows("servers")
+        .find((s) => s.id === id);
+      changes =
+        server &&
+        server.state === "destroying" &&
+        server.destroyed_at == null &&
+        Number(server.updated_at) === Number(expectedUpdatedAt)
+          ? 1
+          : 0;
     } else if (sql.startsWith("update servers set state = 'active'")) {
       // 模拟 sweep 在消费 token 之后、激活之前把机器销毁。
       this.db.beforeServerActivate?.();
@@ -2491,7 +2537,7 @@ export class FakeStatement {
       this.db.exec(this.statement);
       return { success: true, meta: { changes: before - this.db.rows(table).length } };
     } else if (sql.startsWith("insert into server_traffic")) {
-      const [serverId, cycleId, , , seq] = this.statement.args;
+      const [serverId, cycleId, , seq] = this.statement.args;
       const row = this.db
         .rows("server_traffic")
         .find((entry) => entry.server_id === serverId && entry.cycle_id === cycleId);
