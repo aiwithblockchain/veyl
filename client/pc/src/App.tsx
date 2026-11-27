@@ -44,7 +44,14 @@ export default function App() {
 
   useEffect(() => {
     void reload();
-    connectionApi.status().then(setConnection).catch(() => setConnection(null));
+    connectionApi
+      .status()
+      .then(setConnection)
+      .catch(async (failure) => {
+        // 读不到连接状态不是「未连接」：如实说出来，别把它吞成 null。
+        setConnection(null);
+        setError(await toCommandError(failure));
+      });
     const stops: Promise<() => void>[] = [
       listen<ConnectionSnapshot>("connection-changed", (event) => {
         setConnection(event.payload);
@@ -184,6 +191,7 @@ export default function App() {
       />
 
       <main className="main">
+        <ErrorNote error={error} />
         {loading ? null : loadError ? (
           <div className="empty">
             <h1 className="empty__title">读不到配置列表</h1>
@@ -207,20 +215,17 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <>
-            <ErrorNote error={error} />
-            <DetailView
-              detail={detail}
-              busy={busy}
-              connection={connection}
-              onRefresh={() => void refresh()}
-              onRename={(name) => activeId && void rename(activeId, name)}
-              onDelete={() => activeId && void remove(activeId)}
-              onConnect={() => void connect()}
-              onDisconnect={() => void disconnect()}
-              onSwitchNode={(tag) => void switchNode(tag)}
-            />
-          </>
+          <DetailView
+            detail={detail}
+            busy={busy}
+            connection={connection}
+            onRefresh={() => void refresh()}
+            onRename={(name) => activeId && void rename(activeId, name)}
+            onDelete={() => activeId && void remove(activeId)}
+            onConnect={() => void connect()}
+            onDisconnect={() => void disconnect()}
+            onSwitchNode={(tag) => void switchNode(tag)}
+          />
         )}
       </main>
 

@@ -29,6 +29,8 @@ pub enum ConnectionState {
     Connected {
         config_id: String,
         pid: u32,
+        /// helper 不知道连接起始时间时不上线，别发一个空串出去。
+        #[serde(skip_serializing_if = "String::is_empty")]
         since: String,
         node: Option<String>,
     },
@@ -72,6 +74,8 @@ pub struct ConnectionManager {
     inner: Mutex<Inner>,
     /// 连接/断开/切节点串行化，避免两次点击交叉执行。
     op: tokio::sync::Mutex<()>,
+    /// 连接进行中请求取消：`wait_ready` 每轮检查，断开不用干等 15 秒。
+    cancel: std::sync::atomic::AtomicBool,
     observer: Mutex<Option<Observer>>,
 }
 
@@ -98,6 +102,7 @@ impl ConnectionManager {
                 selected_node: None,
             }),
             op: tokio::sync::Mutex::new(()),
+            cancel: std::sync::atomic::AtomicBool::new(false),
             observer: Mutex::new(None),
         }
     }
@@ -118,6 +123,7 @@ impl ConnectionManager {
                 selected_node: None,
             }),
             op: tokio::sync::Mutex::new(()),
+            cancel: std::sync::atomic::AtomicBool::new(false),
             observer: Mutex::new(None),
         }
     }
@@ -244,6 +250,8 @@ impl ConnectionManager {
 
     pub async fn connect(&self, profile: &Profile, raw: &str) -> AppResult<ConnectionSnapshot> {
         let _guard = self.op.lock().await;
+        self.cancel
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         let current = { self.inner.lock().unwrap().state.clone() };
         match current {
@@ -338,6 +346,11 @@ impl ConnectionManager {
                 let _ = session.restore_dns();
             })
             .await;
+            // 用户主动取消不是失败：停干净后回到未连接，别再弹错误。
+            if error.code == "CANCELED" {
+                self.set_state(ConnectionState::Idle);
+                return Ok(self.snapshot());
+            }
             return Err(self.fail_with(
                 error.code,
                 error.message.clone(),
@@ -369,6 +382,10 @@ impl ConnectionManager {
     async fn wait_ready(&self, addr: &str, secret: &str) -> AppResult<()> {
         let deadline = Instant::now() + self.ready_timeout;
         loop {
+            if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(AppError::new("CANCELED", "连接已取消")
+                    .with_hint("再点一次「启动 VPN」即可重连。"));
+            }
             if !matches!(self.session.status(), TunState::Running { .. }) {
                 return Err(AppError::new("TUN_EXITED", "隧道进程启动后又退出了")
                     .with_hint("重试连接；反复出现就查看 helper 日志。"));
@@ -392,6 +409,9 @@ impl ConnectionManager {
     // -----------------------------------------------------------------------
 
     pub async fn disconnect(&self) -> AppResult<ConnectionSnapshot> {
+        // 先请求取消：连接若还在等就绪，会在下一轮（≤300ms）退出，不用干等 15 秒。
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.op.lock().await;
         self.disconnect_locked().await?;
         Ok(self.snapshot())
@@ -995,6 +1015,27 @@ mod tests {
             other => panic!("期望已连接，拿到 {other:?}"),
         }
         assert_eq!(clash.puts.load(Ordering::SeqCst), 1);
+    }
+
+    /// 连接还在等就绪时用户点断开：不该干等 15 秒，也不能留下隧道。
+    #[tokio::test]
+    async fn disconnecting_during_connect_cancels_and_cleans_up() {
+        let clash = fake_clash(false);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        let manager = Arc::new(manager(backend.clone(), &clash));
+
+        let connecting = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.connect(&profile(), &raw_config()).await })
+        };
+        // 让它进入等待就绪的循环，再断开。
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        manager.disconnect().await.unwrap();
+
+        let snapshot = connecting.await.unwrap().unwrap();
+        assert!(matches!(snapshot.state, ConnectionState::Idle), "{:?}", snapshot.state);
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1, "取消也要停掉隧道");
+        assert!(matches!(manager.snapshot().state, ConnectionState::Idle));
     }
 
     #[tokio::test]

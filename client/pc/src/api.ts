@@ -67,7 +67,7 @@ export const api = {
 export type ConnectionState =
   | { state: "idle" }
   | { state: "connecting"; config_id: string }
-  | { state: "connected"; config_id: string; pid: number; since: string; node: string | null }
+  | { state: "connected"; config_id: string; pid: number; since?: string; node: string | null }
   | { state: "disconnecting" }
   | { state: "failed"; code: string; message: string; reason: string; hint: string };
 
