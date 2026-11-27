@@ -3745,6 +3745,16 @@ body[data-resizing] {
   color: var(--ink-3);
 }
 
+.myservers__traffic {
+  color: var(--ink-2);
+}
+
+.myservers__traffic-reset {
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 .myservers__notice {
   margin: 0;
   font-size: 12px;
@@ -3831,6 +3841,173 @@ body[data-resizing] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.myservers-topup__denom {
+  padding: 12px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.myservers-topup__denom:not(:disabled):hover {
+  border-color: var(--ink-2);
+}
+
+.myservers-topup__denom:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.myservers-topup__denom:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+.myservers-topup__denom.is-open {
+  border-color: var(--ink-2);
+}
+
+.myservers-topup__custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.myservers-topup__custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.myservers-topup__input {
+  height: 44px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.myservers-topup__input:focus {
+  outline: 0;
+  border-color: var(--link);
+}
+
+.myservers-topup__submit {
+  height: 44px;
+  padding: 0 18px;
+  font-size: 14px;
+}
+
+.myservers-topup__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+/* 等待付款：档位整块换成一条状态，不留置灰控件。 */
+.myservers-topup__wait {
+  padding: 14px 16px 12px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+}
+
+.myservers-topup__wait-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.myservers-topup__wait-title {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.myservers-topup__wait-amt {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.myservers-topup__wait-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.myservers-topup__wait-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.myservers-topup__reopen {
+  font-size: 12px;
+}
+
+/* 在途不用 disabled：焦点留在按钮上，点击由 aria-disabled 拦下。 */
+.myservers-topup__reopen[aria-disabled="true"] {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.myservers-topup__reopen[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.myservers-topup__change {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.myservers-topup__change:hover {
+  color: var(--ink);
+}
+
+.myservers-topup__change:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 已到账：绿点 6×6、圆角 2px；不自动收起。 */
+.myservers-topup__paid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.myservers-topup__paid:focus {
+  outline: 0;
+}
+
+.myservers-topup__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--green);
 }
 
 .myservers-topup__option {
@@ -4731,6 +4908,12 @@ body[data-resizing] {
 
 .myservers__confirm p {
   margin: 0;
+}
+
+.myservers__confirm-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
 }
 
 /* ---------- 流量范围开关（hero 第二行） ---------- */
