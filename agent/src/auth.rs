@@ -211,8 +211,21 @@ impl AuthState {
 }
 
 fn load_replay(path: &Path) -> HashMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        // No file yet: the normal first-run path.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        // Anything else means the replay set could not be loaded. Say so — an
+        // empty set that nobody noticed lets recent jtis be replayed after a
+        // restart.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "could not load the jti replay set; starting empty"
+            );
+            return HashMap::new();
+        }
     };
     match serde_json::from_str::<HashMap<String, u64>>(&text) {
         Ok(mut map) => {
@@ -429,6 +442,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_replay_file_starts_empty() {
+        let dir = tmpdir("replay-load");
+
+        // Missing: the normal first-run path, no file at all.
+        assert!(load_replay(&dir.join("absent.json")).is_empty());
+
+        // Unreadable for another reason: a path under a regular file. It still
+        // yields an empty set — there is nothing else to do — but the failure
+        // is logged instead of passing as "no replay entries yet".
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        assert!(load_replay(&blocker.join("jti.json")).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

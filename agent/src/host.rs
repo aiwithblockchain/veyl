@@ -200,7 +200,6 @@ impl Host for RealHost {
                 .await
                 .with_context(|| format!("create dir {}", parent.display()))?;
         }
-        let existed = tokio::fs::metadata(path).await.is_ok();
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -216,15 +215,16 @@ impl Host for RealHost {
                 .with_context(|| format!("write {}", path.display()))?;
             file.flush().await?;
         }
-        // Existing files keep their old mode; tighten them if needed.
-        if existed {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-                    .await
-                    .with_context(|| format!("chmod {mode:o} {}", path.display()))?;
-            }
+        // `mode` only applies at creation, so a pre-existing file keeps whatever
+        // mode it had. Tighten it unconditionally: probing `existed` first would
+        // add one more way for the write to fail before it starts, and deciding
+        // this chmod is the only thing that probe was for.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .await
+                .with_context(|| format!("chmod {mode:o} {}", path.display()))?;
         }
         #[cfg(not(unix))]
         let _ = mode;
@@ -252,10 +252,15 @@ impl Host for RealHost {
     }
 
     async fn is_file(&self, path: &Path) -> Result<bool> {
-        Ok(tokio::fs::metadata(path)
-            .await
-            .map(|m| m.is_file())
-            .unwrap_or(false))
+        match tokio::fs::metadata(path).await {
+            Ok(meta) => Ok(meta.is_file()),
+            // Missing is a real answer, not a failure.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            // Anything else ("permission denied", an I/O error) is *not* the
+            // same as "there is no file". Folding them together made callers
+            // like the sing-box upgrade skip the `.bak` step.
+            Err(e) => Err(e).with_context(|| format!("stat {}", path.display())),
+        }
     }
 
     async fn canonicalize(&self, path: &Path) -> Result<std::path::PathBuf> {
@@ -345,6 +350,45 @@ impl Host for RealHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn is_file_distinguishes_missing_from_unreadable() {
+        crate::init_crypto_provider();
+        let host = RealHost::new().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "veyl-agent-isfile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("present");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(host.is_file(&file).await.unwrap(), "an existing file is true");
+
+        assert!(
+            !host.is_file(&dir.join("absent")).await.unwrap(),
+            "a missing file is false, not an error"
+        );
+        assert!(
+            !host.is_file(&dir).await.unwrap(),
+            "a directory is not a file"
+        );
+
+        // A path under a regular file cannot be stat'ed for any reason other
+        // than "missing"; that must surface as an error rather than `false`,
+        // or callers treat "I could not look" as "it is not there".
+        let under_a_file = file.join("child");
+        assert!(
+            host.is_file(&under_a_file).await.is_err(),
+            "a stat failure must not be reported as `no such file`"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[tokio::test]
     async fn a_hung_command_times_out_with_a_marker_error() {
