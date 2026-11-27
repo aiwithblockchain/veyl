@@ -92,6 +92,8 @@ pub fn run() {
             let handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<state::AppState>();
+                // 先拒绝新的连接：退出过程中刚点下的那次 connect 也不能再拉起隧道。
+                state.connection.begin_shutdown();
                 // 清理最多等 15 秒；helper 的停止预算本身是 10 秒。
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(15),

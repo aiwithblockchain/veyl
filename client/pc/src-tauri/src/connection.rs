@@ -76,6 +76,8 @@ pub struct ConnectionManager {
     op: tokio::sync::Mutex<()>,
     /// 连接进行中请求取消：`wait_ready` 每轮检查，断开不用干等 15 秒。
     cancel: std::sync::atomic::AtomicBool,
+    /// 应用正在退出。sticky：一旦置位，后续 `connect` 一律拒绝。
+    closing: std::sync::atomic::AtomicBool,
     observer: Mutex<Option<Observer>>,
 }
 
@@ -103,6 +105,7 @@ impl ConnectionManager {
             }),
             op: tokio::sync::Mutex::new(()),
             cancel: std::sync::atomic::AtomicBool::new(false),
+            closing: std::sync::atomic::AtomicBool::new(false),
             observer: Mutex::new(None),
         }
     }
@@ -124,8 +127,17 @@ impl ConnectionManager {
             }),
             op: tokio::sync::Mutex::new(()),
             cancel: std::sync::atomic::AtomicBool::new(false),
+            closing: std::sync::atomic::AtomicBool::new(false),
             observer: Mutex::new(None),
         }
+    }
+
+    /// 退出流程开始：拒绝新的连接，并让正在等待就绪的连接尽快收尾。
+    pub fn begin_shutdown(&self) {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_observer(&self, observer: Observer) {
@@ -250,6 +262,10 @@ impl ConnectionManager {
 
     pub async fn connect(&self, profile: &Profile, raw: &str) -> AppResult<ConnectionSnapshot> {
         let _guard = self.op.lock().await;
+        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AppError::new("SHUTTING_DOWN", "应用正在退出，不能再发起连接")
+                .with_hint("重新打开应用即可。"));
+        }
         self.cancel
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -382,7 +398,9 @@ impl ConnectionManager {
     async fn wait_ready(&self, addr: &str, secret: &str) -> AppResult<()> {
         let deadline = Instant::now() + self.ready_timeout;
         loop {
-            if self.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.cancel.load(std::sync::atomic::Ordering::SeqCst)
+                || self.closing.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Err(AppError::new("CANCELED", "连接已取消")
                     .with_hint("再点一次「启动 VPN」即可重连。"));
             }
@@ -418,14 +436,34 @@ impl ConnectionManager {
     }
 
     async fn disconnect_locked(&self) -> AppResult<()> {
-        {
+        let was_idle = {
             let mut inner = self.inner.lock().unwrap();
             if matches!(inner.state, ConnectionState::Idle) {
-                return Ok(());
+                true
+            } else {
+                inner.state = ConnectionState::Disconnecting;
+                false
             }
-            inner.state = ConnectionState::Disconnecting;
+        };
+        if !was_idle {
+            self.emit();
         }
-        self.emit();
+
+        // 本地状态是 Idle 也可能后端还在跑：刚点连接、状态还没推到 Connecting，
+        // 或者隧道是接手来的。这里必须问一次后端，不能凭本地状态就收工。
+        let session = self.session.clone();
+        let running = tauri::async_runtime::spawn_blocking(move || {
+            matches!(session.status(), TunState::Running { .. })
+        })
+        .await
+        .unwrap_or(false);
+
+        if was_idle && !running {
+            return Ok(());
+        }
+        if was_idle {
+            self.set_state(ConnectionState::Disconnecting);
+        }
 
         let session = self.session.clone();
         let stopped =
@@ -1045,6 +1083,34 @@ mod tests {
             other => panic!("期望已连接，拿到 {other:?}"),
         }
         assert_eq!(clash.puts.load(Ordering::SeqCst), 1);
+    }
+
+    /// 本地状态还是 Idle，但后端已经在跑（刚点连接/接手的隧道）：断开必须真的停。
+    #[tokio::test]
+    async fn disconnecting_stops_a_backend_that_local_state_does_not_know_about() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        backend.running.store(true, Ordering::SeqCst);
+        backend.running_pid.store(4242, Ordering::SeqCst);
+        let manager = manager(backend.clone(), &clash);
+        assert!(matches!(manager.snapshot().state, ConnectionState::Idle));
+
+        manager.disconnect().await.unwrap();
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 1, "后端在跑就必须停");
+        assert!(matches!(manager.snapshot().state, ConnectionState::Idle));
+    }
+
+    /// 退出开始后，迟到的连接请求不能再拉起隧道。
+    #[tokio::test]
+    async fn connect_is_refused_after_shutdown_begins() {
+        let clash = fake_clash(true);
+        let backend = FakeBackend::new(Ok(start_reply(&clash)));
+        let manager = manager(backend.clone(), &clash);
+        manager.begin_shutdown();
+
+        let error = manager.connect(&profile(), &raw_config()).await.unwrap_err();
+        assert_eq!(error.code, "SHUTTING_DOWN");
+        assert_eq!(backend.stops.load(Ordering::SeqCst), 0, "没启动就不用停");
     }
 
     /// 连接还在等就绪时用户点断开：不该干等 15 秒，也不能留下隧道。
