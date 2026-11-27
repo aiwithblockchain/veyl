@@ -21,8 +21,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// 系统解析器指向的回环地址。端口固定 53（macOS 的服务级 DNS 键不支持改端口）。
-pub const LISTEN_IP: &str = "127.0.0.1";
-pub const LISTEN_ADDR: &str = "127.0.0.1:53";
+/// 转发器绑定的回环地址。两套 APP 同时接管时不能都占 53 端口，所以由身份注入。
+pub fn listen_ip() -> &'static str {
+    crate::identity::dns_forwarder_ip()
+}
+
+pub fn listen_addr() -> String {
+    format!("{}:53", listen_ip())
+}
 /// 进隧道后的目的地址：与 `dns.rs::SYSTEM_DNS_TARGET` 一致。`hijack-dns` 按协议
 /// 匹配 53 端口，不挑目的地址；不用 TUN 对端（历史坑 + 未验证）。
 pub const UPSTREAM_ADDR: &str = "223.5.5.5:53";
@@ -164,7 +170,7 @@ pub fn start(utun_index: Option<u32>) -> Result<(), String> {
             return Ok(());
         }
     }
-    let listen: SocketAddr = LISTEN_ADDR.parse().expect("listen addr");
+    let listen: SocketAddr = listen_addr().parse().expect("listen addr");
     let upstream: SocketAddr = UPSTREAM_ADDR.parse().expect("upstream addr");
     let core = Core::start(listen, upstream, utun_index)?;
     *active = Some(core);

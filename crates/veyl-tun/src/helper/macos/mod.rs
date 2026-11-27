@@ -9,14 +9,7 @@
 //! 这个 bin 刻意不 `use veyl_lib`，只链 libxpc / Security / CoreFoundation / sha2，
 //! 避免把整个 Tauri 依赖图拖进一个 root 进程。
 
-#[path = "../../veyl_paths.rs"]
-#[allow(dead_code)]
-mod veyl_paths;
-// 身份参数：与主程序共用同一份组装逻辑（二进制各自注入一次）。
-#[path = "../../tun_identity.rs"]
-mod tun_identity;
-
-use veyl_tun::{protocol, trust, xpc};
+use crate::{protocol, trust, xpc};
 
 use std::ffi::{c_char, c_void};
 use std::io::Write;
@@ -253,7 +246,6 @@ extern "C" fn on_signal(_signal: libc::c_int) {
 }
 
 pub fn run() {
-    tun_identity::install();
     if !is_root() {
         eprintln!("veyl-helper: 必须以 root 运行");
         std::process::exit(1);
@@ -534,7 +526,7 @@ fn handle_message(
                     unsafe { xpc::dict_set_string(reply, "helper_build", build) };
                 }
                 unsafe {
-                    xpc::dict_set_string(reply, "helper_version", env!("CARGO_PKG_VERSION"))
+                    xpc::dict_set_string(reply, "helper_version", crate::identity::helper_version())
                 };
                 match status {
                     Some(running) => {
@@ -1588,7 +1580,7 @@ impl Supervisor {
                     uid,
                     &format!(
                         "DNS 转发器已启动 listen={} utun_index={utun_index:?}",
-                        dns_forwarder::LISTEN_ADDR
+                        dns_forwarder::listen_addr()
                     ),
                 );
                 true
@@ -1605,7 +1597,7 @@ impl Supervisor {
         // 机器不会失去解析（设计 §2、§4）。
         let targets: Vec<String> = if forwarder {
             vec![
-                dns_forwarder::LISTEN_IP.to_string(),
+                dns_forwarder::listen_ip().to_string(),
                 dns::SYSTEM_DNS_TARGET.to_string(),
             ]
         } else {
@@ -3026,7 +3018,7 @@ impl UserLogs {
         verify_dir(home_fd.raw(), uid, false)?;
         let veyl_fd = Fd::new(open_or_create_dir(
             home_fd.raw(),
-            veyl_paths::DATA_DIR_NAME,
+            crate::helper::paths::data_dir_name(),
             0o700,
             uid,
             gid,
@@ -3040,7 +3032,7 @@ impl UserLogs {
             gid,
             false,
         )?);
-        let dir_path = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(home));
+        let dir_path = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(home));
         let sing_box_path = dir_path.join("sing-box.log");
         rotate_in_dir(dir.raw(), "helper.log", HELPER_LOG_MAX_BYTES, 1);
         let helper = open_log_at(dir.raw(), "helper.log", uid)?;
@@ -4243,7 +4235,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = UserLogs::open(&home, uid, gid).unwrap();
-        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let dir = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home));
 
         logs.append_helper(&"x".repeat(HELPER_LOG_MAX_BYTES as usize + 1));
         logs.append_helper("after-rotation");
@@ -4267,7 +4259,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = UserLogs::open(&home, uid, gid).unwrap();
-        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let dir = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home));
         let session = logs.begin_sing_box().unwrap();
 
         let chunk = vec![b'x'; 64 * 1024];
@@ -4297,7 +4289,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = UserLogs::open(&home, uid, gid).unwrap();
-        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let dir = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home));
 
         let previous = logs.begin_sing_box().unwrap();
         let current = logs.begin_sing_box().unwrap();
@@ -4319,7 +4311,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = Arc::new(UserLogs::open(&home, uid, gid).unwrap());
-        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let dir = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home));
         let session = logs.begin_sing_box().unwrap();
 
         let mut command = Command::new("/bin/sh");
@@ -4347,7 +4339,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = UserLogs::open(&home, uid, gid).unwrap();
-        let dir = veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home));
+        let dir = crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home));
         std::fs::write(
             dir.join("sing-box.log"),
             vec![b'x'; TUN_LOG_MAX_BYTES as usize],
@@ -4383,7 +4375,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let logs = UserLogs::open(&home, uid, gid).unwrap();
-        let data = veyl_paths::data_dir_under(&home);
+        let data = crate::helper::paths::data_dir_under(&home);
         let real = data.join("helper-logs");
         let moved = data.join("helper-logs-real");
         std::fs::rename(&real, &moved).unwrap();
@@ -4429,7 +4421,7 @@ mod tests {
         supervisor.note("规则预置完成");
 
         let text = std::fs::read_to_string(
-            veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(&home)).join("helper.log"),
+            crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(&home)).join("helper.log"),
         )
         .unwrap();
         assert!(text.contains("规则预置完成"), "{text}");
@@ -4468,7 +4460,7 @@ mod tests {
 
         let read = |home: &Path| {
             std::fs::read_to_string(
-                veyl_paths::helper_logs_dir(&veyl_paths::data_dir_under(home))
+                crate::helper::paths::helper_logs_dir(&crate::helper::paths::data_dir_under(home))
                     .join("helper.log"),
             )
             .unwrap()
@@ -4699,7 +4691,7 @@ mod tests {
         let logs = UserLogs::open(&home, uid, gid).unwrap();
         logs.append_helper("hello");
 
-        let dir = home.join(veyl_paths::DATA_DIR_NAME);
+        let dir = home.join(crate::helper::paths::data_dir_name());
         assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
         let helper_dir = dir.join("helper-logs");
         assert_eq!(
@@ -4720,7 +4712,7 @@ mod tests {
         let home = temp("userlogs-symlink");
         let elsewhere = home.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, home.join(veyl_paths::DATA_DIR_NAME)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join(crate::helper::paths::data_dir_name())).unwrap();
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
         let error = UserLogs::open(&home, uid, gid).err().expect("应当拒绝");
@@ -4733,7 +4725,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let home = temp("userlogs-private");
-        let dir = home.join(veyl_paths::DATA_DIR_NAME);
+        let dir = home.join(crate::helper::paths::data_dir_name());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let uid = unsafe { libc::getuid() };
@@ -4752,7 +4744,7 @@ mod tests {
         let gid = unsafe { libc::getgid() };
         let _ = UserLogs::open(&home, uid, gid).unwrap();
         let path = home
-            .join(veyl_paths::DATA_DIR_NAME)
+            .join(crate::helper::paths::data_dir_name())
             .join("helper-logs")
             .join("helper.log");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();

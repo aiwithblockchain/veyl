@@ -5884,11 +5884,14 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-service-management",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tokio",
  "windows-sys 0.59.0",
+ "zstd",
 ]
 
 [[package]]

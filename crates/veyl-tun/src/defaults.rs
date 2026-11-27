@@ -35,3 +35,6 @@ pub const TUN_ADDRESS_WINDOWS: &str = "198.18.0.1/15";
 
 /// helper 可执行文件名。
 pub const HELPER_BINARY_NAME: &str = "veyl-helper";
+
+/// 家目录下的数据目录名。
+pub const DATA_DIR_NAME: &str = ".veyl";

@@ -39,7 +39,17 @@ pub(super) const SYSTEM_DNS_TARGET: &str = "223.5.5.5";
 ///
 /// 2026-11-11 真机：它落在 `172.16.0.0/12` 排除段里，查询出物理网卡后黑洞。
 /// helper 刻意不链 `veyl_lib`，所以这里留一份常量：它是「快照丢失」时唯一的线索。
-const LEGACY_PEER: &str = "172.19.0.2";
+fn legacy_peer_address() -> &'static str {
+    static PEER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PEER.get_or_init(|| {
+        let address = crate::identity::tun_address_macos();
+        let ip = address.split('/').next().unwrap_or(address);
+        match ip.rsplit_once('.') {
+            Some((head, _)) => format!("{head}.2"),
+            None => "172.19.0.2".to_string(),
+        }
+    })
+}
 
 /// 最后一道兜底：连全局 DNS 都读不到时，宁可写一组可用的 DNS 也不能让机器没有解析。
 ///
@@ -118,7 +128,7 @@ fn restore_action(current: &[String], saved: &SavedDns) -> RestoreAction {
         // 摘掉我们写入的地址，也摘掉旧设计留下的隧道对端（升级后可能残留）。
         let remaining: Vec<String> = current
             .iter()
-            .filter(|value| !is_ours(saved, value) && value.as_str() != LEGACY_PEER)
+            .filter(|value| !is_ours(saved, value) && value.as_str() != legacy_peer_address())
             .cloned()
             .collect();
         if remaining.is_empty() {
@@ -144,7 +154,7 @@ fn remove_peer_plan(saved: &SavedDns, remaining: &[String]) -> (Vec<String>, Vec
 /// 一定是旧版本崩溃留下的。返回清理后的列表是否还能当「用户原本有自定义 DNS」；
 /// 只剩它一个时按「本来就没有」处理，搜索域也一并清掉。
 fn strip_legacy_peer(servers: &mut Vec<String>, search: &mut Vec<String>) -> bool {
-    servers.retain(|value| value != LEGACY_PEER);
+    servers.retain(|value| value != legacy_peer_address());
     if servers.is_empty() {
         search.clear();
         return false;
@@ -164,7 +174,7 @@ fn strip_stale_targets(
     had_state: bool,
     targets: &[String],
 ) -> bool {
-    let loopback = super::dns_forwarder::LISTEN_IP;
+    let loopback = super::dns_forwarder::listen_ip();
     if !servers.iter().any(|value| value == loopback) {
         return had_state;
     }
@@ -424,14 +434,14 @@ fn activate_once(targets: &[String]) -> Result<(), String> {
             // （转发器模式），且**只清回环**——公网地址可能是用户自己设的。
             let writes_loopback = targets
                 .iter()
-                .any(|value| value == super::dns_forwarder::LISTEN_IP);
+                .any(|value| value == super::dns_forwarder::listen_ip());
             let mut had_state = had_state;
             if writes_loopback {
                 had_state = strip_stale_targets(&mut servers, &mut search, had_state, targets);
             }
             // 服务级没有原始值时靠它兜底，绝不能让机器落进「没有 DNS」。
             let mut global_servers = global_dns_servers().unwrap_or_default();
-            global_servers.retain(|value| value != LEGACY_PEER);
+            global_servers.retain(|value| value != legacy_peer_address());
             remember_once(
                 &mut guard,
                 SavedDns {
@@ -540,7 +550,7 @@ fn ensure_no_dangling_loopback_within(deadline: Option<Instant>) -> Result<bool,
     if super::dns_forwarder::is_running() {
         return Ok(false);
     }
-    let loopback = super::dns_forwarder::LISTEN_IP;
+    let loopback = super::dns_forwarder::listen_ip();
     let service = primary_service_within(deadline)?;
     let (_, servers, search) = read_service_dns_within(&service, deadline)?;
 
@@ -624,7 +634,7 @@ fn deadline_passed(deadline: Option<Instant>) -> bool {
 /// 恢复或**兜底清理**：没有原始快照（helper 崩溃后重启）时，扫描**所有**服务的
 /// DNS 键——残留可能留在连接中换下来的旧服务上。
 ///
-/// 只清**旧设计**留下的隧道对端地址（配置推得的对端与 `LEGACY_PEER`），整组恰好
+/// 只清**旧设计**留下的隧道对端地址（配置推得的对端与 `legacy_peer_address()`），整组恰好
 /// 等于才动。**不清 `SYSTEM_DNS_TARGET`**：`223.5.5.5` 是真实可用的公网 DNS，也是
 /// 用户可能自己设的值，我们没有可靠标记能证明它是我们写的。宁可留一组能用的 DNS，
 /// 也不误伤用户配置——崩溃后机器仍能正常解析，只是用户的原始自定义 DNS 丢了。
@@ -700,8 +710,8 @@ fn sweep_candidates(legacy_peer: Option<&str>) -> Vec<String> {
     if let Some(peer) = legacy_peer {
         candidates.push(peer.to_string());
     }
-    if !candidates.iter().any(|peer| peer == LEGACY_PEER) {
-        candidates.push(LEGACY_PEER.to_string());
+    if !candidates.iter().any(|peer| peer == legacy_peer_address()) {
+        candidates.push(legacy_peer_address().to_string());
     }
     candidates.retain(|peer| peer != SYSTEM_DNS_TARGET);
     candidates
@@ -1006,7 +1016,7 @@ fn apply_restore(
     // 派生的，读回来只有 223.5.5.5 时若照抄，等于「还原」成自己，用户的 DHCP /
     // 自定义 DNS 永远回不来。旧设计的对端同理。
     let mut exclude_owned: Vec<String> = saved.written.clone();
-    exclude_owned.push(LEGACY_PEER.to_string());
+    exclude_owned.push(legacy_peer_address().to_string());
     let exclude: Vec<&str> = exclude_owned.iter().map(String::as_str).collect();
     match restore_action(&current, saved) {
         RestoreAction::Nothing => {
@@ -1647,7 +1657,7 @@ mod tests {
     #[test]
     fn the_takeover_address_is_a_public_resolver_not_the_tunnel_peer() {
         assert_eq!(SYSTEM_DNS_TARGET, "223.5.5.5");
-        assert_ne!(SYSTEM_DNS_TARGET, LEGACY_PEER);
+        assert_ne!(SYSTEM_DNS_TARGET, legacy_peer_address());
         let ip: std::net::Ipv4Addr = SYSTEM_DNS_TARGET.parse().unwrap();
         assert!(
             !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() && !ip.is_multicast(),
@@ -2046,7 +2056,7 @@ mod tests {
     /// 用户手动改过其中一条时只摘掉我们的、保留其余。
     #[test]
     fn a_two_address_activation_restores_as_a_set() {
-        let forwarder = crate::macos::dns_forwarder::LISTEN_IP.to_string();
+        let forwarder = crate::helper::macos::dns_forwarder::listen_ip().to_string();
         let saved = SavedDns {
             service: "ABC".into(),
             written: vec![forwarder.clone(), SYSTEM_DNS_TARGET.to_string()],
@@ -2116,7 +2126,7 @@ mod tests {
         let _serial = RESTORE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let loopback = crate::macos::dns_forwarder::LISTEN_IP.to_string();
+        let loopback = crate::helper::macos::dns_forwarder::listen_ip().to_string();
         *SAVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SavedDns {
             service: "ABC".into(),
             written: vec![loopback.clone(), SYSTEM_DNS_TARGET.to_string()],
@@ -2187,7 +2197,7 @@ mod tests {
             }
         );
         assert_eq!(
-            rescue_candidates(&saved.global_servers, &[], &[LEGACY_PEER]),
+            rescue_candidates(&saved.global_servers, &[], &[legacy_peer_address()]),
             vec!["192.168.43.1".to_string()],
             "写回全局快照里的地址，而不是空"
         );
@@ -2242,9 +2252,9 @@ mod tests {
     fn a_stale_legacy_peer_in_the_global_snapshot_is_not_written_back() {
         assert_eq!(
             rescue_candidates(
-                &[LEGACY_PEER.to_string()],
+                &[legacy_peer_address().to_string()],
                 &[],
-                &["172.20.0.1", LEGACY_PEER]
+                &["172.20.0.1", legacy_peer_address()]
             ),
             PUBLIC_DNS
                 .iter()
@@ -2263,7 +2273,7 @@ mod tests {
             &candidates
         ));
         assert!(
-            !rescue_confirmed(&[LEGACY_PEER.to_string()], &candidates),
+            !rescue_confirmed(&[legacy_peer_address().to_string()], &candidates),
             "写入失败时键里还是旧对端，非空不等于成功"
         );
     }
@@ -2272,15 +2282,15 @@ mod tests {
     #[test]
     fn rescue_never_leaves_dns_empty() {
         assert_eq!(
-            rescue_candidates(&[], &[], &[LEGACY_PEER]),
+            rescue_candidates(&[], &[], &[legacy_peer_address()]),
             PUBLIC_DNS.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "没有任何来源时写兜底 DNS，宁可改了用户的设置也不能让他没网"
         );
         assert_eq!(
             rescue_candidates(
-                &[LEGACY_PEER.to_string()],
-                &[LEGACY_PEER.to_string()],
-                &[LEGACY_PEER]
+                &[legacy_peer_address().to_string()],
+                &[legacy_peer_address().to_string()],
+                &[legacy_peer_address()]
             ),
             PUBLIC_DNS.iter().map(|value| value.to_string()).collect::<Vec<_>>(),
             "全局 DNS 也只剩旧对端时同样要落到兜底 DNS"
@@ -2322,11 +2332,11 @@ mod tests {
     #[test]
     fn a_lost_snapshot_still_recognises_the_legacy_peer() {
         assert!(
-            is_leftover(&[LEGACY_PEER.to_string()], LEGACY_PEER),
+            is_leftover(&[legacy_peer_address().to_string()], legacy_peer_address()),
             "没有快照也要能清掉指向旧隧道对端的残留"
         );
-        assert!(!is_leftover(&["192.168.43.1".to_string()], LEGACY_PEER));
-        assert!(!is_leftover(&[], LEGACY_PEER));
+        assert!(!is_leftover(&["192.168.43.1".to_string()], legacy_peer_address()));
+        assert!(!is_leftover(&[], legacy_peer_address()));
     }
 
     /// 摘地址时也要摘掉旧设计留下的对端，且搜索域不能丢。
@@ -2342,7 +2352,7 @@ mod tests {
         };
         assert_eq!(
             restore_action(
-                &["172.20.0.1".to_string(), LEGACY_PEER.to_string()],
+                &["172.20.0.1".to_string(), legacy_peer_address().to_string()],
                 &saved
             ),
             RestoreAction::Rescue {
@@ -2360,11 +2370,11 @@ mod tests {
     /// 用户真这么配不能每次启动都被我们换掉。
     #[test]
     fn the_crash_sweep_only_touches_an_exact_match() {
-        assert!(is_leftover(&[LEGACY_PEER.to_string()], LEGACY_PEER));
+        assert!(is_leftover(&[legacy_peer_address().to_string()], legacy_peer_address()));
         assert!(
             !is_leftover(
-                &[LEGACY_PEER.to_string(), "8.8.8.8".to_string()],
-                LEGACY_PEER
+                &[legacy_peer_address().to_string(), "8.8.8.8".to_string()],
+                legacy_peer_address()
             ),
             "包含不等于我们的残留，部分命中交给有快照的 RemovePeer"
         );
@@ -2386,8 +2396,8 @@ mod tests {
             "用户自己的 [223.5.5.5] 不能被清掉"
         );
         assert_eq!(
-            leftover_peer(&[LEGACY_PEER.to_string()], &refs),
-            Some(LEGACY_PEER)
+            leftover_peer(&[legacy_peer_address().to_string()], &refs),
+            Some(legacy_peer_address())
         );
     }
 
@@ -2395,16 +2405,16 @@ mod tests {
     fn sweep_candidates_keep_both_legacy_peers() {
         assert_eq!(
             sweep_candidates(Some("172.20.0.1")),
-            vec!["172.20.0.1".to_string(), LEGACY_PEER.to_string()]
+            vec!["172.20.0.1".to_string(), legacy_peer_address().to_string()]
         );
-        assert_eq!(sweep_candidates(None), vec![LEGACY_PEER.to_string()]);
+        assert_eq!(sweep_candidates(None), vec![legacy_peer_address().to_string()]);
     }
 
     /// P1：全局 DNS 读到的就是我们自己写的地址时，不能把它当救援结果照抄回去——
     /// 否则「还原」成自己，用户原来的 DHCP / 自定义 DNS 永远回不来。
     #[test]
     fn rescue_does_not_copy_our_own_address_back() {
-        let exclude = [SYSTEM_DNS_TARGET, LEGACY_PEER];
+        let exclude = [SYSTEM_DNS_TARGET, legacy_peer_address()];
         assert_eq!(
             rescue_candidates(&[], &[SYSTEM_DNS_TARGET.to_string()], &exclude),
             PUBLIC_DNS
@@ -2428,13 +2438,13 @@ mod tests {
     /// 会让每次未命中缓存的查询先等它超时。
     #[test]
     fn capturing_the_original_drops_a_mixed_legacy_address() {
-        let mut servers = vec![LEGACY_PEER.to_string(), "8.8.8.8".to_string()];
+        let mut servers = vec![legacy_peer_address().to_string(), "8.8.8.8".to_string()];
         let mut search = vec!["lan".to_string()];
         assert!(strip_legacy_peer(&mut servers, &mut search));
         assert_eq!(servers, vec!["8.8.8.8".to_string()]);
         assert_eq!(search, vec!["lan".to_string()], "用户的搜索域要留");
 
-        let mut only = vec![LEGACY_PEER.to_string()];
+        let mut only = vec![legacy_peer_address().to_string()];
         let mut search = vec!["lan".to_string()];
         assert!(!strip_legacy_peer(&mut only, &mut search));
         assert!(only.is_empty());
@@ -2445,7 +2455,7 @@ mod tests {
     /// 记下来，断开时又写回去，等于让系统去问一个没人监听的端口。
     #[test]
     fn capturing_the_original_drops_a_stale_loopback() {
-        let loopback = crate::macos::dns_forwarder::LISTEN_IP;
+        let loopback = crate::helper::macos::dns_forwarder::listen_ip();
         let targets = vec![loopback.to_string(), SYSTEM_DNS_TARGET.to_string()];
         // 回环在列表里 = 我们上次写的：公网次选也一并当残留，不能写回成用户原始值。
         let mut servers = vec![loopback.to_string(), SYSTEM_DNS_TARGET.to_string()];
@@ -2473,7 +2483,7 @@ mod tests {
     #[test]
     fn the_takeover_address_is_not_in_any_fixed_exclude() {
         // 排除表现在与 helper 在同一个共享 crate 里，直接读常量，不再解析源码。
-        let excludes = veyl_tun::FIXED_EXCLUDES;
+        let excludes = crate::FIXED_EXCLUDES;
         assert!(excludes.len() >= 10, "排除表看起来不对：{excludes:?}");
         let target: std::net::Ipv4Addr = SYSTEM_DNS_TARGET.parse().unwrap();
         for entry in excludes {
@@ -2548,10 +2558,10 @@ mod tests {
     /// TUN 地址改过之后，旧残留还在旧常量上：两个候选都要试。
     #[test]
     fn a_leftover_is_cleared_even_when_the_config_address_changed() {
-        let candidates = ["172.20.0.1", LEGACY_PEER];
+        let candidates = ["172.20.0.1", legacy_peer_address()];
         assert_eq!(
-            leftover_peer(&[LEGACY_PEER.to_string()], &candidates),
-            Some(LEGACY_PEER),
+            leftover_peer(&[legacy_peer_address().to_string()], &candidates),
+            Some(legacy_peer_address()),
             "配置换了地址，旧残留要按旧常量认出来"
         );
         assert_eq!(
@@ -2587,11 +2597,11 @@ mod tests {
     /// 旧版本崩溃留下的对端不算原始值；但公网目标可能是用户自己设的，必须照常记录。
     #[test]
     fn a_legacy_peer_left_behind_is_not_recorded_as_the_original() {
-        assert!(is_leftover(&[LEGACY_PEER.to_string()], LEGACY_PEER));
-        assert!(!is_leftover(&["10.0.0.53".to_string()], LEGACY_PEER));
-        assert!(!is_leftover(&[], LEGACY_PEER));
+        assert!(is_leftover(&[legacy_peer_address().to_string()], legacy_peer_address()));
+        assert!(!is_leftover(&["10.0.0.53".to_string()], legacy_peer_address()));
+        assert!(!is_leftover(&[], legacy_peer_address()));
         assert!(
-            !is_leftover(&[SYSTEM_DNS_TARGET.to_string()], LEGACY_PEER),
+            !is_leftover(&[SYSTEM_DNS_TARGET.to_string()], legacy_peer_address()),
             "223.5.5.5 是用户可能自己设的值，不能当残留清掉"
         );
     }

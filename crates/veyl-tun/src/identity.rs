@@ -21,6 +21,14 @@ pub struct Identity {
     pub team_id: &'static str,
     /// helper 可执行文件名（`veyl-helper` / `veyl-cli-helper`）。
     pub helper_binary_name: &'static str,
+    /// helper 上报的版本号，取各 APP 自己的 `CARGO_PKG_VERSION`。
+    pub helper_version: &'static str,
+    /// 产品显示名，用于 helper 的用户可见文案。
+    pub app_display_name: &'static str,
+    /// 家目录下的数据目录名（`.veyl` / `.veyl-cli`），helper 日志写在这里。
+    pub data_dir_name: &'static str,
+    /// DNS 转发器绑定的回环地址。两套 APP 同时接管时不能都占 53 端口。
+    pub dns_forwarder_ip: &'static str,
     /// Windows 命名管道名，含 `\\.\pipe\` 前缀。
     pub pipe_name: &'static str,
     /// Windows 服务名（SCM 里的键）。
@@ -105,6 +113,10 @@ mod test_fixture {
                 bundle_identifier: "com.example.veyl-tun-test",
                 team_id: "TESTTEAM12",
                 helper_binary_name: crate::defaults::HELPER_BINARY_NAME,
+                helper_version: "0.0.0-test",
+                app_display_name: "Veyl",
+                data_dir_name: crate::defaults::DATA_DIR_NAME,
+                dns_forwarder_ip: "127.0.0.1",
                 pipe_name: crate::defaults::PIPE_NAME,
                 service_name: crate::defaults::SERVICE_NAME,
                 service_display_name: crate::defaults::SERVICE_DISPLAY_NAME,
@@ -135,6 +147,22 @@ pub fn team_id() -> &'static str {
 
 pub fn helper_binary_name() -> &'static str {
     identity().helper_binary_name
+}
+
+pub fn helper_version() -> &'static str {
+    identity().helper_version
+}
+
+pub fn app_display_name() -> &'static str {
+    identity().app_display_name
+}
+
+pub fn data_dir_name() -> &'static str {
+    identity().data_dir_name
+}
+
+pub fn dns_forwarder_ip() -> &'static str {
+    identity().dns_forwarder_ip
 }
 
 pub fn pipe_name() -> &'static str {

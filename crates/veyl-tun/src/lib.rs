@@ -20,6 +20,7 @@ pub mod backend;
 pub mod cidr;
 pub mod defaults;
 pub mod gate;
+pub mod helper;
 pub mod helper_update;
 pub mod identity;
 pub mod netcfg;
