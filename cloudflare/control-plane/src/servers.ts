@@ -1251,7 +1251,17 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
 }
 
 /** cloud-init 装机失败的固定阶段；只认这几个值，其余一律当未知。 */
-const FAIL_STAGES = new Set(["download", "checksum", "install", "config", "systemd"]);
+const FAIL_STAGES = new Set([
+  "download",
+  "checksum",
+  "install",
+  "config",
+  "systemd",
+  // 来自 agent 的启动探针，不是 cloud-init：冷节点计量不成立时由 agent 自己上报。
+  "metering",
+  // cloud-init 等 agent 的就绪文件超时（单元 active 但探针没过，或进程崩了）。
+  "ready",
+]);
 
 /**
  * 防御性脱敏：cloud-init 的 stderr 可能回显命令参数。agent 侧已经脱敏过一次，

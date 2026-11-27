@@ -44,9 +44,16 @@ loop {
 
 **为什么用 `Delay` 而不是默认的 `Burst`**：一次读取若因 nft 卡住超时，`Burst` 会在恢复后连续补跑多个 tick。`Delay` 让下一次从当前时刻重新计 30 秒，实际周期因此 **≥ 30 秒且永不突发**。
 
-**为什么循环前要手动跑一次**：`agent.rs:254` 在申请 desired state、装机之前先调用一次 `meter.tick_now()`，把 nft 计数器表建起来。注意：**建表的那一轮是读失败**，真正开始计账要等到下一个窗口（见 §3.1），所以**只有建表后的第一个窗口不计入**——装机期间的流量通常正好落在这一段。
+**建表发生在启动探针里，早于 enroll**：`agent.rs` 在 `ensure_identity` 之前调用 `traffic::probe(host)`（`traffic.rs`）。探针复用下面同一套读表逻辑，最多尝试 3 次、每次间隔 1 秒、整体 25 秒预算，语义是「**重试到某次成功，或预算用完**」：
 
-这一次**不一定只记录基线**：
+- **冷节点**：第一次读失败（表不存在 → 建表），第二次读到新计数器，探针返回 `Ok`。
+- **已入网重启**：表还在内核里，第一次就 `Ok`，不会重建。
+
+探针之后才 enroll、拉期望状态、启动 MCP，最后在装机前调用一次 `meter.tick_now()` 采纳基线。所以**从探针到首次 `tick_now` 之间的出站流量不计入**（enroll 与拉期望状态那几 KB），而不是过去说的「建表后一个窗口」。计数器只挂在 `hook output` 上，入站流量（比如装机下载 sing-box）它本来就数不到。
+
+**冷节点探针失败 = 建机失败**：3 次都读不到时，agent 用一次性 enrollment token 调 `POST /v1/agent/fail` 上报原因，然后以退出码 1 退出，控制面据此销毁实例。`agentFail` 只接受「token 未消费」的行，这正是探针必须跑在 enroll 之前的原因。还有第二道兜底：agent 只在探针成功后才写 `/run/veyl-agent/ready`，cloud-init 等的是「单元 active **且**该文件存在」——`Type=exec` 下单元在 `execve` 时就 active，早于探针；30 秒内没就绪就由 cloud-init 自己调 `agentFail`（那次上报失败时也还能收网）。**已入网**节点探针失败只记 error 继续跑——退出会让它 crash-loop，桌面再也修不了；代价是少算，方向仍是保守的。
+
+启动时那次 `tick_now` **不一定只记录基线**：
 
 - **首次安装**（磁盘上没有状态文件）：只记基线，不产生上报。
 - **磁盘上已有状态文件**：`seed()` 直接加载它，这一次可能顺带做三件事之一——`pending_bytes` 已达阈值 → 立即上报；距上次成功上报满 30 分钟 → 发一次空闲心跳（可能 0 字节）；崩溃前冻结过批次 → 立即重发那一批。
@@ -57,7 +64,7 @@ loop {
 
 ## 2. 一次读取的完整流程
 
-入口：`TrafficMeter::tick()`（`traffic.rs:153`）→ `read_counter()`（`traffic.rs:332`）→ `read_table()`（`traffic.rs:394`）。
+入口：`TrafficMeter::tick()` → 自由函数 `read_counter(host)` → `read_table(host)`（都在 `traffic.rs`）。这三个读表函数只依赖 `&dyn Host`，不碰 `control` 也不用 `params`，所以启动探针 `probe(host)` 能在 enroll 之前调用完全相同的逻辑。
 
 ```
 tick(now)
@@ -131,7 +138,7 @@ pending      = pending + delta
 代价是**少算**，方向与 `traffic-billing.md` §6.6「宁可少算，不可多算」一致：
 
 - **中途重建**：只有 `C > L` 时才有差异，少算量 = `L`；因为 `C > L`，所以少算量小于一个窗口的流量。
-- **首次安装**：建表那一轮是失败、不入账；下一轮的第一个读数被当作基线，**建表后第一个窗口的流量全部不计数**（通常是装机下载 sing-box 的十几 MB）。
+- **首次安装**：建表发生在 enroll 之前的启动探针里；第一次 `tick_now`（装机之前）把当时的计数器当作基线，**探针到 `tick_now` 之间的出站包被算进基线、不计数**，量级是几 KB（enroll 与拉期望状态）。`tick_now` 之后到下一 tick 的出站（请求与 ACK）正常计入。装机下载是**入站**流量，`hook output` 计数器本来就看不到它，这次改动没有改变这一点。
 
 ### 3.2 409 不做特殊处理
 
@@ -159,6 +166,8 @@ pending      = pending + delta
 `Ok` 一定是读数，`Err` 一定不是。重建是**修**，不是**读**，所以它落在 `Err` 里。
 
 「表不完整」可以安全重建，是因为那种表**从来没有过计数器**——删掉不会丢任何数。这与「表读不出来」有本质区别：后者可能是一个正在计数的表，碰它就等于清零。
+
+启动探针 `probe(host)` 用的是同一套逻辑，只把「这一轮读不到」放大成「最多 3 次都读不到」：`Ok` 表示计数器确实可读，`Err` 表示 25 秒预算内没有任何一次成功。它不改变上面任何一条判定，只是把结论从「每 30 秒的日志」提前到「建机期」。
 
 ---
 
@@ -225,6 +234,13 @@ exit=0
 
 | 事件 | 级别 | 消息文本 |
 |---|---|---|
+| 启动探针成功 | info | `metering probe ok`（带 `bytes=` 和 `attempts=`——已入网节点也会打，用来确认探针真的跑过） |
+| 启动探针单次尝试失败 | debug | `traffic: metering probe attempt failed`（带 `attempt=`） |
+| 启动探针失败（**冷节点**：上报后退出） | error | `metering probe failed; the build cannot meter` |
+| 启动探针失败（**已入网**：继续跑） | error | `metering probe failed; continuing, this node will under-count traffic` |
+| 就绪文件写不出（探针已通过） | error | `could not write the readiness file` |
+| 启动时删陈旧就绪文件失败 | warn | `could not remove a stale readiness file` |
+| 失败上报成功 / 被拒 | info / warn | `reported the install failure` / `the control plane rejected the install-failure report` |
 | 读失败（跳过本窗口） | warn | `traffic: counter read failed; skipping this window` |
 | 表不存在（两个列表都说没有） | info | `traffic: no counter table; creating it`（带 `json_listing=` 和 `listing=`） |
 | 表不存在（JSON 说没有，但文本列表不可用） | **warn** | 同一句消息，只带 `json_listing=`——这是唯一「文本列表拿不到却仍然重建」的路径，要让人看得见 |

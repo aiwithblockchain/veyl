@@ -1261,6 +1261,7 @@ mod tests {
             control_plane_url: "https://control.example.com".into(),
             enrollment_token: None,
             enroll_url: None,
+            fail_url: None,
             signer_pubkey: None,
             detect_public_ip: false,
             metadata_url: "http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address".into(),

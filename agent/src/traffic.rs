@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -151,7 +152,7 @@ impl TrafficMeter {
     /// One 30-second window: read the counter, accumulate, then save and/or
     /// report if due. Never returns an error; every failure is a log line.
     pub async fn tick(&self, now: u64) {
-        let counter = match self.read_counter().await {
+        let counter = match read_counter(self.host.as_ref()).await {
             Ok(counter) => counter,
             Err(e) => {
                 tracing::warn!(error = %e, "traffic: counter read failed; skipping this window");
@@ -320,218 +321,251 @@ impl TrafficMeter {
     fn report_failures(&self) -> u32 {
         self.report_failures.load(Ordering::Relaxed)
     }
+}
 
-    /// Resolve the interface on every read: a default-route change would
-    /// otherwise freeze the counter without any error.
-    ///
-    /// Exactly two outcomes: `Ok(bytes)` is a real reading of the counter, and
-    /// `Err` means this window has no reading at all. A rebuild is a repair,
-    /// not a reading — the window it happens in is reported as a failure and
-    /// the next window picks the new counter up through the negative-delta
-    /// branch in `tick`.
-    async fn read_counter(&self) -> Result<u64> {
-        let iface = self.default_iface().await?;
-        match self.read_table().await? {
-            TableRead::Counter {
-                iface: rule_iface,
-                bytes,
-            } if rule_iface == iface => Ok(bytes),
-            TableRead::Counter {
-                iface: rule_iface, ..
-            } => {
-                tracing::info!(
-                    rule_iface,
-                    iface = %iface,
-                    "traffic: counter follows a stale interface; rebuilding"
-                );
-                self.rebuild(&iface, true)
-                    .await
-                    .with_context(|| "recreating the counter after a stale interface")?;
-                bail!("counter followed a stale interface; recreated, skipping this window")
-            }
-            TableRead::Missing => {
-                self.rebuild(&iface, false)
-                    .await
-                    .with_context(|| "creating the counter table")?;
-                bail!("counter table was missing; recreated, skipping this window")
-            }
-            TableRead::Incomplete => {
-                tracing::warn!("traffic: counter table is incomplete; recreating");
-                self.rebuild(&iface, true)
-                    .await
-                    .with_context(|| "completing an incomplete counter table")?;
-                bail!("counter table was incomplete; recreated, skipping this window")
-            }
-            TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
-        }
-    }
-
-    async fn default_iface(&self) -> Result<String> {
-        let out = self
-            .host
-            .run(
-                "ip",
-                &["route".into(), "show".into(), "default".into()],
-            )
-            .await?;
-        if !out.success() {
-            bail!(
-                "ip route show default exited with {}: {}",
-                out.status.unwrap_or(-1),
-                out.summary()
+/// Resolve the interface on every read: a default-route change would otherwise
+/// freeze the counter without any error.
+///
+/// Exactly two outcomes: `Ok(bytes)` is a real reading of the counter, and
+/// `Err` means this window has no reading at all. A rebuild is a repair, not a
+/// reading — the window it happens in is reported as a failure and the next
+/// window picks the new counter up through the negative-delta branch in
+/// `TrafficMeter::tick`.
+async fn read_counter(host: &dyn Host) -> Result<u64> {
+    let iface = default_iface(host).await?;
+    match read_table(host).await? {
+        TableRead::Counter {
+            iface: rule_iface,
+            bytes,
+        } if rule_iface == iface => Ok(bytes),
+        TableRead::Counter {
+            iface: rule_iface, ..
+        } => {
+            tracing::info!(
+                rule_iface,
+                iface = %iface,
+                "traffic: counter follows a stale interface; rebuilding"
             );
+            rebuild(host, &iface, true)
+                .await
+                .with_context(|| "recreating the counter after a stale interface")?;
+            bail!("counter followed a stale interface; recreated, skipping this window")
         }
-        parse_default_iface(&out.stdout)
-            .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
+        TableRead::Missing => {
+            rebuild(host, &iface, false)
+                .await
+                .with_context(|| "creating the counter table")?;
+            bail!("counter table was missing; recreated, skipping this window")
+        }
+        TableRead::Incomplete => {
+            tracing::warn!("traffic: counter table is incomplete; recreating");
+            rebuild(host, &iface, true)
+                .await
+                .with_context(|| "completing an incomplete counter table")?;
+            bail!("counter table was incomplete; recreated, skipping this window")
+        }
+        TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
+    }
+}
+
+/// Startup probe: prove the counter can be read before enrollment, so a node
+/// that cannot meter fails its build instead of reporting zero bytes forever.
+///
+/// Retries until one attempt succeeds or the budget is spent. A cold node needs
+/// the second round (the first creates the table and is a failed read); a
+/// restored node normally answers on the first.
+pub async fn probe(host: &dyn Host) -> Result<u64> {
+    const ATTEMPTS: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_secs(1);
+    const BUDGET: Duration = Duration::from_secs(25);
+
+    let attempts = async {
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 1..=ATTEMPTS {
+            match read_counter(host).await {
+                Ok(bytes) => {
+                    // Logged on success too: on a restored node nothing else
+                    // records that the probe ran at all.
+                    tracing::info!(bytes, attempts = attempt, "metering probe ok");
+                    return Ok(bytes);
+                }
+                Err(e) => {
+                    tracing::debug!(attempt, error = %e, "traffic: metering probe attempt failed");
+                    last = Some(e);
+                }
+            }
+            if attempt < ATTEMPTS {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
+        }
+        Err(last.expect("at least one attempt ran"))
+    };
+
+    // `Host::run` gives a single command 30 s; this bounds the whole probe
+    // below that, and `kill_on_drop` reclaims a child still running.
+    match tokio::time::timeout(BUDGET, attempts).await {
+        Ok(result) => result,
+        Err(_) => bail!("metering probe timed out after {}s", BUDGET.as_secs()),
+    }
+}
+
+async fn default_iface(host: &dyn Host) -> Result<String> {
+    let out = host
+        .run("ip", &["route".into(), "show".into(), "default".into()])
+        .await?;
+    if !out.success() {
+        bail!(
+            "ip route show default exited with {}: {}",
+            out.status.unwrap_or(-1),
+            out.summary()
+        );
+    }
+    parse_default_iface(&out.stdout)
+        .with_context(|| format!("no usable `dev` in: {}", out.stdout.trim()))
+}
+
+/// One read of the counter table, classified so that only a genuinely absent
+/// table is rebuilt. A failed or unparsable read must never be folded into
+/// `Missing`: rebuilding resets the counter, so doing it on every window would
+/// report zero bytes forever, with no error at all.
+async fn read_table(host: &dyn Host) -> Result<TableRead> {
+    let out = host
+        .run(
+            "nft",
+            &[
+                "-j".into(),
+                "list".into(),
+                "table".into(),
+                "inet".into(),
+                TABLE.into(),
+            ],
+        )
+        .await?;
+    if out.success() {
+        return Ok(match parse_counter(&out.stdout) {
+            Some((iface, bytes)) => TableRead::Counter { iface, bytes },
+            None if table_is_incomplete(&out.stdout) => TableRead::Incomplete,
+            None => TableRead::Broken(format!(
+                "unparsable counter output: {}",
+                snippet(&out.stdout)
+            )),
+        });
+    }
+    // The command failed. Ask whether the table exists at all: a kernel
+    // without nftables, or a permission problem, must not be mistaken for
+    // "this node has never been set up". (A missing binary never reaches
+    // here: `Host::run` returns Err and `?` short-circuits.)
+    //
+    // The JSON listing is the primary signal: the text one has no
+    // machine-readable contract, and a false negative there rebuilds the
+    // table every window, resetting the counter while only logging info.
+    let json_listing = host
+        .run("nft", &["-j".into(), "list".into(), "tables".into()])
+        .await?;
+    let json_verdict = if json_listing.success() {
+        json_lists_table(&json_listing.stdout)
+    } else {
+        None
+    };
+    if json_verdict == Some(true) {
+        return Ok(TableRead::Broken(format!(
+            "`nft list table` failed while the table exists: {}",
+            snippet(&out.summary())
+        )));
     }
 
-    /// One read of the counter table, classified so that only a genuinely
-    /// absent table is rebuilt. A failed or unparsable read must never be
-    /// folded into `Missing`: rebuilding resets the counter, so doing it on
-    /// every window would report zero bytes forever, with no error at all.
-    async fn read_table(&self) -> Result<TableRead> {
-        let out = self
-            .host
-            .run(
-                "nft",
-                &[
-                    "-j".into(),
-                    "list".into(),
-                    "table".into(),
-                    "inet".into(),
-                    TABLE.into(),
-                ],
-            )
-            .await?;
-        if out.success() {
-            return Ok(match parse_counter(&out.stdout) {
-                Some((iface, bytes)) => TableRead::Counter { iface, bytes },
-                None if table_is_incomplete(&out.stdout) => TableRead::Incomplete,
-                None => TableRead::Broken(format!(
-                    "unparsable counter output: {}",
-                    snippet(&out.stdout)
-                )),
-            });
-        }
-        // The command failed. Ask whether the table exists at all: a kernel
-        // without nftables, or a permission problem, must not be mistaken for
-        // "this node has never been set up". (A missing binary never reaches
-        // here: `Host::run` returns Err and `?` short-circuits.)
-        //
-        // The JSON listing is the primary signal: the text one has no
-        // machine-readable contract, and a false negative there rebuilds the
-        // table every window, resetting the counter while only logging info.
-        let json_listing = self
-            .host
-            .run("nft", &["-j".into(), "list".into(), "tables".into()])
-            .await?;
-        let json_verdict = if json_listing.success() {
-            json_lists_table(&json_listing.stdout)
-        } else {
-            None
-        };
-        if json_verdict == Some(true) {
+    // Text listing: the fallback when the JSON command fails or its output
+    // is not the shape we expect. It is also consulted when the JSON parsed
+    // but did not list the table — either signal saying "present" is enough
+    // to keep us from rebuilding over a table that is really there.
+    let listing = host.run("nft", &["list".into(), "tables".into()]).await?;
+    if listing.success() {
+        if lists_table(&listing.stdout) {
             return Ok(TableRead::Broken(format!(
                 "`nft list table` failed while the table exists: {}",
                 snippet(&out.summary())
             )));
         }
-
-        // Text listing: the fallback when the JSON command fails or its output
-        // is not the shape we expect. It is also consulted when the JSON parsed
-        // but did not list the table — either signal saying "present" is enough
-        // to keep us from rebuilding over a table that is really there.
-        let listing = self
-            .host
-            .run("nft", &["list".into(), "tables".into()])
-            .await?;
-        if listing.success() {
-            if lists_table(&listing.stdout) {
-                return Ok(TableRead::Broken(format!(
-                    "`nft list table` failed while the table exists: {}",
-                    snippet(&out.summary())
-                )));
-            }
-            tracing::info!(
-                json_listing = %snippet(&json_listing.stdout),
-                listing = %snippet(&listing.stdout),
-                "traffic: no counter table; creating it"
-            );
-            return Ok(TableRead::Missing);
-        }
-        // No usable text listing. A JSON that parsed and explicitly did not
-        // list the table is still an answer; only two unusable listings are
-        // reason to leave the counter alone. This is the one Missing path that
-        // rebuilds on a single signal, so it is a warn: someone should see that
-        // the text listing was unavailable when the counter was recreated.
-        if json_verdict == Some(false) {
-            tracing::warn!(
-                json_listing = %snippet(&json_listing.stdout),
-                "traffic: no counter table; creating it"
-            );
-            return Ok(TableRead::Missing);
-        }
-        Ok(TableRead::Broken(format!(
-            "`nft list table` failed ({}); `nft list tables` failed too ({})",
-            snippet(&out.summary()),
-            snippet(&listing.summary())
-        )))
+        tracing::info!(
+            json_listing = %snippet(&json_listing.stdout),
+            listing = %snippet(&listing.stdout),
+            "traffic: no counter table; creating it"
+        );
+        return Ok(TableRead::Missing);
     }
+    // No usable text listing. A JSON that parsed and explicitly did not
+    // list the table is still an answer; only two unusable listings are
+    // reason to leave the counter alone. This is the one Missing path that
+    // rebuilds on a single signal, so it is a warn: someone should see that
+    // the text listing was unavailable when the counter was recreated.
+    if json_verdict == Some(false) {
+        tracing::warn!(
+            json_listing = %snippet(&json_listing.stdout),
+            "traffic: no counter table; creating it"
+        );
+        return Ok(TableRead::Missing);
+    }
+    Ok(TableRead::Broken(format!(
+        "`nft list table` failed ({}); `nft list tables` failed too ({})",
+        snippet(&out.summary()),
+        snippet(&listing.summary())
+    )))
+}
 
-    /// `table_expected` is true when the caller knows a table is there and the
-    /// delete has to succeed. It only changes how a failed delete is logged:
-    /// on the first run "no such file" is normal, but a table that survives the
-    /// delete means the `add rule` below appends a second counter instead of
-    /// replacing the old one.
-    async fn rebuild(&self, iface: &str, table_expected: bool) -> Result<()> {
-        match self
-            .host
-            .run(
-                "nft",
-                &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
-            )
-            .await
-        {
-            Ok(out) if out.success() => {
-                tracing::debug!(
-                    result = %snippet(&out.summary()),
-                    "traffic: dropped the old counter table"
+/// `table_expected` is true when the caller knows a table is there and the
+/// delete has to succeed. It only changes how a failed delete is logged:
+/// on the first run "no such file" is normal, but a table that survives the
+/// delete means the `add rule` below appends a second counter instead of
+/// replacing the old one.
+async fn rebuild(host: &dyn Host, iface: &str, table_expected: bool) -> Result<()> {
+    match host
+        .run(
+            "nft",
+            &["delete".into(), "table".into(), "inet".into(), TABLE.into()],
+        )
+        .await
+    {
+        Ok(out) if out.success() => {
+            tracing::debug!(
+                result = %snippet(&out.summary()),
+                "traffic: dropped the old counter table"
+            );
+        }
+        Ok(out) => {
+            let result = snippet(&out.summary());
+            if table_expected {
+                tracing::warn!(
+                    result = %result,
+                    "traffic: could not drop the existing counter table; the new rule may be \
+                     appended instead of replacing it"
                 );
-            }
-            Ok(out) => {
-                let result = snippet(&out.summary());
-                if table_expected {
-                    tracing::warn!(
-                        result = %result,
-                        "traffic: could not drop the existing counter table; the new rule may be \
-                         appended instead of replacing it"
-                    );
-                } else {
-                    tracing::debug!(result = %result, "traffic: no counter table to drop");
-                }
-            }
-            // `Host::run` itself failed (spawn error, timeout). The `add` below
-            // fails too, so this is recorded rather than acted on.
-            Err(e) => tracing::warn!(error = %e, "traffic: could not run `nft delete`"),
-        }
-        let steps: [&[&str]; 3] = [
-            &["add", "table", "inet", TABLE],
-            &[
-                "add", "chain", "inet", TABLE, CHAIN, "{", "type", "filter", "hook", "output",
-                "priority", "0", ";", "policy", "accept", ";", "}",
-            ],
-            &["add", "rule", "inet", TABLE, CHAIN, "oifname", iface, "counter"],
-        ];
-        for step in steps {
-            let args: Vec<String> = step.iter().map(|s| s.to_string()).collect();
-            let out = self.host.run("nft", &args).await?;
-            if !out.success() {
-                bail!("nft {} failed: {}", args.join(" "), out.summary());
+            } else {
+                tracing::debug!(result = %result, "traffic: no counter table to drop");
             }
         }
-        tracing::info!(iface, "traffic: created the outbound counter table");
-        Ok(())
+        // `Host::run` itself failed (spawn error, timeout). The `add` below
+        // fails too, so this is recorded rather than acted on.
+        Err(e) => tracing::warn!(error = %e, "traffic: could not run `nft delete`"),
     }
+    let steps: [&[&str]; 3] = [
+        &["add", "table", "inet", TABLE],
+        &[
+            "add", "chain", "inet", TABLE, CHAIN, "{", "type", "filter", "hook", "output",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ],
+        &[
+            "add", "rule", "inet", TABLE, CHAIN, "oifname", iface, "counter",
+        ],
+    ];
+    for step in steps {
+        let args: Vec<String> = step.iter().map(|s| s.to_string()).collect();
+        let out = host.run("nft", &args).await?;
+        if !out.success() {
+            bail!("nft {} failed: {}", args.join(" "), out.summary());
+        }
+    }
+    tracing::info!(iface, "traffic: created the outbound counter table");
+    Ok(())
 }
 
 /// What one counter read told us. `Missing` and `Incomplete` may rebuild the
@@ -1761,5 +1795,68 @@ mod tests {
             parse_default_iface("default via 146.190.144.1 dev eth0 proto static\n").as_deref(),
             Some("eth0")
         );
+    }
+
+    #[tokio::test]
+    async fn probe_retries_a_cold_node_until_the_table_reads() {
+        let (dir, host, _control) = setup("probe-cold");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                // First round: the table is not there, so `read_counter`
+                // creates it and reports the window as a failure.
+                (1, "", "No such file or directory"),
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                (0, "table inet filter\n", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                // Second round: the freshly created counter reads.
+                (0, &nft_json("ens3", 500), ""),
+            ],
+        );
+
+        assert_eq!(probe(host.as_ref()).await.unwrap(), 500);
+        assert_eq!(
+            rebuilds(&host),
+            1,
+            "the probe builds the table exactly once"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_gives_up_after_three_failed_rounds() {
+        let (dir, host, _control) = setup("probe-broken");
+        // Exit 0 with no rule to read: `Broken`, which never rebuilds.
+        host.queue_command_outputs("nft", &[(0, "", ""), (0, "", ""), (0, "", "")]);
+
+        assert!(probe(host.as_ref()).await.is_err());
+        assert_eq!(rebuilds(&host), 0, "a broken table is never recreated");
+        assert_eq!(
+            nft_calls(&host).len(),
+            3,
+            "one read per attempt and no extra commands"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_a_restored_node_on_the_first_round() {
+        let (dir, host, _control) = setup("probe-restored");
+        host.queue_command_outputs("nft", &[(0, &nft_json("ens3", 9_000), "")]);
+
+        assert_eq!(probe(host.as_ref()).await.unwrap(), 9_000);
+        assert_eq!(rebuilds(&host), 0);
+        assert_eq!(
+            nft_calls(&host).len(),
+            1,
+            "no retry after a successful read"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

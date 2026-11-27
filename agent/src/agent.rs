@@ -21,7 +21,7 @@ use crate::logging::{self, redact_sensitive, FileLogConfig};
 use crate::rotation::{RotationEngine, Rotator};
 use crate::singbox::SingBox;
 use crate::state::{AgentState, StateStore, StoredDesired};
-use crate::traffic::TrafficMeter;
+use crate::traffic::{self, TrafficMeter};
 use crate::{start_agent_with_certs, AgentHandle};
 
 /// Production builds compile the control plane's Ed25519 public key in.
@@ -29,6 +29,11 @@ const BUILTIN_SIGNER_PUBKEY: Option<&str> = option_env!("VEYL_AGENT_SIGNER_PUBKE
 
 /// How long to wait before touching the control plane again after a 409.
 const TERMINAL_BACKOFF: Duration = Duration::from_secs(600);
+
+/// Readiness signal for cloud-init. With `Type=exec` the unit is "active" at
+/// `execve`, before the metering probe has run, so cloud-init waits for this
+/// file instead (see `cloud_init.ts`).
+const READY_FILE: &str = "/run/veyl-agent/ready";
 
 /// How often to retry the metadata-service IP probe when it failed at startup.
 /// Converges on the first success and never talks to the control plane before.
@@ -85,6 +90,8 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     let store = StateStore::new(cfg.state_path());
     let mut state = store.load_or_recover();
     let restored = state.server_id.is_some() && state.server_token.is_some();
+    // Only builds an HTTP client; the metering probe needs it before enrollment.
+    let host: Arc<dyn Host> = Arc::new(RealHost::new()?);
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         config = %config_path.display(),
@@ -124,10 +131,50 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     let ca_fp = cert::ca_fingerprint(&identity.certs().ca_cert)?;
     tracing::info!(ca_fingerprint = %ca_fp, leaf_fingerprint = %leaf_fp, "TLS identity ready");
 
-    let plane = ControlPlane::new(&cfg.control_plane_url)?.with_enroll_url(cfg.enroll_url.clone());
+    let plane = ControlPlane::new(&cfg.control_plane_url)?
+        .with_enroll_url(cfg.enroll_url.clone())
+        .with_fail_url(cfg.fail_url.clone());
     if state.cert_fingerprint.as_deref() != Some(leaf_fp.as_str()) {
         state.cert_fingerprint = Some(leaf_fp.clone());
         store.save(&state)?;
+    }
+
+    // A unit with `Type=exec` is active as soon as `execve` succeeds — long
+    // before the probe answers — so cloud-init cannot use `is-active` to learn
+    // whether this node can meter. This file is that signal. `/run` is a tmpfs
+    // that survives `systemctl restart`, so a stale file is removed first.
+    let ready = Path::new(READY_FILE);
+    if let Err(e) = host.remove(ready).await {
+        tracing::warn!(error = %e, "could not remove a stale readiness file");
+    }
+
+    // Prove that metering works before enrolling: `/v1/agent/fail` only accepts
+    // an unconsumed enrollment token, so a cold node that cannot read the
+    // counter has to report before `ensure_identity` spends that token.
+    //
+    // A restored node is never failed this way: exiting would crash-loop it and
+    // the desktop could no longer repair it, while under-counting is the safe
+    // direction.
+    match traffic::probe(host.as_ref()).await {
+        Ok(_) => {
+            // Written on a restored node too: harmless, and it keeps one code
+            // path. A failure here is only logged — the node can still serve,
+            // and cloud-init's own timeout is the backstop.
+            if let Err(e) = host.write(ready, b"ok\n", 0o644).await {
+                tracing::error!(error = %e, "could not write the readiness file");
+            }
+        }
+        Err(e) if restored => tracing::error!(
+            error = %e,
+            "metering probe failed; continuing, this node will under-count traffic"
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "metering probe failed; the build cannot meter");
+            plane
+                .report_install_failure(cfg.enrollment_token.as_deref(), e)
+                .await;
+            std::process::exit(1);
+        }
     }
 
     let (server_id, server_token, enrolled_desired, token_public_key) =
@@ -200,7 +247,6 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         "control port"
     );
 
-    let host: Arc<dyn Host> = Arc::new(RealHost::new()?);
     let singbox = Arc::new(SingBox::new(cfg.singbox.clone(), host.clone()));
     // Outbound metering is independent of everything below: it logs its own
     // errors and never delays sing-box, credentials or the MCP endpoint.
@@ -247,10 +293,10 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         "agent ready"
     );
 
-    // Create the nft counter before the first apply so the table is in place as
-    // early as possible. The window that creates it is a *failed* read (see
-    // `TrafficMeter::read_counter`), so the counter is adopted as the baseline
-    // one window later. Any error here is a log line, never a startup failure.
+    // On a cold node the startup probe has already created the counter table,
+    // before enrollment. This first tick either seeds the baseline from the
+    // current counter (no state file) or accumulates the delta since the last
+    // save. Neither path can fail here — every error is a log line.
     meter.tick_now().await;
 
     if let Some(desired) = &desired {

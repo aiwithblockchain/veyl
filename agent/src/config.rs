@@ -215,6 +215,10 @@ pub struct AgentConfig {
     /// Full enroll URL. cloud-init writes it; when present it is used verbatim.
     #[serde(default)]
     pub enroll_url: Option<String>,
+    /// Full `POST /v1/agent/fail` URL. cloud-init writes it; the startup probe
+    /// reports a cold node's metering failure here before enrollment.
+    #[serde(default)]
+    pub fail_url: Option<String>,
     /// Control-plane Ed25519 public key (hex). Production gets the JWK from the
     /// enroll response instead; this is the fallback.
     #[serde(default)]
@@ -274,6 +278,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("control_plane_url", &self.control_plane_url)
             .field("enrollment_token", &self.enrollment_token.as_ref().map(|_| "***"))
             .field("enroll_url", &self.enroll_url)
+            .field("fail_url", &self.fail_url)
             .field("signer_pubkey", &self.signer_pubkey)
             .field("detect_public_ip", &self.detect_public_ip)
             .field("control_bind", &self.control_bind)
@@ -324,6 +329,13 @@ impl AgentConfig {
                 || (insecure_ok && enroll_url.starts_with("http://")))
             {
                 bail!("enroll_url must be https://");
+            }
+        }
+        if let Some(fail_url) = &self.fail_url {
+            if !(fail_url.starts_with("https://")
+                || (insecure_ok && fail_url.starts_with("http://")))
+            {
+                bail!("fail_url must be https://");
             }
         }
         let [lo, hi] = self.port_band;
@@ -405,6 +417,7 @@ mod tests {
             control_plane_url: "https://control.example.com".into(),
             enrollment_token: None,
             enroll_url: None,
+            fail_url: None,
             signer_pubkey: None,
             detect_public_ip: true,
             metadata_url: default_metadata_url(),
