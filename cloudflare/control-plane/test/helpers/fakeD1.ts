@@ -59,6 +59,8 @@ export class FakeD1 {
   beforeDestroyClaim?: () => void;
   /** 测试钩子：写 `provider_gone_at` 前触发，用来模拟「另一轮 Cron 已经先写过标记」。 */
   beforeProviderGoneMark?: () => void;
+  /** 测试钩子：建机写回 `provider_id` 前触发，用来模拟「DO 建机这几秒里行被销毁」。 */
+  beforeProvisionWrite?: () => void;
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, { sql, args: [] });
@@ -1042,7 +1044,9 @@ export class FakeD1 {
 
     if (sql.startsWith("update servers set provider_id")) {
       const server = this.tables.servers.find((s) => s.id === a[5]);
-      if (server) {
+      // `AND state NOT IN ('destroying','destroyed')`：建机写回期间行进入销毁流程时不能
+      // 把 destroyed 改回 booting（真实 D1 的 affected rows 会是 0）。
+      if (server && server.state !== "destroying" && server.state !== "destroyed") {
         server.provider_id = a[0];
         server.ip = a[1];
         server.state = "booting";
@@ -1767,7 +1771,8 @@ export class FakeD1 {
     }
     if (sql.startsWith("update servers set ip = ?, updated_at = ?") && sql.includes("installing_at")) {
       const row = this.tables.servers.find((server) => server.id === a[3]);
-      if (row) {
+      // `AND destroyed_at IS NULL`：查询快照之后被销毁的行不能补写 ip / installing_at。
+      if (row && row.destroyed_at == null) {
         row.ip = a[0];
         row.updated_at = a[1];
         if (row.state === "booting") {
@@ -2401,6 +2406,12 @@ export class FakeStatement {
             server.state !== "destroyed"))
           ? 1
           : 0;
+    } else if (sql.startsWith("update servers set provider_id")) {
+      // 建机写回带销毁守卫：钩子在算 affected rows 之前触发，模拟 DO 建机期间行被销毁。
+      this.db.beforeProvisionWrite?.();
+      const server = this.db.rows("servers").find((s) => s.id === this.statement.args[5]);
+      changes =
+        server && server.state !== "destroying" && server.state !== "destroyed" ? 1 : 0;
     } else if (sql.startsWith("update servers set dismissed_at")) {
       const [at, updated, id, account] = this.statement.args;
       const server = this.db

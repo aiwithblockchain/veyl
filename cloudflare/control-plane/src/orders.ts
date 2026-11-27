@@ -441,6 +441,8 @@ async function checkout(request: Request, env: OrdersEnv, orderId: string): Prom
 
       if (!provisioned.ok) {
         // 非可重试（4xx）：provision 已把订单置 failed；at_ready 没有扣过费，不会退款。
+        // 例外是 `provision_aborted`：建机期间行已被销毁，provision 不碰行与订单，
+        // 由销毁路径负责收尾。
         if (!provisioned.retryable) {
           return storedError(
             502,

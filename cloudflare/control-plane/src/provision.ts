@@ -216,6 +216,29 @@ export async function refundProvision(
   return { ok: true };
 }
 
+/**
+ * 建机写回失败时删掉刚建出来的实例。删不掉必须留一条带 provider_id 的错误日志：
+ * 这台机器在库里没有任何记录，清扫器扫不到，只能靠日志（或 DO 后台）手工收尾。
+ */
+async function deleteOrphanDroplet(
+  token: string,
+  providerId: string,
+  serverId: string,
+  reason: string,
+): Promise<void> {
+  try {
+    const removed = await deleteDroplet(token, providerId);
+    if (removed.ok || removed.status === 404) return;
+    console.error(
+      `[provision] orphan_delete_failed server=${serverId} provider_id=${providerId} reason=${reason} upstream=${removed.reason}`,
+    );
+  } catch (error) {
+    console.error(
+      `[provision] orphan_delete_failed server=${serverId} provider_id=${providerId} reason=${reason} error=${String(error)}`,
+    );
+  }
+}
+
 export async function provisionServer(
   env: ProvisionEnv,
   server: ServerToProvision,
@@ -223,6 +246,8 @@ export async function provisionServer(
   if (!env.DO_API_TOKEN || !env.ENROLL_BASE_URL) {
     return fail(env, server, "provider_unconfigured");
   }
+  // 闭包里用局部量：属性上的窄化在回调里不保留。
+  const doToken = env.DO_API_TOKEN;
 
   const enrollToken = randomId("enr_", 32);
   const enrollHash = await sha256B64u(enrollToken);
@@ -301,33 +326,54 @@ export async function provisionServer(
   }
 
   const now = Date.now();
-  try {
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
-          "enrollment_expires_at = ?, updated_at = ? WHERE id = ?",
-      ).bind(
-        created.value.providerId,
-        created.value.ipv4,
-        enrollHash,
-        now + ENROLL_TTL_MS,
-        now,
-        server.id,
-      ),
-      env.DB.prepare(
-        "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.created', ?)",
-      ).bind(
-        now,
-        server.account_id,
-        server.id,
-        JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
-      ),
-    ]);
-  } catch (error) {
-    // 机器已经建出来了但没记进库：立刻删掉，否则它会成为一台没有记录、无人管理的计费实例。
-    await deleteDroplet(env.DO_API_TOKEN, created.value.providerId);
-    return fail(env, server, "db_write_failed");
+  // 写回带状态守卫：从查到这一行到 DO 建完机之间（1–3 秒）可能已被销毁（用户点销毁、
+  // 欠费 / 流量超支、enroll 超时）。无条件写回会把 `destroyed` 改回 `booting`，
+  // DO 上多一台没人管理、也不该存在的实例；这台机器刚落成，只能我们自己删。
+  const written = await env.DB.prepare(
+    "UPDATE servers SET provider_id = ?, ip = ?, state = 'booting', enrollment_hash = ?, " +
+      "enrollment_expires_at = ?, updated_at = ? " +
+      "WHERE id = ? AND state NOT IN ('destroying', 'destroyed')",
+  )
+    .bind(
+      created.value.providerId,
+      created.value.ipv4,
+      enrollHash,
+      now + ENROLL_TTL_MS,
+      now,
+      server.id,
+    )
+    .run()
+    .catch(async (error: unknown) => {
+      // 机器已经建出来了但没记进库：立刻删掉，否则它会成为一台没有记录、无人管理的计费实例。
+      await deleteOrphanDroplet(doToken, created.value.providerId, server.id, "db_write_failed");
+      console.error(`[provision] db_write_failed server=${server.id} error=${String(error)}`);
+      return null;
+    });
+
+  if (!written) return fail(env, server, "db_write_failed");
+
+  if (Number(written.meta?.changes ?? 0) === 0) {
+    // 行已进入销毁流程（或被删掉）：不碰它的状态、不碰订单——销毁路径会把订单收尾。
+    await deleteOrphanDroplet(doToken, created.value.providerId, server.id, "row_destroying");
+    console.warn(
+      `[provision] provision_aborted server=${server.id} provider_id=${created.value.providerId}`,
+    );
+    return { ok: false, reason: "provision_aborted", retryable: false };
   }
+
+  await env.DB.prepare(
+    "INSERT INTO audit_log (at, account_id, server_id, action, detail) VALUES (?, ?, ?, 'provision.created', ?)",
+  )
+    .bind(
+      now,
+      server.account_id,
+      server.id,
+      JSON.stringify({ provider_id: created.value.providerId, region: server.region }),
+    )
+    .run()
+    .catch((error: unknown) =>
+      console.warn(`[provision] audit_failed server=${server.id} error=${String(error)}`),
+    );
 
   return { ok: true, providerId: created.value.providerId, ip: created.value.ipv4 };
 }
