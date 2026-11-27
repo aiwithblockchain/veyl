@@ -3839,7 +3839,7 @@ body[data-resizing] {
 
 .myservers-topup__grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -4008,12 +4008,6 @@ body[data-resizing] {
   height: 6px;
   border-radius: 2px;
   background: var(--green);
-}
-
-.myservers-topup__option {
-  min-height: 44px;
-  font-size: 15px;
-  font-variant-numeric: tabular-nums;
 }
 
 .myservers__detail {
