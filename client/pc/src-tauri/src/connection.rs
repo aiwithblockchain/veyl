@@ -144,10 +144,6 @@ impl ConnectionManager {
         self.emit();
     }
 
-    fn fail(&self, code: &str, message: impl Into<String>) -> AppError {
-        self.fail_with(code, message, String::new(), String::new())
-    }
-
     fn fail_with(
         &self,
         code: &str,

@@ -72,6 +72,9 @@ PY
 APP_SRC="$ROOT/src-tauri/target/debug/bundle/macos/$PRODUCT.app"
 APP_DEST="$INSTALL_DIR/$PRODUCT.app"
 
+# shellcheck source=lib/tun-macos.sh
+source "$ROOT/scripts/lib/tun-macos.sh"
+
 resolve_executable() {
   local plist name
   for plist in "$APP_DEST/Contents/Info.plist" "$APP_SRC/Contents/Info.plist"; do
@@ -120,24 +123,26 @@ printf '== veyl-cli 开发包 ==\n'
 printf '目录：%s\n' "$ROOT"
 printf '安装：%s\n\n' "$APP_DEST"
 
-printf '[1/4] 构建 debug .app\n'
+printf '[准备] 随包运行时与规则\n'
+prepare_tun_artifacts || die "准备随包运行时/规则失败"
+CLI_SIGN_ID="${CLI_SIGN_ID:-}"
+
+printf '\n[1/4] 构建 debug .app\n'
 (cd "$ROOT" && npm run tauri -- build --debug --bundles app)
 [ -d "$APP_SRC" ] || die "找不到构建产物：$APP_SRC"
 
-printf '\n[2/4] 签名\n'
-SIGN_ID="${VEYL_CLI_SIGN_IDENTITY:-}"
-if [ -z "$SIGN_ID" ]; then
-  printf '  未设置 VEYL_CLI_SIGN_IDENTITY，使用 ad-hoc 签名（仅本机可用）\n'
-  codesign --force --deep --sign - "$APP_SRC"
-else
-  printf '  使用证书：%s\n' "$SIGN_ID"
-  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP_SRC"
-fi
-codesign --verify --deep --strict "$APP_SRC" >/dev/null
-printf '  签名校验通过\n'
+printf '\n[构建] 特权 helper\n'
+(cd "$ROOT/src-tauri" && cargo build --bin veyl-cli-helper) || die "构建 helper 失败"
+assemble_tun_bundle "$APP_SRC" "$ROOT/src-tauri/target/debug/veyl-cli-helper" \
+  || die "组装 .app 失败"
 
-# TODO(TUN)：接入隧道层后，在这里构建并拷入 helper / service、安装 LaunchDaemon
-# plist、拷贝 sing-box 运行时——照 scripts/dev/tun-dev.sh 的 [2/5] 与 [3/5]。
+printf '\n[2/4] 签名\n'
+if [ -n "${CLI_SIGN_ID:-}" ]; then
+  printf '  签名身份：%s（Team %s）\n' "$CLI_SIGN_ID" "$CLI_TEAM_ID"
+fi
+sign_cli_app "$APP_SRC" || die "签名失败"
+codesign --verify --deep --strict "$APP_SRC" >/dev/null || die "签名校验失败"
+printf '  签名校验通过\n'
 
 printf '\n[3/4] 安装到 %s\n' "$INSTALL_DIR"
 EXECUTABLE="$(resolve_executable)" || die "读不到 CFBundleExecutable，无法识别 veyl-cli 进程"

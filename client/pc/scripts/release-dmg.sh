@@ -84,6 +84,9 @@ PY
 [ "$VERSION" = "$CONF_VERSION" ] || die "package.json 版本（$VERSION）与 tauri.conf.json（$CONF_VERSION）不一致"
 printf '版本：%s\n产品名：%s\n' "$VERSION" "$PRODUCT"
 
+# shellcheck source=lib/tun-macos.sh
+source "$ROOT/scripts/lib/tun-macos.sh"
+
 if [ "$CURRENT_ARCH" -eq 1 ]; then
   TARGET="$(rustc -vV | sed -n 's/^host: //p')"
   printf '架构：%s（--current-arch）\n' "$TARGET"
@@ -121,8 +124,27 @@ else
   本地验证可以加 --skip-notarize。"
   fi
 fi
-# TODO(TUN)：接入 helper 后，这里必须校验证书 Team 与 build.rs 编进 helper 的信任根一致；
-# 现在没有 helper，Team 不一致还不会表现为「装得上、连不上」。
+# helper 的验签根是 Team ID：证书 Team 与 build.rs 编进去的不一致，会「装得上、连不上」。
+if [ -n "$SIGN_ID" ] && [ "$SIGN_ID" != "-" ]; then
+  CERT_TEAM="$(cli_cert_team "$SIGN_ID")"
+  [ "$CERT_TEAM" = "$CLI_TEAM_ID" ] \
+    || die "证书 Team（$CERT_TEAM）与 build.rs 的 $CLI_TEAM_ID 不一致，helper 会拒绝连接。"
+  case "$SIGN_ID" in
+    "Developer ID Application: "*) ;;
+    *)
+      [ "$SKIP_NOTARIZE" -eq 1 ] \
+        || die "公证只接受 Developer ID Application 证书；本地验证请加 --skip-notarize。"
+      ;;
+  esac
+fi
+
+printf '\n[准备] 随包运行时与规则\n'
+prepare_tun_artifacts || die "准备随包运行时/规则失败"
+if [ -n "${SIGN_ID:-}" ] && [ "$SIGN_ID" != "-" ]; then
+  CLI_SIGN_ID="$SIGN_ID"
+else
+  CLI_SIGN_ID=""
+fi
 
 printf '\n[1/6] 构建前端与 .app\n'
 (cd "$ROOT" && npm run tauri -- build --target "$TARGET" --bundles app)
@@ -141,16 +163,31 @@ if [ "$TARGET" = "universal-apple-darwin" ]; then
   esac
 fi
 
-# TODO(TUN)：接入隧道层后，在签名之前把 helper / service、LaunchDaemon plist、
-# sing-box 运行时与规则归档装进 $APP_PATH——照 scripts/packaging/build-dmg.sh 的
-# [2/9] 与 [3/9]。Tauri 不会自动把 [[bin]] 放进包；漏了它们，TUN 在真机上起不来。
+printf '\n[构建] 特权 helper\n'
+if [ "$TARGET" = "universal-apple-darwin" ]; then
+  for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+    (cd "$ROOT/src-tauri" && cargo build --release --target "$arch" --bin veyl-cli-helper) \
+      || die "构建 $arch helper 失败"
+  done
+  mkdir -p "$ROOT/src-tauri/target/universal-apple-darwin/release"
+  lipo -create -output "$ROOT/src-tauri/target/universal-apple-darwin/release/veyl-cli-helper" \
+    "$ROOT/src-tauri/target/aarch64-apple-darwin/release/veyl-cli-helper" \
+    "$ROOT/src-tauri/target/x86_64-apple-darwin/release/veyl-cli-helper" \
+    || die "lipo helper 失败"
+  HELPER_BIN="$ROOT/src-tauri/target/universal-apple-darwin/release/veyl-cli-helper"
+else
+  (cd "$ROOT/src-tauri" && cargo build --release --target "$TARGET" --bin veyl-cli-helper) \
+    || die "构建 helper 失败"
+  HELPER_BIN="$ROOT/src-tauri/target/$TARGET/release/veyl-cli-helper"
+fi
+assemble_tun_bundle "$APP_PATH" "$HELPER_BIN" || die "组装 .app 失败"
 
 printf '\n[2/6] 签名 App\n'
-if [ "$SIGN_ID" = "-" ]; then
-  codesign --force --deep --sign - "$APP_PATH"
-else
-  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$APP_PATH"
-fi
+case "${SIGN_ID:-}" in
+  "Developer ID Application: "*) VEYL_SIGN_TIMESTAMP=1 ;;
+  *) VEYL_SIGN_TIMESTAMP=0 ;;
+esac
+sign_cli_app "$APP_PATH" || die "签名失败"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 if [ "$SKIP_NOTARIZE" -eq 0 ]; then
