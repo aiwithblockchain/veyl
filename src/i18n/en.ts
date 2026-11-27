@@ -887,6 +887,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.paid.expired": "Current period ended; service is running normally",
   "myservers.billing.daily": "{price} per day",
   "myservers.billing.dailyExpired": "{price} per day · {word}",
+  "myservers.billing.providerGone": "Deleted at the cloud provider — no longer billed",
   "myservers.billing.pastDueNoGrace":
     "Balance is short and the last charge failed. Top up within 7 days to keep using it.",
   "myservers.billing.pastDueGrace":

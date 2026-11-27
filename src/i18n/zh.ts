@@ -843,6 +843,7 @@ export const zh = {
   "myservers.paid.expired": "本期已过，服务正常",
   "myservers.billing.daily": "每天 {price}",
   "myservers.billing.dailyExpired": "每天 {price} · {word}",
+  "myservers.billing.providerGone": "已在云服务商侧删除，不再扣费",
   "myservers.billing.pastDueNoGrace": "余额不足，最近一次扣费没成功。7 天内充值可继续使用。",
   "myservers.billing.pastDueGrace":
     "余额不足，最近一次扣费没成功。宽限还剩 {days} 天，7 天内充值可继续使用。",

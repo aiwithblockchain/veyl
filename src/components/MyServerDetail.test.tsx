@@ -406,6 +406,23 @@ describe("服务器详情", () => {
     expect(onTopUp).toHaveBeenCalledTimes(1);
   });
 
+  it("云服务商侧已删除的欠费机器：不给去充值，也不报日价", () => {
+    renderDetail(
+      {
+        billing_state: "past_due",
+        provider_gone: true,
+        grace_ends_at: new Date(Date.now() + 2.5 * 86_400_000).toISOString(),
+      },
+      vi.fn(),
+      undefined,
+      vi.fn(),
+    );
+
+    // 结算不会再跑，充值救不回来；费用行改写「已删除，不再扣费」。
+    expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
+    expect(document.body.textContent).toContain("已在云服务商侧删除，不再扣费");
+  });
+
   it("进度条报步骤：1–4 与阶段名，另有 sr-only 第 N 步", () => {
     renderDetail({ state: "installing" });
 

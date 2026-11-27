@@ -1010,6 +1010,8 @@ function normalizeMyServer(raw: unknown): MyServer | null {
       MY_SERVER_TRAFFIC_STATES.has(value.traffic_state as MyServerTrafficState)
         ? (value.traffic_state as MyServerTrafficState)
         : "ok",
+    // 旧控制面 / 旧 Host 不给这个字段：按「没失联」处理，保持原来的算法。
+    provider_gone: value.provider_gone === true,
     charged_cents: readCents(value.charged_cents) ?? undefined,
     refunded_cents: readCents(value.refunded_cents) ?? undefined,
     failure: normalizeMyServerFailure(value.failure),

@@ -97,6 +97,7 @@ describe("明天新增额度", () => {
       state: "healthy" | "destroyed";
       transfer_gib: number;
       traffic_limit_bytes: number;
+      provider_gone: boolean;
     }> = {},
   ) => ({
     state: "healthy" as const,
@@ -126,7 +127,7 @@ describe("明天新增额度", () => {
     ).toBe(0);
   });
 
-  it("到 28 天封顶的机器贡献 0，已销毁的不计", () => {
+  it("到 28 天封顶的机器贡献 0，已销毁与已失联的都不计", () => {
     expect(
       trafficTomorrowBytes(
         machine({ traffic_limit_bytes: 1000 * GIB }),
@@ -137,8 +138,10 @@ describe("明天新增额度", () => {
       machine(),
       machine({ state: "destroyed" }),
       machine({ traffic_limit_bytes: 1000 * GIB }),
+      // DO 侧已删：state 仍是 healthy，额度冻结在失联时刻，明天不会再涨。
+      machine({ provider_gone: true }),
     ];
-    // 只有第一台贡献 35.7 GiB：销毁与封顶都不加。
+    // 只有第一台贡献 35.7 GiB：销毁、封顶与失联都不加。
     expect(trafficPoolTomorrowBytes(servers)).toBeCloseTo((1000 * GIB) / 28);
   });
 });

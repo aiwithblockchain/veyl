@@ -234,9 +234,16 @@ export function formatDuration(totalSeconds: number): string {
 
 /** 机器详情费用行：日价 + 计费状态的单一文案函数。 */
 export function serverBillingText(
-  server: Pick<MyServer, "daily_price_cents" | "paid_until" | "billing_state">,
+  server: Pick<
+    MyServer,
+    "daily_price_cents" | "paid_until" | "billing_state" | "provider_gone"
+  >,
   now = Date.now(),
 ): string {
+  // 机器已在云服务商侧不存在：不再续扣，报日价就是假话。
+  if (server.provider_gone === true) {
+    return t("myservers.billing.providerGone");
+  }
   const price = formatDailyPrice(server.daily_price_cents);
   const ends = server.paid_until ? new Date(server.paid_until).getTime() : NaN;
   // active 但已过 paid_until：还在等当天 Cron 补扣，不当作已停用。

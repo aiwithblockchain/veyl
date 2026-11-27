@@ -394,3 +394,22 @@ describe("左栏底部的在其它设备上使用", () => {
     expect(row?.disabled).toBe(true);
   });
 });
+
+describe("云服务商侧已删除的机器", () => {
+  it("左栏副行不报日价：已经不扣费了", () => {
+    const { container } = renderCta({
+      servers: [server({ provider_gone: true })],
+    });
+    const row = container.querySelector(".rail-server") as HTMLElement;
+    expect(row.textContent).toContain("东京 2 · Vultr");
+    expect(row.textContent).not.toContain("$");
+    expect(row.textContent).not.toContain("/天");
+  });
+
+  it("正常机器照常报日价", () => {
+    const { container } = renderCta();
+    const row = container.querySelector(".rail-server") as HTMLElement;
+    expect(row.textContent).toContain("$0.30");
+    expect(row.textContent).toContain("/天");
+  });
+});

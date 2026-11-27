@@ -40,6 +40,7 @@ function addServer(
     destroyedAt?: number | null;
     failureCode?: string | null;
     dismissedAt?: number | null;
+    providerGoneAt?: number | null;
   } = {},
 ): void {
   db.rows("servers").push({
@@ -64,6 +65,7 @@ function addServer(
     destroyed_at: extra.destroyedAt ?? null,
     failure_code: extra.failureCode ?? null,
     dismissed_at: extra.dismissedAt ?? null,
+    provider_gone_at: extra.providerGoneAt ?? null,
     charge_mode: "at_ready",
   });
 }
@@ -139,6 +141,25 @@ describe("MyServer 流量四字段 · FakeD1", () => {
       traffic_limit_bytes: LIMIT_100GIB_NOV26,
       traffic_state: "ok",
     });
+  });
+
+  it("provider_gone 透给客户端，额度冻结在失联时刻（state 仍是 active）", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db);
+    addAccount(db, ACCOUNT, 10_000);
+    addServer(db, "srv_live", ACCOUNT, 30008);
+    // DO 后台删掉、还没在应用里销毁：state 仍是 active，只有 provider_gone_at 有值。
+    addServer(db, "srv_gone", ACCOUNT, 30009, {
+      providerGoneAt: Date.parse("2026-11-23T12:00:00Z"),
+    });
+
+    const byId = Object.fromEntries((await listServers(env)).map((row) => [row.server_id, row]));
+    expect(byId.srv_live.provider_gone).toBe(false);
+    expect(byId.srv_live.traffic_limit_bytes).toBe(LIMIT_100GIB_NOV26);
+    expect(byId.srv_gone.provider_gone).toBe(true);
+    expect(byId.srv_gone.state).toBe("active");
+    // 额度停在失联那天，不会继续涨到整月。
+    expect(byId.srv_gone.traffic_limit_bytes).toBe(LIMIT_100GIB_DESTROYED_NOV23);
   });
 
   it("另一个账户的流量行不能算进来", async () => {

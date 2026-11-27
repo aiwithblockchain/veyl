@@ -162,6 +162,9 @@ export function AccountSurface({
             // 余额不足停机销毁的行 billing_state 还是 active，只有 state 变成
             // destroyed；不排除会让台数比金额多，出现「每天约 $0.00 · 1 台服务器」。
             server.state !== "destroyed" &&
+            // DO 侧已失联的机器（state 仍是 active）不再扣费、额度也冻结，
+            // 把它算进来会虚增上限与每日增量，见下方 capBytes / tomorrowBytes。
+            !server.provider_gone &&
             (server.billing_state === "active" ||
               server.billing_state === "past_due"),
         );
@@ -198,7 +201,7 @@ export function AccountSurface({
         setTraffic({
           pool: list.traffic_pool,
           resetAt,
-          tomorrowBytes: trafficPoolTomorrowBytes(list.servers),
+          tomorrowBytes: trafficPoolTomorrowBytes(billable),
           capBytes,
           trackBytes: Math.max(
             capBytes + frozenBytes,

@@ -556,6 +556,8 @@ export function MyServerDetail({
   /** 欠费 / 停用：右侧给「去充值」主按钮，销毁仍在左；停机/已销毁与失败态不掺和。 */
   const deficient =
     (server.billing_state === "past_due" || server.billing_state === "expired") &&
+    // 云服务商侧已删除的机器不会再结算，充值也救不回来。
+    server.provider_gone !== true &&
     !halted &&
     !failed;
   // 就绪后进度块整块抽走（ServerProgress 返回 null）：事实区会随之上移，接受这点位移。

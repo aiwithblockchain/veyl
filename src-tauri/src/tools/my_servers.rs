@@ -61,7 +61,7 @@ fn destroyed_reason(state: &str, failure_code: Option<&str>) -> Option<&'static 
 
 /// 对模型可见的字段白名单：地址可以给（用户已同意 AI 看到自己服务器的 IP）；
 /// 端口、密码、节点 id、provider id 等内部字段一律不出。
-const VISIBLE_FIELDS: [&str; 16] = [
+const VISIBLE_FIELDS: [&str; 17] = [
     "server_id",
     "name",
     "region",
@@ -80,6 +80,8 @@ const VISIBLE_FIELDS: [&str; 16] = [
     "traffic_limit_bytes",
     "traffic_reset_at",
     "traffic_state",
+    // 云服务商侧已不存在：state 仍是 active，但不再扣费、额度冻结。
+    "provider_gone",
 ];
 
 /// 对模型可见的单条：按白名单重建，destroyed 时补人话原因并抹掉内部 failure。
@@ -168,7 +170,9 @@ impl Tool for MyServersTool {
          账号本月流量只看摘要首行，不要把各台相加——列表不含已销毁的机器；\
          流量只说已用与已释放（不是本月上限），不推算还能用几天，也不换算成钱。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
-         不返回内部错误码。建机与销毁只能由用户在「我的服务器」页面操作。\n\
+         不返回内部错误码。云服务商侧已删除的会标「已在云服务商侧删除，不再扣费」——\
+         它的 state 仍显示可用，但已经不扣费，不要给它报日价。\
+         建机与销毁只能由用户在「我的服务器」页面操作。\n\
          用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
     }
 
@@ -282,10 +286,20 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
             .get("daily_price_cents")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let mut line = format!("- {id} | {name} | {region} | {state} | {ip} | 每天 {:.2} 美元", daily as f64 / 100.0);
+        // 云服务商侧已删除的机器：state 仍是可用，但不再扣费，报日价就是假话。
+        let gone = server
+            .get("provider_gone")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut line = format!("- {id} | {name} | {region} | {state} | {ip}");
+        if gone {
+            line.push_str(" | 已在云服务商侧删除，不再扣费");
+        } else {
+            line.push_str(&format!(" | 每天 {:.2} 美元", daily as f64 / 100.0));
+        }
         // 计费锚点：到期前 1 小时进可扣窗口，扣成功顺延一天，扣不到当场停机销毁、无宽限。
         // 所以既能说「已付到哪一刻」，也不能说成「有效期」或「到期」。
-        if server.get("billing_state").and_then(Value::as_str) == Some("active") {
+        if !gone && server.get("billing_state").and_then(Value::as_str) == Some("active") {
             if let Some(paid_until) = server
                 .get("paid_until")
                 .and_then(Value::as_str)
@@ -642,6 +656,24 @@ mod tests {
             text.contains("本月流量 已用 1.0 GiB"),
             "每台自己的用量照写：{text}"
         );
+    }
+
+    /// 云服务商侧已删除的机器：state 仍是可用，但不再扣费，不能报日价。
+    #[test]
+    fn a_ghost_is_not_quoted_a_daily_price() {
+        let servers = vec![json!({
+            "server_id": "srv_1", "name": "悉尼", "region": "syd1", "state": "active",
+            "ip": "203.0.113.9", "node_ready": true, "daily_price_cents": 40,
+            "paid_until": "2026-11-27T00:00:00Z", "billing_state": "active",
+            "provider_gone": true,
+            "traffic_used_bytes": 1_000_000_u64,
+            "traffic_limit_bytes": 38_000_000_000_u64,
+            "traffic_state": "ok",
+        })];
+        let text = summarise_servers(&servers, None);
+        assert!(text.contains("已在云服务商侧删除，不再扣费"), "{text}");
+        assert!(!text.contains("每天 0.40 美元"), "{text}");
+        assert!(!text.contains("已付至"), "{text}");
     }
 
     /// 旧控制面没有池子：整段不出现，也绝不补一个 0。

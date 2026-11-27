@@ -129,6 +129,11 @@ pub struct MyServer {
         deserialize_with = "deserialize_lenient_traffic_state"
     )]
     pub traffic_state: String,
+    /// DO 侧已确认不存在（控制面 `provider_gone_at`）：额度冻结在失联时刻，
+    /// 不再释放、也不再扣费。`state` 仍是 active（用户还没在应用里销毁），
+    /// 客户端只靠这个旗标分清「还会涨」和「冻结」。
+    #[serde(default)]
+    pub provider_gone: bool,
     /// 这台服务器实际扣过的钱（USD 分）；没扣过 = 0。
     #[serde(default)]
     pub charged_cents: i64,
@@ -1223,6 +1228,8 @@ pub async fn rebuild(server_id: &str, confirm: bool) -> Result<Value, CpError> {
             traffic_limit_bytes: 0,
             traffic_reset_at: String::new(),
             traffic_state: default_traffic_state(),
+            // 重建是一台新机器，不会带着上一台的失联标记。
+            provider_gone: false,
             // 新订单的钱还没结算，等下一次列表/详情以控制面为准。
             charged_cents: 0,
             refunded_cents: 0,
@@ -1638,6 +1645,8 @@ pub(crate) fn local_server(server_id: &str) -> Option<MyServer> {
         traffic_limit_bytes: 0,
         traffic_reset_at: String::new(),
         traffic_state: default_traffic_state(),
+        // 本地镜像不存失联标记；拿不到远端时不把机器当成冻结。
+        provider_gone: false,
         // 本地缓存只存服务器状态，不存钱；拿不到远端时按「没扣过/没退过」展示。
         charged_cents: 0,
         refunded_cents: 0,
@@ -1695,6 +1704,8 @@ mod tests {
         assert_eq!(server.traffic_limit_bytes, 0);
         assert_eq!(server.traffic_reset_at, "");
         assert_eq!(server.traffic_state, "ok");
+        // 旧控制面不给 provider_gone：按「没失联」处理，额度照常增长。
+        assert!(!server.provider_gone);
         assert_eq!(list.traffic_pool, None);
         assert!(list.complete);
     }
@@ -1706,6 +1717,7 @@ mod tests {
         value["traffic_limit_bytes"] = json!(1.5e9_f64);
         value["traffic_reset_at"] = json!("2026-12-01T00:00:00Z");
         value["traffic_state"] = json!("unpaid");
+        value["provider_gone"] = json!(true);
 
         let mut junk = sample_server_json();
         junk["server_id"] = json!("srv_2");
@@ -1720,10 +1732,12 @@ mod tests {
         assert_eq!(list.servers[0].traffic_limit_bytes, 1_500_000_000);
         assert_eq!(list.servers[0].traffic_reset_at, "2026-12-01T00:00:00Z");
         assert_eq!(list.servers[0].traffic_state, "unpaid");
+        assert!(list.servers[0].provider_gone);
         assert_eq!(list.servers[1].traffic_used_bytes, 0);
         assert_eq!(list.servers[1].traffic_limit_bytes, 0);
         assert_eq!(list.servers[1].traffic_reset_at, "");
         assert_eq!(list.servers[1].traffic_state, "ok");
+        assert!(!list.servers[1].provider_gone);
     }
 
     /// 单台只有 ok / unpaid。滚动升级期间旧控制面还会发 near / over，
@@ -1866,6 +1880,7 @@ mod tests {
             traffic_limit_bytes: 0,
             traffic_reset_at: String::new(),
             traffic_state: default_traffic_state(),
+            provider_gone: false,
             charged_cents: 0,
             refunded_cents: 0,
             paid_until: Some("2026-11-15T08:00:00Z".into()),

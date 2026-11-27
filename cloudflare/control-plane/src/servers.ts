@@ -244,6 +244,10 @@ function serverView(
     transfer_gib: Number(row.transfer_gib ?? 0),
     paid_until: paidUntil == null ? null : new Date(paidUntil).toISOString(),
     billing_state: row.billing_state ?? "active",
+    // DO 侧确认已不存在（0017）：额度在失联时刻冻结，不再释放、也不再扣费。
+    // `state` 仍是 active（用户还没在应用里销毁），客户端只有这个旗标才分得清
+    // 「还会涨」和「冻结」，否则会把已消失的机器算进账号上限与每日增量。
+    provider_gone: row.provider_gone_at != null,
     // 扣费口径（2.39.0）：存量服务器/订单行缺省按 upfront，新单是 at_ready。
     charge_mode: row.charge_mode ?? "upfront",
     // 本周期流量（2.78.0）：已用 / 已释放额度 / 下个 UTC 月 1 日重置 / 状态。

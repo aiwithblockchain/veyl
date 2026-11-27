@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   billingNoticeText,
+  serverBillingText,
   serverDetailState,
   serverRailState,
   serverTone,
@@ -231,5 +232,35 @@ describe("billingNoticeText", () => {
       NOW,
     );
     expect(text).toContain("服务已停用");
+  });
+});
+
+describe("费用行：云服务商侧已删除的机器", () => {
+  it("provider_gone 不报日价，直接说不扣费", () => {
+    const text = serverBillingText(
+      {
+        daily_price_cents: 40,
+        paid_until: at(DAY),
+        billing_state: "active",
+        provider_gone: true,
+      },
+      NOW,
+    );
+    expect(text).toBe("已在云服务商侧删除，不再扣费");
+    expect(text).not.toContain("$");
+  });
+
+  it("正常机器照常写日价", () => {
+    const text = serverBillingText(
+      {
+        daily_price_cents: 30,
+        paid_until: at(DAY),
+        billing_state: "active",
+        provider_gone: false,
+      },
+      NOW,
+    );
+    expect(text).toContain("$0.30");
+    expect(text).toContain("每天");
   });
 });

@@ -67,12 +67,16 @@ export function trafficMeterWidths(
 
 /**
  * 这台机器明天会新增的额度（字节）：`min(月额度 / 28, 月额度 − 已释放)`。
- * 已销毁不增长；到 28 天封顶（`traffic_limit_bytes` 追平月额度）贡献 0。
+ * 已销毁、DO 侧已失联（`provider_gone`）都不增长——后者的额度冻结在失联时刻；
+ * 到 28 天封顶（`traffic_limit_bytes` 追平月额度）贡献 0。
  */
 export function trafficTomorrowBytes(
-  server: Pick<MyServer, "state" | "transfer_gib" | "traffic_limit_bytes">,
+  server: Pick<
+    MyServer,
+    "state" | "transfer_gib" | "traffic_limit_bytes" | "provider_gone"
+  >,
 ): number {
-  if (server.state === "destroyed") return 0;
+  if (server.state === "destroyed" || server.provider_gone === true) return 0;
   // 脏值不往下传：否则会渲染成「明天再涨 NaN GiB」。
   if (
     !Number.isFinite(server.transfer_gib) ||
@@ -90,7 +94,7 @@ export function trafficTomorrowBytes(
 export function trafficPoolTomorrowBytes(
   servers: readonly Pick<
     MyServer,
-    "state" | "transfer_gib" | "traffic_limit_bytes"
+    "state" | "transfer_gib" | "traffic_limit_bytes" | "provider_gone"
   >[],
 ): number {
   return servers.reduce((sum, server) => sum + trafficTomorrowBytes(server), 0);

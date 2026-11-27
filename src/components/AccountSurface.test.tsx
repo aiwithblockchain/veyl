@@ -543,6 +543,43 @@ describe("账号流量（2.79.0）", () => {
     expect(screen.getByText("11.1%")).toBeTruthy();
   });
 
+  it("DO 侧已失联的机器不进上限、不进日增、不进台数", async () => {
+    // 复现真机：一台在跑 500 GiB + 一台在 DO 后台删掉、还没在应用里销
+    // 毁的 1000 GiB（state 仍是 active，只有 provider_gone 为真）。
+    const myServerList = vi.fn(async () => ({
+      servers: [
+        listServer({
+          transfer_gib: 500,
+          traffic_limit_bytes: 36 * GIB,
+          daily_price_cents: 30,
+        }),
+        listServer({
+          server_id: "srv_ghost",
+          transfer_gib: 1000,
+          traffic_limit_bytes: 36 * GIB,
+          daily_price_cents: 40,
+          provider_gone: true,
+        }),
+      ],
+      traffic_pool: { usedBytes: 3.5 * GIB, limitBytes: 518 * GIB },
+    }));
+    const view = renderSurface({ bridge: makeBridge({ myServerList }) });
+
+    // 冻结 = 518 − 36 = 482；上限 = 在跑 500 + 482 = 982。
+    await waitFor(() =>
+      expect(
+        document.querySelector(".account-surface__traffic-cap")?.textContent,
+      ).toBe("上限 982 GiB"),
+    );
+    const figures = view.container.querySelector(
+      ".account-surface__traffic-figures",
+    ) as HTMLElement;
+    // 幽灵机的 1000 GiB 不该出现在日增里：只剩 500/28 ≈ 17.9。
+    expect(figures.textContent).toMatch(/（每日 \d{2}:\d{2} \+17\.9）/);
+    // 「每天约」只算还在扣费的机器。
+    expect(await screen.findByText("每天约 $0.30 · 1 台服务器")).toBeTruthy();
+  });
+
   it("已用为 0：不画深色段，已累计段铺满轨道", async () => {
     const myServerList = vi.fn(async () => ({
       servers: [],
