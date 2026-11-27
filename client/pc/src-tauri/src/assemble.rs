@@ -390,3 +390,221 @@ mod tests {
         assert!(parse("{}").unwrap().is_object());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 交给 helper 的形态
+// ---------------------------------------------------------------------------
+
+/// helper 的 allowlist 比技术设计 §3.2 更窄（见 `crates/veyl-tun/src/protocol.rs`）：
+/// 顶层只认这五个，路由只认这几个键。这里各自留一份，改动时要两边一起改。
+const HELPER_TOP_LEVEL: [&str; 5] = ["log", "dns", "inbounds", "outbounds", "route"];
+const HELPER_ROUTE_KEYS: [&str; 5] = [
+    "rules",
+    "rule_set",
+    "final",
+    "auto_detect_interface",
+    "default_domain_resolver",
+];
+
+/// 把装配结果改成交给 helper 的最终形态。
+///
+/// 三件事只有 helper 能做：注入自己的 clash_api、给规则补本地路径、校验配置。
+/// 我们不能把这些字段发过去——发过去会被 allowlist 直接拒绝：
+/// - `experimental`：helper 用 `force_clash_api` 覆盖，发过去也没用；
+/// - `http_clients` / `route.default_http_client`：只服务远程规则下载，而 helper
+///   禁止远程规则；
+/// - `inbounds[].dns_address`：不在 helper 的 inbound 白名单里；
+/// - `rule_set[]` 的 `type/format/path`：由 helper 按 tag 补。
+pub fn for_helper(config: &Value) -> AppResult<Value> {
+    let assembled = assemble(
+        config,
+        &ConnectParams {
+            clash_port: 0,
+            clash_secret: String::new(),
+        },
+    )?;
+    let mut out = assembled.runtime;
+    let object = out
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("CONFIG_INVALID", "配置必须是一个 JSON 对象"))?;
+
+    object.remove("experimental");
+    object.remove("http_clients");
+
+    if let Some(route) = object.get_mut("route").and_then(Value::as_object_mut) {
+        route.remove("default_http_client");
+
+        if let Some(entries) = route.get_mut("rule_set").and_then(Value::as_array_mut) {
+            let mut rewritten = Vec::with_capacity(entries.len());
+            for entry in entries.iter() {
+                let tag = entry
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::new("CONFIG_INVALID", "rule_set 缺少 tag")
+                            .with_hint("重新导入配置；反复出现就回桌面端重新导出。")
+                    })?
+                    .to_string();
+                rewritten.push(json!({ "tag": tag }));
+            }
+            *entries = rewritten;
+        }
+
+        ensure_transport_rules(route);
+
+        if let Some(unknown) = route
+            .keys()
+            .find(|key| !HELPER_ROUTE_KEYS.contains(&key.as_str()))
+        {
+            return Err(AppError::new(
+                "CONFIG_FORBIDDEN",
+                format!("路由里有这一版客户端还不支持的字段：{unknown}"),
+            )
+            .with_hint("更新客户端，或回桌面端重新导出配置。"));
+        }
+    }
+
+    if let Some(inbounds) = object.get_mut("inbounds").and_then(Value::as_array_mut) {
+        for inbound in inbounds.iter_mut() {
+            if let Some(map) = inbound.as_object_mut() {
+                map.remove("dns_address");
+            }
+        }
+    }
+
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !HELPER_TOP_LEVEL.contains(&key.as_str()))
+    {
+        return Err(AppError::new(
+            "CONFIG_FORBIDDEN",
+            format!("配置顶层有这一版客户端还不支持的字段：{unknown}"),
+        )
+        .with_hint("更新客户端，或回桌面端重新导出配置。"));
+    }
+
+    Ok(out)
+}
+
+/// sniff 与 hijack-dns 必须在规则最前面；缺了 DNS 劫持会静默失效。
+fn ensure_transport_rules(route: &mut Map<String, Value>) {
+    let rules = route
+        .entry("rules")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(rules) = rules.as_array_mut() else {
+        return;
+    };
+
+    let action_is = |rule: &Value, action: &str| {
+        rule.get("action").and_then(Value::as_str) == Some(action)
+    };
+    let has_hijack = rules.iter().any(|rule| action_is(rule, "hijack-dns"));
+    let has_sniff = rules.iter().any(|rule| action_is(rule, "sniff"));
+
+    if !has_hijack {
+        rules.insert(0, json!({ "protocol": "dns", "action": "hijack-dns" }));
+    }
+    if !has_sniff {
+        rules.insert(
+            0,
+            json!({
+                "action": "sniff",
+                "sniffer": veyl_tun::SNIFFERS,
+                "timeout": veyl_tun::SNIFF_TIMEOUT,
+            }),
+        );
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    fn routed() -> Value {
+        json!({
+            "log": {"level": "info"},
+            "http_clients": [{"tag": "veyl-download", "detour": "proxy"}],
+            "inbounds": [{"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "dns_address": ["172.18.0.2"]}],
+            "outbounds": [
+                {"type": "selector", "tag": "proxy", "outbounds": ["node-a"], "default": "node-a"},
+                {"type": "vless", "tag": "node-a", "server": "a.example.com", "server_port": 443},
+                {"type": "direct", "tag": "direct"}
+            ],
+            "route": {
+                "final": "proxy",
+                "default_http_client": "veyl-download",
+                "rule_set": [
+                    {"type": "remote", "tag": "geosite-cn", "format": "binary", "url": "https://example.com/g.srs"},
+                    {"type": "remote", "tag": "geoip-cn", "format": "binary", "url": "https://example.com/i.srs"}
+                ],
+                "rules": [
+                    {"action": "sniff", "sniffer": ["http", "tls", "quic", "dns"], "timeout": "300ms"},
+                    {"action": "hijack-dns", "protocol": "dns"},
+                    {"action": "route", "rule_set": ["geosite-cn"], "outbound": "direct"}
+                ]
+            },
+            "experimental": {"clash_api": {"external_controller": "0.0.0.0:9090"}}
+        })
+    }
+
+    #[test]
+    fn drops_what_the_helper_rejects_or_overrides() {
+        let out = for_helper(&routed()).unwrap();
+        assert!(out.get("experimental").is_none(), "helper 会自己注入 clash_api");
+        assert!(out.get("http_clients").is_none(), "helper 不允许顶层 http_clients");
+        assert!(
+            out["route"].get("default_http_client").is_none(),
+            "它指向的客户端已经删了"
+        );
+        assert!(
+            out["inbounds"][0].get("dns_address").is_none(),
+            "dns_address 不在 helper 的 inbound 白名单里"
+        );
+    }
+
+    #[test]
+    fn rule_sets_become_tags_only() {
+        let out = for_helper(&routed()).unwrap();
+        assert_eq!(
+            out["route"]["rule_set"],
+            json!([{"tag": "geosite-cn"}, {"tag": "geoip-cn"}])
+        );
+    }
+
+    #[test]
+    fn unknown_route_keys_are_rejected_with_a_readable_code() {
+        let mut config = routed();
+        config["route"]["geoip"] = json!({"path": "/tmp/x"});
+        let error = for_helper(&config).unwrap_err();
+        assert_eq!(error.code, "CONFIG_FORBIDDEN");
+        assert!(error.message.contains("geoip"));
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_rejected() {
+        let mut config = routed();
+        config["some_future_field"] = json!(true);
+        let error = for_helper(&config).unwrap_err();
+        assert_eq!(error.code, "CONFIG_FORBIDDEN");
+        assert!(error.message.contains("some_future_field"));
+    }
+
+    #[test]
+    fn transport_rules_are_guaranteed() {
+        let mut config = routed();
+        config["route"]["rules"] = json!([{"action": "route", "outbound": "direct"}]);
+        let out = for_helper(&config).unwrap();
+        let rules = out["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["action"], "hijack-dns");
+    }
+
+    #[test]
+    fn zero_nodes_still_cannot_be_assembled() {
+        let config = json!({
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "route": {"final": "direct"}
+        });
+        assert_eq!(for_helper(&config).unwrap_err().code, "NO_NODES");
+    }
+}
