@@ -15,31 +15,27 @@ mod server;
 #[cfg(windows)]
 mod service;
 
-// 纯 IPv4 CIDR 计算：与主程序 `tun::cidr` 是**同一份源码**，
-// 用 `#[path]` 引用，不复制粘贴（两份 CIDR 判断迟早会分叉）。
-// 主程序要的 `remove_covering` 服务端用不到，不必逐条报死代码。
+// 纯 IPv4 CIDR 计算与协议层都来自共享 crate，不再 `#[path]` 内联源码。
 #[cfg(windows)]
-#[allow(dead_code)]
-#[path = "../../tun/windows/cidr.rs"]
-mod cidr;
+#[allow(unused_imports)]
+pub(crate) use veyl_tun::cidr;
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use veyl_tun::protocol;
+// 命名管道 + 服务的实现：客户端与服务端共用一份。
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub(crate) use veyl_tun::windows as win;
 
+// 身份参数：与主程序、helper 共用同一份组装逻辑（每个二进制各自注入一次）。
 #[cfg(windows)]
-// 这份模块是客户端与服务端共用的：服务二进制只用到服务端那一半，
-// release 下 `--client` 被移除后客户端函数在本 bin 里没有调用点。
-#[allow(dead_code)]
-#[path = "../../tun/windows/mod.rs"]
-mod win;
-
-// 只读引用 `tun/protocol.rs`：allowlist 与 macOS 共用同一份实现。
-// 其中 macOS 专属的常量/函数在这个 bin 里用不到，不必逐条报死代码。
-#[cfg(windows)]
-#[allow(dead_code)]
-#[path = "../../tun/protocol.rs"]
-mod protocol;
+#[path = "../../tun_identity.rs"]
+mod tun_identity;
 
 pub fn main() {
     #[cfg(windows)]
     {
+        tun_identity::install();
         service::main();
     }
 

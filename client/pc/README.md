@@ -4,24 +4,27 @@ Veyl 的轻量级 PC 客户端：只做「导入配置 → 连节点 → 建隧�
 
 需求与技术设计见 [`../docs/client-apps.md`](../docs/client-apps.md) 与 [`../docs/client-apps-technical.md`](../docs/client-apps-technical.md)。
 
-## 当前状态：骨架
+## 当前状态：M1-B（macOS 连接闭环）
 
-这是一个**可独立构建、可独立启动**的 Tauri 2 应用，界面只有品牌页与版本号。
-
-已包含：
+这是一个**可独立构建、可独立启动**的 Tauri 2 应用。已实现：
 
 - 独立工程：自己的 `package.json`、`src-tauri`、bundle id（`io.github.aiwithblockchain.veyl.cli`）、数据目录；
 - 复用主客户端的 logo 与图标（`src/assets/logo.png`、`src-tauri/icons/`）；
-- `app_info` 命令：前端通过 `invoke` 取名称与版本，验证 Tauri 桥接可用；
-- dev / release 脚本（见下）。
+- **订阅导入**：粘贴 `https://veyl:<令牌>@主机/v1/mobile/profile` 或选本地 sing-box JSON；拉取按 §6.2（Basic 认证、10s/20s 超时、512 KiB 上限、不跟随重定向），401/403/429/5xx 映射成同步状态；
+- **配置装配**：按技术设计 §3.2 只改 `inbounds` / `experimental` / `log`，其余字段原样保留；结构校验 + 有内核时跑 `sing-box check`；
+- **持久化**：`profiles.json` 存元数据（不含链接），原始配置与装配预览存 `profiles/<id>/`，均 0600 原子写；令牌进系统钥匙串（debug 默认本地加密文件，可用 `VEYL_CLI_SECRET_BACKEND` 切换）；
+- **界面**：配置列表 + 导入弹层 + 详情（节点列表、同步状态、重命名/删除/刷新），沿用主客户端的 token 与字号。
 
-**尚未包含**（交接后按技术设计实现）：
+- **连接（仅 macOS）**：随包 sing-box 与规则归档、特权 helper 与 LaunchDaemon、连接 / 断开 / 就绪判定 / 状态与计时器、节点热切；
+- macOS 的 `dev.sh` / `release-dmg.sh` 会把 helper、`Contents/Library/LaunchDaemons/com.veyl.cli.helper.plist`、`Contents/Resources/runtime/sing-box` 与规则装进包，并按「嵌套 Mach-O → .app」签名。
 
-- 订阅链接与本地配置导入、持久化；
-- 配置装配与 `sing-box check`；
-- 隧道层：`crates/veyl-tun`（M0 抽取）、随包 sing-box、privileged helper / Windows 服务；
+**TUN 需要真实签名证书**：SMAppService 只认签名 `.app`；helper 验对端签名，随包 runtime 也必须由同一 Team 签过。脚本会按证书主体的 OU 选证书（默认 Team `2XYK8RBB6M`），没有匹配证书时退回 ad-hoc——那种构建能看界面，但连不上。
+
+**尚未包含**（下一阶段）：
+
 - 菜单栏常驻与后台运行：关闭主界面只隐藏、进程与隧道继续，从菜单栏唤回；显式退出才断开（技术设计 §3.4）；
-- 节点切换、开机自启、日志页。
+- 开机自启、日志页；
+- Windows 服务与安装包。
 
 ## 前置
 

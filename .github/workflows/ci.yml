@@ -51,6 +51,12 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
+      # TUN 层是独立 crate：`--lib` 只测当前包，crate 里的用例必须单独跑，
+      # 否则抽取之后它们会在 CI 里静默消失。共用 src-tauri/target 复用产物。
+      # Windows runner 上 crate 里的 Windows 分支也要编译，所以两个 job 都跑。
+      - name: TUN crate tests
+        run: cargo test --manifest-path crates/veyl-tun/Cargo.toml --target-dir src-tauri/target
+
       # veyl-helper 是独立 bin，`--lib` 覆盖不到它的 37 项测试。它一度变成只能在
       # macOS 编译而没人发现。Windows runner 上这个 bin 会随 [[bin]] 的平台门控消失，
       # 所以只在这里跑；不满足条件的 job 直接跳过，不算失败。

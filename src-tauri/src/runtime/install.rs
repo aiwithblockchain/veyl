@@ -799,7 +799,7 @@ mod tests {
             })
             .unwrap_or_default();
         let ours = detail.contains("Identifier=sing-box")
-            && detail.contains(&format!("TeamIdentifier={}", crate::tun::protocol::TEAM_ID));
+            && detail.contains(&format!("TeamIdentifier={}", crate::tun::protocol::team_id()));
 
         let result = signature::verify_bundled_runtime(&path);
         if ours {

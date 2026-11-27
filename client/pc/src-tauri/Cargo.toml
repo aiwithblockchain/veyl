@@ -1,7 +1,7 @@
 [package]
 name = "veyl-cli"
 version = "0.1.0"
-description = "Veyl 轻量客户端（骨架）"
+description = "Veyl 轻量客户端"
 edition = "2021"
 rust-version = "1.77"
 default-run = "veyl-cli"
@@ -12,7 +12,47 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 随包 runtime 与规则归档的哈希（见 build.rs）。
+sha2 = "0.10"
+
+[[bin]]
+name = "veyl-cli-helper"
+path = "src/bin/veyl-cli-helper/main.rs"
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 订阅拉取：关掉默认 TLS（会拉 native-tls/OpenSSL），与主客户端同一套 rustls。
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "process", "macros"] }
+thiserror = "2"
+rand = "0.8"
+# 本地加密凭据文件（与主客户端 `secrets.enc` 同一套构造）。
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# TUN 接管与提权协议层：与主客户端共用同一份实现。
+veyl-tun = { path = "../../../crates/veyl-tun" }
+
+# 系统钥匙串：只在发布构建默认启用，debug 走本地加密文件（见 secrets.rs）。
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+] }
+
+# 本地加密凭据文件的密钥派生要用机器标识。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile = "3"

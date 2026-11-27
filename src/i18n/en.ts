@@ -693,6 +693,8 @@ export const en: Record<MessageKey, string> = {
   "console.probe.allFailed": "None connected this time.",
   "console.probe.allUntested": "Testing didn't complete this time.",
   "console.probe.mixed": "{count} couldn't be tested.",
+  "console.probe.needsReconnectOne": "Reconnect to test {count} node.",
+  "console.probe.needsReconnect": "Reconnect to test {count} nodes.",
   "console.selfOwnedUnreachable":
     "Not being able to connect doesn't necessarily mean the machine is at fault; your current network often can't reach that region. You can destroy and rebuild, but the day's charge isn't refunded.",
   "console.group.owned": "My servers",

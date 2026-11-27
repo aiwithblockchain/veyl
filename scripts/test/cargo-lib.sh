@@ -22,6 +22,13 @@ rm -f "$FAILURE"
 STARTED=$(date +%s)
 cargo test --manifest-path src-tauri/Cargo.toml --lib -- --nocapture "$@" >"$LOG" 2>&1
 STATUS=$?
+# TUN 层是独立 crate，`--lib` 只测当前包；不单独跑这一条，迁移过去的用例会在
+# CI 里静默消失。共用 src-tauri/target 以复用编译产物。
+if [ "$STATUS" -eq 0 ]; then
+  cargo test --manifest-path crates/veyl-tun/Cargo.toml --target-dir src-tauri/target \
+    -- --nocapture "$@" >>"$LOG" 2>&1
+  STATUS=$?
+fi
 TOOK=$(( $(date +%s) - STARTED ))
 
 if [ "$STATUS" -eq 0 ]; then
@@ -31,7 +38,7 @@ fi
 
 {
   printf 'time: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'command: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --nocapture %s\n' "$*"
+  printf 'command: cargo test --manifest-path src-tauri/Cargo.toml --lib (then crates/veyl-tun) -- --nocapture %s\n' "$*"
   printf 'status: %s\n\n' "$STATUS"
 
   printf '== failing tests ==\n'

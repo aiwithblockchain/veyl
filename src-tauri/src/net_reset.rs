@@ -117,7 +117,7 @@ pub fn find_sing_box_processes<'a>(
 pub fn tun_runtime_root() -> Option<PathBuf> {
     #[cfg(unix)]
     {
-        Some(PathBuf::from(crate::tun::trust::TRUST_ROOT))
+        Some(PathBuf::from(crate::tun::trust::trust_root()))
     }
     #[cfg(not(unix))]
     {

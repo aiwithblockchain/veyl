@@ -1,0 +1,78 @@
+[workspace]
+
+[package]
+name = "veyl-tun"
+version = "0.1.0"
+description = "Veyl 的 TUN 接管与提权协议层：主客户端与 veyl-cli 共用"
+edition = "2021"
+rust-version = "1.77"
+
+[features]
+default = []
+# 各 APP 的测试需要直接摆出连接状态（TunSession::force_*_for_test）。
+# 只由 dev-dependency 打开；正常构建与发布构建里这些方法不存在。
+test-hooks = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "rt"] }
+log = { version = "0.4", features = ["std"] }
+# helper 解压随包规则归档、生成随机数。
+zstd = "0.13"
+tar = "0.4"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# SMAppService 只在 macOS 13+ 存在；sha2 的 asm 与主客户端保持一致。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", features = ["asm"] }
+block2 = { version = "0.6", default-features = false, features = ["alloc"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+    "NSBundle",
+    "alloc",
+] }
+objc2-service-management = { version = "0.3", default-features = false, features = [
+    "std",
+    "SMAppService",
+    "objc2",
+    "objc2-foundation",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinInet",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+
+# 与主客户端同一理由：debug 构建里哈希 166MB 运行时要 5.8s，优化后 0.29s。
+[profile.dev.package.sha2]
+opt-level = 3

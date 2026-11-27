@@ -1,0 +1,17 @@
+version: 2026-11-12.1
+geosite: https://github.com/SagerNet/sing-geosite branch=rule-set commit=23066e3b0833 date=2026-11-10T06:42:42Z
+geoip:   https://github.com/SagerNet/sing-geoip branch=rule-set commit=eb32cd6ed4a1 date=2026-10-12T17:29:53Z
+geosite_commit: 23066e3b0833d1484916637dde2b5bae80178045
+geosite_tarball: https://codeload.github.com/SagerNet/sing-geosite/tar.gz/23066e3b0833d1484916637dde2b5bae80178045
+geoip_commit: eb32cd6ed4a16fcb3bf9a36ccebf28e45716ae84
+geoip_tarball: https://codeload.github.com/SagerNet/sing-geoip/tar.gz/eb32cd6ed4a16fcb3bf9a36ccebf28e45716ae84
+fetched_at: 2026-11-12T01:53:34.327Z
+items: 2238 (geosite=2000, geoip=238)
+uncompressed_bytes: 2362701
+archive: veyl-rules-2026-11-12.1.tar.zst
+archive_bytes: 2522989
+archive_sha256: 3da289ec424fdcf410670383bfce9fbee131a518f12898f4499325035a58f323
+licenses: geosite=LICENSE-geosite.txt (GPL), geoip=LICENSE-geoip.txt (GPL), gpl=LICENSE-GPL-3.0.txt
+
+说明：manifest.items[].sha256 是每个 .srs 的内容校验；archive_sha256 是整个归档的供应链校验。
+categories.json 的 item_count 为 0 表示上游二进制不提供域名条数，不是分类为空。

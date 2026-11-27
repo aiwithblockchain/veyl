@@ -6549,6 +6549,16 @@ details[open] > .settings-fold__summary::before {
   color: var(--ink-3);
 }
 
+/* 自定义空态里的添加节点是引导动作：用主题红，不用卡片头的深灰。 */
+.stage-group-empty .stage-add {
+  color: var(--link);
+}
+
+.stage-group-empty .stage-add:hover:not(:disabled),
+.stage-group-empty .stage-add:focus-visible {
+  color: var(--link-hover);
+}
+
 /* 免费试用卡：说明行 + 倒计时；列表最多 3 行。 */
 .stage-trial-note {
   margin: 6px 0 0;

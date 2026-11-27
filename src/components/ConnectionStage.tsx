@@ -884,8 +884,53 @@ export function ConnectionStage({
       : freeEntries.length > 0
         ? "free"
         : null);
-  const tabProbeNote = noteHome === activeSource ? probeBatchNote : null;
-  const freeProbeNote = noteHome === "free" ? probeBatchNote : null;
+  /**
+   * 没测成的原因是「运行配置里还没有它 / 还是旧凭据」：不是测速故障，
+   * 单独说清楚要重新连接，别只写「N 个没测成」。原因由行内 title 给。
+   */
+  const reconnectNote = (ids: string[]) => {
+    if (probeRunning) return null;
+    const untested = ids
+      .filter((id) => {
+        const node = nodes.find((item) => item.node_id === id);
+        // 到期、停机删除的行不可测，别拿旧结果给它们指路。
+        return node !== undefined && !isExpiredSeed(node) && !danglingNodeIds.has(id);
+      })
+      .map((id) => nodeProbes.results[id])
+      .filter(
+        (result) =>
+          result?.status === "untested" &&
+          // 这次连接比结果新：运行配置已经重建，旧结论不再适用。
+          !(
+            connected &&
+            Number.isFinite(connectedAt) &&
+            result.checked_at > 0 &&
+            result.checked_at < connectedAt
+          ),
+      );
+    if (untested.length === 0) return null;
+    const waitingForReconnect = untested.every(
+      (result) =>
+        result.error?.reason === "node_not_in_running_config" ||
+        result.error?.reason === "running_config_stale",
+    );
+    if (!waitingForReconnect) return null;
+    return (
+      <p className="stage-card__probe-note">
+        {untested.length === 1
+          ? t("console.probe.needsReconnectOne", { count: untested.length })
+          : t("console.probe.needsReconnect", { count: untested.length })}
+      </p>
+    );
+  };
+  const tabProbeNote =
+    noteHome === activeSource
+      ? reconnectNote(activeNodeIds) ?? probeBatchNote
+      : null;
+  const freeProbeNote =
+    noteHome === "free"
+      ? reconnectNote(freeNodeIds) ?? probeBatchNote
+      : null;
   const searchable = activeRowCount > 12;
   const normalizedQuery = nodeQuery.trim().toLocaleLowerCase();
   const matchesQuery = (name: string) =>

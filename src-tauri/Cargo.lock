@@ -1072,6 +1072,16 @@ dependencies = [
 
 [[package]]
 name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
@@ -5172,7 +5182,7 @@ dependencies = [
  "anyhow",
  "brotli 9.1.1",
  "cargo_metadata",
- "ctor",
+ "ctor 1.0.13",
  "dom_query",
  "dunce",
  "glob",
@@ -5821,6 +5831,7 @@ dependencies = [
  "claurst-core",
  "claurst-query",
  "claurst-tools",
+ "ctor 0.2.9",
  "flate2",
  "futures",
  "futures-util",
@@ -5855,9 +5866,31 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "veyl-tun",
  "windows-sys 0.59.0",
  "winreg 0.52.0",
  "zip",
+ "zstd",
+]
+
+[[package]]
+name = "veyl-tun"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "chrono",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "objc2-service-management",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tokio",
+ "windows-sys 0.59.0",
  "zstd",
 ]
 

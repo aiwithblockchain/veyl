@@ -976,6 +976,129 @@ describe("连接舞台", () => {
     expect(screen.getByText("1 个没测成。")).toBeTruthy();
   });
 
+  it("没测成的原因是运行配置里还没有它：说清楚要重新连接，不只写没测成", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 1, failed: 0, untested: 1 }),
+        results: {
+          n1: probeResult("n1", 38),
+          n2: {
+            ...untestedProbe("n2"),
+            error: {
+              code: "PROBE_UNAVAILABLE",
+              message: "节点还没进运行中的配置，重新连接后再测",
+              reason: "node_not_in_running_config",
+            },
+          },
+        },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.getByText("有 1 个节点要重新连接后才能测。")).toBeTruthy();
+    expect(screen.queryByText("1 个没测成。")).toBeNull();
+  });
+
+  it("运行配置还是旧凭据：同样指向重新连接", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 0, untested: 2 }),
+        results: {
+          n1: {
+            ...untestedProbe("n1"),
+            error: {
+              code: "PROBE_UNAVAILABLE",
+              message: "运行中的配置还是旧凭据，断开重新连接后再测",
+              reason: "running_config_stale",
+            },
+          },
+          n2: {
+            ...untestedProbe("n2"),
+            error: {
+              code: "PROBE_UNAVAILABLE",
+              message: "运行中的配置还是旧凭据，断开重新连接后再测",
+              reason: "running_config_stale",
+            },
+          },
+        },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.getByText("有 2 个节点要重新连接后才能测。")).toBeTruthy();
+  });
+
+  it("没测成的原因与运行配置无关：仍按原来的「N 个没测成」", () => {
+    renderStage({
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 1, failed: 0, untested: 1 }),
+        results: {
+          n1: probeResult("n1", 38),
+          n2: {
+            ...untestedProbe("n2"),
+            error: {
+              code: "PROBE_UNAVAILABLE",
+              message: "临时运行时没起来",
+              reason: "runtime_failed",
+            },
+          },
+        },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.getByText("1 个没测成。")).toBeTruthy();
+    expect(screen.queryByText(/重新连接后才能测/)).toBeNull();
+  });
+
+  it("重新连接后，旧结果不再提示重新连接", () => {
+    renderStage({
+      connection: "connected",
+      runtime: runtime({
+        state: "running",
+        connected_since: new Date().toISOString(),
+      }),
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 0, untested: 1 }),
+        results: {
+          n1: {
+            ...untestedProbe("n1"),
+            checked_at: Date.now() - 60_000,
+            error: {
+              code: "PROBE_UNAVAILABLE",
+              message: "节点还没进运行中的配置，重新连接后再测",
+              reason: "node_not_in_running_config",
+            },
+          },
+        },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.queryByText(/重新连接后才能测/)).toBeNull();
+  });
+
+  it("到期节点不给「重新连接」建议：这条建议对它不成立", () => {
+    const stale = {
+      ...untestedProbe("n1"),
+      error: {
+        code: "PROBE_UNAVAILABLE",
+        message: "节点还没进运行中的配置，重新连接后再测",
+        reason: "node_not_in_running_config",
+      },
+    };
+    renderStage({
+      trialState: "expired",
+      nodeProbes: probes({
+        finished: probeFinished({ ok: 0, failed: 0, untested: 1 }),
+        results: { n1: stale },
+      }),
+      onProbe: () => {},
+    });
+
+    expect(screen.queryByText(/重新连接后才能测/)).toBeNull();
+  });
+
   it("切到没测过的配置：不带上一套的「都没测通」", () => {
     const base: StageOverrides = {
       nodeProbes: probes({
