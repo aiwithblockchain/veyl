@@ -125,7 +125,18 @@ fn server_row_fact(server: &Value) -> Option<Fact> {
         .get("region")
         .and_then(Value::as_str)
         .filter(|region| !region.is_empty())?;
-    let state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    // 云服务商侧已删除：复用契约里已有的 `gone`（实例已不存在），否则卡片会把幽灵机
+    // 写成「已开通」。已销毁优先——应用里销毁之后仍然写「已销毁」。
+    let provider_gone = server
+        .get("provider_gone")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let raw_state = server.get("state").and_then(Value::as_str).unwrap_or("");
+    let state = if provider_gone && raw_state != "destroyed" {
+        "gone"
+    } else {
+        raw_state
+    };
     let failure_code = server
         .get("failure")
         .and_then(|failure| failure.get("code"))
@@ -170,7 +181,7 @@ impl Tool for MyServersTool {
          账号本月流量只看摘要首行，不要把各台相加——列表不含已销毁的机器；\
          流量只说已用与已释放（不是本月上限），不推算还能用几天，也不换算成钱。\
          已销毁的会给出人话原因（`destroyed_reason`：因余额不足停机删除 / 已销毁），\
-         不返回内部错误码。云服务商侧已删除的会标「已在云服务商侧删除，不再扣费」——\
+         不返回内部错误码。云服务商侧已删除的会标「云服务商已删除，不再扣费」——\
          它的 state 仍显示可用，但已经不扣费，不要给它报日价。\
          建机与销毁只能由用户在「我的服务器」页面操作。\n\
          用「服务器」「地区」「安装中」这些词；server_id 只用于调用工具，不要把它念给用户；不出现 node_id。"
@@ -293,7 +304,7 @@ fn summarise_servers(servers: &[Value], pool: Option<&Value>) -> String {
             .unwrap_or(false);
         let mut line = format!("- {id} | {name} | {region} | {state} | {ip}");
         if gone {
-            line.push_str(" | 已在云服务商侧删除，不再扣费");
+            line.push_str(" | 云服务商已删除，不再扣费");
         } else {
             line.push_str(&format!(" | 每天 {:.2} 美元", daily as f64 / 100.0));
         }
@@ -671,7 +682,7 @@ mod tests {
             "traffic_state": "ok",
         })];
         let text = summarise_servers(&servers, None);
-        assert!(text.contains("已在云服务商侧删除，不再扣费"), "{text}");
+        assert!(text.contains("云服务商已删除，不再扣费"), "{text}");
         assert!(!text.contains("每天 0.40 美元"), "{text}");
         assert!(!text.contains("已付至"), "{text}");
     }
@@ -833,6 +844,34 @@ mod tests {
             Some(Fact::with_params(
                 FactKey::ServerRow,
                 json!({ "name": "伦敦", "region": "lon1", "state": "active" })
+            ))
+        );
+    }
+
+    /// 云服务商侧已删除的机器：卡片状态词换掉，不能写成「已开通」。
+    #[test]
+    fn a_ghost_row_is_pushed_as_gone() {
+        assert_eq!(
+            server_row_fact(&json!({
+                "state": "active", "name": "悉尼", "region": "syd1", "provider_gone": true
+            })),
+            Some(Fact::with_params(
+                FactKey::ServerRow,
+                json!({ "name": "悉尼", "region": "syd1", "state": "gone" })
+            ))
+        );
+        // 应用里销毁之后仍写「已销毁」，不被 provider_gone 覆盖。
+        assert_eq!(
+            server_row_fact(&json!({
+                "state": "destroyed", "name": "悉尼", "region": "syd1",
+                "provider_gone": true, "failure": null
+            })),
+            Some(Fact::with_params(
+                FactKey::ServerRow,
+                json!({
+                    "name": "悉尼", "region": "syd1", "state": "destroyed",
+                    "destroyed": "user"
+                })
             ))
         );
     }

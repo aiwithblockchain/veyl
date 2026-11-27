@@ -816,7 +816,7 @@ export const zh = {
   "myservers.state.error": "出错了",
   "myservers.state.destroying": "正在销毁",
   "myservers.state.destroyed": "已停机删除",
-  "myservers.state.gone": "已失效",
+  "myservers.state.gone": "云服务商已删除",
   "myservers.state.unknown": "状态未知",
   "myservers.tombstone.word": "已停机删除",
   "myservers.tombstone.text":
@@ -843,7 +843,7 @@ export const zh = {
   "myservers.paid.expired": "本期已过，服务正常",
   "myservers.billing.daily": "每天 {price}",
   "myservers.billing.dailyExpired": "每天 {price} · {word}",
-  "myservers.billing.providerGone": "已在云服务商侧删除，不再扣费",
+  "myservers.billing.providerGone": "云服务商已删除，不再扣费",
   "myservers.billing.pastDueNoGrace": "余额不足，最近一次扣费没成功。7 天内充值可继续使用。",
   "myservers.billing.pastDueGrace":
     "余额不足，最近一次扣费没成功。宽限还剩 {days} 天，7 天内充值可继续使用。",
@@ -1071,6 +1071,7 @@ export const zh = {
   "detail.confirmDestroy": "确认销毁",
   "detail.retryDestroy": "重试销毁",
   "detail.destroy": "销毁",
+  "detail.providerGone": "这台机器已在云服务商后台删除，不会再扣费。销毁后即可从列表移除。",
   "detail.rotate": "更换连接密码",
   "detail.rotateConfirm":
     "更换后旧的端口和密码立刻失效，节点会短暂中断；手机上已导入的配置要重新导入一次，桌面端会自动刷新。",

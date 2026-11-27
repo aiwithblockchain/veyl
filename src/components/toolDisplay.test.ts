@@ -165,6 +165,21 @@ describe("readToolDisplay", () => {
     ]);
   });
 
+  it("server.row 的 gone 写「云服务商已删除」，不是「已开通」", () => {
+    const display = readToolDisplay({
+      facts: [
+        {
+          key: "server.row",
+          params: { name: "悉尼", region: "澳大利亚", state: "gone" },
+        },
+      ],
+    });
+
+    expect(display?.facts).toEqual([
+      { label: "", value: "悉尼 · 澳大利亚 · 云服务商已删除" },
+    ]);
+  });
+
   it("server.row 未知状态仍渲染，真正非法枚举才丢行", () => {
     const unknown = readToolDisplay({
       facts: [

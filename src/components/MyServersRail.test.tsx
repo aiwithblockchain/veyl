@@ -404,6 +404,9 @@ describe("云服务商侧已删除的机器", () => {
     expect(row.textContent).toContain("东京 2 · Vultr");
     expect(row.textContent).not.toContain("$");
     expect(row.textContent).not.toContain("/天");
+    // 状态词点明「云服务商已删除」，状态点按异常画琥珀，不是绿点。
+    expect(row.textContent).toContain("云服务商已删除");
+    expect(row.querySelector(".led")?.className).toContain("is-warn");
   });
 
   it("正常机器照常报日价", () => {

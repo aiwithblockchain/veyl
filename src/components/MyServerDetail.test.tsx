@@ -420,7 +420,14 @@ describe("服务器详情", () => {
 
     // 结算不会再跑，充值救不回来；费用行改写「已删除，不再扣费」。
     expect(screen.queryByRole("button", { name: "去充值" })).toBeNull();
-    expect(document.body.textContent).toContain("已在云服务商侧删除，不再扣费");
+    expect(document.body.textContent).toContain("云服务商已删除，不再扣费");
+    // 标题词与提示都点明「已从云服务商删除」，不是可用。
+    expect(document.querySelector(".myservers__state")?.textContent).toContain(
+      "云服务商已删除",
+    );
+    expect(document.body.textContent).toContain("销毁后即可从列表移除");
+    // 欠费提示与「去充值」都让位给「已删除」：充值救不回来，两个提示会互相否定。
+    expect(document.body.textContent).not.toContain("最近一次扣费没成功");
   });
 
   it("进度条报步骤：1–4 与阶段名，另有 sr-only 第 N 步", () => {

@@ -657,13 +657,21 @@ export function MyServerDetail({
         ) : null}
 
         {server.billing_state === "past_due" || server.billing_state === "expired" ? (
-          <p
-            className={`myservers__billing ${
-              server.billing_state === "expired" ? "is-expired" : ""
-            }`}
-            role="status"
-          >
-            {billingNoticeText(server)}
+          server.provider_gone === true ? null : (
+            <p
+              className={`myservers__billing ${
+                server.billing_state === "expired" ? "is-expired" : ""
+              }`}
+              role="status"
+            >
+              {billingNoticeText(server)}
+            </p>
+          )
+        ) : null}
+
+        {server.provider_gone === true && server.state !== "destroyed" ? (
+          <p className="myservers__billing" role="status">
+            {tr("detail.providerGone")}
           </p>
         ) : null}
 

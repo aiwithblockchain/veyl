@@ -857,7 +857,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.state.error": "Error",
   "myservers.state.destroying": "Destroying",
   "myservers.state.destroyed": "Deleted",
-  "myservers.state.gone": "Gone",
+  "myservers.state.gone": "Deleted at the provider",
   "myservers.state.unknown": "Unknown status",
   "myservers.tombstone.word": "Deleted",
   "myservers.tombstone.text":
@@ -887,7 +887,7 @@ export const en: Record<MessageKey, string> = {
   "myservers.paid.expired": "Current period ended; service is running normally",
   "myservers.billing.daily": "{price} per day",
   "myservers.billing.dailyExpired": "{price} per day · {word}",
-  "myservers.billing.providerGone": "Deleted at the cloud provider — no longer billed",
+  "myservers.billing.providerGone": "Deleted at the provider — no longer billed",
   "myservers.billing.pastDueNoGrace":
     "Balance is short and the last charge failed. Top up within 7 days to keep using it.",
   "myservers.billing.pastDueGrace":
@@ -1131,6 +1131,7 @@ export const en: Record<MessageKey, string> = {
   "detail.confirmDestroy": "Confirm destroy",
   "detail.retryDestroy": "Retry destroy",
   "detail.destroy": "Destroy",
+  "detail.providerGone": "This server was deleted in the cloud provider's console. It is no longer billed. Destroy it to remove it from the list.",
   "detail.rotate": "Change connection password",
   "detail.rotateConfirm":
     "After changing it, the old port and password stop working immediately and the node drops briefly. Re-import the profile on your phone; the desktop app refreshes on its own.",

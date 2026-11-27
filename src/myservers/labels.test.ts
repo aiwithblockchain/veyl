@@ -246,7 +246,7 @@ describe("费用行：云服务商侧已删除的机器", () => {
       },
       NOW,
     );
-    expect(text).toBe("已在云服务商侧删除，不再扣费");
+    expect(text).toBe("云服务商已删除，不再扣费");
     expect(text).not.toContain("$");
   });
 
@@ -262,5 +262,38 @@ describe("费用行：云服务商侧已删除的机器", () => {
     );
     expect(text).toContain("$0.30");
     expect(text).toContain("每天");
+  });
+});
+
+describe("云服务商侧已删除的状态词与状态点", () => {
+  const gone = {
+    state: "active" as const,
+    billing_state: "active" as const,
+    provider_gone: true,
+  };
+
+  it("列表与详情同一个词：云服务商已删除", () => {
+    expect(serverRailState(gone)).toBe("云服务商已删除");
+    expect(serverDetailState(gone)).toBe("云服务商已删除");
+  });
+
+  it("不是绿点：按异常画琥珀", () => {
+    expect(serverTone(gone)).toBe("warn");
+  });
+
+  it("已销毁优先：应用里销毁之后回到墓碑词", () => {
+    const destroyed = { ...gone, state: "destroyed" as const };
+    expect(serverDetailState(destroyed)).not.toBe("云服务商已删除");
+    expect(serverRailState(destroyed)).not.toBe("云服务商已删除");
+  });
+
+  it("没失联的机器仍按原状态走", () => {
+    expect(
+      serverDetailState({
+        state: "active",
+        billing_state: "active",
+        provider_gone: false,
+      }),
+    ).toBe("已开通");
   });
 });

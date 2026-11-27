@@ -1,7 +1,7 @@
 # 机器在 DO 后台被删掉之后：停计费与停额度
 
 > 日期：2026-11-26
-> 状态：控制面已实现（迁移 0017，未部署）。**未做**：自动销毁、通知。**界面文案（2026-11-27 部分落地）**：`state` 仍显示「可用」（用户已确认不算 bug），但费用行与左栏副行不再报日价，改写「已在云服务商侧删除，不再扣费」；账号面板的上限 / 每日增量 /「每天约」也把这类机器排除（`provider_gone` 随 `MyServer` 透出）。
+> 状态：控制面已实现（迁移 0017，已部署）。**未做**：自动销毁、通知。**界面文案（2026-11-27 落地）**：`state` 不动，展示态来自 `provider_gone`——列表与详情状态词「云服务商已删除」、状态点琥珀，费用行与左栏副行不报日价，详情提示「销毁后即可从列表移除」；账号面板的上限 / 每日增量 /「每天约」把这类机器排除。
 > 相关：`traffic-billing.md`（§4.0 / §4.1 周期与额度）、`my-servers.md`（销毁流程）
 > 事实来源：DigitalOcean API `GET /v2/droplets/{id}`（404 = 不存在）；agent 上报周期 `agent/src/traffic.rs:33` `REPORT_IDLE_SECS = 30 * 60`
 
@@ -46,7 +46,7 @@ ALTER TABLE servers ADD COLUMN provider_gone_at INTEGER DEFAULT NULL;  -- 迁移
 - **`failure_code`**：`MyServer.failure` 把未知 code 一律显示成「这台服务器没有创建成功」，`billing_unpaid` / `traffic_overage` 又被 dismiss 与墓碑展示逻辑判读；加第三个码会污染这两处。
 - **`billing_state`**：契约里它是 `active | past_due | expired`，界面按它算 `grace_ends_at`，加值要连带 App 端改。
 
-`state` 保持原样（驱动建机、凭据签发、销毁流程）。代价是界面暂时仍显示「可用」——用户已确认这不算 bug。
+`state` 保持原样（驱动建机、凭据签发、销毁流程）。界面不靠 `state` 表达这件事：状态词与状态点另外读 `provider_gone`（见 `my-servers.md` §7.4），`state` 只继续管那三条流程。
 
 ## 3. 三分语义
 
