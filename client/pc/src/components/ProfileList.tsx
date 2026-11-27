@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { Profile, SyncState } from "../api";
 
@@ -36,19 +36,27 @@ export function ProfileList({
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // Esc 会先改状态、再让输入框失焦；失焦不能把按 Esc 前的内容当成新名字。
+  const skipSave = useRef(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   const startEditing = (profile: Profile) => {
+    skipSave.current = false;
     setDraft(profile.name);
     setEditingId(profile.id);
   };
 
   const cancelEditing = () => {
+    skipSave.current = true;
     setEditingId(null);
     setDraft("");
   };
 
   const saveName = (profile: Profile) => {
+    if (skipSave.current) {
+      skipSave.current = false;
+      return;
+    }
     const name = draft.trim();
     setEditingId(null);
     if (name === "" || name === profile.name) return;

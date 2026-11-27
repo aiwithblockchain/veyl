@@ -93,6 +93,18 @@ describe("配置列表", () => {
     expect(onDelete).toHaveBeenCalledWith("p1");
   });
 
+  it("按 Esc 放弃改名，失焦也不会偷偷保存", () => {
+    const onRename = vi.fn();
+    renderList({ profiles: [profile({})], activeId: "p1", onRename });
+
+    fireEvent.doubleClick(screen.getByText("配置一"));
+    const input = screen.getByLabelText("配置名称");
+    fireEvent.change(input, { target: { value: "改了一半" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    fireEvent.blur(input);
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
   it("取消删除不会触发回调", () => {
     const onDelete = vi.fn();
     renderList({ profiles: [profile({})], activeId: "p1", onDelete });
