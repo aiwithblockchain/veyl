@@ -1706,6 +1706,36 @@ describe("补建扫描不会复活已销毁的行", () => {
     expect(db.rows("audit_log").some((row) => row.action === "provision.created")).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("正在销毁、provider_id 还没有：不补建，等销毁流程收尾", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    // 卡住不到 30 分钟：本轮销毁清扫不碰它，正好落在补建扫描的判定窗口里。
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      destroyed_at: null,
+      updated_at: Date.now() - 5 * 60 * 1000,
+      paid_until: 0,
+      provider_id: null,
+    });
+    seedOrder(db, {
+      id: "ord_seed",
+      state: "paid",
+      server_id: "srv_billing0000000000",
+      created_at: Date.now() - 10 * 60 * 1000,
+    });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const report = await runBilling(env as never);
+
+    expect(report.rebuilt).toBe(0);
+    expect(report.pendingDestroyed).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(db.rows("orders")[0].state).toBe("paid");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("日边界：付费天数与额度份额同一个 00:00", () => {

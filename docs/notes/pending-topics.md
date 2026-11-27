@@ -34,10 +34,12 @@
 - 误判评审（Felix 白盒 + Tess 外部事实 + Soren 裁决）后的两处收尾：审计只在真改到行时写、报告加 `providerGoneActive`（`0262634`）。
 - AI 工具 content 与两份 product 提示词统一「已累计」（与界面同一个词）。
 - `state='destroying' AND billing_state='pending'` 卡死行：改由计费 Cron 的 `recoverStuckDestroying` 在 30 分钟后补完销毁（非 pending 行仍恢复 `active`）；DO 删不掉时留在 `destroying` 保留下轮重试，落 `destroyed` 时同批关单、从不凭空退款。报告加 `pendingDestroyed` 计数。Felix 评审「过」（0 P0/P1/P2）；遗留 P3：`orders.failure_stage` 会写成 `destroying`（客户端不可见）、并发已销毁时计数多 1、失败告警不去重。
+- 本地 105 行压测发现补建扫描缺 `state <> 'destroying'` 守卫：超过批量上限、没被本轮收走的 pending 行会被当成「已付款没机器」重新建机（无 DO 令牌时落 `error`）。已加守卫，超出部分只顺延到下一轮，`rebuilt` 恒为 0。
 
 **未开始**
 
 1. **余额三次提醒**（7/3/1 天）：要 `billing_warnings` 表 + App 弹框；「第三次后仍未充值 → 销毁」踩计费 Cron，最后做。
-2. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
+2. **建机写入与销毁的竞态（Felix P3-1，既有模式）**：`provision.ts:307` 的写回只有 `WHERE id = ?`，补建扫描到写回之间（DO 创建 1–3 秒）用户销毁了同一行，会把 `destroyed` 写回 `booting`，DO 上多一台实例；订单已 `failed` 不扣费，`sweepExpiredEnrollments` 或下一次列表刷新会在 ≤20 分钟内收掉。修法：那条 UPDATE 加 `AND state NOT IN ('destroying','destroyed')`，`changes=0` 走既有 `db_write_failed` 分支删掉刚建的 droplet。
+3. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
 
 **纪律**：以上都只改 main、不建分支；控制面先 dev 后 prod；迁移先于引用它的代码。

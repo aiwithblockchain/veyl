@@ -2067,9 +2067,12 @@ export class FakeD1 {
           if (Number(order.created_at) >= Number(a[0])) return false;
           // `AND s.destroyed_at IS NULL`：唯一那台机器行已销毁时，LEFT JOIN 的行会被过滤掉，
           // 订单不再出现在结果里——否则用户销毁后会被补建复活。
+          // `AND s.state <> 'destroying'`：正在销毁、provider_id 还没落库的行同理，
+          // 不能被当成「已付款没机器」重新建出来。
           const any = this.tables.servers.find((row) => row.order_id === order.id);
           if (!any) return true;
           if (any.destroyed_at != null) return false;
+          if (any.state === "destroying") return false;
           return any.provider_id == null || any.state === "error";
         })
         .slice(0, 5)
