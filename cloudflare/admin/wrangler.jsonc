@@ -15,10 +15,10 @@
     "enabled": true
   },
   "vars": {
-    // 填成 https://<your-team>.cloudflareaccess.com
-    "ACCESS_TEAM_DOMAIN": "",
-    // 填成 Access 应用的 Application Audience (AUD) Tag
-    "ACCESS_AUD": ""
+    "ACCESS_TEAM_DOMAIN": "https://tweetcat.cloudflareaccess.com",
+    // Access 应用「Veyl Admin」的 Application Audience Tag：校验 JWT 的 aud，
+    // 确认令牌确实是签给这个应用的。不是密钥，可以入库。
+    "ACCESS_AUD": "71d03d7d105ddf60911c1374406918b5442cf641ed7760a08e5a18a6497bb47d"
   },
   // 自定义域名要求 dessage.xyz 是本账号下的 zone。它目前托管在 GoDaddy 的 DNS 上，
   // 而 Worker 无法通过外部 CNAME 接入自定义主机名（Cloudflare 按 Host 头在自己的
