@@ -152,16 +152,16 @@ HTTP 409
 
 **`runBilling` 内的次序**：`sweepStaleCreating` 必须排在「已收款但没有机器」的补建扫描**之前**——否则一条超龄 `creating` 行会先被补建扫描重新建一次；关单之后补建条件（`orders.state IN ('paid','provisioning')`）自然不命中，不会复活。5–10 分钟之间的行由补建扫描照常重试一次，不冲突。
 
-不存在「永远停在 installing」：四种创建中状态都有上限与终态。唯一不自动收敛的是 `destroying`（见 §7），它不在本规则的拒绝集合里，用户入口仍然可用。
+不存在「永远停在 installing」：四种创建中状态都有上限与终态。`destroying` 不在本规则的拒绝集合里，用户入口仍然可用；其中建机阶段卡住的行与其它 `destroying` 一样由计费 Cron 在 30 分钟后收尾（见 §7）。
 
 ---
 
-## 7. 与在途待办（`destroying AND billing_state='pending'`）的关系
+## 7. 与在途待办（`destroying AND billing_state='pending'`）的关系（已实现）
 
 - **用户路径不再产生**：创建中被拒，用户无法在 `pending` 阶段发起销毁。
-- **系统路径仍可能产生**：`sweepExpiredEnrollments` / `failSettlement` / `activation_lost` 在 `destroyInstance` 中途 Worker 死亡，会留下 `destroying`；其中 `billing_state='pending'` 的行按 `my-servers.md` §19.6.4 **不恢复**。
-- 该状态（`state='destroying'`）**不在拒绝集合内**：详情页 60 秒后仍显示「重试销毁」，用户能收尾，不会变成无人能动的行。
-- 因此该待办**优先级不变**；如果以后要彻底自动收尾，可让 enroll 收割器对超龄的 `destroying AND billing_state='pending'` 补终态（`destroyInstance` 幂等），但涉及退款口径，另开设计。
+- **系统路径仍可能产生**：`sweepExpiredEnrollments` / `failSettlement` / `activation_lost` 在 `destroyInstance` 中途 Worker 死亡，会留下 `destroying`。
+- **已由计费 Cron 自动收尾**（`billing.ts` 的 `recoverStuckDestroying`，卡住 30 分钟后）：`billing_state <> 'pending'` 的恢复成 `active`（口径不变）；`billing_state='pending'` 的**补完销毁**（`destroyInstance(..., "destroy_stuck", { restoreOnFailure: "destroying" })`）——落 `destroyed` 并关单，DO 删不掉时留在 `destroying` 等下一轮。这类行从未扣过费，`refundPlan` 撞不到 charge 流水，只写 `refund_skipped_no_charge` 审计，不会凭空退款。报告里的 `pendingDestroyed` 计数每小时可见。
+- 用户不再需要手动「重试销毁」才能收尾；入口保留只是兜底（`destroying` 不在拒绝集合内）。
 
 ---
 

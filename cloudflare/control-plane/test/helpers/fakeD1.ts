@@ -2095,15 +2095,14 @@ export class FakeD1 {
           node_port: row.node_port,
         }));
     }
-    if (sql.startsWith("select id, account_id, updated_at from servers where state = 'destroying'")) {
+    if (sql.startsWith("select id, account_id, updated_at, billing_state from servers where state = 'destroying'")) {
       // 卡住的 destroying 清扫：只看状态与超时，参数是 [cutoff, limit]。
-      // pending 是建机阶段，恢复成 active 会变成永久幻影，SQL 侧已排除。
+      // 两类行都要返回：pending 的补完销毁，其余恢复成 active。
       return this.tables.servers
         .filter(
           (row) =>
             row.state === "destroying" &&
             row.destroyed_at == null &&
-            row.billing_state !== "pending" &&
             Number(row.updated_at ?? 0) < Number(a[0]),
         )
         .slice(0, Number(a[1]))
@@ -2111,6 +2110,7 @@ export class FakeD1 {
           id: row.id,
           account_id: row.account_id,
           updated_at: row.updated_at ?? 0,
+          billing_state: row.billing_state,
         }));
     }
     if (sql.startsWith("select id from servers where provider_gone_at is not null")) {

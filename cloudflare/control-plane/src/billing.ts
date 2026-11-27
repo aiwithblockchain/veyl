@@ -5,7 +5,7 @@ import { randomId } from "./lib/crypto";
 import { provisionPaidOrder, type OrdersEnv } from "./orders";
 import { failPermanently, refundProvision, type ServerToProvision } from "./provision";
 import { deleteDroplet, getDroplet, listDropletsByTag } from "./providers/digitalocean";
-import { destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
+import { destroyStuckServer, destroyUnpaidServer, sweepExpiredEnrollments, sweepUnsettledSettlements } from "./servers";
 import { reconciliationDrift, recordLedgerEntry, type WalletEnv } from "./wallet";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -77,6 +77,11 @@ export interface BillingReport {
   creatingReaped: number;
   /** 卡在 `destroying`（Worker 在删远端与落库之间死掉）被恢复成 active 的台数。 */
   destroyingRecovered: number;
+  /**
+   * 建机阶段（`billing_state='pending'`）卡在 `destroying`、本轮被补完销毁的台数。
+   * 这类行不能恢复成 active（没人会再扣费也不会再收敛），只能直接删干净。
+   */
+  pendingDestroyed: number;
   archived: number;
   /** 超龄的历史 `server_traffic` 行（保留每台机器的最大 last_seq 行）。 */
   trafficPruned: number;
@@ -110,7 +115,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, pendingDestroyed: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -124,9 +129,11 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   // 再收掉「建机请求没回来」的 creating 行：必须排在补建扫描之前，否则超龄 creating
   // 会先被补建再建一次；关单之后补建条件（paid / provisioning）自然不命中。
   report.creatingReaped = await sweepStaleCreating(env, now);
-  // 先把卡住的 destroying 恢复成 active：这类行既不被 collectDue 取到、也不会自己
-  // 恢复，不清理就会「机器还在跑、却永远不再扣费」。要在收集到期之前做。
-  report.destroyingRecovered = await recoverStuckDestroying(env, now);
+  // 卡住的 destroying：建机阶段的补完销毁，其余恢复成 active。两类行都既不被 collectDue
+  // 取到、也不会自己收敛；要在收集到期之前做。
+  const stuck = await recoverStuckDestroying(env, now);
+  report.destroyingRecovered = stuck.recovered;
+  report.pendingDestroyed = stuck.pendingDestroyed;
   const due = await collectDue(env, now);
 
   for (const server of due) {
@@ -337,31 +344,54 @@ async function retryStuckRefunds(env: BillingEnv, now: number): Promise<number> 
  * Worker 恰好在两步之间被踢时，行会永久停在 `destroying`——`collectDue` 不取它，
  * 于是 droplet 还在跑却再也不会扣费。
  *
- * 这里只恢复成 `active`，**不补完销毁**：我们不知道当初为什么销毁、该按哪种退款
- * 口径，猜错就是钱的事。恢复后正常的几条线会接管——到期扫描照常计费，DO 侧真没了的
- * 机器会被 `markProviderGone` 发现，用户也可以自己再点销毁。
- *
- * `billing_state = 'pending'` 的行不能恢复：那是建机阶段，扣费扫描永远不取它，
- * 而两个收割器只认 booting / installing / verifying、孤儿补建要求 provider_id 为空或
- * state='error'——恢复成 active 就会变成一台「运行中却连不上」的永久幻影。
- * 它们维持原状，界面仍有「重试销毁」；让 enroll 收割器补完销毁是更彻底的解法，待办。
+ * 按 `billing_state` 分两类：
+ * - 正常计费过的行：只恢复成 `active`，**不补完销毁**——不知道当初为什么销毁、该按哪种
+ *   退款口径，猜错就是钱的事。恢复后正常几条线接管：到期扫描照常计费，DO 侧真没了的
+ *   机器由 `markProviderGone` 发现，用户也可以自己再点销毁。
+ * - `billing_state = 'pending'`（建机阶段）：**补完销毁**。这类行一分钱没扣过，没有退款
+ *   口径的选择题；恢复成 active 反而会变成一台永远不扣费、也连不上的永久幻影
+ *   （扣费扫描不取 pending，两个收割器只认 booting / installing / verifying）。
+ *   删远端失败时行留在 `destroying`，下一轮再试。
  */
 const DESTROYING_STUCK_MS = 30 * 60 * 1000;
 const DESTROYING_RECOVER_BATCH = 100;
 
-async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<number> {
+interface StuckDestroyingRow {
+  id: string;
+  account_id: string;
+  updated_at: number;
+  billing_state: string;
+}
+
+async function recoverStuckDestroying(
+  env: BillingEnv,
+  now: number,
+): Promise<{ recovered: number; pendingDestroyed: number }> {
   const db = env.DB!;
   let recovered = 0;
+  let pendingDestroyed = 0;
   try {
     const rows = await db
       .prepare(
-        "SELECT id, account_id, updated_at FROM servers " +
-          "WHERE state = 'destroying' AND destroyed_at IS NULL AND updated_at < ? " +
-          "AND billing_state <> 'pending' LIMIT ?",
+        "SELECT id, account_id, updated_at, billing_state FROM servers " +
+          "WHERE state = 'destroying' AND destroyed_at IS NULL AND updated_at < ? LIMIT ?",
       )
       .bind(now - DESTROYING_STUCK_MS, DESTROYING_RECOVER_BATCH)
-      .all<{ id: string; account_id: string; updated_at: number }>();
+      .all<StuckDestroyingRow>();
     for (const row of rows.results ?? []) {
+      if (row.billing_state === "pending") {
+        try {
+          if (await destroyStuckServer(env, row.id, row.account_id)) {
+            pendingDestroyed += 1;
+          } else {
+            console.warn(`[billing] pending_destroy_failed server=${row.id}`);
+          }
+        } catch (error) {
+          // 单台失败不影响其它行；行留在 destroying，下一轮再试。
+          console.error(`[billing] pending_destroy_failed server=${row.id} error=${String(error)}`);
+        }
+        continue;
+      }
       // `updated_at` 一起比对：并发的销毁刚好刷新过这行时不能把它改回 active。
       const updated = await db
         .prepare(
@@ -393,7 +423,7 @@ async function recoverStuckDestroying(env: BillingEnv, now: number): Promise<num
     // 清扫失败不能拖垮整轮计费：下一轮再来。
     console.error(`[billing] destroying_sweep_failed error=${String(error)}`);
   }
-  return recovered;
+  return { recovered, pendingDestroyed };
 }
 
 /**

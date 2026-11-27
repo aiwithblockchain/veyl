@@ -347,6 +347,12 @@ async function destroyInstance(
     failureStage?: string | null;
     /** 用户销毁失败态（error）机器时同批关单：补建扫描只认 paid/provisioning，关了才不会复活。 */
     closeOrderOnUser?: boolean;
+    /**
+     * 失败还原时的落点，默认沿用 `destroying → active`。计费 Cron 补完「建机阶段卡在
+     * destroying」的行时传 `"destroying"`：DO 删不掉就留在原状态等下一轮，而不是变成
+     * 一台永远不扣费、也连不上的 active 幻影。
+     */
+    restoreOnFailure?: string;
   } = {},
 ): Promise<DestroyOutcome> {
   if (!env.DB) return { ok: false, status: 503, reason: "db_unavailable", retryable: true };
@@ -354,7 +360,9 @@ async function destroyInstance(
 
   // 从这一刻起计费的记账守卫拒绝再扣：DO 删除可能几秒，不能让它边删边扣。
   // 所有失败分支都恢复原状态；成功后由下面的 batch 落 destroyed。
-  const previousState = row.state === "destroying" ? "active" : row.state;
+  const previousState = options.restoreOnFailure ?? (row.state === "destroying" ? "active" : row.state);
+  // 落回 destroying 的重试要保持原 `updated_at`：否则每失败一次就再等 30 分钟才轮到下一轮清扫。
+  const previousUpdatedAt = options.restoreOnFailure ? row.updated_at : Date.now();
   await db
     .prepare(
       "UPDATE servers SET state = 'destroying', updated_at = ? WHERE id = ? AND state != 'destroyed'",
@@ -367,7 +375,7 @@ async function destroyInstance(
       .prepare(
         "UPDATE servers SET state = ?, updated_at = ? WHERE id = ? AND state = 'destroying' AND destroyed_at IS NULL",
       )
-      .bind(previousState, Date.now(), row.id)
+      .bind(previousState, previousUpdatedAt, row.id)
       .run()
       .catch(() => {});
   };
@@ -2303,6 +2311,30 @@ export async function destroyUnpaidServer(
   if (!row) return true;
   if (row.state === "destroyed") return true;
   const outcome = await destroyInstance(env, row, reason);
+  return outcome.ok;
+}
+
+/**
+ * 计费 Cron 补完「建机阶段卡在 destroying」的行（`billing_state='pending'`）。
+ *
+ * 这类行从没扣过费，不存在退款口径的选择题，所以可以直接补完销毁；`destroyInstance`
+ * 本身幂等（DO 404 按成功处理、退款键唯一）。删远端失败时行留在 `destroying`
+ * 而不是还原成 active，下一轮 Cron 继续重试。
+ */
+export async function destroyStuckServer(
+  env: ServersEnv,
+  serverId: string,
+  accountId: string,
+): Promise<boolean> {
+  if (!env.DB) return false;
+  const row = await loadServer(env.DB, accountId, serverId);
+  // 行已经没了或已被别的路径收尾：没有可做的事，但也不算失败。
+  if (!row || row.state === "destroyed") return true;
+  // 只处理仍是 destroying 的行：夹在中间被谁改成别的状态时不动它。
+  if (row.state !== "destroying") return false;
+  const outcome = await destroyInstance(env, row, "destroy_stuck", {
+    restoreOnFailure: "destroying",
+  });
   return outcome.ok;
 }
 

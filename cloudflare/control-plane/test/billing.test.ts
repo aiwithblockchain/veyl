@@ -1464,26 +1464,117 @@ describe("卡住的 destroying 清扫", () => {
       db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
     ).toHaveLength(0);
   });
-  it("建机阶段（pending）卡住的 destroying 不动：恢复成 active 会变成永久幻影", async () => {
+  it("建机阶段（pending）卡住的 destroying：补完销毁，订单关闭、不凭空退款", async () => {
     const db = new FakeD1();
     const env = envWith(db);
+    const stuckAt = Date.now() - 40 * 60 * 1000;
     // 扣费扫描不收 pending，收割器只认 booting/installing/verifying，孤儿补建也不接——
-    // 恢复成 active 就是一台「运行中却连不上」的机器。维持原状，界面还能重试销毁。
+    // 恢复成 active 就是一台「运行中却连不上」的机器。这类行一分钱没扣过，直接删干净。
     seedServer(db, {
       state: "destroying",
       billing_state: "pending",
-      updated_at: Date.now() - 40 * 60 * 1000,
+      updated_at: stuckAt,
       paid_until: 0,
+      provider_id: "4242",
+      firewall_id: null,
     });
+    // 订单已付（钱包）但结算前从没扣过钱：不该凭空退一笔。
+    seedOrder(db, {
+      id: "ord_seed",
+      state: "paid",
+      server_id: "srv_billing0000000000",
+      paid_via: "wallet",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        return new Response(null, { status: 204 });
+      }),
+    );
 
     const report = await runBilling(env as never);
 
+    expect(report.pendingDestroyed).toBe(1);
     expect(report.destroyingRecovered).toBe(0);
-    expect(db.rows("servers")[0].state).toBe("destroying");
-    expect(db.rows("servers")[0].billing_state).toBe("pending");
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroyed");
+    expect(server.destroyed_at).toBeTruthy();
+    expect(db.rows("orders")[0].state).toBe("failed");
+    expect(db.rows("orders")[0].failure_code).toBe("destroy_stuck");
+    expect(calls).toContain("DELETE https://api.digitalocean.com/v2/droplets/4242");
+    // 从没扣过钱：只能留「无扣款流水」审计，绝不能凭空写退款。
+    expect(db.rows("wallet_ledger").filter((row) => row.ref_type === "server_refund")).toHaveLength(0);
     expect(
-      db.rows("audit_log").filter((row) => row.action === "server.destroying_recovered"),
-    ).toHaveLength(0);
+      db
+        .rows("audit_log")
+        .some(
+          (row) =>
+            row.action === "server.destroy" &&
+            JSON.parse(String(row.detail)).reason === "destroy_stuck",
+        ),
+    ).toBe(true);
+    expect(db.rows("audit_log").some((row) => row.action === "refund_skipped_no_charge")).toBe(true);
+  });
+
+  it("补完销毁时 DO 删不掉：行留在 destroying（不是 active），下一轮还能重试", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    const stuckAt = Date.now() - 40 * 60 * 1000;
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: stuckAt,
+      paid_until: 0,
+      provider_id: "4242",
+      firewall_id: null,
+    });
+    seedOrder(db, { id: "ord_seed", state: "paid", server_id: "srv_billing0000000000" });
+    const deletes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "DELETE") deletes.push(String(input));
+        return new Response(null, { status: 500 });
+      }),
+    );
+
+    const report = await runBilling(env as never);
+
+    expect(report.pendingDestroyed).toBe(0);
+    expect(report.destroyingRecovered).toBe(0);
+    const server = db.rows("servers")[0];
+    expect(server.state).toBe("destroying");
+    // 失败要还原原 `updated_at`：否则每失败一次就再等 30 分钟才轮到下一轮。
+    expect(server.updated_at).toBe(stuckAt);
+    expect(server.destroyed_at).toBeNull();
+    expect(db.rows("orders")[0].state).toBe("paid");
+
+    const second = await runBilling(env as never);
+
+    expect(second.pendingDestroyed).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(deletes).toHaveLength(2);
+  });
+
+  it("建机阶段（pending）不到 30 分钟的不动：可能还有一次销毁正在进行", async () => {
+    const db = new FakeD1();
+    const env = envWith(db);
+    seedServer(db, {
+      state: "destroying",
+      billing_state: "pending",
+      updated_at: Date.now() - 5 * 60 * 1000,
+      paid_until: 0,
+    });
+    const fetchSpy = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const report = await runBilling(env as never);
+
+    expect(report.pendingDestroyed).toBe(0);
+    expect(db.rows("servers")[0].state).toBe("destroying");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

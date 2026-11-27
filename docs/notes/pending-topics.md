@@ -33,11 +33,11 @@
 - `provider_gone` 的三处错数（上限 1946→982、日增、每天约）与服务器展示态（`e5a8ffa` / `c7c6f21` / `8e44516`）。
 - 误判评审（Felix 白盒 + Tess 外部事实 + Soren 裁决）后的两处收尾：审计只在真改到行时写、报告加 `providerGoneActive`（`0262634`）。
 - AI 工具 content 与两份 product 提示词统一「已累计」（与界面同一个词）。
+- `state='destroying' AND billing_state='pending'` 卡死行：改由计费 Cron 的 `recoverStuckDestroying` 在 30 分钟后补完销毁（非 pending 行仍恢复 `active`）；DO 删不掉时留在 `destroying` 保留下轮重试，落 `destroyed` 时同批关单、从不凭空退款。报告加 `pendingDestroyed` 计数。Felix 评审「过」（0 P0/P1/P2）；遗留 P3：`orders.failure_stage` 会写成 `destroying`（客户端不可见）、并发已销毁时计数多 1、失败告警不去重。
 
 **未开始**
 
 1. **余额三次提醒**（7/3/1 天）：要 `billing_warnings` 表 + App 弹框；「第三次后仍未充值 → 销毁」踩计费 Cron，最后做。
-2. **`state='destroying' AND billing_state='pending'` 行的彻底修法**：让 enroll 收割器接住并补完销毁——这类行一分钱没扣过，不存在退款口径的选择题，补完安全。现在只靠界面上的「重试销毁」自愈。
-3. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
+2. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
 
 **纪律**：以上都只改 main、不建分支；控制面先 dev 后 prod；迁移先于引用它的代码。
