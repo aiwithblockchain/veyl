@@ -36,10 +36,10 @@
 - `state='destroying' AND billing_state='pending'` 卡死行：改由计费 Cron 的 `recoverStuckDestroying` 在 30 分钟后补完销毁（非 pending 行仍恢复 `active`）；DO 删不掉时留在 `destroying` 保留下轮重试，落 `destroyed` 时同批关单、从不凭空退款。报告加 `pendingDestroyed` 计数。Felix 评审「过」（0 P0/P1/P2）；遗留 P3：`orders.failure_stage` 会写成 `destroying`（客户端不可见）、并发已销毁时计数多 1、失败告警不去重。
 - 本地 105 行压测发现补建扫描缺 `state <> 'destroying'` 守卫：超过批量上限、没被本轮收走的 pending 行会被当成「已付款没机器」重新建机（无 DO 令牌时落 `error`）。已加守卫，超出部分只顺延到下一轮，`rebuilt` 恒为 0。
 - 建机写回与销毁的竞态（Felix P3-1）：`provision.ts` 写回 `provider_id` / `booting` 的 UPDATE 加 `state NOT IN ('destroying','destroyed')`；`changes = 0` 时删掉刚建的 droplet、不碰行与订单。真实 D1 已验证：destroying 行 no-op、creating 行照常写回；单测含变异红证。
+- 余额预估（2026-11-27，按用户口径改为纯前端）：连接舞台 hero 底部一行「账户每天约 $X · 约 N 天后余额用尽」，余额为 0 时「余额不足，服务即将停止」，点击打开账号弹层；直接用 `/v1/wallet` 的 `daily_cents` / `remaining_days`，后台不落提醒状态、不加表，到期照旧直接销毁（`24e40f1`，Felix 评审 0 P0/P1/P2）。真实账号下尚未人工验收：mock 钱包没有这两个字段，这一行只在真实登录时出现。
 
 **未开始**
 
-1. **余额三次提醒**（7/3/1 天）：要 `billing_warnings` 表 + App 弹框；「第三次后仍未充值 → 销毁」踩计费 Cron，最后做。
-2. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
+1. **DO 发票对账**：已写进 `admin-console.md` §8，归运维平台，与 agent 管控同期开发。
 
 **纪律**：以上都只改 main、不建分支；控制面先 dev 后 prod；迁移先于引用它的代码。
