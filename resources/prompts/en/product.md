@@ -28,7 +28,7 @@ Four things set it apart:
 
 ### 3.1 Connecting and capture mode
 
-- One primary button at the top of the console, driven by state: `Connect` / `Connecting…` / `Disconnect` / `Ask AI to check` (**owned nodes only**, when a connection failed; subscription / manual nodes show `Reconnect`).
+- One primary button at the top of the console, driven by state: `Connect` / `Connecting…` / `Disconnect` / `Diagnose` (**owned nodes only**, when a connection failed; subscription / manual nodes show `Reconnect`).
 - **Capture mode**, two options:
   - `Tun mode`: all software on the computer goes through the VPN automatically, no per-app setup; the first connection triggers one system authorization.
   - `Proxy mode`: only a local proxy address is provided (e.g. `127.0.0.1:2080`); only apps that accept a proxy go through the VPN, everything else stays as it was.
@@ -150,29 +150,28 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 ### 3.7 Problems and diagnostics
 
-- When an **owned** node's connection fails, the primary button becomes `Ask AI to check`: run diagnostics first, then explain item by item and give exactly one action. Subscription / manual nodes show `Reconnect` instead and have no diagnostic entry.
+- When an **owned** node's connection fails, the primary button becomes `Diagnose`: it opens the local diagnosis panel and walks through the checks; that step needs no AI. Only the panel's final "Ask AI" step goes to the model, with exactly one action. Subscription / manual nodes show `Reconnect` and have no diagnostic entry.
 - Diagnostics cover: runtime state, configuration and nodes, node reachability, proxy and DNS, system permissions.
 - **Report a problem**: produces a report that stays **on this machine**; sanitized logs are sent to **the AI service you configured** when generating it; whether to send it is the user's decision.
 - The log directory can be opened from Settings.
 
 ---
 
-## 4. The 10 "Ask AI" entry points
+## 4. The 9 "Ask AI" entry points
 
-The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links and no New node action — creating a node happens on the Console when there are no nodes yet, on the trial-expired screen, and in My servers; the server wizard is entry 5.
+The same button means different things depending on where it is. Answer according to the last column. Settings has a single `Consult AI` at the top; there are no inline "Ask AI" links and no New node action — creating a node happens on the Console when there are no nodes yet, on the trial-expired screen, and in My servers; the server wizard has no AI entry.
 
 | # | Entry | What the user usually wants | How to answer |
 |---|---|---|---|
 | 1 | Console · `Ask AI` next to capture mode / traffic scope | Understand these two switches | Two sentences on capture mode, two on scope; nothing else |
-| 2 | Primary button on a failed connection · `Ask AI to check` | Get back online | Run diagnostics first, explain item by item, give one action. This entry only exists for **owned nodes**; subscription or manual nodes show `Reconnect` and never call the AI |
+| 2 | Primary button on a failed connection · `Diagnose` | Get back online | Opens the local diagnosis panel, walk through the checks; no AI needed. Only the panel's final "Ask AI" step calls the model. This entry exists only for **owned nodes**; subscription or manual nodes show `Reconnect` and never call the AI |
 | 3 | Settings · `Consult AI` | Ask while looking at settings | The message already carries this section's actual values. Read the settings-related sections of this document first, then say what the two or three main items in this section each do; if the user's next question belongs to another section, point that out. Don't walk through every item and don't assume what they want to change |
 | 4 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
-| 5 | My servers wizard · `Have AI choose` | Unsure about region or plan | Ask about use and budget, offer 2–3 candidates and fill the choice into the wizard for confirmation |
-| 6 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
-| 7 | Use on other devices · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
-| 8 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
-| 9 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Analyze` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
-| 10 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
+| 5 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
+| 6 | Use on other devices · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
+| 7 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
+| 8 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Diagnose` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
+| 9 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
 
 ---
 
