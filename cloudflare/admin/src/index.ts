@@ -176,14 +176,15 @@ function baseHeaders(): Record<string, string> {
   };
 }
 
-/** 页面脚本只有一小段内联，用 nonce 放行；fetch 只允许同源。 */
+/** 页面脚本只有一段内联，用 nonce 放行；fetch 还要能打到节点（https://<IP>:32100/mcp），
+ *  节点 IP 是动态的，所以 connect-src 放开到整个 https:。 */
 function htmlHeaders(nonce: string): Record<string, string> {
   return {
     ...baseHeaders(),
     "content-type": "text/html; charset=utf-8",
     "content-security-policy":
       "default-src 'none'; style-src 'unsafe-inline'; " +
-      `script-src 'nonce-${nonce}'; connect-src 'self'; ` +
+      `script-src 'nonce-${nonce}'; connect-src 'self' https:; ` +
       "frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
   };
 }

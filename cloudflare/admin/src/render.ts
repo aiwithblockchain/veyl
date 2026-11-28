@@ -3,6 +3,8 @@
 //
 // 视觉规范见 cloudflare/admin/ui-tokens.md，色值一律取自那里的 token，不新增颜色。
 
+import { consoleClient } from "./client";
+
 /** 控制面 servers 表的字段。单位以 cloudflare/control-plane/src/servers.ts 为准：
  *  cert_not_after 是 unix 秒（certs.ts:224），last_seen_at 是毫秒（servers.ts:1713 Date.now()）。 */
 export interface ServerRow {
@@ -250,6 +252,15 @@ tbody tr.is-failed td{background:var(--surface-danger)}
 .btn:hover:not(:disabled){background:var(--surface-sunken)}
 .btn:disabled{background:rgba(20,22,28,.06);color:var(--text-3);cursor:default}
 .btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.btn-primary{background:var(--action-bg);border-color:var(--action-bg);color:#fff}
+.btn-primary:hover:not(:disabled){background:var(--action-bg-hover);border-color:var(--action-bg-hover)}
+.btn-primary:disabled{background:rgba(20,22,28,.06);border-color:rgba(20,22,28,.06);color:var(--text-3)}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 16px;font-size:12px;line-height:20px}
+.kv .k{color:var(--text-2)}
+.kv .v{color:var(--text-1);font-family:var(--font-mono);word-break:break-all}
+.kv .v.missing{color:var(--text-missing)}
+.causes{margin:6px 0 0;padding-left:18px;color:var(--text-2);font-size:12px;line-height:20px}
 .note{margin:0;color:var(--text-2);font-size:13px;line-height:20px}
 .ticket{background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:12px 14px}
 .ticket h2{margin:0;font-size:12px;line-height:16px;font-weight:500;color:var(--text-2)}
@@ -303,9 +314,8 @@ function rowHtml(server: LabelledServer, now: number): string {
       : "";
 
   const canTicket = Boolean(server.ip) && server.control_port !== null;
-  const buttonDisabled = canTicket
-    ? ""
-    : ' disabled title="没有 IP 或控制端口，签出来的票也用不上"';
+  const target = canTicket ? `https://${server.ip}:${server.control_port}/mcp` : "";
+  const buttonDisabled = canTicket ? "" : ' disabled title="没有 IP 或控制端口，连不上节点"';
   const certCellClass = cert.missing ? "missing" : `text3${certClass}`;
   const seenCellClass = seen.missing ? "missing" : `dim${seenClass}`;
 
@@ -318,9 +328,9 @@ function rowHtml(server: LabelledServer, now: number): string {
   <td class="mono ${address.missing ? "missing" : "dim"}">${escapeHtml(address.text)}</td>
   <td class="num ${certCellClass}">${escapeHtml(cert.text)}</td>
   <td class="num ${seenCellClass}">${escapeHtml(seen.text)}</td>
-  <td><button type="button" class="btn" data-ticket data-env="${server.env}" data-server="${escapeHtml(
+  <td><button type="button" class="btn btn-primary" data-health data-env="${server.env}" data-server="${escapeHtml(
     server.id,
-  )}"${buttonDisabled}>签只读票</button></td>
+  )}" data-url="${escapeHtml(target)}"${buttonDisabled}>查看健康</button></td>
 </tr>`;
 }
 
@@ -372,133 +382,7 @@ ${body}
   ${notes}
 </main>
 <script nonce="${options.nonce}">
-(function () {
-  "use strict";
-  var table = document.getElementById("servers");
-  if (!table) return;
-
-  function copyButton() {
-    var button = document.createElement("button");
-    button.type = "button";
-    button.className = "btn";
-    button.setAttribute("data-copy", "");
-    button.textContent = "复制";
-    return button;
-  }
-
-  function textArea(value) {
-    var area = document.createElement("textarea");
-    area.readOnly = true;
-    area.spellcheck = false;
-    area.value = value;
-    return area;
-  }
-
-  function field(label, value) {
-    var wrap = document.createElement("div");
-    var caption = document.createElement("div");
-    caption.className = "label";
-    caption.textContent = label;
-    var row = document.createElement("div");
-    row.className = "row";
-    row.appendChild(textArea(value));
-    row.appendChild(copyButton());
-    wrap.appendChild(caption);
-    wrap.appendChild(row);
-    return wrap;
-  }
-
-  function block(payload) {
-    var box = document.createElement("div");
-    box.className = "ticket";
-    var title = document.createElement("h2");
-    title.textContent = "只读票 · 有效期 1 小时";
-    box.appendChild(title);
-    box.appendChild(field("JWT", payload.jwt));
-    if (payload.curl) {
-      box.appendChild(field("命令行", payload.curl));
-    } else {
-      var note = document.createElement("p");
-      note.className = "note";
-      note.textContent = "该节点没有 IP 或控制端口，无法构造命令行。";
-      box.appendChild(note);
-    }
-    return box;
-  }
-
-  function resultRow(env, id) {
-    var row = document.createElement("tr");
-    row.setAttribute("data-result", env + ":" + id);
-    var cell = document.createElement("td");
-    cell.colSpan = 9;
-    row.appendChild(cell);
-    return { row: row, cell: cell };
-  }
-
-  function errorLine(message) {
-    var line = document.createElement("p");
-    line.className = "err";
-    line.textContent = message;
-    return line;
-  }
-
-  table.addEventListener("click", function (event) {
-    var copy = event.target.closest("button[data-copy]");
-    if (copy) {
-      var area = copy.parentNode.querySelector("textarea");
-      if (!area) return;
-      var done = function () {
-        copy.textContent = "已复制";
-        setTimeout(function () { copy.textContent = "复制"; }, 1500);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(area.value).then(done, function () { area.select(); });
-      } else {
-        area.select();
-      }
-      return;
-    }
-
-    var button = event.target.closest("button[data-ticket]");
-    if (!button || button.disabled) return;
-    var env = button.getAttribute("data-env");
-    var id = button.getAttribute("data-server");
-    var owner = button.closest("tr");
-    if (!owner) return;
-
-    var previous = table.querySelector('tr[data-result="' + env + ":" + id + '"]');
-    if (previous) previous.remove();
-
-    var target = resultRow(env, id);
-    owner.after(target.row);
-    target.cell.textContent = "签票中…";
-    button.disabled = true;
-
-    fetch("/ticket", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ env: env, server_id: id })
-    })
-      .then(function (response) {
-        return response.json().then(function (body) { return { ok: response.ok, body: body }; });
-      })
-      .then(function (result) {
-        target.cell.textContent = "";
-        if (!result.ok) {
-          target.cell.appendChild(errorLine(result.body && result.body.error ? result.body.error : "签票失败"));
-          return;
-        }
-        target.cell.appendChild(block(result.body));
-      })
-      .catch(function () {
-        target.cell.textContent = "";
-        target.cell.appendChild(errorLine("网络错误，稍后重试"));
-      })
-      .then(function () {
-        button.disabled = false;
-      });
-  });
-})();
+(${consoleClient.toString()})(document, function (url, init) { return fetch(url, init); });
 </script>
 </body>
 </html>`;

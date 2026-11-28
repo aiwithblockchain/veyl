@@ -225,6 +225,9 @@ describe("第一屏", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
 
+    // 面板要直连 https://<IP>:32100/mcp，CSP 必须放行跨源 https，否则 fetch 在 CORS 之前就被拦掉。
+    expect(res.headers.get("content-security-policy")).toContain("connect-src 'self' https:");
+
     expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(body).not.toContain("<script>alert(1)</script>");
     expect(body).toContain("srv_&lt;b&gt;");
@@ -256,8 +259,9 @@ describe("第一屏", () => {
     expect(body).toMatch(/class="num text3">\d{4}-\d{2}-\d{2} · 剩余 729 天</);
     // 7 天内：天数与日期一起用 warn。
     expect(body).toMatch(/class="num text3 warntext">\d{4}-\d{2}-\d{2} · 剩余 3 天</);
-    // 0 天与负数都显示「已到期」，用 danger。
-    expect(body.match(/已到期/g)).toHaveLength(2);
+    // 0 天与负数都显示「已到期」，用 danger。带 < 才是渲染出来的单元格——
+    // 页面里还嵌着客户端脚本，「已到期」三个字在源码里也有一份。
+    expect(body.match(/已到期</g)).toHaveLength(2);
     expect(body).toMatch(/class="num text3 dangertext">\d{4}-\d{2}-\d{2} · 已到期</);
   });
 

@@ -11,6 +11,12 @@
   // wrangler 开关，官方建议把 Access 应用的范围设成同时覆盖 production 与
   // preview/deployment，别只保护 production。
   "preview_urls": false,
+  // 必须关掉 keep_names：页面里的「查看健康」脚本是把 src/client.ts 的函数用
+  // toString() 原样嵌进 HTML 的。开着 keep_names 时 esbuild 会在函数体里注入
+  // __name(...) 调用，而那个 helper 定义在模块作用域，浏览器里并不存在——
+  // 脚本会直接 ReferenceError。关掉之后函数体不含任何外部引用。
+  // 改这一行之前先跑一次 `wrangler deploy --dry-run` 并检查产出里没有 __name。
+  "keep_names": false,
   "observability": {
     "enabled": true
   },
