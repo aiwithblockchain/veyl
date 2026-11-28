@@ -78,7 +78,7 @@ impl LeafRequest {
 
 /// Write via `*.tmp` + fsync + rename: a crash never leaves a truncated file
 /// where the previous readable one used to be.
-fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<()> {
+fn write_bytes_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
     {
@@ -92,7 +92,7 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<()> {
         let mut file = options
             .open(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;
-        file.write_all(contents.as_bytes())
+        file.write_all(contents)
             .with_context(|| format!("write {}", tmp.display()))?;
         file.sync_all()
             .with_context(|| format!("fsync {}", tmp.display()))?;
@@ -108,12 +108,134 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<()> {
     Ok(())
 }
 
+fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<()> {
+    write_bytes_atomic(path, contents.as_bytes(), mode)
+}
+
 fn write_secret(path: &Path, contents: &str) -> Result<()> {
     write_atomic(path, contents, 0o600)
 }
 
 fn write_public(path: &Path, contents: &str) -> Result<()> {
     write_atomic(path, contents, 0o644)
+}
+
+/// Every file one install touches, in the order it is written. The backup and
+/// its manifest use the same list, so a restore also deletes files the failed
+/// install created (a legacy pair has no `leaf-meta.json`, for instance).
+const CERT_FILES: [&str; 5] = [
+    "leaf-key.pem",
+    "leaf-cert.pem",
+    "ca-cert.pem",
+    "leaf-sans.json",
+    "leaf-meta.json",
+];
+
+fn file_mode(name: &str) -> u32 {
+    match name {
+        "leaf-sans.json" | "leaf-meta.json" => 0o644,
+        _ => 0o600,
+    }
+}
+
+fn backup_dir(dir: &Path) -> PathBuf {
+    dir.join("install-backup")
+}
+
+/// The state on disk is internally consistent: an install either finished or
+/// never started. The test is the signature, not the marker: a leaf the local
+/// root signed is worth keeping even when `leaf-meta.json` was lost, while a
+/// half-renamed pair (new leaf, old CA) is not.
+fn is_committed(state: &LeafState) -> bool {
+    state.files_ok && state.signed_by_local_root
+}
+
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
+}
+
+/// Copy the certificate pair currently in use aside, before an install touches
+/// anything. Only called when that pair is known to be usable; the manifest
+/// records which files existed so a restore can also remove files the failed
+/// install created.
+pub(crate) fn take_backup(dir: &Path) -> Result<()> {
+    let backup = backup_dir(dir);
+    // A leftover backup describes an older generation; never restore it.
+    let _ = std::fs::remove_dir_all(&backup);
+    std::fs::create_dir_all(&backup).with_context(|| format!("create {}", backup.display()))?;
+    // The files are 0600; a 0755 directory would still leak their names.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 700 {}", backup.display()))?;
+    }
+
+    let mut present = Vec::new();
+    for name in CERT_FILES {
+        let source = dir.join(name);
+        match std::fs::read(&source) {
+            Ok(bytes) => {
+                write_bytes_atomic(&backup.join(name), &bytes, file_mode(name))?;
+                present.push(name);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("read {}", source.display()));
+            }
+        }
+    }
+    let manifest = serde_json::to_string(&present)?;
+    write_bytes_atomic(&backup.join("manifest.json"), manifest.as_bytes(), 0o600)?;
+    sync_dir(&backup);
+    sync_dir(dir);
+    Ok(())
+}
+
+fn restore_backup(dir: &Path) -> Result<()> {
+    let backup = backup_dir(dir);
+    let manifest: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(backup.join("manifest.json"))
+            .with_context(|| format!("read {}", backup.join("manifest.json").display()))?,
+    )
+    .context("parse the install backup manifest")?;
+
+    for name in CERT_FILES {
+        let target = dir.join(name);
+        if manifest.iter().any(|saved| saved == name) {
+            let bytes = std::fs::read(backup.join(name))
+                .with_context(|| format!("read {}", backup.join(name).display()))?;
+            write_bytes_atomic(&target, &bytes, file_mode(name))?;
+        } else {
+            // The failed install created it; the backup says it was not there.
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+    sync_dir(dir);
+    Ok(())
+}
+
+fn discard_backup(dir: &Path) {
+    let _ = std::fs::remove_dir_all(backup_dir(dir));
+}
+
+/// Startup recovery: an install killed mid-way leaves the backup behind. Put
+/// the old pair back unless the state on disk is self-consistent — a crash
+/// after the commit marker means the new pair is good and the backup is stale.
+pub fn recover_interrupted_install(dir: &Path) -> Result<bool> {
+    if !backup_dir(dir).exists() {
+        return Ok(false);
+    }
+    if is_committed(&inspect(dir, &[])) {
+        discard_backup(dir);
+        return Ok(false);
+    }
+    restore_backup(dir)?;
+    discard_backup(dir);
+    Ok(true)
 }
 
 /// Hosts that go into the CSR and the SAN marker: the loopback names plus the
@@ -196,26 +318,61 @@ pub fn install_leaf(
         None => parsed.validity().not_after.timestamp(),
     };
 
-    write_secret(&p.leaf_key, &req.key_pem)?;
-    write_secret(&p.leaf_cert, cert_pem)?;
-    write_secret(&p.ca_cert, ca_pem)?;
-    write_public(&p.leaf_sans, &serde_json::to_string_pretty(&req.hosts)?)?;
     let meta = LeafMeta {
         root_fingerprint: sha256_hex(&ca_der),
         not_after,
     };
-    write_public(&p.leaf_meta, &serde_json::to_string_pretty(&meta)?)?;
+
+    // Only a self-consistent pair is worth defending. "Pairs with its key" is
+    // not enough: a mixed state left by an earlier crash would be backed up
+    // over the good copy, and the good copy is what recovery needs.
+    let had_committed_pair = is_committed(&inspect(dir, &[]));
+    if had_committed_pair {
+        take_backup(dir).context("backing up the certificate pair in use")?;
+    }
+
+    if let Err(e) = write_leaf_files(&p, req, cert_pem, ca_pem, &meta) {
+        if !had_committed_pair {
+            return Err(e);
+        }
+        // Put the pair back before reporting: a half-written pair would leave
+        // the port in listen mode while every handshake fails.
+        return match restore_backup(dir) {
+            Ok(()) => {
+                discard_backup(dir);
+                Err(e.context("the certificate pair in use was restored"))
+            }
+            Err(restore) => Err(e.context(format!(
+                "restoring the certificate pair in use failed: {restore:#}"
+            ))),
+        };
+    }
 
     // Make the renames durable; best effort, the files themselves are synced.
-    #[cfg(unix)]
-    if let Ok(dir) = std::fs::File::open(dir) {
-        let _ = dir.sync_all();
-    }
+    sync_dir(dir);
+
+    // The install is committed (the meta marker is in place): the backup now
+    // describes the previous generation and must not be restored later.
+    discard_backup(dir);
 
     // The legacy self-signed CA's key signs nothing anymore; keep the node from
     // leaving a stale private key behind.
     let _ = std::fs::remove_file(dir.join("ca-key.pem"));
     Ok(p)
+}
+
+fn write_leaf_files(
+    p: &CertPaths,
+    req: &LeafRequest,
+    cert_pem: &str,
+    ca_pem: &str,
+    meta: &LeafMeta,
+) -> Result<()> {
+    write_secret(&p.leaf_key, &req.key_pem)?;
+    write_secret(&p.leaf_cert, cert_pem)?;
+    write_secret(&p.ca_cert, ca_pem)?;
+    write_public(&p.leaf_sans, &serde_json::to_string_pretty(&req.hosts)?)?;
+    write_public(&p.leaf_meta, &serde_json::to_string_pretty(meta)?)
 }
 
 /// Contract §4. Three conditions decide whether the leaf on disk is the one the
@@ -231,8 +388,15 @@ pub struct LeafState {
     /// The SAN marker lists exactly the current hosts, i.e. this build asked
     /// for exactly what it needs now.
     pub hosts_exact: bool,
-    /// `leaf-meta.json` says the leaf came from the root in `ca-cert.pem`.
+    /// The local `ca-cert.pem` really signed this leaf (signature verified),
+    /// whether or not `leaf-meta.json` survived.
+    pub signed_by_local_root: bool,
+    /// `leaf-meta.json` says the leaf came from the root in `ca-cert.pem`, and
+    /// the signature was verified against it.
     pub issued_by_current_root: bool,
+    /// The certificate signed itself — a legacy node's own CA, not a leaf that
+    /// is waiting for the shared root.
+    pub legacy_ca: bool,
     pub not_after: Option<i64>,
 }
 
@@ -258,9 +422,26 @@ pub fn inspect(dir: &Path, hosts: &[String]) -> LeafState {
     let p = paths(dir);
     // Only the certificate decides whether the node can serve: the control
     // plane fills SANs in from `servers.ip`, so the marker can lag behind.
-    let leaf = leaf_pair(&p.leaf_cert, &p.leaf_key);
-    let files_ok = leaf.is_ok();
-    let cert_hosts = leaf.unwrap_or_default();
+    let files_ok = leaf_pair(&p.leaf_cert, &p.leaf_key).is_ok();
+    // Read the certificates even when the pair is broken: `broken` must not
+    // erase which CA the leaf belongs to.
+    let leaf_der = load_certs(&p.leaf_cert)
+        .ok()
+        .and_then(|mut certs| certs.drain(..).next());
+    let root_der = load_certs(&p.ca_cert)
+        .ok()
+        .and_then(|mut certs| certs.drain(..).next());
+    let leaf = leaf_der
+        .as_ref()
+        .and_then(|der| parse_x509(der.as_ref()).ok());
+    let root = root_der
+        .as_ref()
+        .and_then(|der| parse_x509(der.as_ref()).ok());
+
+    let cert_hosts = leaf
+        .as_ref()
+        .and_then(|cert| sans_of(cert).ok())
+        .unwrap_or_default();
     let hosts_cover = hosts.iter().all(|host| {
         cert_hosts
             .iter()
@@ -275,16 +456,30 @@ pub fn inspect(dir: &Path, hosts: &[String]) -> LeafState {
     let hosts_exact = marker.as_deref() == Some(hosts);
 
     let meta = read_meta(&p.leaf_meta);
-    let issued_by_current_root = match (&meta, ca_fingerprint(&p.ca_cert)) {
-        (Some(meta), Ok(fingerprint)) => meta.root_fingerprint == fingerprint,
+    let meta_matches_root = match (&meta, &root_der) {
+        (Some(meta), Some(root)) => meta.root_fingerprint == sha256_hex(root.as_ref()),
         _ => false,
     };
+    // A matching fingerprint only proves what was recorded; the leaf must also
+    // carry the local root's signature. Otherwise a stale or swapped leaf
+    // would be served as "current".
+    let signed_by_local_root = match (&leaf_der, &root_der) {
+        (Some(leaf), Some(root)) => verify_signed_by(leaf.as_ref(), root.as_ref()).is_ok(),
+        _ => false,
+    };
+    let issued_by_current_root = meta_matches_root && signed_by_local_root;
+    // The DN checks alone would also match a shared root that happens to reuse
+    // the old CA's name; the signature is what tells the two apart.
+    let legacy_ca = signed_by_local_root
+        && matches!((&leaf, &root), (Some(leaf), Some(ca)) if is_legacy_pair(leaf, ca));
 
     LeafState {
         files_ok,
         hosts_cover,
         hosts_exact,
+        signed_by_local_root,
         issued_by_current_root,
+        legacy_ca,
         not_after: meta.map(|meta| meta.not_after),
     }
 }
@@ -294,10 +489,11 @@ fn read_meta(path: &Path) -> Option<LeafMeta> {
     serde_json::from_str(&text).ok()
 }
 
-/// Parse both halves, prove they belong together, and return the SANs the
-/// certificate actually carries. A half-replaced pair would otherwise be
-/// "parseable" and every handshake would fail.
-fn leaf_pair(cert_path: &Path, key_path: &Path) -> Result<Vec<String>> {
+/// Validate the key pair: both files parse and belong together. The SANs and
+/// the signature are read separately, so a missing key still leaves the
+/// certificate's own facts knowable (`cert_state` needs that to say `broken`
+/// without losing whether the certificate itself is self-signed).
+fn leaf_pair(cert_path: &Path, key_path: &Path) -> Result<()> {
     let der = load_certs(cert_path)?
         .into_iter()
         .next()
@@ -313,7 +509,42 @@ fn leaf_pair(cert_path: &Path, key_path: &Path) -> Result<Vec<String>> {
             key_path.display()
         );
     }
-    sans_of(&parsed)
+    Ok(())
+}
+
+/// The CN the old per-node CA always had. Pre-migration agents never
+/// self-signed the leaf — they generated this CA and signed a
+/// `CN=veyl-node-agent` leaf with it — so this name is what identifies a
+/// legacy pair.
+pub const LEGACY_CA_CN: &str = "Veyl Node Agent CA";
+
+fn common_name(name: &x509_parser::x509::X509Name<'_>) -> Option<String> {
+    name.iter_common_name()
+        .next()?
+        .as_str()
+        .ok()
+        .map(str::to_string)
+}
+
+/// `legacy`: the local CA is the old self-signed one, and it signed this leaf.
+fn is_legacy_pair(
+    leaf: &x509_parser::certificate::X509Certificate<'_>,
+    ca: &x509_parser::certificate::X509Certificate<'_>,
+) -> bool {
+    let ca_self_signed = ca.tbs_certificate.issuer == ca.tbs_certificate.subject;
+    let named_like_old_ca =
+        common_name(&ca.tbs_certificate.subject).is_some_and(|cn| cn == LEGACY_CA_CN);
+    let leaf_from_ca = leaf.tbs_certificate.issuer == ca.tbs_certificate.subject;
+    ca_self_signed && named_like_old_ca && leaf_from_ca
+}
+
+/// The leaf must really carry the root's signature: a matching fingerprint in
+/// `leaf-meta.json` only proves what the last request asked for.
+fn verify_signed_by(leaf_der: &[u8], ca_der: &[u8]) -> Result<()> {
+    let leaf = parse_x509(leaf_der)?;
+    let root = parse_x509(ca_der)?;
+    leaf.verify_signature(Some(root.public_key()))
+        .map_err(|e| anyhow::anyhow!("certificate is not signed by the given root: {e}"))
 }
 
 fn sans_of(cert: &x509_parser::certificate::X509Certificate<'_>) -> Result<Vec<String>> {
@@ -518,6 +749,48 @@ pub fn ensure_dev_certs(dir: &Path, extra_hosts: &[String]) -> Result<CertPaths>
     generate_with_hosts(dir, extra_hosts)
 }
 
+/// Test only: the pre-migration shape — a self-signed CA named like the old
+/// generator signs a `CN=veyl-node-agent` leaf, and no `leaf-meta.json` exists.
+/// The leaf is NOT self-signed; that is exactly what made it hard to tell
+/// apart from a stale shared-root leaf.
+#[cfg(test)]
+pub(crate) fn install_legacy_leaf(dir: &Path, extra_hosts: &[String]) -> Result<CertPaths> {
+    let hosts = canonical_hosts(extra_hosts);
+    let req = request_leaf(&hosts)?;
+    let key = req.key_pair()?;
+
+    let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, LEGACY_CA_CN);
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca_key = KeyPair::generate()?;
+    let ca_cert = ca_params.self_signed(&ca_key)?;
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "veyl-node-agent");
+    push_sans(&mut params, &hosts)?;
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = params.signed_by(&key, &issuer)?;
+
+    let p = install_leaf(dir, &req, &leaf.pem(), &ca_cert.pem(), None)?;
+    std::fs::remove_file(&p.leaf_meta)
+        .with_context(|| format!("remove {}", p.leaf_meta.display()))?;
+    Ok(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +857,45 @@ mod tests {
         assert!(names.contains(&"dns:localhost".to_string()));
         assert!(names.contains(&"ip:127.0.0.1".to_string()));
         assert!(names.contains(&"ip:203.0.113.7".to_string()));
+    }
+
+    #[test]
+    fn the_committed_csr_fixture_is_a_real_agent_csr() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let der = std::fs::read(dir.join("agent-rcgen-csr.der")).unwrap();
+        let b64 = std::fs::read_to_string(dir.join("agent-rcgen-csr.b64")).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .unwrap(),
+            der,
+            "the base64 sidecar must decode to the same DER"
+        );
+
+        let (_, csr) = X509CertificationRequest::from_der(&der).unwrap();
+        let names: Vec<String> = csr
+            .requested_extensions()
+            .and_then(|mut extensions| {
+                extensions.find_map(|extension| match extension {
+                    ParsedExtension::SubjectAlternativeName(san) => Some(san.general_names.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the fixture carries its SANs")
+            .iter()
+            .map(|name| match name {
+                GeneralName::DNSName(dns) => format!("dns:{dns}"),
+                GeneralName::IPAddress(bytes) => {
+                    let addr = <[u8; 4]>::try_from(*bytes).expect("IPv4 SAN");
+                    format!("ip:{}", std::net::IpAddr::from(addr))
+                }
+                other => format!("other:{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["dns:localhost", "ip:127.0.0.1", "ip:203.0.113.7"]
+        );
     }
 
     #[test]
@@ -768,6 +1080,269 @@ mod tests {
         let (_, other_ca) = dev_sign(&request_leaf(&hosts).unwrap()).unwrap();
 
         assert!(install_leaf(&dir, &req, &cert_pem, &other_ca, None).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_install_restores_the_pair_in_use() {
+        let dir = tmpdir("install-restore");
+        let hosts = canonical_hosts(&[]);
+        // A legacy pair has no `leaf-meta.json`, so the manifest does not
+        // include it and the restore never needs the blocked temp path.
+        install_legacy_leaf(&dir, &[]).unwrap();
+        let before = leaf_fingerprint(&paths(&dir).leaf_cert).unwrap();
+        assert!(inspect(&dir, &hosts).servable());
+
+        // Fail the last write: the meta temp path cannot be created.
+        std::fs::create_dir_all(paths(&dir).leaf_meta.with_extension("tmp")).unwrap();
+
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = dev_sign(&req).unwrap();
+        let err = install_leaf(&dir, &req, &cert_pem, &ca_pem, None).unwrap_err();
+        assert!(format!("{err:#}").contains("restored"), "{err:#}");
+
+        assert_eq!(
+            leaf_fingerprint(&paths(&dir).leaf_cert).unwrap(),
+            before,
+            "the pair in use is back"
+        );
+        assert!(leaf_pair(&paths(&dir).leaf_cert, &paths(&dir).leaf_key).is_ok());
+        assert!(inspect(&dir, &hosts).servable());
+        assert!(
+            !backup_dir(&dir).exists(),
+            "the backup is discarded once it has been restored"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_install_with_nothing_usable_leaves_a_broken_state() {
+        let dir = tmpdir("install-no-rollback");
+        let hosts = canonical_hosts(&[]);
+        // Fail the certificate write: with no usable pair there is nothing to
+        // restore, and the half-installed state must read as broken.
+        std::fs::create_dir_all(paths(&dir).leaf_cert.with_extension("tmp")).unwrap();
+
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = dev_sign(&req).unwrap();
+        assert!(install_leaf(&dir, &req, &cert_pem, &ca_pem, None).is_err());
+
+        assert!(!backup_dir(&dir).exists(), "nothing usable means no backup");
+        let state = inspect(&dir, &hosts);
+        assert!(
+            !state.files_ok,
+            "the key was written, the certificate was not"
+        );
+        assert!(!state.servable());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_successful_install_leaves_no_backup() {
+        let dir = tmpdir("install-clean");
+        let hosts = canonical_hosts(&[]);
+        generate_with_hosts(&dir, &[]).unwrap();
+        let before = leaf_fingerprint(&paths(&dir).leaf_cert).unwrap();
+
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = dev_sign(&req).unwrap();
+        install_leaf(&dir, &req, &cert_pem, &ca_pem, None).unwrap();
+
+        assert_ne!(leaf_fingerprint(&paths(&dir).leaf_cert).unwrap(), before);
+        assert!(
+            !backup_dir(&dir).exists(),
+            "a committed install keeps no copy"
+        );
+        assert!(inspect(&dir, &hosts).is_current());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stale_backup_never_rolls_back_a_good_pair() {
+        let dir = tmpdir("stale-backup");
+        let hosts = canonical_hosts(&[]);
+        generate_with_hosts(&dir, &[]).unwrap();
+        take_backup(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(backup_dir(&dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "the backup directory must not expose names");
+        }
+
+        // A completed install whose backup cleanup was lost: every file,
+        // including the commit marker, belongs to the new generation.
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = dev_sign(&req).unwrap();
+        write_secret(&paths(&dir).leaf_key, &req.key_pem).unwrap();
+        write_secret(&paths(&dir).leaf_cert, &cert_pem).unwrap();
+        write_secret(&paths(&dir).ca_cert, &ca_pem).unwrap();
+        let ca_der = first_der(&ca_pem, "CERTIFICATE").unwrap();
+        let meta = LeafMeta {
+            root_fingerprint: sha256_hex(&ca_der),
+            not_after: 1_955_000_000,
+        };
+        std::fs::write(paths(&dir).leaf_meta, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let newer = leaf_fingerprint(&paths(&dir).leaf_cert).unwrap();
+
+        assert!(!recover_interrupted_install(&dir).unwrap());
+        assert_eq!(leaf_fingerprint(&paths(&dir).leaf_cert).unwrap(), newer);
+        assert!(!backup_dir(&dir).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_restores_the_backup_over_a_mixed_pair() {
+        let dir = tmpdir("mixed-recovery");
+        let hosts = canonical_hosts(&[]);
+        generate_with_hosts(&dir, &[]).unwrap();
+        let old = leaf_fingerprint(&paths(&dir).leaf_cert).unwrap();
+        take_backup(&dir).unwrap();
+
+        // Killed after the certificate rename, before the CA rename: the new
+        // pair matches its key, but the CA (and the marker) are still old, so
+        // the leaf is signed by a root this node does not trust.
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, _) = dev_sign(&req).unwrap();
+        write_secret(&paths(&dir).leaf_key, &req.key_pem).unwrap();
+        write_secret(&paths(&dir).leaf_cert, &cert_pem).unwrap();
+        let mixed = inspect(&dir, &hosts);
+        assert!(
+            mixed.files_ok,
+            "the half-written pair still matches its key"
+        );
+        assert!(!mixed.issued_by_current_root);
+        assert!(!mixed.legacy_ca);
+
+        assert!(
+            recover_interrupted_install(&dir).unwrap(),
+            "a pair that only matches its key is not a committed install"
+        );
+        assert_eq!(
+            leaf_fingerprint(&paths(&dir).leaf_cert).unwrap(),
+            old,
+            "the backup wins over a mixed state"
+        );
+        assert!(inspect(&dir, &hosts).is_current());
+        assert!(!backup_dir(&dir).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restoring_removes_files_the_failed_install_created() {
+        let dir = tmpdir("restore-extra");
+        install_legacy_leaf(&dir, &[]).unwrap();
+        assert!(
+            !paths(&dir).leaf_meta.exists(),
+            "a legacy pair has no marker"
+        );
+        take_backup(&dir).unwrap();
+
+        // The install reached its commit marker and then failed.
+        std::fs::write(
+            paths(&dir).leaf_meta,
+            r#"{"root_fingerprint":"x","not_after":1}"#,
+        )
+        .unwrap();
+
+        restore_backup(&dir).unwrap();
+        assert!(
+            !paths(&dir).leaf_meta.exists(),
+            "the backup says this file did not exist before the install"
+        );
+        assert!(leaf_pair(&paths(&dir).leaf_cert, &paths(&dir).leaf_key).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn self_signed_ca_pem(cn: &str) -> String {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let key = KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().pem()
+    }
+
+    #[test]
+    fn a_stale_pair_is_still_protected_by_the_backup() {
+        let dir = tmpdir("stale-backup-protected");
+        let hosts = canonical_hosts(&[]);
+        generate_with_hosts(&dir, &[]).unwrap();
+        // The leaf was signed by the local root, but its marker is gone:
+        // `stale`, still serving, and still worth defending.
+        std::fs::remove_file(paths(&dir).leaf_meta).unwrap();
+        let before = leaf_fingerprint(&paths(&dir).leaf_cert).unwrap();
+        assert!(inspect(&dir, &hosts).servable());
+
+        std::fs::create_dir_all(paths(&dir).leaf_meta.with_extension("tmp")).unwrap();
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, ca_pem) = dev_sign(&req).unwrap();
+        let err = install_leaf(&dir, &req, &cert_pem, &ca_pem, None).unwrap_err();
+        assert!(format!("{err:#}").contains("restored"), "{err:#}");
+
+        assert_eq!(
+            leaf_fingerprint(&paths(&dir).leaf_cert).unwrap(),
+            before,
+            "the pair that could still serve is back"
+        );
+        assert!(leaf_pair(&paths(&dir).leaf_cert, &paths(&dir).leaf_key).is_ok());
+        assert!(inspect(&dir, &hosts).servable());
+        assert!(!backup_dir(&dir).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_shared_root_reusing_the_old_cn_is_not_legacy() {
+        let dir = tmpdir("legacy-cn-collision");
+        let hosts = canonical_hosts(&[]);
+        install_legacy_leaf(&dir, &[]).unwrap();
+        // A root that happens to reuse the old CA's name is still a different
+        // key: the leaf on disk was not signed by it.
+        write_secret(&paths(&dir).ca_cert, &self_signed_ca_pem(LEGACY_CA_CN)).unwrap();
+
+        let state = inspect(&dir, &hosts);
+        assert!(state.files_ok);
+        assert!(!state.signed_by_local_root);
+        assert!(!state.legacy_ca, "the DN matches but the key does not");
+        assert!(!state.issued_by_current_root);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_leaf_whose_root_fingerprint_lies_is_not_current() {
+        let dir = tmpdir("wrong-signer");
+        let hosts = canonical_hosts(&[]);
+        generate_with_hosts(&dir, &[]).unwrap();
+
+        // A valid pair for a different key, signed by an unrelated root, while
+        // the meta records the local root's fingerprint as if it had signed it.
+        let req = request_leaf(&hosts).unwrap();
+        let (cert_pem, _) = dev_sign(&req).unwrap();
+        write_secret(&paths(&dir).leaf_key, &req.key_pem).unwrap();
+        write_secret(&paths(&dir).leaf_cert, &cert_pem).unwrap();
+        let ca_der = load_certs(&paths(&dir).ca_cert).unwrap().remove(0);
+        let meta = LeafMeta {
+            root_fingerprint: sha256_hex(ca_der.as_ref()),
+            not_after: 1_955_000_000,
+        };
+        std::fs::write(paths(&dir).leaf_meta, serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        let state = inspect(&dir, &hosts);
+        assert!(state.files_ok, "the pair itself is valid");
+        assert!(
+            !state.issued_by_current_root,
+            "the fingerprint matches but the signature is not from that root"
+        );
+        assert!(!state.is_current());
+        assert!(state.servable(), "it still serves; it is just not current");
         std::fs::remove_dir_all(&dir).ok();
     }
 

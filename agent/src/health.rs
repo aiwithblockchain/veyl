@@ -57,10 +57,16 @@ impl HealthKey {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HealthEntry {
+    /// Failures since the last success. A successful run clears it: a recovered
+    /// module must not keep a red badge.
     pub count: u64,
-    /// Unix seconds of the most recent failure.
+    /// Unix seconds of the most recent failure; cleared by the next success.
     pub last_at: u64,
     pub last_error: String,
+    /// Unix seconds of the most recent success, 0 when this process has not
+    /// seen one. Kept across a `count` reset so "never ran" stays
+    /// distinguishable from "ran fine".
+    pub last_ok_at: u64,
 }
 
 #[derive(Debug, Default)]
@@ -81,6 +87,18 @@ impl Health {
         entry.count = entry.count.saturating_add(1);
         entry.last_at = now;
         entry.last_error = message;
+    }
+
+    /// Record one success: clear the failure evidence and stamp the success.
+    /// "Failure evidence" includes `last_at`, otherwise a dashboard that keys
+    /// off it would keep showing red while `count` says zero.
+    pub fn record_success(&self, key: HealthKey, now: u64) {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.entry(key).or_default();
+        entry.count = 0;
+        entry.last_at = 0;
+        entry.last_error.clear();
+        entry.last_ok_at = now;
     }
 
     /// Every **wired** key in a fixed order, with a zeroed entry for keys that
@@ -113,6 +131,36 @@ mod tests {
         assert_eq!(entry.count, 2, "every failure is counted");
         assert_eq!(entry.last_at, 1_030, "the table is not a history");
         assert_eq!(entry.last_error, "second");
+    }
+
+    #[test]
+    fn a_success_clears_the_failure_evidence_and_stamps_the_time() {
+        let health = Health::new();
+        health.record(HealthKey::NftRead, 1_000, "boom");
+        health.record(HealthKey::NftRead, 1_030, "boom again");
+
+        health.record_success(HealthKey::NftRead, 1_060);
+        let entry = health
+            .entries()
+            .into_iter()
+            .find(|(key, _)| *key == HealthKey::NftRead)
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(entry.count, 0, "a recovered module must not stay red");
+        assert_eq!(entry.last_at, 0, "no failure time is left to colour on");
+        assert!(entry.last_error.is_empty());
+        assert_eq!(entry.last_ok_at, 1_060);
+
+        // A later failure starts a fresh run but keeps the last success.
+        health.record(HealthKey::NftRead, 1_100, "down again");
+        let entry = health
+            .entries()
+            .into_iter()
+            .find(|(key, _)| *key == HealthKey::NftRead)
+            .map(|(_, entry)| entry)
+            .unwrap();
+        assert_eq!(entry.count, 1);
+        assert_eq!(entry.last_ok_at, 1_060, "the last good run is still known");
     }
 
     #[test]

@@ -228,11 +228,17 @@ impl NodeAgentServer {
 fn status_payload(metering: Option<&dyn MeteringView>, identity: &Identity) -> Value {
     let metering_json = match metering.and_then(|view| view.status()) {
         Some(status) => json!({
-            "counter_last": status.counter_last,
-            "pending_bytes": status.pending_bytes,
-            "seq": status.seq,
-            "last_read_at": status.last_read_at,
-            "consecutive_read_failures": status.consecutive_read_failures,
+            "counter_last": status.state.counter_last,
+            "pending_bytes": status.state.pending_bytes,
+            "seq": status.state.seq,
+            "last_read_at": status.state.last_read_at,
+            // "Not reported at all" is an incident too; without this only a
+            // counter read can be judged.
+            "last_ok_at": status.state.last_ok_at,
+            "consecutive_read_failures": status.state.consecutive_read_failures,
+            // false = restored from the state file because no read succeeded
+            // since this process started; the numbers are the last known ones.
+            "observed": status.observed,
         }),
         None => Value::Null,
     };
@@ -245,10 +251,12 @@ fn status_payload(metering: Option<&dyn MeteringView>, identity: &Identity) -> V
                     "count": entry.count,
                     "last_at": entry.last_at,
                     "last_error": entry.last_error,
+                    "last_ok_at": entry.last_ok_at,
                 }),
             );
         }
     }
+    let cert_state = identity.cert_state();
     let cert = identity.cert_not_after().map(|not_after| {
         json!({
             "not_after": not_after,
@@ -259,11 +267,16 @@ fn status_payload(metering: Option<&dyn MeteringView>, identity: &Identity) -> V
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": crate::uptime_secs(),
+        // Absolute times are only meaningful next to the clock that produced
+        // them; the ops platform must not have to guess the node's.
+        "now": crate::auth::now_unix(),
         // Distinguishes "the module is not attached" (dev only) from "attached
         // but nothing read yet" (a cold node). Both have `metering: null`, and
         // without this flag the first would read as an all-green dashboard.
         "metering_attached": metering.is_some(),
         "metering": metering_json,
+        // current / legacy / broken: `cert: null` alone cannot say which.
+        "cert_state": cert_state.as_str(),
         "cert": cert,
         "health": health,
     })
@@ -851,11 +864,14 @@ mod tests {
         assert_eq!(body["metering"]["pending_bytes"], 0);
         assert!(body["metering"]["seq"].as_u64().is_some());
         assert_eq!(body["metering"]["last_read_at"], 1_030);
+        assert_eq!(body["metering"]["last_ok_at"], 1_030);
+        assert_eq!(body["metering"]["observed"], true);
         assert_eq!(body["metering"]["consecutive_read_failures"], 0);
-        assert_eq!(
-            body["health"]["nft_read"]["count"], 1,
-            "counts never go down"
-        );
+        // The recovery clears the failure evidence for that key.
+        assert_eq!(body["health"]["nft_read"]["count"], 0);
+        assert_eq!(body["health"]["nft_read"]["last_at"], 0);
+        assert_eq!(body["health"]["nft_read"]["last_error"], "");
+        assert_eq!(body["health"]["nft_read"]["last_ok_at"], 1_030);
         std::fs::remove_dir_all(&status_dir).ok();
     }
 
@@ -880,6 +896,7 @@ mod tests {
         let identity = Identity::load(&dir, &[], None).unwrap();
 
         let body = status_payload(None, &identity);
+        assert_eq!(body["cert_state"], "current");
         let not_after = body["cert"]["not_after"]
             .as_i64()
             .expect("a signed leaf has an expiry");
@@ -903,8 +920,8 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_leaf_reports_no_cert_block() {
-        let (dir, _) = identity_for_status("legacy-cert");
+    fn a_node_without_a_current_marker_reports_no_cert_block() {
+        let (dir, _) = identity_for_status("no-marker");
         cert::ensure_dev_certs(&dir, &[]).unwrap();
 
         // A marker from another root is not this node's certificate.
@@ -918,11 +935,29 @@ mod tests {
             status_payload(None, &identity)["cert"].is_null(),
             "an expiry from an unknown root must not be advertised"
         );
+        assert_eq!(status_payload(None, &identity)["cert_state"], "stale");
 
         std::fs::remove_file(cert::paths(&dir).leaf_meta).unwrap();
         assert!(
             status_payload(None, &identity)["cert"].is_null(),
-            "a legacy self-signed node has no cert block"
+            "a node without a current marker has no cert block"
+        );
+        assert_eq!(status_payload(None, &identity)["cert_state"], "stale");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn get_status_carries_the_node_clock() {
+        let (dir, _) = identity_for_status("clock");
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        let before = crate::auth::now_unix();
+        let body = status_payload(None, &identity);
+        let after = crate::auth::now_unix();
+
+        let now = body["now"].as_u64().expect("now is always present");
+        assert!(
+            now >= before && now <= after,
+            "absolute times must come with the clock that produced them"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

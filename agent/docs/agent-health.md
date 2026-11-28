@@ -84,16 +84,20 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 
 ```json
 {
-  "version": "0.1.6",
+  "version": "0.1.7",
   "uptime_secs": 3600,
+  "now": 1795760400,
   "metering_attached": true,
   "metering": {
     "counter_last": 156708490,
     "pending_bytes": 156707288,
     "seq": 1795759055,
     "last_read_at": 1795760351,
-    "consecutive_read_failures": 0
+    "last_ok_at": 1795759055,
+    "consecutive_read_failures": 0,
+    "observed": true
   },
+  "cert_state": "current",
   "cert": {
     "not_after": 1955000000,
     "renewal_failures": 0,
@@ -103,7 +107,9 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 }
 ```
 
-文件 `agent/docs/certificates.md` 换成统一根之后，`cert` 块才有内容；现在自签的节点返回 `cert: null`。三个字段的含义见 §3.5。
+- `now` 是**节点自己的时钟**（unix 秒）。所有绝对时间都要和它一起读，否则节点时钟偏了会把判断整个翻转。
+- `observed: false` 表示本次进程还没成功读过计数器，`metering` 里的数字是从状态文件恢复的**最后已知值**。它和「从没读过」不是一回事。
+- `cert_state` 的四种取值见 §3.5；只有 `current` 时 `cert` 块才有内容。
 
 ### 3.4 `metering: null` 有两种含义，必须分开
 
@@ -112,7 +118,10 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 | 情形 | 含义 | 是否生产状态 |
 |---|---|---|
 | `metering_attached: false` + `metering: null` | 计量模块根本没接上（开发用的 `serve` 命令） | 否 |
-| `metering_attached: true` + `metering: null` | 接上了，但还没成功读过一次（冷节点启动时 `get_status` 早于第一次 `tick`） | 是，短暂 |
+| `metering_attached: true` + `metering: null` | 接上了，从没读过，状态文件里也没有 | 是，短暂 |
+| `metering_attached: true` + `metering.observed: false` | 本次进程还没读成功，数字是上次落盘的；`last_read_at` 能说明**多久以前**成功过 | 是，可能长期 |
+
+第三种是这一版补的：重启后如果一直读不到计数器，以前 `metering` 会一直是 `null`，已经落盘的 `last_read_at` 也被一起藏起来——管理员看到「uptime 1 小时 + 空 + nft_read 失败 120 次」，会读成「刚启动还没读」，而不是「已经坏了很久」。
 
 如果不分开，第一种情形会配上一个空的 `health: {}`，在仪表盘上就是一片绿——和 §4.1.1 要消灭的假绿灯是同一个东西。
 
@@ -121,6 +130,17 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 `uptime_secs` 不能省，原因见 §4.3。
 
 ### 3.5 证书状态
+
+`cert: null` 本身说明不了任何问题——它可能是还没换证的存量节点，也可能是证书文件已经坏了。必须看 `cert_state`：
+
+| 取值 | 含义 | 要不要处理 |
+|---|---|---|
+| `current` | 统一根签发、验签通过、SAN 覆盖当前地址 | 否 |
+| `legacy` | 自签证书，文件可用（存量节点尚未换证） | 是，随迁移处理 |
+| `stale` | 不是自签，但不是当前根签发（meta 丢失或根已更换） | 是，必须重签 |
+| `broken` | 证书或私钥缺失、损坏、不配对，节点可能已经服务不了 | 是，最高优先 |
+
+`current` 时 `cert` 块才有内容；更准确地说，只要叶证书由**当前根**签发（即使 SAN 标记落后、状态显示 `stale`），`cert` 块就有值；meta 丢失时 `not_after` 为空。
 
 | 字段 | 来源 | 落盘 |
 |---|---|---|
@@ -141,8 +161,10 @@ agent 是一个 MCP 服务器，监听 `0.0.0.0:32100`，MCP 挂在 `/mcp`（Str
 一张**固定 key** 的映射，进程内有效，不落盘：
 
 ```
-key -> { count, last_at, last_error }
+key -> { count, last_at, last_error, last_ok_at }
 ```
+
+`count` 是**连续**失败次数：成功一次就清零，并把 `last_ok_at` 更新到当前时间。只增不清会让恢复后的节点一直挂着红色，和假绿灯一样有害。
 
 初始 key（后续可扩）：
 

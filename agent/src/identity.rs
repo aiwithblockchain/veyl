@@ -25,6 +25,35 @@ pub struct IdentitySnapshot {
     pub cert_hosts: Vec<String>,
 }
 
+/// Which kind of leaf the node has, as `get_status` reports it. `cert: null`
+/// alone could not tell "still self-signed" from "files destroyed", and a lost
+/// migration marker is not the same incident as a node that never migrated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertState {
+    /// Intact pair signed by the root in `ca-cert.pem`, covering today's hosts.
+    Current,
+    /// Files missing, corrupt, or not a key pair.
+    Broken,
+    /// The old per-node CA (`CN=Veyl Node Agent CA`) signed this leaf: a node
+    /// installed before the shared root. Its migration is expected and cannot
+    /// fail. The leaf itself is never self-signed.
+    Legacy,
+    /// Not the old per-node CA and not current (the root marker was lost or the
+    /// root changed). Needs a new leaf before it can be trusted.
+    Stale,
+}
+
+impl CertState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Broken => "broken",
+            Self::Legacy => "legacy",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 pub struct Identity {
     dir: PathBuf,
     certs: CertPaths,
@@ -46,6 +75,19 @@ impl Identity {
     /// previous leaf's addresses are kept so a restart during a metadata outage
     /// does not drop the IP.
     pub fn load(dir: &Path, static_hosts: &[String], public_host: Option<String>) -> Result<Self> {
+        // An install killed mid-way leaves a backup behind; put the working
+        // pair back before deciding anything from what is on disk. A backup
+        // whose current pair is already fine is stale and gets discarded.
+        match cert::recover_interrupted_install(dir) {
+            Ok(true) => {
+                tracing::warn!("restored the certificate pair from an interrupted install")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::error!(
+                error = %e,
+                "could not restore the certificate pair from an interrupted install"
+            ),
+        }
         let extras: Vec<String> = match &public_host {
             Some(host) => vec![host.clone()],
             None => cert::previous_extra_hosts(dir)
@@ -135,12 +177,28 @@ impl Identity {
         !state.is_current() || state.renewal_due(crate::auth::now_unix() as i64)
     }
 
+    /// Which kind of leaf is on disk, for `get_status` (`cert_state`). A
+    /// certificate that covers today's hosts is `current` even when the SAN
+    /// marker lags; whether to re-issue is `needs_new_cert`'s call.
+    pub fn cert_state(&self) -> CertState {
+        let state = self.leaf_state();
+        if state.files_ok && state.issued_by_current_root && state.hosts_cover {
+            CertState::Current
+        } else if !state.files_ok {
+            CertState::Broken
+        } else if state.legacy_ca {
+            CertState::Legacy
+        } else {
+            CertState::Stale
+        }
+    }
+
     /// `not_after` of a leaf the current root issued, or `None` for a legacy
     /// self-signed pair. `get_status` renders a null `cert` block in that case
     /// (`agent-health.md` §3.3).
     pub fn cert_not_after(&self) -> Option<i64> {
         let state = self.leaf_state();
-        if state.issued_by_current_root {
+        if state.files_ok && state.issued_by_current_root {
             state.not_after
         } else {
             None
@@ -387,6 +445,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(identity.cert_not_after(), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cert_state_distinguishes_current_stale_and_broken() {
+        let dir = tmpdir("cert-state");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert_eq!(identity.cert_state(), CertState::Current);
+
+        // The dev leaf is signed by a dev root, not self-signed: losing its
+        // marker leaves a state that needs a new leaf, not a plan to migrate.
+        std::fs::remove_file(cert::paths(&dir).leaf_meta).unwrap();
+        assert_eq!(identity.cert_state(), CertState::Stale);
+
+        // A destroyed key makes the pair unparseable, whatever the marker says.
+        std::fs::write(cert::paths(&dir).leaf_key, "not a private key").unwrap();
+        assert_eq!(identity.cert_state(), CertState::Broken);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cert_state_is_legacy_for_the_old_per_node_ca() {
+        let dir = tmpdir("legacy-ca");
+        cert::install_legacy_leaf(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert_eq!(
+            identity.cert_state(),
+            CertState::Legacy,
+            "a node installed before the shared root has an expected migration"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cert_state_is_current_while_the_san_marker_lags() {
+        let dir = tmpdir("lagging-current");
+        cert::ensure_dev_certs(&dir, &["203.0.113.7".to_string()]).unwrap();
+        // The certificate covers the IP; only the marker forgot it.
+        std::fs::write(cert::paths(&dir).leaf_sans, r#"["localhost","127.0.0.1"]"#).unwrap();
+        let identity = Identity::load(&dir, &[], Some("203.0.113.7".to_string())).unwrap();
+
+        assert_eq!(identity.cert_state(), CertState::Current);
+        assert!(
+            identity.needs_new_cert(),
+            "the lagging marker still asks for a re-issue"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cert_not_after_is_none_when_the_key_is_missing() {
+        let dir = tmpdir("cert-not-after-broken");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        std::fs::remove_file(cert::paths(&dir).leaf_key).unwrap();
+
+        // The certificate itself still matches the root, but without its key
+        // nothing can be served, so no expiry may be advertised.
+        assert!(identity.leaf_state().issued_by_current_root);
+        assert_eq!(identity.cert_not_after(), None);
+        assert_eq!(identity.cert_state(), CertState::Broken);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_restores_a_pair_left_broken_by_an_interrupted_install() {
+        let dir = tmpdir("interrupted-install");
+        cert::ensure_dev_certs(&dir, &[]).unwrap();
+        let before = Identity::load(&dir, &[], None).unwrap().leaf_fingerprint();
+
+        // A crash after the backup was taken and the key was replaced.
+        cert::take_backup(&dir).unwrap();
+        std::fs::write(cert::paths(&dir).leaf_key, "not a private key").unwrap();
+        assert!(!cert::inspect(&dir, &[]).files_ok);
+
+        let identity = Identity::load(&dir, &[], None).unwrap();
+        assert_eq!(
+            identity.leaf_fingerprint(),
+            before,
+            "the pair from before the interrupted install is back"
+        );
+        assert!(identity.servable());
         std::fs::remove_dir_all(&dir).ok();
     }
 

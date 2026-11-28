@@ -36,7 +36,8 @@ declare module "node:fs" {
     options?: { mode?: number },
   ): void;
   export function chmodSync(path: string, mode: number): void;
-  export function readFileSync(path: string, encoding: "utf8"): string;
+  export function readFileSync(path: string | URL): Uint8Array;
+  export function readFileSync(path: string | URL, encoding: "utf8"): string;
   export function readdirSync(path: string): string[];
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
 }

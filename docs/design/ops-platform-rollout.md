@@ -182,13 +182,16 @@ Felix 在 P1 契约定稿、以及每一批代码交付后各评一次。按现�
 
 ### 9.3 详情
 
-「现在查」调 `get_status`，把 `cert` 块原样显示：
+「现在查」调 `get_status`，按 `cert_state` 显示：
 
-- `not_after`：证书到期日；
-- `renewal_failures > 0`：连续续期失败次数，标红；
-- `last_renewal_error`：最后一次失败的原文。
+| `cert_state` | 界面 | 说明 |
+|---|---|---|
+| `current` | 到期日 + 剩余天数 | 统一根签发 |
+| `legacy` | 「存量自签，等待迁移」 | 旧 CA 签的叶，属正常存量 |
+| `stale` | 红色「证书待修复」 | 非自签但不是当前根签发，必须重签 |
+| `broken` | 红色「证书不可用」 | 文件缺失/损坏/不配对，节点可能已经连不上 |
 
-`cert: null` 表示这台还在用自签证书（存量节点），显式写「未接入统一根」，不要显示成正常。
+`cert` 块里的 `renewal_failures` 与 `last_renewal_error` 在能连上时一起显示。**不要用 `cert: null` 判断状态**——它同时覆盖了上面三种非 current 的情况。
 
 ### 9.4 数据来源
 

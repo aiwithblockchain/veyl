@@ -38,13 +38,24 @@ const TERMINAL_BACKOFF: Duration = Duration::from_secs(600);
 const CERT_RETRY_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Cold start with nothing servable: back off until the control plane signs a
 /// leaf. Exiting would only lean on systemd, and the contract wants the process
-/// to stay up and listen once the certificate arrives.
+/// to stay up and listen once the certificate arrives. Capped below the
+/// provisioning timeout (20 minutes from machine creation), so the agent is
+/// never asleep in a long backoff when the sweep looks at the machine.
 const CERT_BOOTSTRAP_BACKOFF_START: Duration = Duration::from_secs(30);
-const CERT_BOOTSTRAP_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+const CERT_BOOTSTRAP_BACKOFF_MAX: Duration = Duration::from_secs(4 * 60);
 /// A cold node gets its server token from enrollment, so a transient enrollment
 /// failure backs off instead of exiting for the same reason.
 const ENROLL_BACKOFF_START: Duration = Duration::from_secs(60);
-const ENROLL_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+const ENROLL_BACKOFF_MAX: Duration = Duration::from_secs(4 * 60);
+/// How soon the certificate for a late-detected public IP is retried after a
+/// failed issuance. Short on purpose: the Host allow-list already accepts the
+/// IP, but clients cannot complete a handshake until the leaf carries it.
+///
+/// 180s, not less: the control plane allows 3 issuances per fixed 5-minute
+/// window. A 120s cadence would spend all three slots on retries alone, so one
+/// renewal or a restart's first attempt in the same window would get a 429.
+/// At 180s this uses two slots and leaves one for everything else.
+const IP_CERT_RETRY_INTERVAL: Duration = Duration::from_secs(180);
 
 /// Readiness signal for cloud-init. With `Type=exec` the unit is "active" at
 /// `execve`, before the metering probe has run, so cloud-init waits for this
@@ -420,6 +431,11 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
     cert_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     cert_tick.tick().await;
 
+    // A late-detected public IP gets its own short retry window; `None` means
+    // nothing is scheduled. It is deliberately not keyed off `public_host()`,
+    // which is already set by the time the first attempt happens.
+    let mut ip_cert_retry_at: Option<tokio::time::Instant> = None;
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -456,6 +472,7 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                         if changed || identity.needs_new_cert() {
                             match issue_leaf(&identity, &cert_plane, &cert_token).await {
                                 Ok(fingerprint) => {
+                                    ip_cert_retry_at = None;
                                     tracing::info!(
                                         public_ip = %ip,
                                         fingerprint = %fingerprint,
@@ -464,11 +481,31 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                                     engine.record_cert_fingerprint(&fingerprint);
                                     engine.report_registration().await;
                                 }
-                                Err((_, error)) => tracing::warn!(
-                                    public_ip = %ip,
-                                    error = %error,
-                                    "could not issue a leaf for the detected public IP; keeping the existing certificate"
-                                ),
+                                Err((permanent, error)) => {
+                                    // The allow-list already has the IP; without a
+                                    // leaf that carries it every handshake fails, so
+                                    // retry far sooner than the 6-hour renewal tick.
+                                    match ip_cert_retry_delay(false, true, permanent) {
+                                        Some(delay) => {
+                                            ip_cert_retry_at =
+                                                Some(tokio::time::Instant::now() + delay);
+                                            tracing::warn!(
+                                                public_ip = %ip,
+                                                error = %error,
+                                                retry_in_secs = delay.as_secs(),
+                                                "could not issue a leaf for the detected public IP; keeping the existing certificate"
+                                            );
+                                        }
+                                        None => {
+                                            ip_cert_retry_at = None;
+                                            tracing::warn!(
+                                                public_ip = %ip,
+                                                error = %error,
+                                                "the control plane rejected the certificate for the detected public IP"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -477,6 +514,48 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
                         "the public IP is still unknown; set public_host or allowed_hosts in the config"
                     ),
                     None => {}
+                }
+            }
+            // The late-IP issuance, retried on a short timer until it lands.
+            // Fixed to this task only, so a failure does not wait for the
+            // 6-hour renewal tick (the Host allow-list already accepts the IP).
+            _ = tokio::time::sleep_until(
+                ip_cert_retry_at.unwrap_or_else(tokio::time::Instant::now)
+            ),
+                if ip_cert_retry_at.is_some() =>
+            {
+                ip_cert_retry_at = None;
+                if identity.needs_new_cert() {
+                    match issue_leaf(&identity, &cert_plane, &cert_token).await {
+                        Ok(fingerprint) => {
+                            tracing::info!(
+                                fingerprint = %fingerprint,
+                                "issued the certificate for the detected public IP"
+                            );
+                            engine.record_cert_fingerprint(&fingerprint);
+                            engine.report_registration().await;
+                        }
+                        Err((permanent, error)) => {
+                            match ip_cert_retry_delay(false, true, permanent) {
+                                Some(delay) => {
+                                    ip_cert_retry_at =
+                                        Some(tokio::time::Instant::now() + delay);
+                                    tracing::warn!(
+                                        error = %error,
+                                        retry_in_secs = delay.as_secs(),
+                                        "the certificate for the detected public IP was not issued; retrying"
+                                    );
+                                }
+                                None => {
+                                    ip_cert_retry_at = None;
+                                    tracing::warn!(
+                                        error = %error,
+                                        "the control plane rejected the certificate for the detected public IP; not retrying"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Renewal, migration and repair: a leaf inside the 30-day window or
@@ -756,6 +835,17 @@ fn leaf_retry_decision(servable: bool, permanent: bool, backoff: Duration) -> Le
     }
 }
 
+/// Delay before retrying the certificate for a late-detected public IP.
+/// `None` means stop: the attempt already succeeded, nothing was attempted, or
+/// a permanent rejection means asking again cannot help.
+fn ip_cert_retry_delay(issued: bool, failed: bool, permanent: bool) -> Option<Duration> {
+    if issued || !failed || permanent {
+        None
+    } else {
+        Some(IP_CERT_RETRY_INTERVAL)
+    }
+}
+
 /// Make sure this process has a leaf worth serving. A stale but parseable leaf
 /// keeps serving while one replacement round is attempted; with nothing
 /// servable this blocks (backing off) until the control plane signs one, and
@@ -769,7 +859,6 @@ async fn ensure_leaf(identity: &Identity, plane: &ControlPlane, server_token: &s
         if !identity.needs_new_cert() {
             return false;
         }
-        let servable = identity.servable();
         match issue_leaf(identity, plane, server_token).await {
             Ok(fingerprint) => {
                 tracing::info!(
@@ -778,33 +867,39 @@ async fn ensure_leaf(identity: &Identity, plane: &ControlPlane, server_token: &s
                 );
                 return true;
             }
-            Err((permanent, error)) => match leaf_retry_decision(servable, permanent, backoff) {
-                LeafRetry::KeepServing => {
-                    tracing::warn!(
-                        error = %error,
-                        "could not replace the TLS leaf; keeping the existing certificate until the next retry"
-                    );
-                    return false;
+            Err((permanent, error)) => {
+                // install_leaf may have restored the pair that was in use, so
+                // the decision has to come from what is on disk *now*, not
+                // from a snapshot taken before the attempt.
+                let servable = identity.servable();
+                match leaf_retry_decision(servable, permanent, backoff) {
+                    LeafRetry::KeepServing => {
+                        tracing::warn!(
+                            error = %error,
+                            "could not replace the TLS leaf; keeping the existing certificate until the next retry"
+                        );
+                        return false;
+                    }
+                    LeafRetry::LongSleep(wait) => {
+                        tracing::error!(
+                            error = %error,
+                            retry_in_secs = wait.as_secs(),
+                            "the control plane rejected the certificate request"
+                        );
+                        tokio::time::sleep(wait).await;
+                        backoff = CERT_BOOTSTRAP_BACKOFF_START;
+                    }
+                    LeafRetry::Backoff(wait) => {
+                        tracing::warn!(
+                            error = %error,
+                            retry_in_secs = wait.as_secs(),
+                            "no usable TLS certificate yet; retrying"
+                        );
+                        tokio::time::sleep(wait).await;
+                        backoff = (backoff * 2).min(CERT_BOOTSTRAP_BACKOFF_MAX);
+                    }
                 }
-                LeafRetry::LongSleep(wait) => {
-                    tracing::error!(
-                        error = %error,
-                        retry_in_secs = wait.as_secs(),
-                        "the control plane rejected the certificate request"
-                    );
-                    tokio::time::sleep(wait).await;
-                    backoff = CERT_BOOTSTRAP_BACKOFF_START;
-                }
-                LeafRetry::Backoff(wait) => {
-                    tracing::warn!(
-                        error = %error,
-                        retry_in_secs = wait.as_secs(),
-                        "no usable TLS certificate yet; retrying"
-                    );
-                    tokio::time::sleep(wait).await;
-                    backoff = (backoff * 2).min(CERT_BOOTSTRAP_BACKOFF_MAX);
-                }
-            },
+            }
         }
     }
 }
@@ -919,6 +1014,53 @@ mod tests {
         assert_eq!(
             leaf_retry_decision(false, true, CERT_BOOTSTRAP_BACKOFF_START),
             LeafRetry::LongSleep(CERT_RETRY_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn a_failed_late_ip_issuance_retries_within_five_minutes() {
+        let delay = ip_cert_retry_delay(false, true, false).expect("a retryable failure retries");
+        // Too slow leaves the node unreachable for minutes; too fast spends the
+        // control plane's 3-per-5-minute issuance budget on retries alone.
+        assert!(
+            delay <= Duration::from_secs(5 * 60),
+            "the late-IP retry must be short, got {delay:?}"
+        );
+        assert!(
+            delay >= Duration::from_secs(100),
+            "the late-IP retry must leave room in the rate-limit window, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn a_settled_late_ip_issuance_stops_retrying() {
+        assert_eq!(
+            ip_cert_retry_delay(true, true, false),
+            None,
+            "a success stops the retry"
+        );
+        assert_eq!(
+            ip_cert_retry_delay(false, true, true),
+            None,
+            "a permanent rejection stops the retry"
+        );
+        assert_eq!(
+            ip_cert_retry_delay(false, false, false),
+            None,
+            "nothing was attempted"
+        );
+    }
+
+    #[test]
+    fn bootstrap_backoff_is_shorter_than_the_provisioning_timeout() {
+        assert!(
+            CERT_BOOTSTRAP_BACKOFF_MAX <= Duration::from_secs(5 * 60),
+            "the sweep destroys the machine after 20 minutes; the backoff must not outlast it"
+        );
+        assert_eq!(
+            CERT_RETRY_INTERVAL,
+            Duration::from_secs(6 * 60 * 60),
+            "the long sleep stays reserved for permanent errors"
         );
     }
 

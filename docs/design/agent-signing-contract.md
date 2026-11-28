@@ -103,6 +103,7 @@ Content-Type: application/json
 | 续期时的私钥 | **生成新密钥对**，不复用旧 key |
 | SAN | `servers.ip` + `localhost` + `127.0.0.1`，去重 |
 | subject | 固定 `CN=veyl-node-agent`，不采信 CSR 的 subject |
+| 根证书 subject | 固定 `CN=Veyl Node Root CA`，**不得等于叶的 subject**——否则 `issuer == subject` 会让 agent 把根签的叶误判成存量自签 |
 | 允许的 CSR SAN | 上述地址；其余一律 `403 san_rejected`，**包括无法识别的 GeneralName 类型** |
 | 密钥类型 | ECDSA P-256，其余拒签 |
 | 密钥用法 | 由控制面固定，不采信 CSR；`CA:FALSE`、`digitalSignature`、`keyEncipherment`、EKU `serverAuth` |

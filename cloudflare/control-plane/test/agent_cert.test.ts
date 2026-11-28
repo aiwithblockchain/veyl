@@ -1,5 +1,7 @@
 import "reflect-metadata";
 
+import { readFileSync } from "node:fs";
+
 import {
   BasicConstraintsExtension,
   Extension,
@@ -23,6 +25,12 @@ const SERVER_TOKEN = "agt_cert000000000000";
 const SERVER_IP = "203.0.113.7";
 const ENC_KEY = "A".repeat(43);
 const DAY_MS = 86_400_000;
+
+/** 真实 agent（rcgen 0.14）生成的 CSR：SAN 与 `certEnv` 里的公网 IP 对得上。 */
+const REAL_CSR_B64 = readFileSync(
+  new URL("../../../agent/testdata/agent-rcgen-csr.b64", import.meta.url),
+  "utf8",
+).trim();
 
 interface TestRoot {
   certPem: string;
@@ -501,6 +509,28 @@ describe("契约 §6：POST /v1/agent/cert", () => {
       fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     expect(JSON.stringify(detail)).not.toContain("BEGIN CERTIFICATE");
+  });
+
+  it("真实 agent 的 rcgen CSR 走 /v1/agent/cert 能签出来", async () => {
+    const { db, env } = await certEnv();
+    const res = await handleServers(certRequest({ csr: REAL_CSR_B64 }), env as never);
+    expect(res?.status).toBe(200);
+
+    const body = (await res!.json()) as {
+      cert_pem: string;
+      ca_pem: string;
+      not_after: number;
+    };
+    const leaf = new X509Certificate(body.cert_pem);
+    expect(leaf.subject).toBe("CN=veyl-node-agent");
+    // CSR 三条 SAN 的校验在 certs.test.ts；这里只看路由返回的叶确实覆盖了公网 IP。
+    expect(sanOf(leaf)).toEqual([
+      { type: "ip", value: SERVER_IP },
+      { type: "dns", value: "localhost" },
+      { type: "ip", value: "127.0.0.1" },
+    ]);
+    expect(db.rows("servers")[0].cert_not_after).toBe(body.not_after);
+    expect(db.rows("audit_log").some((row) => row.action === "agent.cert.issued")).toBe(true);
   });
 
   it("同一台连续两次签发：公钥不同（每次续期换 key）", async () => {

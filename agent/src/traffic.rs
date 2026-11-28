@@ -171,7 +171,14 @@ impl TrafficMeter {
     /// report if due. Never returns an error; every failure is a log line.
     pub async fn tick(&self, now: u64) {
         let counter = match read_counter(self.host.as_ref()).await {
-            Ok(counter) => counter,
+            Ok(CounterRead::Read(counter)) => counter,
+            Ok(CounterRead::Repaired(reason)) => {
+                tracing::info!(
+                    reason,
+                    "traffic: counter table repaired; skipping this window"
+                );
+                return;
+            }
             Err(e) => {
                 self.health.record(HealthKey::NftRead, now, &e.to_string());
                 {
@@ -187,6 +194,7 @@ impl TrafficMeter {
                 return;
             }
         };
+        self.health.record_success(HealthKey::NftRead, now);
 
         let (save_due, new_attempt, report) = {
             let mut guard = self.state.lock().unwrap();
@@ -242,6 +250,7 @@ impl TrafficMeter {
 
         match self.control.traffic(seq, delta_bytes).await {
             Ok(()) => {
+                self.health.record_success(HealthKey::Report, now);
                 let failures = self.report_failures.swap(0, Ordering::Relaxed);
                 {
                     let mut guard = self.state.lock().unwrap();
@@ -360,14 +369,41 @@ impl TrafficMeter {
 /// separate from `ControlApi`: reading local state must not need a server
 /// token, and nothing here can change what is reported.
 pub trait MeteringView: Send + Sync {
-    /// The in-memory state, not the file: the file lags by up to `save_secs`.
-    fn status(&self) -> Option<TrafficState>;
+    fn status(&self) -> Option<MeteringStatus>;
     fn health(&self) -> Arc<Health>;
 }
 
+/// What `get_status` shows for metering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeteringStatus {
+    pub state: TrafficState,
+    /// True when this process has read the counter at least once. False means
+    /// the numbers were restored from the state file because reads are failing
+    /// (restart during an outage): `last_read_at` is still the honest answer,
+    /// but the meter has not adopted these numbers as a baseline.
+    pub observed: bool,
+}
+
 impl MeteringView for TrafficMeter {
-    fn status(&self) -> Option<TrafficState> {
-        self.state.lock().unwrap().clone()
+    fn status(&self) -> Option<MeteringStatus> {
+        if let Some(state) = self.state.lock().unwrap().clone() {
+            return Some(MeteringStatus {
+                state,
+                observed: true,
+            });
+        }
+        // Read-only fallback: a restart whose first windows all fail must not
+        // hide the last time the counter was readable — that is how an outage
+        // gets misread as a cold node. The meter itself keeps its in-memory
+        // state empty until a real read succeeds.
+        self.store
+            .load()
+            .ok()
+            .flatten()
+            .map(|state| MeteringStatus {
+                state,
+                observed: false,
+            })
     }
 
     fn health(&self) -> Arc<Health> {
@@ -383,13 +419,23 @@ impl MeteringView for TrafficMeter {
 /// reading — the window it happens in is reported as a failure and the next
 /// window picks the new counter up through the negative-delta branch in
 /// `TrafficMeter::tick`.
-async fn read_counter(host: &dyn Host) -> Result<u64> {
+/// Outcome of one counter window.
+enum CounterRead {
+    /// A real reading of the counter.
+    Read(u64),
+    /// The table was created or repaired. This window has no reading, but that
+    /// is maintenance, not a metering failure: a brand-new node must not show
+    /// a red `nft_read` before its first window.
+    Repaired(&'static str),
+}
+
+async fn read_counter(host: &dyn Host) -> Result<CounterRead> {
     let iface = default_iface(host).await?;
     match read_table(host).await? {
         TableRead::Counter {
             iface: rule_iface,
             bytes,
-        } if rule_iface == iface => Ok(bytes),
+        } if rule_iface == iface => Ok(CounterRead::Read(bytes)),
         TableRead::Counter {
             iface: rule_iface, ..
         } => {
@@ -401,20 +447,24 @@ async fn read_counter(host: &dyn Host) -> Result<u64> {
             rebuild(host, &iface, true)
                 .await
                 .with_context(|| "recreating the counter after a stale interface")?;
-            bail!("counter followed a stale interface; recreated, skipping this window")
+            Ok(CounterRead::Repaired(
+                "counter followed a stale interface; recreated",
+            ))
         }
         TableRead::Missing => {
             rebuild(host, &iface, false)
                 .await
                 .with_context(|| "creating the counter table")?;
-            bail!("counter table was missing; recreated, skipping this window")
+            Ok(CounterRead::Repaired("counter table was missing; created"))
         }
         TableRead::Incomplete => {
             tracing::warn!("traffic: counter table is incomplete; recreating");
             rebuild(host, &iface, true)
                 .await
                 .with_context(|| "completing an incomplete counter table")?;
-            bail!("counter table was incomplete; recreated, skipping this window")
+            Ok(CounterRead::Repaired(
+                "counter table was incomplete; recreated",
+            ))
         }
         TableRead::Broken(reason) => bail!("counter table unreadable: {reason}"),
     }
@@ -435,11 +485,21 @@ pub async fn probe(host: &dyn Host) -> Result<u64> {
         let mut last: Option<anyhow::Error> = None;
         for attempt in 1..=ATTEMPTS {
             match read_counter(host).await {
-                Ok(bytes) => {
+                Ok(CounterRead::Read(bytes)) => {
                     // Logged on success too: on a restored node nothing else
                     // records that the probe ran at all.
                     tracing::info!(bytes, attempts = attempt, "metering probe ok");
                     return Ok(bytes);
+                }
+                Ok(CounterRead::Repaired(reason)) => {
+                    // A repair is not a reading: the next round reads the fresh
+                    // table. Retry like a failed attempt.
+                    tracing::debug!(
+                        attempt,
+                        reason,
+                        "traffic: metering probe repaired the table"
+                    );
+                    last = Some(anyhow::anyhow!(reason));
                 }
                 Err(e) => {
                     tracing::debug!(attempt, error = %e, "traffic: metering probe attempt failed");
@@ -883,6 +943,16 @@ mod tests {
                     && args.get(1).map(String::as_str) == Some("table")
             })
             .count()
+    }
+
+    fn nft_health(meter: &TrafficMeter) -> crate::health::HealthEntry {
+        meter
+            .health()
+            .entries()
+            .into_iter()
+            .find(|(key, _)| *key == crate::health::HealthKey::NftRead)
+            .map(|(_, entry)| entry)
+            .expect("nft_read is a wired key")
     }
 
     #[tokio::test]
@@ -1899,9 +1969,96 @@ mod tests {
             .find(|(key, _)| *key == crate::health::HealthKey::NftRead)
             .map(|(_, entry)| entry)
             .unwrap();
-        assert_eq!(entry.count, 1, "only the failed window is recorded");
-        assert_eq!(entry.last_at, 1_030);
+        assert_eq!(entry.count, 0, "the recovery clears the failed window");
+        assert_eq!(entry.last_at, 0, "no failure time is left to colour on");
+        assert!(entry.last_error.is_empty());
+        assert_eq!(entry.last_ok_at, 1_060, "the successful read is stamped");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_restarted_node_still_reports_the_persisted_last_read() {
+        let (dir, host, control) = setup("restart-status");
+        TrafficStore::new(dir.join("traffic.json"))
+            .save(&TrafficState {
+                counter_last: 7_000,
+                pending_bytes: 512,
+                last_saved_at: 900,
+                last_ok_at: 870,
+                last_read_at: 900,
+                seq: 42,
+                ..TrafficState::default()
+            })
+            .unwrap();
+
+        // Every window of the new process fails: the table exists but is
+        // unreadable (a real outage, not a missing table).
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "Operation not permitted"),
+                (0, &nft_tables_json(), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control,
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+        meter.tick(1_000).await;
+
+        let status = meter
+            .status()
+            .expect("the persisted state is still reported");
+        assert!(!status.observed, "no read has succeeded in this process");
+        assert_eq!(
+            status.state.last_read_at, 900,
+            "a long outage must not look like a cold start"
+        );
+        assert!(
+            meter.snapshot().is_none(),
+            "the fallback is read-only; the file is not adopted as a baseline"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn creating_the_table_is_maintenance_not_a_read_failure() {
+        let (dir, host, control) = setup("first-install-health");
+        host.queue_command_outputs(
+            "nft",
+            &[
+                (1, "", "No such file or directory"),
+                (0, r#"{"nftables":[{"metainfo":{"version":"1.0.9"}}]}"#, ""),
+                (0, "table inet filter\n", ""),
+                // The rebuild: delete, add table, add chain, add rule.
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, &nft_json("ens3", 500), ""),
+            ],
+        );
+        let meter = TrafficMeter::new(
+            host.clone(),
+            control,
+            dir.join("traffic.json"),
+            params(1_000_000),
+        );
+
+        meter.tick(1_000).await;
+        assert_eq!(rebuilds(&host), 1);
+        let entry = nft_health(&meter);
+        assert_eq!(entry.count, 0, "creating the table is not a failed read");
+        assert_eq!(entry.last_at, 0);
+        assert!(meter.snapshot().is_none(), "a repair is not a reading");
+
+        meter.tick(1_030).await;
+        let entry = nft_health(&meter);
+        assert_eq!(entry.count, 0);
+        assert_eq!(entry.last_ok_at, 1_030, "the first real read is stamped");
         std::fs::remove_dir_all(&dir).ok();
     }
 

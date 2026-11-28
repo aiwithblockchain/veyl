@@ -1,5 +1,7 @@
 import "reflect-metadata";
 
+import { readFileSync } from "node:fs";
+
 import { AsnConvert } from "@peculiar/asn1-schema";
 import {
   GeneralName as AsnGeneralName,
@@ -9,6 +11,7 @@ import {
 import {
   BasicConstraintsExtension,
   Extension,
+  GeneralNames,
   KeyUsageFlags,
   KeyUsagesExtension,
   Pkcs10CertificateRequest,
@@ -29,6 +32,15 @@ import {
 } from "../src/certs";
 
 const SERVER_IP = "203.0.113.7";
+
+/** 真实 agent（rcgen 0.14）生成的 CSR，由 `agent/testdata/` 固化；公网 IP 与上面一致。 */
+const REAL_CSR_DER = new Uint8Array(
+  readFileSync(new URL("../../../agent/testdata/agent-rcgen-csr.der", import.meta.url)),
+);
+const REAL_CSR_B64 = readFileSync(
+  new URL("../../../agent/testdata/agent-rcgen-csr.b64", import.meta.url),
+  "utf8",
+).trim();
 
 async function newKeys(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
@@ -206,6 +218,64 @@ describe("issueLeaf", () => {
         { type: "ip", value: SERVER_IP },
       ]),
     );
+  });
+
+  it("真实 rcgen CSR（固化 fixture）能签出来，且 SAN 真的被校验过", async () => {
+    // 这只 CSR 由真实 agent 的 rcgen 产出，不是测试自己拼的。
+    const decoded = Array.from(atob(REAL_CSR_B64), (c) => c.charCodeAt(0));
+    expect(decoded).toEqual(Array.from(REAL_CSR_DER));
+
+    const csr = new Pkcs10CertificateRequest(REAL_CSR_DER);
+
+    // 只断言叶证书的 SAN 证明不了 CSR 被检查过：叶 SAN 是控制面用 `issuedNames`
+    // 自己拼的，就算 `getExtensions` 返回空、校验提前 return，叶上也照样是这三条。
+    const sanExtensions = csr.getExtensions("2.5.29.17");
+    expect(sanExtensions).toHaveLength(1);
+    expect(new GeneralNames(sanExtensions[0].value).items).toHaveLength(3);
+
+    // 最关键的一条：不给这台机器的 IP 时，CSR 里那个公网 IP 必须被拒。
+    // 如果 SAN 根本没被读到，这里就不会抛。
+    try {
+      assertSanAllowed(csr, []);
+      expect.unreachable("空 serverIps 下 CSR 里的公网 IP 必须被拒");
+    } catch (error) {
+      expect(error).toMatchObject({
+        reason: "san_rejected",
+        rejectedNames: [`ip:${SERVER_IP}`],
+      });
+    }
+
+    // 给了正确 IP 就放行，并真的签出由根签发的叶证书。
+    expect(() => assertSanAllowed(csr, [SERVER_IP])).not.toThrow();
+    const { root } = await newRoot();
+    const leaf = await issueLeaf(root, { csrDer: REAL_CSR_DER, serverIps: [SERVER_IP] });
+    const certificate = new X509Certificate(leaf.certPem);
+    expect(certificate.issuer).toBe(root.certificate.subject);
+    expect(await certificate.verify({ publicKey: root.certificate.publicKey })).toBe(true);
+    expect(certificate.subject).toBe("CN=veyl-node-agent");
+    expect(sanOf(certificate)).toEqual(
+      expect.arrayContaining([
+        { type: "dns", value: "localhost" },
+        { type: "ip", value: "127.0.0.1" },
+        { type: "ip", value: SERVER_IP },
+      ]),
+    );
+  });
+
+  it("没有 SAN 扩展的 CSR 照样签，SAN 全由控制面构造", async () => {
+    // SAN 本来就不采信 CSR：不带 SAN 是合法请求，必须放行。这条守住 `assertSanAllowed`
+    // 的早退——若有人为了堵「静默跳过」删掉它，这里会变成 400。
+    const csrDer = await newCsrWith([]);
+    expect(new Pkcs10CertificateRequest(csrDer).getExtensions("2.5.29.17")).toHaveLength(0);
+
+    const { root } = await newRoot();
+    const leaf = await issueLeaf(root, { csrDer, serverIps: [SERVER_IP] });
+    const certificate = new X509Certificate(leaf.certPem);
+    expect(sanOf(certificate)).toEqual([
+      { type: "ip", value: SERVER_IP },
+      { type: "dns", value: "localhost" },
+      { type: "ip", value: "127.0.0.1" },
+    ]);
   });
 
   it("SAN 里混了无法识别的 GeneralName：按越权拒签，不能静默跳过", async () => {
