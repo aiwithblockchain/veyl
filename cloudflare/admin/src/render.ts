@@ -14,6 +14,8 @@ export interface ServerRow {
   control_port: number | null;
   cert_not_after: number | null;
   last_seen_at: number | null;
+  /** 非空 = DigitalOcean 那边已经查无此机（billing 巡检 404 后写的标记），毫秒。 */
+  provider_gone_at: number | null;
   failure_code: string | null;
   failure_stage: string | null;
 }
@@ -24,10 +26,10 @@ export interface LabelledServer extends ServerRow {
   env: EnvName;
 }
 
-/** 待处理的四类，按严重程度从高到低。 */
-export type Issue = "failed" | "cert" | "stale" | "no_version";
+/** 待处理的五类，按严重程度从高到低。 */
+export type Issue = "gone" | "failed" | "cert" | "stale" | "no_version";
 
-const RANK: Record<Issue, number> = { failed: 3, cert: 2, stale: 1, no_version: 0 };
+const RANK: Record<Issue, number> = { gone: 4, failed: 3, cert: 2, stale: 1, no_version: 0 };
 
 export const CERT_WARN_MS = 7 * 86_400_000;
 export const STALE_MS = 24 * 3_600_000;
@@ -38,6 +40,10 @@ export function isFailed(state: string): boolean {
 }
 
 export function issuesOf(server: LabelledServer, now: number): Issue[] {
+  // DO 后台已删除：这是最强的信号，一台机器只算这一条——否则它还会同时算失联，
+  // 横幅就成了「一台机器两条」，看不出实际有几台要处理。
+  if (server.provider_gone_at !== null) return ["gone"];
+
   const issues: Issue[] = [];
   if (isFailed(server.state)) issues.push("failed");
   if (server.cert_not_after !== null && server.cert_not_after * 1000 <= now + CERT_WARN_MS) {
@@ -88,6 +94,7 @@ export function sortServers(rows: LabelledServer[], now: number): LabelledServer
 
 export interface Counts {
   attention: number;
+  gone: number;
   failed: number;
   cert: number;
   stale: number;
@@ -97,6 +104,7 @@ export interface Counts {
 export function countIssues(rows: LabelledServer[], now: number): Counts {
   const counts: Counts = {
     attention: 0,
+    gone: 0,
     failed: 0,
     cert: 0,
     stale: 0,
@@ -105,6 +113,7 @@ export function countIssues(rows: LabelledServer[], now: number): Counts {
   for (const row of rows) {
     const issues = issuesOf(row, now);
     if (issues.length > 0) counts.attention += 1;
+    if (issues.includes("gone")) counts.gone += 1;
     if (issues.includes("failed")) counts.failed += 1;
     if (issues.includes("cert")) counts.cert += 1;
     if (issues.includes("stale")) counts.stale += 1;
@@ -257,11 +266,12 @@ function bannerHtml(counts: Counts): string {
     return `<div class="banner">待处理 0 台</div>`;
   }
   const parts = [`待处理 ${counts.attention} 台`];
+  if (counts.gone > 0) parts.push(`云服务商已删除 ${counts.gone}`);
   if (counts.failed > 0) parts.push(`失败 ${counts.failed}`);
   if (counts.cert > 0) parts.push(`证书 ${counts.cert}`);
   if (counts.stale > 0) parts.push(`失联 ${counts.stale}`);
   if (counts.noVersion > 0) parts.push(`无版本 ${counts.noVersion}`);
-  const kind = counts.failed > 0 ? "danger" : "warn";
+  const kind = counts.gone > 0 || counts.failed > 0 ? "danger" : "warn";
   return `<div class="banner ${kind}">${parts
     .map((part, index) => (index === 0 ? part : `<span class="sep">·</span>${part}`))
     .join("")}</div>`;
@@ -274,7 +284,10 @@ function rowHtml(server: LabelledServer, now: number): string {
   const cert = formatCertExpiry(server.cert_not_after, now);
   const seen = formatLastSeen(server.last_seen_at, now);
   const address = formatAddress(server);
-  const chip = stateChip(server.state);
+  const chip =
+    server.provider_gone_at !== null
+      ? { label: "云服务商已删除", kind: "danger" as ChipKind }
+      : stateChip(server.state);
   const version = server.agent_version?.trim() ? server.agent_version.trim() : null;
 
   // §7.5/§7.6：一行最多一个彩色元素；失败行整行变底，其余单元格一律中性。

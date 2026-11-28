@@ -136,6 +136,7 @@ function server(overrides: Partial<ServerRow> = {}): ServerRow {
     control_port: 32100,
     cert_not_after: Math.floor((Date.now() + 100 * DAY) / 1000),
     last_seen_at: Date.now() - HOUR,
+    provider_gone_at: null,
     failure_code: null,
     failure_stage: null,
     ...overrides,
@@ -258,6 +259,37 @@ describe("第一屏", () => {
     // 0 天与负数都显示「已到期」，用 danger。
     expect(body.match(/已到期/g)).toHaveLength(2);
     expect(body).toMatch(/class="num text3 dangertext">\d{4}-\d{2}-\d{2} · 已到期</);
+  });
+
+  it("云服务商已删除：状态列替代 active、只贡献 gone 一条、排在 active 之前", async () => {
+    const db = new FakeDb();
+    const base = { account_id: "acct_1", destroyed_at: null };
+    db.servers.push(
+      // state 仍是 active、30 小时没上报，但 provider_gone_at 非空：
+      // 不该显示 active，也不该再算一条失联（否则一台机器进两栏）。
+      {
+        ...server({
+          id: "srv_gone",
+          name: "A-gone",
+          state: "active",
+          provider_gone_at: Date.now() - 2 * HOUR,
+          last_seen_at: Date.now() - 30 * HOUR,
+        }),
+        ...base,
+      },
+      { ...server({ id: "srv_ok", name: "B-ok" }), ...base },
+    );
+
+    const res = await worker.fetch(request("/", { jwt: await signAccessJwt() }), envWith(db, new FakeDb()));
+    const body = await res.text();
+
+    expect(body).toContain('chip-danger">云服务商已删除<');
+    // 只有那台健康节点还带 active chip。
+    expect(body.match(/chip-ok">active</g)).toHaveLength(1);
+    expect(body).toContain("待处理 1 台");
+    expect(body).toContain("云服务商已删除 1");
+    expect(body).not.toContain("失联 1");
+    expect(body.indexOf("A-gone")).toBeLessThan(body.indexOf("B-ok"));
   });
 
   it("建机中的节点不进待处理：只有 active 缺版本才算", async () => {

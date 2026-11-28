@@ -34,7 +34,8 @@ const decoder = new TextDecoder();
 
 /** 只取体检表需要的列；少了任何一列渲染就少一格。 */
 const SERVER_COLUMNS =
-  "id, name, state, agent_version, ip, control_port, cert_not_after, last_seen_at, failure_code, failure_stage";
+  "id, name, state, agent_version, ip, control_port, cert_not_after, last_seen_at, " +
+  "provider_gone_at, failure_code, failure_stage";
 
 interface AccessClaims {
   aud?: unknown;
