@@ -63,7 +63,7 @@ Running a node on your own server gives you a dedicated, stable exit.
 - **Balance threshold**: before creating, the balance must cover **7 days** (daily × 7). Otherwise show "Not enough balance, $X short." and do not create or charge anything.
 - **Billing**: the first day is charged once the server is ready and verified running; after that **one day is auto-renewed one hour before expiry**, and success pushes the paid-through time one day later. If the charge fails, the server is stopped and destroyed — there is no grace period.
 - **Destroying**: unused whole days are refunded to the balance; **the day of destruction is not refunded**. Balance that was never spent cannot be withdrawn.
-- **Destruction reason comes only from the tool**: a destroyed server is either "destroyed" or "stopped and deleted because the balance was insufficient" — never attribute it to the cloud provider or any other third party, and never say "we deleted it for you".
+- **Destruction reason comes only from the tool**: `destroyed` is either "destroyed" or "stopped and deleted because the balance was insufficient"; `provider_gone` is "deleted on the cloud provider's side, no longer charged". Never mix the two, and never invent a third reason.
 - **Creation failure**: nothing is charged. The UI offers "AI locate", which reads the structured failure and says which step failed, whether it can be retried, and gives one action to take.
 - **One server = one node**: once created it joins the node pool automatically and can be switched in the console.
 - One account can have multiple servers; no limit.
