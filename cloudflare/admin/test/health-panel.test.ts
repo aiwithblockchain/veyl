@@ -159,7 +159,7 @@ function clientScript(): string {
   return html.slice(html.indexOf(">", open) + 1, html.indexOf("</script>", open));
 }
 
-async function run(fakeFetch: FetchLike): Promise<string> {
+async function run(fakeFetch: FetchLike): Promise<{ text: string; table: FakeEl }> {
   const { doc, table, button } = page();
   const install = new Function("document", "fetch", clientScript()) as (
     doc: ClientDocument,
@@ -168,7 +168,16 @@ async function run(fakeFetch: FetchLike): Promise<string> {
   install(doc, fakeFetch);
   table.clickOn(button);
   await flush();
-  return table.textContent;
+  return { text: table.textContent, table };
+}
+
+function findByClass(root: FakeEl, cls: string): FakeEl | null {
+  if (root.className.split(/\s+/).includes(cls)) return root;
+  for (const child of root.children) {
+    const hit = findByClass(child, cls);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 const STATUS = {
@@ -192,7 +201,7 @@ const STATUS = {
 
 describe("查看健康面板", () => {
   it("成功：渲染版本、uptime、证书、计量与 health", async () => {
-    const text = await run(installer(STATUS));
+    const { text } = await run(installer(STATUS));
 
     expect(text).toContain("节点健康");
     expect(text).toContain("0.1.9");
@@ -212,41 +221,50 @@ describe("查看健康面板", () => {
     const fakeFetch: FetchLike = async (url) =>
       url === "/ticket" ? response(TICKET) : response({ error: "unauthorized" }, 401);
 
-    const text = await run(fakeFetch);
+    const { text } = await run(fakeFetch);
 
     expect(text).toContain("票被拒绝");
     expect(text).not.toContain("连不上节点");
   });
 
-  it("网络错误：提示连不上节点，并列出三种常见原因与兜底 curl", async () => {
+  it("网络错误：先让人用 curl 分清是哪一层，并把「复制 curl」做成主按钮", async () => {
     const fakeFetch: FetchLike = async (url) => {
       if (url === "/ticket") return response(TICKET);
       throw new Error("net down");
     };
 
-    const text = await run(fakeFetch);
+    const { text, table } = await run(fakeFetch);
 
     expect(text).toContain("连不上节点");
-    expect(text).toContain("根证书");
-    expect(text).toContain("不可达");
-    expect(text).toContain("0.1.9");
-    expect(text).toContain("复制 curl");
+    // 通用说法，不绑死某个系统的终端命令。
+    expect(text).toContain("终端");
+    // 三种结果按 curl 实际会看到的先后排：能通 → 证书 → 不可达。
+    const json = text.indexOf("拿到 JSON");
+    const cert = text.indexOf("报证书错误");
+    const unreachable = text.indexOf("不可达");
+    expect(json).toBeGreaterThan(-1);
+    expect(json).toBeLessThan(cert);
+    expect(cert).toBeLessThan(unreachable);
+    expect(text).toContain("浏览器没有信任根证书");
+
+    // 这个状态下 curl 就是下一步，所以是主按钮，而不是次要按钮。
+    const primary = findByClass(table, "btn-primary");
+    expect(primary?.textContent).toBe("复制 curl");
   });
 
   it("返回体异常：200 但不是 get_status 结构", async () => {
-    const fakeFetch: FetchLike = async (url) =>
-      url === "/ticket" ? response(TICKET) : response({ junk: true });
-
-    const text = await run(fakeFetch);
+    const { text } = await run(async (url) =>
+      url === "/ticket" ? response(TICKET) : response({ junk: true }),
+    );
 
     expect(text).toContain("返回格式异常");
     expect(text).not.toContain("节点健康");
   });
 
   it("签不到票时报「无法签票」，不显示 CORS 那些猜测", async () => {
-    const fakeFetch: FetchLike = async () => response({ error: "未配置", code: "signing_key_missing" }, 503);
-
-    const text = await run(fakeFetch);
+    const { text } = await run(async () =>
+      response({ error: "未配置", code: "signing_key_missing" }, 503),
+    );
 
     expect(text).toContain("无法签票");
     expect(text).toContain("signing_key_missing");

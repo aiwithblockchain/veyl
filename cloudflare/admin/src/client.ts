@@ -105,8 +105,8 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     parent.appendChild(v);
   }
 
-  function copyButton(curl: string): El {
-    const button = make("button", "btn");
+  function copyButton(curl: string, primary?: boolean): El {
+    const button = make("button", primary ? "btn btn-primary" : "btn");
     button.setAttribute("data-copy", "");
     button.type = "button";
     button.textContent = "复制 curl";
@@ -132,27 +132,36 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     box.appendChild(line);
   }
 
+  /**
+   * 连不上时不要并列三种猜测：先让人用 curl 分清卡在哪一层，再按结果对号入座。
+   * 浏览器连不上不代表命令行连不上，所以 curl 在这个状态下就是下一步——做成主按钮。
+   */
   function failCauses(box: El, status: string, curl: string): void {
     box.textContent = "";
     const head = make("div", "panel-head");
     const heading = make("h2");
     heading.textContent = "连不上节点";
     head.appendChild(heading);
-    if (curl) head.appendChild(copyButton(curl));
+    if (curl) head.appendChild(copyButton(curl, true));
     box.appendChild(head);
 
     const line = make("p", "err");
     line.textContent = status;
     box.appendChild(line);
 
-    const list = make("ul", "causes");
-    for (const reason of [
-      "浏览器还不信任这台节点的根证书（没有安装 veyl-root-cert.pem）",
-      "节点不可达（端口没开、IP 变了、机器没起来）",
-      "节点版本低于 0.1.9，还不支持浏览器直连（CORS）",
-    ]) {
+    const lead = make("p", "note");
+    lead.textContent = "把这条 curl 复制到终端里跑一次，按结果判断卡在哪一层：";
+    box.appendChild(lead);
+
+    const outcomes: Array<[string, string]> = [
+      ["拿到 JSON", "节点和票都没问题，问题在浏览器没有信任根证书"],
+      ["报证书错误", "根证书没装好，或装了但没设为信任"],
+      ["连不上 / 超时", "节点不可达：端口、IP、机器状态都要看"],
+    ];
+    const list = make("ol", "causes");
+    for (const [when, then] of outcomes) {
       const item = make("li");
-      item.textContent = reason;
+      item.textContent = `${when} → ${then}`;
       list.appendChild(item);
     }
     box.appendChild(list);

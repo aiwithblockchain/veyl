@@ -408,15 +408,36 @@ describe("POST /ticket", () => {
     expect(body.curl).toContain(`authorization: Bearer ${body.jwt}`);
     expect(body.curl).toContain('"name":"get_status"');
 
-    // 审计只有 env 与 jti，JWT 绝不落库。
+    // 审计记 env、jti 与操作者；JWT 绝不落库。
     expect(db.audit).toHaveLength(1);
     expect(db.audit[0]).toMatchObject({
       account_id: "acct_1",
       server_id: "srv_alpha",
       action: "ops.ticket.issued",
-      detail: { env: "prod", jti: claims.jti },
+      detail: { env: "prod", jti: claims.jti, actor: EMAIL },
     });
     expect(JSON.stringify(db.audit)).not.toContain(body.jwt);
+  });
+
+  it("审计的操作者是验过的 Access 邮箱，且不含票的任何一段", async () => {
+    const db = new FakeDb();
+    db.servers.push({ ...server({ id: "srv_alpha" }), account_id: "acct_1", destroyed_at: null });
+    const jwt = await signAccessJwt({ email: "oncall@example.com" });
+
+    const res = await worker.fetch(
+      request("/ticket", { method: "POST", body: { env: "prod", server_id: "srv_alpha" }, jwt }),
+      envWith(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { jwt: string };
+
+    // actor 来自验签后的 claims，不是请求头里的自称。
+    expect(db.audit).toHaveLength(1);
+    expect(db.audit[0].detail).toMatchObject({ actor: "oncall@example.com" });
+
+    // 头、载荷、签名三段都不进审计。
+    const stored = JSON.stringify(db.audit);
+    for (const part of body.jwt.split(".")) expect(stored).not.toContain(part);
   });
 
   it("已销毁的节点拒绝签票，也不写审计", async () => {

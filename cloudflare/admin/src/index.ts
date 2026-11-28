@@ -260,7 +260,7 @@ interface TicketRow {
   control_port: number | null;
 }
 
-async function issueTicket(request: Request, env: Env): Promise<Response> {
+async function issueTicket(request: Request, env: Env, actor: string): Promise<Response> {
   let body: unknown;
   try {
     body = await request.json();
@@ -311,7 +311,8 @@ async function issueTicket(request: Request, env: Env): Promise<Response> {
     return json({ error: "签票失败", code: "sign_failed" }, 500);
   }
 
-  // 审计只记 env 与 jti；JWT 本身绝不落库、绝不进日志。
+  // 审计记 env、jti 与操作者邮箱（已经过 Access 验签，不是请求头里的自称）；
+  // JWT 本身绝不落库、绝不进日志。
   try {
     await db
       .prepare(
@@ -322,7 +323,7 @@ async function issueTicket(request: Request, env: Env): Promise<Response> {
         row.account_id,
         row.id,
         "ops.ticket.issued",
-        JSON.stringify({ env: envName, jti: ticket.jti }),
+        JSON.stringify({ env: envName, jti: ticket.jti, actor }),
       )
       .run();
   } catch (error) {
@@ -357,7 +358,7 @@ export default {
     }
 
     if (pathname === "/ticket" && method === "POST") {
-      return issueTicket(request, env);
+      return issueTicket(request, env, email);
     }
 
     return new Response("Not Found", { status: 404, headers: baseHeaders() });
