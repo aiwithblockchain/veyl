@@ -13,6 +13,8 @@
 
 TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Release → 由 Cloudflare Worker 返回 `latest.json` 清单 → 客户端按清单校验并安装。**但交互不要照搬**：它是在用户点「更新」之后调用 `download_and_install` 并立即重启；Veyl 要的是「后台先下完，再问用户要不要重启」。
 
+提示位置已定（2026-11-28）：**左下角设置按钮的圆点 + 连接界面顶部的提示条**；下载完成前完全静默；不提供「跳过这个版本」；发布先在 dev 环境验证，成功后再发 prod。
+
 **前置阻塞**：macOS 必须先解决签名与公证（1.1.0 公证失败、官网下载仍 404）。没有公证，更新包装不上，自动升级无从谈起。
 
 ---
@@ -37,6 +39,9 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 | 6 | staging 构建只连 staging 清单，生产构建只连生产清单 |
 | 7 | 签名校验失败必须拒绝安装并记录；私钥不进仓库、不进日志 |
 | 8 | 下载地址只用自有域名，不出现 `workers.dev` |
+| 9 | 提示只出现在两处：设置按钮的圆点 + 连接界面顶部的提示条；**下载完成前完全静默** |
+| 10 | 不提供「跳过这个版本」；「稍后」只收起提示，圆点保留，下次启动仍提示 |
+| 11 | 发布顺序固定：先在 dev 环境完成升级验证，成功后再发 prod |
 
 ---
 
@@ -50,6 +55,17 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 | `/Users/wesley/ai/TweetPilot/src-tauri/src/commands/updater.rs` | 启动 10 秒后检查、`app-update-available` / 进度事件、按 feature/环境切换端点 | **交互不同**：它 `download_and_install` 后立刻 `app.restart()`；我们要拆成「先下载、后安装」 |
 | `/Users/wesley/ai/TweetPilot/src-tauri/tauri.conf.json` | `plugins.updater`：`endpoints`、`dialog: false`、`pubkey` | 公钥入库，私钥只在本机 keychain / CI secret |
 | TweetPilot 的 license-worker updater 路由 | `/v1/update/latest` 返回清单、下载走 Worker 代理 | Veyl 用控制面 Worker，域名用自己的 |
+
+**参考文件绝对路径与看哪里**（实现时逐个打开对照）：
+
+| 绝对路径 | 看什么 |
+|---|---|
+| `/Users/wesley/ai/TweetPilot/scripts/release.sh` | `[1/3]` 构建签名包（`--bundles app,updater`）、`[3/3]` 上传 `.tar.gz` + `.sig` |
+| `/Users/wesley/ai/TweetPilot/scripts/release-windows.ps1` | 同样的签名环境变量处理；NSIS 产物优先 |
+| `/Users/wesley/ai/TweetPilot/scripts/assemble-update-manifest.py` | `--env prod` 时双平台资产缺一即中止；从 Release 读 `.sig` 组装清单 |
+| `/Users/wesley/ai/TweetPilot/src-tauri/src/commands/updater.rs` | `start_update_check`（10 秒后检查）、`check_for_update`（事件）、`install_update`（下载+安装+重启，**我们要拆开**）、`update_endpoint()`（staging/prod 切换） |
+| `/Users/wesley/ai/TweetPilot/src-tauri/tauri.conf.json` | `plugins.updater`：`endpoints` / `dialog: false` / `pubkey` |
+| `/Users/wesley/ai/TweetPilot/cloudflare/license-worker/src/routes/updater.ts` | `latest.json` 的字段形状与下载路由；Veyl 照此在控制面 Worker 实现 |
 
 **不复用**：TweetPilot 的 license / 会话类型 / 定时器体系；Veyl 只需要「启动检查 + 手动检查」两个触发点，不要引入整套 license 轮询。
 
@@ -100,8 +116,8 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 状态机：`idle → checking → downloading → ready → installing`
 
 1. 启动后 **10 秒**触发一次检查（`std::thread`/async spawn，不阻塞 UI；失败只记日志，不弹窗）。
-2. 检查到新版本 → 立刻后台 `update.download(...)` 下载，发 `app-update-progress` 事件（约每 100ms 一次或按百分比节流）。
-3. 下载完成 → 把字节留在内存（或临时文件）→ 发 `app-update-ready { version, notes, size }`。
+2. 检查到新版本 → 立刻后台 `update.download(...)` 下载，发 `app-update-progress` 事件（约每 100ms 一次或按百分比节流）。**下载完成之前，界面上不出现任何更新提示，设置按钮也不加圆点**——静默下载就是彻底静默。
+3. 下载完成 → 把字节留在内存（或临时文件）→ 发 `app-update-ready { version, notes, size }`，此时才出现提示。
 4. 用户在 UI 点「重启并更新」→ 调用 `app_update_install` 命令：`update.install(bytes)` → `app.restart()`。
 5. 用户忽略 → 状态保持 `ready`，本次进程内不再重复下载；下次启动重新检查。
 
@@ -115,7 +131,12 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 ### 4.4 前端
 
 - 全局状态：`{ status: idle|checking|downloading|ready|installing, version?, notes?, percent?, error? }`。
-- 提示位置（**待产品定**，见 §8）：最低要求是非模态、可忽略、只有一个主动作「重启并更新」，并写明会断开当前连接。
+- **提示位置（2026-11-28 已定）**，只放两处：
+  1. **左下角 activity bar 的设置按钮**（`aria-label = activity.settings`，齿轮）：下载就绪后在这里加一个圆点，复用现有 `activity__dot` 样式；点进设置后，设置 › 高级 › 版本行显示「新版本已就绪 · 重启并更新」。
+  2. **连接界面的顶部**：在顶部状态区（主按钮那一行）下方给一条非模态提示条，文案说明新版本已下载完成，两个动作——`重启并更新`（主）与 `稍后`（次）；写明「重启会断开当前连接」。
+- **不能跳过版本**：不提供「跳过这个版本」。「稍后」只收起提示条与连接页横幅，设置按钮的圆点保留；下次启动仍会检查并提示。
+- 下载完成前，这两处都不出现任何提示。
+- 提示出现后即使用户关掉，状态保留；再次打开应用若仍是同一版本，重新检查。
 - 设置 › 高级 › 版本行：显示当前版本；「检查更新」按钮；已就绪时显示「重启并更新」。
 - 下载完成后即使用户关掉提示，状态仍保留；再次打开应用若仍是同一版本，重新检查。
 - AI **没有**升级入口：不在工具集里加任何「升级应用」工具，也不要在对话里承诺替用户升级。
@@ -140,7 +161,7 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
    - 生成 `latest.json`、部署 Worker（或写入 Pages）。
 4. `scripts/release/update-site.mjs` 继续维护官网下载区，不动。
 5. 版本号三处必须一致：`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`（现有 release.sh 已检查，沿用）。
-6. 发布顺序：**先 staging 双平台 → 真机升级验证 → 再 prod**；prod 每次保留上一版安装包，便于回滚。
+6. 发布顺序（2026-11-28 已定）：**先在 dev 环境做完整升级测试，成功后再发 prod**。具体为：staging 双平台资产 → 指 dev 清单真机升级验证（下载、提示、重启、版本变化）→ 通过后才组装 prod 清单并发布。prod 每次保留上一版安装包，便于回滚。
 
 ---
 
@@ -154,6 +175,9 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 - 忽略提示后重启应用：若仍未升级，再次提示；不会重复下载第二个副本。
 - staging 构建：只连 staging 清单；生产构建：只连生产清单。
 - 私钥：`git grep` 不到；日志里没有；CI 里只以 secret 形式存在。
+- 提示位置：只在设置按钮（圆点）与连接界面顶部（提示条）出现；下载过程中两处都没有提示。
+- 点「稍后」：提示条收起、圆点保留；重启应用后仍会提示；界面里没有「跳过这个版本」。
+- 发布流程：dev 清单升级验证通过后才允许发 prod（清单脚本对 prod 校验双平台齐全）。
 
 ---
 
@@ -171,12 +195,14 @@ TweetPilot 的管线可以直接复用：更新包签名 → 上传到 GitHub Re
 
 ---
 
-## 8. 待产品拍板
+## 8. 已定的产品口径（2026-11-28）
 
-1. 提示放在哪里：应用内顶部横幅 / 账户弹层 / 只放设置行（建议非模态横幅 + 设置行兜底）。
-2. 是否提供「跳过这个版本」（建议先不做，保持简单）。
-3. 是否对 dev 构建也开自动检查（建议只在不连生产端点的前提下开）。
-4. 更新期间正在连接：只提示「会断开」，不阻止更新（建议）。
+1. 提示只放两处：设置按钮圆点 + 连接界面的顶部提示条；下载完成前完全静默。
+2. 不能跳过版本；只有「稍后」，圆点保留。
+3. 先 dev 测试，成功后再 prod。
+4. 更新期间正在连接：只提示「会断开」，不阻止更新。
+
+仍待定（非产品口径，实现时处理）：Windows 代码签名是否购买、是否做差分更新（tauri 默认整包，建议先不做）。
 
 ---
 
