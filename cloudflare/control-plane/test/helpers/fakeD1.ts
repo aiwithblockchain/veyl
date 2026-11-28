@@ -526,6 +526,15 @@ export class FakeD1 {
       );
       return null;
     }
+    if (sql.startsWith("delete from audit_log where id in")) {
+      // 运维审计保留期：只删 `ops.*` 且超龄的行，业务审计同岁也不动。
+      const [cutoff, limit] = a;
+      const victims = this.tables.audit_log
+        .filter((row) => String(row.action).startsWith("ops.") && Number(row.at) < Number(cutoff))
+        .slice(0, Number(limit));
+      this.tables.audit_log = this.tables.audit_log.filter((row) => !victims.includes(row));
+      return null;
+    }
     if (sql.startsWith("select status, kind, merged_into from accounts")) {
       const account = this.tables.accounts.find((x) => x.id === a[0]);
       return account ? { status: account.status, kind: account.kind, merged_into: account.merged_into } : null;
@@ -2553,8 +2562,16 @@ export class FakeStatement {
             (Number(row.attempts) < Number(max) && Number(row.expires_at) > Number(expiresAt))
           ? 1
           : 0;
-    } else if (sql.startsWith("delete from refresh_tokens") || sql.startsWith("delete from accounts where id in")) {
-      const table = sql.includes("refresh_tokens") ? "refresh_tokens" : "accounts";
+    } else if (
+      sql.startsWith("delete from refresh_tokens") ||
+      sql.startsWith("delete from accounts where id in") ||
+      sql.startsWith("delete from audit_log where id in")
+    ) {
+      const table = sql.includes("refresh_tokens")
+        ? "refresh_tokens"
+        : sql.includes("audit_log")
+          ? "audit_log"
+          : "accounts";
       const before = this.db.rows(table).length;
       this.db.exec(this.statement);
       return { success: true, meta: { changes: before - this.db.rows(table).length } };

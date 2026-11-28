@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pruneDestroyedServers, pruneServerTraffic, runBilling } from "../src/billing";
+import { pruneDestroyedServers, pruneOpsAudit, pruneServerTraffic, runBilling } from "../src/billing";
 import { openMigratedDb, sqliteAvailable, type SqliteD1 } from "./helpers/sqliteD1";
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -33,6 +33,14 @@ function addTraffic(
     cycleId,
     seq,
     updatedAt,
+  );
+}
+
+function addAudit(db: SqliteD1, action: string, at: number): void {
+  db.run(
+    "INSERT INTO audit_log (at, account_id, action, detail) VALUES (?, 'acct_sql', ?, '{}')",
+    at,
+    action,
   );
 }
 
@@ -161,6 +169,31 @@ describeSqlite("保留清理 · 真实 SQL（node:sqlite + 全部迁移）", () 
     }
   });
 
+  it("运维审计只删 ops.* 且超过 12 个月；业务审计与 11 个月前的运维审计保留", async () => {
+    const db = await openMigratedDb();
+    try {
+      addAudit(db, "ops.ticket.issued", NOW - 400 * DAY_MS);
+      addAudit(db, "ops.ticket.issued", NOW - 400 * DAY_MS);
+      addAudit(db, "ops.status.read", NOW - 400 * DAY_MS);
+      addAudit(db, "ops.ticket.issued", NOW - 330 * DAY_MS);
+      addAudit(db, "enroll.ok", NOW - 400 * DAY_MS);
+      addAudit(db, "settle.ok", NOW - 400 * DAY_MS);
+      addAudit(db, "destroy.ok", NOW - 400 * DAY_MS);
+
+      expect(await pruneOpsAudit(envWith(db), NOW)).toBe(3);
+
+      const left = db.rows<{ action: string }>("SELECT action FROM audit_log ORDER BY id");
+      expect(left.map((row) => row.action)).toEqual([
+        "ops.ticket.issued",
+        "enroll.ok",
+        "settle.ok",
+        "destroy.ok",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("接线与分页：runBilling 报告清理数量，超过一批的数据能删干净", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
@@ -177,12 +210,19 @@ describeSqlite("保留清理 · 真实 SQL（node:sqlite + 全部迁移）", () 
       for (let index = 0; index < 120; index += 1) {
         addServer(db, `srv_d${index}`, "destroyed", NOW - 46 * DAY_MS, `ord_d${index}`, 1000 + index);
       }
+      // 运维审计：超龄的删、业务审计同岁也保留。
+      addAudit(db, "ops.ticket.issued", NOW - 400 * DAY_MS);
+      addAudit(db, "enroll.ok", NOW - 400 * DAY_MS);
       db.exec("COMMIT");
 
       const report = await runBilling(envWith(db));
 
       expect(report.trafficPruned).toBe(1100);
       expect(report.serversPruned).toBe(120);
+      expect(report.opsAuditPruned).toBe(1);
+      expect(
+        db.rows<{ action: string }>("SELECT action FROM audit_log WHERE action = 'enroll.ok'"),
+      ).toHaveLength(1);
       expect(Number(db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM servers")[0].n)).toBe(0);
       expect(
         Number(db.rows<{ n: number }>("SELECT COUNT(*) AS n FROM credentials")[0].n),

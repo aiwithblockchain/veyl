@@ -29,6 +29,9 @@ const RETENTION_MAX_PAGES = 5;
 /** 刷新令牌保留 30 天：已用过/已作废的历史只需覆盖轮换重放窗口。 */
 const TOKEN_RETENTION_MS = 30 * DAY_MS;
 const TOKEN_PRUNE_BATCH = 1000;
+/** 运维审计保留 12 个月：只针对 `ops.` 动作，业务审计（enroll / settle / destroy…）不按时间删。 */
+const OPS_AUDIT_RETENTION_MS = 365 * DAY_MS;
+const OPS_AUDIT_PRUNE_BATCH = 1000;
 /** 登出留下的匿名账户：过一天、确认没人引用才删。 */
 const ORPHAN_ACCOUNT_MIN_AGE_MS = DAY_MS;
 const ORPHAN_ACCOUNT_BATCH = 200;
@@ -89,6 +92,8 @@ export interface BillingReport {
   serversPruned: number;
   tokensPruned: number;
   accountsPruned: number;
+  /** 超过 12 个月的运维审计（`action LIKE 'ops.%'`）行。 */
+  opsAuditPruned: number;
   drift: number;
 }
 
@@ -115,7 +120,7 @@ function monthKey(at: number): string {
 }
 
 export async function runBilling(env: BillingEnv): Promise<BillingReport> {
-  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, pendingDestroyed: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, drift: 0 };
+  const report: BillingReport = { renewed: 0, unpaidDestroyed: 0, providerGone: 0, providerProbed: 0, providerUnknown: 0, providerGoneActive: 0, pastDue: 0, expired: 0, rebuilt: 0, refunded: 0, reaped: 0, settleReaped: 0, creatingReaped: 0, destroyingRecovered: 0, pendingDestroyed: 0, archived: 0, trafficPruned: 0, serversPruned: 0, tokensPruned: 0, accountsPruned: 0, opsAuditPruned: 0, drift: 0 };
   const db = env.DB;
   if (!db) return report;
 
@@ -246,6 +251,7 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   report.serversPruned = await pruneDestroyedServers(env, now);
   report.tokensPruned = await pruneRefreshTokens(env, now);
   report.accountsPruned = await pruneOrphanAccounts(env, now);
+  report.opsAuditPruned = await pruneOpsAudit(env, now);
   // 事故可见性：`providerGone` 只记本轮新增，事故过去后就看不出冻了多少台。
   // 只读计数，查失败不影响这一轮计费。
   try {
@@ -927,6 +933,35 @@ async function pruneOrphanAccounts(env: BillingEnv, now: number): Promise<number
     console.error(`[billing] account_prune_failed error=${String(error)}`);
     return 0;
   }
+}
+
+/**
+ * 运维审计保留 12 个月：只删 `action LIKE 'ops.%'` 且超龄的行。
+ * **绝不能按时间删整表**——enroll / settle / destroy 这类业务审计要长期留着。
+ * 将来审计迁到独立的运维库时，这个函数跟着换表，保留期不变。
+ */
+export async function pruneOpsAudit(env: BillingEnv, now: number): Promise<number> {
+  const db = env.DB;
+  if (!db) return 0;
+  const cutoff = now - OPS_AUDIT_RETENTION_MS;
+  let pruned = 0;
+  try {
+    for (let page = 0; page < RETENTION_MAX_PAGES; page += 1) {
+      const deleted = await db
+        .prepare(
+          "DELETE FROM audit_log WHERE id IN (" +
+            "SELECT id FROM audit_log WHERE action LIKE 'ops.%' AND at < ? LIMIT ?)",
+        )
+        .bind(cutoff, OPS_AUDIT_PRUNE_BATCH)
+        .run();
+      const changes = Number((deleted as { meta?: { changes?: number } }).meta?.changes ?? 0);
+      pruned += changes;
+      if (changes < OPS_AUDIT_PRUNE_BATCH) break;
+    }
+  } catch (error) {
+    console.error(`[billing] audit_prune_failed error=${String(error)}`);
+  }
+  return pruned;
 }
 
 /**
