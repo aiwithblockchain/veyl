@@ -245,7 +245,10 @@ describe("查看健康面板", () => {
     expect(json).toBeGreaterThan(-1);
     expect(json).toBeLessThan(cert);
     expect(cert).toBeLessThan(unreachable);
-    expect(text).toContain("浏览器没有信任根证书");
+    expect(text).toContain("浏览器这一侧");
+    // curl 通了但页面失败，根证书与「旧节点没有 CORS」在 fetch 里是同一个 TypeError，文案不能二选一。
+    expect(text).toContain("低于 0.1.9");
+    expect(text).toContain("跨域");
 
     // 这个状态下 curl 就是下一步，所以是主按钮，而不是次要按钮。
     const primary = findByClass(table, "btn-primary");

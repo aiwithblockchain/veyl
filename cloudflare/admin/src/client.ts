@@ -154,7 +154,10 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     box.appendChild(lead);
 
     const outcomes: Array<[string, string]> = [
-      ["拿到 JSON", "节点和票都没问题，问题在浏览器没有信任根证书"],
+      [
+        "拿到 JSON",
+        "节点和票都没问题，问题在浏览器这一侧：可能是根证书未信任，也可能是节点版本低于 0.1.9（没有跨域）；仍失败就看控制台的具体报错",
+      ],
       ["报证书错误", "根证书没装好，或装了但没设为信任"],
       ["连不上 / 超时", "节点不可达：端口、IP、机器状态都要看"],
     ];

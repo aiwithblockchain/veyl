@@ -153,8 +153,11 @@ function envWith(prod: FakeDb, dev: FakeDb = new FakeDb()): Env {
   };
 }
 
-function request(path: string, init: { method?: string; body?: unknown; jwt?: string } = {}): Request {
-  const headers: Record<string, string> = {};
+function request(
+  path: string,
+  init: { method?: string; body?: unknown; jwt?: string; headers?: Record<string, string> } = {},
+): Request {
+  const headers: Record<string, string> = { ...init.headers };
   if (init.jwt !== undefined) headers["cf-access-jwt-assertion"] = init.jwt;
   if (init.body !== undefined) headers["content-type"] = "application/json";
   return new Request(`https://admin.test${path}`, {
@@ -438,6 +441,30 @@ describe("POST /ticket", () => {
     // 头、载荷、签名三段都不进审计。
     const stored = JSON.stringify(db.audit);
     for (const part of body.jwt.split(".")) expect(stored).not.toContain(part);
+  });
+
+  it("伪造的 Actor 头无效：审计里的 actor 只认验签后的邮箱", async () => {
+    const db = new FakeDb();
+    db.servers.push({ ...server({ id: "srv_alpha" }), account_id: "acct_1", destroyed_at: null });
+
+    const res = await worker.fetch(
+      request("/ticket", {
+        method: "POST",
+        body: { env: "prod", server_id: "srv_alpha" },
+        jwt: await signAccessJwt(),
+        // 客户端可以随便带这类自称头；它们不是身份来源。
+        headers: {
+          "x-actor": "someone@evil.example",
+          "x-authenticated-user-email": "someone@evil.example",
+        },
+      }),
+      envWith(db),
+    );
+    expect(res.status).toBe(200);
+
+    expect(db.audit).toHaveLength(1);
+    expect(db.audit[0].detail).toMatchObject({ actor: EMAIL });
+    expect(JSON.stringify(db.audit)).not.toContain("evil.example");
   });
 
   it("已销毁的节点拒绝签票，也不写审计", async () => {
