@@ -44,7 +44,6 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
 
   type El = ClientElement & {
     _veylPanel?: El;
-    _veylCurl?: string;
   };
 
   function make(tag: string, cls?: string): El {
@@ -136,27 +135,12 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     return { text: state, missing: false };
   }
 
-  function copyButton(curl: string, primary?: boolean): El {
-    const button = make("button", primary ? "btn btn-primary" : "btn");
-    button.setAttribute("data-copy", "");
-    button.type = "button";
-    button.textContent = "复制 curl";
-    button._veylCurl = curl;
-    if (!curl) {
-      button.disabled = true;
-      button.title = "这台节点没有 IP 或控制端口";
-    }
-    return button;
-  }
-
-  /** 出错时也保留「复制 curl」：浏览器连不上不代表命令行连不上（通常是根证书没被信任）。 */
-  function fail(box: El, title: string, detail: string, curl: string): void {
+  function fail(box: El, title: string, detail: string): void {
     box.textContent = "";
     const head = make("div", "panel-head");
     const heading = make("h2");
     heading.textContent = title;
     head.appendChild(heading);
-    if (curl) head.appendChild(copyButton(curl));
     box.appendChild(head);
     const line = make("p", "err");
     line.textContent = detail;
@@ -164,16 +148,15 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
   }
 
   /**
-   * 连不上时不要并列三种猜测：先让人用 curl 分清卡在哪一层，再按结果对号入座。
-   * 浏览器连不上不代表命令行连不上，所以 curl 在这个状态下就是下一步——做成主按钮。
+   * 连不上时只说明浏览器这一侧能查的原因。访问节点必须持票，这条路径就是给浏览器用的，
+   * 不再提供绕开浏览器的命令。
    */
-  function failCauses(box: El, status: string, curl: string): void {
+  function failCauses(box: El, status: string): void {
     box.textContent = "";
     const head = make("div", "panel-head");
     const heading = make("h2");
     heading.textContent = "连不上节点";
     head.appendChild(heading);
-    if (curl) head.appendChild(copyButton(curl, true));
     box.appendChild(head);
 
     const line = make("p", "err");
@@ -181,24 +164,9 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     box.appendChild(line);
 
     const lead = make("p", "note");
-    lead.textContent = "把这条 curl 复制到终端里跑一次，按结果判断卡在哪一层：";
+    lead.textContent =
+      "常见原因是浏览器还不信任这台节点的根证书，或节点版本低于 0.1.9（没有跨域）。也可能是节点暂时不可达，可以稍后重试。";
     box.appendChild(lead);
-
-    const outcomes: Array<[string, string]> = [
-      [
-        "拿到 JSON",
-        "节点和票都没问题，问题在浏览器这一侧：可能是根证书未信任，也可能是节点版本低于 0.1.9（没有跨域）；仍失败就看控制台的具体报错",
-      ],
-      ["报证书错误", "根证书没装好，或装了但没设为信任"],
-      ["连不上 / 超时", "节点不可达：端口、IP、机器状态都要看"],
-    ];
-    const list = make("ol", "causes");
-    for (const [when, then] of outcomes) {
-      const item = make("li");
-      item.textContent = `${when} → ${then}`;
-      list.appendChild(item);
-    }
-    box.appendChild(list);
   }
 
   interface StatusPayload {
@@ -212,13 +180,12 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     health?: unknown;
   }
 
-  function renderStatus(box: El, payload: StatusPayload, curl: string): void {
+  function renderStatus(box: El, payload: StatusPayload): void {
     box.textContent = "";
     const head = make("div", "panel-head");
     const heading = make("h2");
     heading.textContent = "节点健康";
     head.appendChild(heading);
-    head.appendChild(copyButton(curl));
     box.appendChild(head);
 
     const unixNow = typeof payload.now === "number" ? payload.now : Math.floor(Date.now() / 1000);
@@ -359,7 +326,7 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     ticket
       .then((issued) => {
         if (!issued) {
-          fail(box, "无法签票", "签票请求没有完成，稍后重试。", "");
+          fail(box, "无法签票", "签票请求没有完成，稍后重试。");
           return;
         }
         if (!issued.ok) {
@@ -367,14 +334,12 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
             issued.body && typeof (issued.body as { code?: unknown }).code === "string"
               ? (issued.body as { code: string }).code
               : `HTTP ${issued.status}`;
-          fail(box, "无法签票", `签票接口返回 ${code}。`, "");
+          fail(box, "无法签票", `签票接口返回 ${code}。`);
           return;
         }
         const jwt = (issued.body as { jwt?: unknown } | null)?.jwt;
-        const curl = (issued.body as { curl?: unknown } | null)?.curl;
-        const curlText = typeof curl === "string" ? curl : "";
         if (typeof jwt !== "string" || !jwt) {
-          fail(box, "无法签票", "签票接口没有返回票。", curlText);
+          fail(box, "无法签票", "签票接口没有返回票。");
           return;
         }
 
@@ -414,26 +379,25 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
                 timedOut
                   ? `请求在 ${TIMEOUT_MS / 1000} 秒内没有完成。`
                   : "浏览器没有拿到响应（连接被拒绝或证书不被信任）。",
-                curlText,
               );
               return;
             }
             if (reply.status === 401) {
-              fail(box, "票被拒绝", "节点不认这张票：多半是它还没有拿到运维公钥，或票已过期。", curlText);
+              fail(box, "票被拒绝", "节点不认这张票：多半是它还没有拿到运维公钥，或票已过期。");
               return;
             }
             if (reply.status !== 200) {
-              failCauses(box, `节点返回 HTTP ${reply.status}。`, curlText);
+              fail(box, "节点返回异常", `节点返回 HTTP ${reply.status}，稍后重试。`);
               return;
             }
             let payload: StatusPayload;
             try {
               payload = parseStatus(reply.body);
             } catch {
-              fail(box, "返回格式异常", "节点回了 200，但内容不是 get_status 的结构。", curlText);
+              fail(box, "返回格式异常", "节点回了 200，但内容不是 get_status 的结构。");
               return;
             }
-            renderStatus(box, payload, curlText);
+            renderStatus(box, payload);
           });
       })
       .then(
@@ -446,40 +410,7 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
       );
   }
 
-  function copy(text: string, button: El): void {
-    const done = (): void => {
-      button.textContent = "已复制";
-      setTimeout(() => {
-        button.textContent = "复制 curl";
-      }, 1500);
-    };
-    const nav = (typeof navigator !== "undefined" ? navigator : undefined) as
-      | { clipboard?: { writeText(text: string): Promise<void> } }
-      | undefined;
-    const clipboard = nav ? nav.clipboard : undefined;
-    if (clipboard && typeof clipboard.writeText === "function") {
-      clipboard.writeText(text).then(done, () => {
-        button.textContent = "复制失败";
-        setTimeout(() => {
-          button.textContent = "复制 curl";
-        }, 1500);
-      });
-      return;
-    }
-    button.textContent = "复制失败";
-    setTimeout(() => {
-      button.textContent = "复制 curl";
-    }, 1500);
-  }
-
   table.addEventListener("click", (event) => {
-    const copyTarget = walk(event.target, (el) => el.getAttribute("data-copy") !== null);
-    if (copyTarget) {
-      const curl = copyTarget._veylCurl ?? "";
-      if (curl) copy(curl, copyTarget);
-      return;
-    }
-
     const button = walk(event.target, (el) => el.getAttribute("data-health") !== null);
     if (!button || button.disabled) return;
     const owner = walk(button, (el) => el.tagName === "TR");

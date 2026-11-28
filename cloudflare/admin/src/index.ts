@@ -12,7 +12,7 @@ import {
   type LabelledServer,
   type ServerRow,
 } from "./render";
-import { buildCurl, signOpsTicket } from "./ticket";
+import { signOpsTicket } from "./ticket";
 
 export interface Env {
   ACCESS_TEAM_DOMAIN?: string;
@@ -258,8 +258,6 @@ interface TicketRow {
   account_id: string;
   ip: string | null;
   control_port: number | null;
-  /** 签发时下发的统一根证书，用来把复制出来的命令做成自包含的。老节点可能为空。 */
-  ca_pem: string | null;
 }
 
 async function issueTicket(request: Request, env: Env, actor: string): Promise<Response> {
@@ -285,7 +283,7 @@ async function issueTicket(request: Request, env: Env, actor: string): Promise<R
   try {
     row = await db
       .prepare(
-        "SELECT id, account_id, ip, control_port, ca_pem FROM servers WHERE id = ? AND destroyed_at IS NULL",
+        "SELECT id, account_id, ip, control_port FROM servers WHERE id = ? AND destroyed_at IS NULL",
       )
       .bind(serverId)
       .first<TicketRow>();
@@ -333,11 +331,7 @@ async function issueTicket(request: Request, env: Env, actor: string): Promise<R
     return json({ error: "审计写入失败，票未下发", code: "audit_failed" }, 500);
   }
 
-  const curl =
-    row.ip && row.control_port !== null
-      ? buildCurl(row.ip, row.control_port, ticket.jwt, row.ca_pem)
-      : "";
-  return json({ jwt: ticket.jwt, curl, exp: ticket.exp });
+  return json({ jwt: ticket.jwt, exp: ticket.exp });
 }
 
 export default {

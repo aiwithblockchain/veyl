@@ -13,12 +13,6 @@ const KID = "test-kid";
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
-const CA_PEM = [
-  "-----BEGIN CERTIFICATE-----",
-  "MIIBszCCAVmgAwIBAgIUY2Fub25pY2FsLXRlc3Qtcm9vdA==",
-  "-----END CERTIFICATE-----",
-].join("\n");
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -75,9 +69,7 @@ interface AuditRow {
 
 /** 只实现这个 worker 会发的那三条语句；遇到别的语句直接抛，避免测试悄悄走错分支。 */
 class FakeDb {
-  servers: Array<
-    ServerRow & { account_id: string; destroyed_at: number | null; ca_pem?: string | null }
-  > = [];
+  servers: Array<ServerRow & { account_id: string; destroyed_at: number | null }> = [];
   audit: AuditRow[] = [];
 
   prepare(sql: string) {
@@ -105,7 +97,6 @@ class FakeDb {
             account_id: row.account_id,
             ip: row.ip,
             control_port: row.control_port,
-            ca_pem: row.ca_pem ?? null,
           };
         }
         throw new Error(`unexpected first(): ${norm}`);
@@ -390,7 +381,7 @@ describe("POST /ticket", () => {
       envWith(db),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { jwt: string; curl: string; exp: number };
+    const body = (await res.json()) as { jwt: string; exp: number };
 
     const [headerPart, payloadPart, signaturePart] = body.jwt.split(".");
     expect(decodePart<{ alg: string }>(headerPart)).toMatchObject({ alg: "EdDSA", typ: "JWT" });
@@ -414,12 +405,6 @@ describe("POST /ticket", () => {
     );
     expect(valid).toBe(true);
 
-    // curl 指向 MCP、带根证书与 get_status。
-    expect(body.curl).toContain("https://203.0.113.7:32100/mcp");
-    expect(body.curl).toContain("--cacert veyl-root-cert.pem");
-    expect(body.curl).toContain(`authorization: Bearer ${body.jwt}`);
-    expect(body.curl).toContain('"name":"get_status"');
-
     // 审计记 env、jti 与操作者；JWT 绝不落库。
     expect(db.audit).toHaveLength(1);
     expect(db.audit[0]).toMatchObject({
@@ -429,65 +414,6 @@ describe("POST /ticket", () => {
       detail: { env: "prod", jti: claims.jti, actor: EMAIL },
     });
     expect(JSON.stringify(db.audit)).not.toContain(body.jwt);
-  });
-
-  it("复制内容自带根证书：先写 PEM 到临时文件，再 curl 那个文件", async () => {
-    const db = new FakeDb();
-    db.servers.push({
-      ...server({ id: "srv_alpha" }),
-      account_id: "acct_1",
-      destroyed_at: null,
-      ca_pem: CA_PEM,
-    });
-
-    const res = await worker.fetch(
-      request("/ticket", {
-        method: "POST",
-        body: { env: "prod", server_id: "srv_alpha" },
-        jwt: await signAccessJwt(),
-      }),
-      envWith(db),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { curl: string };
-
-    // 顺序必须先是写证书、再是 curl；否则粘进终端第一行就找不到文件。
-    const heredocAt = body.curl.indexOf("cat > /tmp/veyl-root.pem <<'PEM'");
-    const beginAt = body.curl.indexOf("-----BEGIN CERTIFICATE-----");
-    const curlAt = body.curl.indexOf("curl -sS --cacert /tmp/veyl-root.pem");
-    expect(heredocAt).toBe(0);
-    expect(beginAt).toBeGreaterThan(heredocAt);
-    expect(curlAt).toBeGreaterThan(beginAt);
-    expect(body.curl).toContain(`\nPEM\ncurl -sS`);
-
-    // 证书原文原样进剪贴板，不做转义；也不依赖本机已有的文件名。
-    expect(body.curl).toContain(CA_PEM);
-    expect(body.curl).not.toContain("--cacert veyl-root-cert.pem");
-  });
-
-  it("没有 ca_pem 的老节点：不生成 PEM 段，仍退回原来的命令", async () => {
-    const db = new FakeDb();
-    db.servers.push({
-      ...server({ id: "srv_alpha" }),
-      account_id: "acct_1",
-      destroyed_at: null,
-      ca_pem: null,
-    });
-
-    const res = await worker.fetch(
-      request("/ticket", {
-        method: "POST",
-        body: { env: "prod", server_id: "srv_alpha" },
-        jwt: await signAccessJwt(),
-      }),
-      envWith(db),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { curl: string };
-
-    expect(body.curl).not.toContain("cat >");
-    expect(body.curl).not.toContain("PEM");
-    expect(body.curl).toContain("curl -sS --cacert veyl-root-cert.pem");
   });
 
   it("审计的操作者是验过的 Access 邮箱，且不含票的任何一段", async () => {

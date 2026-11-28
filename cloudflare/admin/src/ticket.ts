@@ -53,32 +53,3 @@ export async function signOpsTicket(
   );
   return { jwt: `${header}.${payload}.${b64u(signature)}`, jti, exp };
 }
-
-/**
- * 给运维直接粘贴的命令。信任锚是统一根证书；直接把 cert 文件路径写进命令的话，
- * 本机删过根证书就会 `curl: (77) CAfile`。所以有 ca_pem 时先把它写进临时文件
- * （heredoc 用带引号的结束符，内容原样不展开），再让 curl 指向那里；
- * 老节点没存 ca_pem 时退回原来的写法。
- */
-export function buildCurl(ip: string, port: number, jwt: string, caPem: string | null): string {
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "tools/call",
-    params: { name: "get_status", arguments: {} },
-  });
-  const pem = (caPem ?? "").trim();
-  const lines: string[] = [];
-  if (pem) {
-    lines.push("cat > /tmp/veyl-root.pem <<'PEM'", pem, "PEM");
-  }
-  lines.push(
-    `curl -sS --cacert ${pem ? "/tmp/veyl-root.pem" : "veyl-root-cert.pem"} \\`,
-    "  -H 'content-type: application/json' \\",
-    "  -H 'accept: application/json, text/event-stream' \\",
-    `  -H 'authorization: Bearer ${jwt}' \\`,
-    `  -d '${body}' \\`,
-    `  https://${ip}:${port}/mcp`,
-  );
-  return lines.join("\n");
-}

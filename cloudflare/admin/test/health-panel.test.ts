@@ -108,7 +108,7 @@ function response(body: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
-const TICKET = { jwt: "tkt_value", curl: "curl -sS --cacert veyl-root-cert.pem ..." };
+const TICKET = { jwt: "tkt_value" };
 
 function installer(status: unknown) {
   const nodeBody = {
@@ -159,7 +159,7 @@ function clientScript(): string {
   return html.slice(html.indexOf(">", open) + 1, html.indexOf("</script>", open));
 }
 
-async function run(fakeFetch: FetchLike): Promise<{ text: string; table: FakeEl }> {
+async function run(fakeFetch: FetchLike): Promise<{ text: string }> {
   const { doc, table, button } = page();
   const install = new Function("document", "fetch", clientScript()) as (
     doc: ClientDocument,
@@ -168,16 +168,7 @@ async function run(fakeFetch: FetchLike): Promise<{ text: string; table: FakeEl 
   install(doc, fakeFetch);
   table.clickOn(button);
   await flush();
-  return { text: table.textContent, table };
-}
-
-function findByClass(root: FakeEl, cls: string): FakeEl | null {
-  if (root.className.split(/\s+/).includes(cls)) return root;
-  for (const child of root.children) {
-    const hit = findByClass(child, cls);
-    if (hit) return hit;
-  }
-  return null;
+  return { text: table.textContent };
 }
 
 const STATUS = {
@@ -222,7 +213,8 @@ describe("查看健康面板", () => {
     expect(text).toContain("上报控制面");
     expect(text).toContain("正常 · 18 秒前");
 
-    expect(text).toContain("复制 curl");
+    // 面板里不再有任何手动执行的命令或复制入口。
+    expect(text).not.toContain("复制");
     // 票不进页面文本。
     expect(text).not.toContain("tkt_value");
 
@@ -280,32 +272,23 @@ describe("查看健康面板", () => {
     expect(text).not.toContain("连不上节点");
   });
 
-  it("网络错误：先让人用 curl 分清是哪一层，并把「复制 curl」做成主按钮", async () => {
+  it("网络错误：说明浏览器这一侧的常见原因，并提示可以重试", async () => {
     const fakeFetch: FetchLike = async (url) => {
       if (url === "/ticket") return response(TICKET);
       throw new Error("net down");
     };
 
-    const { text, table } = await run(fakeFetch);
+    const { text } = await run(fakeFetch);
 
     expect(text).toContain("连不上节点");
-    // 通用说法，不绑死某个系统的终端命令。
-    expect(text).toContain("终端");
-    // 三种结果按 curl 实际会看到的先后排：能通 → 证书 → 不可达。
-    const json = text.indexOf("拿到 JSON");
-    const cert = text.indexOf("报证书错误");
-    const unreachable = text.indexOf("不可达");
-    expect(json).toBeGreaterThan(-1);
-    expect(json).toBeLessThan(cert);
-    expect(cert).toBeLessThan(unreachable);
-    expect(text).toContain("浏览器这一侧");
-    // curl 通了但页面失败，根证书与「旧节点没有 CORS」在 fetch 里是同一个 TypeError，文案不能二选一。
-    expect(text).toContain("低于 0.1.9");
+    expect(text).toContain("根证书");
+    // 命令行能通但页面失败时，根证书与「旧节点没有跨域」在 fetch 里是同一个 TypeError，文案不能二选一。
+    expect(text).toContain("0.1.9");
     expect(text).toContain("跨域");
-
-    // 这个状态下 curl 就是下一步，所以是主按钮，而不是次要按钮。
-    const primary = findByClass(table, "btn-primary");
-    expect(primary?.textContent).toBe("复制 curl");
+    expect(text).toContain("稍后重试");
+    // 不给绕开浏览器的手动路径。
+    expect(text).not.toContain("复制");
+    expect(text).not.toContain("终端");
   });
 
   it("返回体异常：200 但不是 get_status 结构", async () => {
