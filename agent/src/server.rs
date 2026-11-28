@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -530,6 +530,62 @@ async fn auth_gate(
     resp
 }
 
+/// 运维看板是浏览器直连节点，所以必须回 CORS。只放行这一个源：精确比较，
+/// 不做前缀/正则；其他 Origin 一个头都不加（浏览器那边自然读不到响应）。
+const ADMIN_ORIGIN: &str = "https://veyl-admin.ribencong.workers.dev";
+const CORS_ALLOW_HEADERS: &str =
+    "authorization, content-type, accept, mcp-protocol-version, mcp-session-id";
+
+/// 最外层的 CORS。预检请求不带 Authorization，如果在 `auth_gate` 里处理就永远是 401，
+/// 所以 OPTIONS 必须在这里直接答掉——这是整件事唯一的顺序要求。
+///
+/// 它只加头，不放宽任何鉴权：非 OPTIONS 的请求原样交给 `auth_gate`，
+/// 没有票照样 401；允许源的 401 也会带 ACAO，浏览器才能把「没授权」读给页面。
+async fn cors(req: Request<Body>, next: Next) -> Response {
+    let allowed = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        == Some(ADMIN_ORIGIN);
+
+    if allowed && req.method() == Method::OPTIONS {
+        let mut res = Response::new(Body::empty());
+        *res.status_mut() = StatusCode::NO_CONTENT;
+        let headers = res.headers_mut();
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static(ADMIN_ORIGIN),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("POST, OPTIONS"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static(CORS_ALLOW_HEADERS),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        headers.append(header::VARY, HeaderValue::from_static("Origin"));
+        return res;
+    }
+
+    let mut res = next.run(req).await;
+    // 响应随 Origin 变化（是否带 ACAO 由它决定），缓存必须按它分键。
+    res.headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Origin"));
+    if allowed {
+        // 故意不发 Access-Control-Allow-Credentials：票走 Authorization 头，不用 cookie。
+        res.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static(ADMIN_ORIGIN),
+        );
+    }
+    res
+}
+
 pub fn mcp_router(state: Arc<ServerState>) -> Router {
     let factory_state = state.clone();
     let config = StreamableHttpServerConfig::default()
@@ -553,6 +609,8 @@ pub fn mcp_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .nest_service("/mcp", service)
         .layer(middleware::from_fn_with_state(state, auth_gate))
+        // 后加的 layer 在外层：CORS 必须先于 auth_gate 看到请求，否则预检过不去。
+        .layer(middleware::from_fn(cors))
 }
 
 pub async fn serve(
@@ -729,6 +787,196 @@ mod tests {
 
     fn ticket(signing: &ed25519_dalek::SigningKey, jti: &str, ttl: u64) -> String {
         crate::auth::mint_token(signing, "srv_1", jti, crate::auth::now_unix() + ttl)
+    }
+
+    fn preflight(origin: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header(header::ORIGIN, origin)
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "authorization")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn list_request(token: Option<&str>, origin: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header(header::ORIGIN, origin);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            ))
+            .unwrap()
+    }
+
+    fn cors_router(name: &str) -> (Router, ed25519_dalek::SigningKey) {
+        let business = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let auth = AuthState::new(business.verifying_key(), "srv_1");
+        let rotator = Arc::new(CountingRotator::default());
+        let (_dir, identity) = identity_for_status(name);
+        let state = ServerState::new(Arc::new(auth), rotator, Arc::new(identity), None);
+        (mcp_router(state), business)
+    }
+
+    /// 预检请求不带 Authorization：它必须在 auth_gate 之前就被答掉。
+    #[tokio::test]
+    async fn preflight_from_the_admin_origin_is_answered_before_auth() {
+        use tower::ServiceExt as _;
+        let (router, _) = cors_router("cors-preflight");
+
+        let resp = router.oneshot(preflight(ADMIN_ORIGIN)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let headers = resp.headers();
+        assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], ADMIN_ORIGIN);
+        let methods = headers[header::ACCESS_CONTROL_ALLOW_METHODS]
+            .to_str()
+            .unwrap();
+        assert!(methods.contains("POST") && methods.contains("OPTIONS"));
+        let allowed = headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+            .to_str()
+            .unwrap();
+        for name in [
+            "authorization",
+            "content-type",
+            "accept",
+            "mcp-protocol-version",
+            "mcp-session-id",
+        ] {
+            assert!(allowed.contains(name), "{name} 不在 Allow-Headers 里");
+        }
+        assert_eq!(headers[header::ACCESS_CONTROL_MAX_AGE], "600");
+        assert!(headers[header::VARY].to_str().unwrap().contains("Origin"));
+        // 票走 Authorization 头，不用 cookie，所以不开凭据。
+        assert!(headers
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn other_origins_get_no_cors_headers_and_no_preflight() {
+        use tower::ServiceExt as _;
+        let (router, business) = cors_router("cors-other");
+        let evil = "https://evil.example";
+
+        let pre = router.clone().oneshot(preflight(evil)).await.unwrap();
+        assert_ne!(pre.status(), StatusCode::NO_CONTENT);
+        assert!(pre
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+
+        // 正常请求即使带合法票也不给 ACAO——鉴权照常放行，浏览器自己拦读取。
+        let token = ticket(&business, "o1", 60);
+        let resp = router
+            .oneshot(list_request(Some(&token), evil))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+
+    /// 精确匹配是这条安全边界本身：任何「长得像」的源都必须被拒。
+    /// 这五条各挡一种实现走样——前缀匹配、放行 http、大小写不敏感、忽略端口、把 null 当空值。
+    #[tokio::test]
+    async fn lookalike_origins_get_nothing() {
+        use tower::ServiceExt as _;
+        let (router, business) = cors_router("cors-lookalike");
+        let token = ticket(&business, "l1", 60);
+
+        for origin in [
+            "https://veyl-admin.ribencong.workers.dev.evil.example",
+            "http://veyl-admin.ribencong.workers.dev",
+            "https://VEYL-ADMIN.ribencong.workers.dev",
+            "https://veyl-admin.ribencong.workers.dev:443",
+            "null",
+        ] {
+            let pre = router.clone().oneshot(preflight(origin)).await.unwrap();
+            assert_ne!(
+                pre.status(),
+                StatusCode::NO_CONTENT,
+                "预检不该被放行：{origin}"
+            );
+            for name in [
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                header::ACCESS_CONTROL_ALLOW_METHODS,
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                header::ACCESS_CONTROL_MAX_AGE,
+            ] {
+                assert!(
+                    pre.headers().get(&name).is_none(),
+                    "{origin} 不该拿到 {name}"
+                );
+            }
+
+            // 鉴权照常走：票合法就放行，但绝不给这个源任何 CORS 头。
+            let res = router
+                .clone()
+                .oneshot(list_request(Some(&token), origin))
+                .await
+                .unwrap();
+            assert_ne!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "{origin}：CORS 不该影响鉴权结果"
+            );
+            assert!(
+                res.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{origin} 不该拿到 ACAO"
+            );
+        }
+    }
+
+    /// CORS 只加头，不放宽鉴权：没票仍然 401，只是允许源能读到这个 401。
+    #[tokio::test]
+    async fn the_admin_origin_gets_cors_headers_without_loosening_auth() {
+        use tower::ServiceExt as _;
+        let (router, business) = cors_router("cors-auth");
+
+        let anonymous = router
+            .clone()
+            .oneshot(list_request(None, ADMIN_ORIGIN))
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            anonymous.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            ADMIN_ORIGIN
+        );
+        assert!(anonymous
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none());
+
+        let token = ticket(&business, "a1", 60);
+        let authorized = router
+            .oneshot(list_request(Some(&token), ADMIN_ORIGIN))
+            .await
+            .unwrap();
+        assert_ne!(authorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            authorized.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            ADMIN_ORIGIN
+        );
+        assert!(authorized.headers()[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("Origin"));
     }
 
     /// The gate is what these tests assert on; the MCP service behind it may
