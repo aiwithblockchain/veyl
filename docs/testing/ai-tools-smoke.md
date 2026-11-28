@@ -230,7 +230,7 @@ sqlite3 -readonly "$HOME/.veyl/veyl.db" "select tool_name, is_error, substr(args
 | 4.4 批量测速 | 通过 | 说明批量在界面做，未循环调用 `NodeProbe` |
 | 4.5 手机使用 | 通过 | 指到「我的服务器」左栏入口，未断开连接、未贴令牌 |
 | 4.6 AI 服务商 | 通过 | 先取 `[id: deepseek]` 再测；期间修过一次 content 不带 id 的问题 |
-| 4.7 机械核对 | 通过 | `tools.md` §3 / `TOOL_COPY` / `vpn_tools()` 三处 38，`check-contracts` 91 项通过 |
+| 4.7 机械核对 | 通过 | `tools.md` §3 / `TOOL_COPY` / `vpn_tools()` 三处 38，`check-contracts` 92 项通过 |
 
 ### 2026-11-26 账户入口复测（工具面 38，`tools.md` 3.36.0）
 
