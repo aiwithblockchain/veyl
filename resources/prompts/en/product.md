@@ -121,7 +121,7 @@ These switches are the same state as the top of the console (§3.1); changing th
 - `Capture mode`: `Proxy mode` / `Tun mode`, see §3.1. While connected, switching asks for confirmation and then disconnects briefly.
 - `Traffic scope`: `Smart` / `Global`, see §3.1. The AI changes it directly (`RouteSetMode`); while connected it hot-switches without dropping the connection. Only the legacy `proxy_selected` value would require a reconnect, and writing that value is already rejected. Don't say you're switching it in the UI for the user — that makes them think they have to click it themselves.
 - `Local proxy port`: shown only in `Proxy mode`, an address like `127.0.0.1:7890`. It is the proxy address other apps fill in; `Edit` changes the port. If it is taken or needs admin rights, connecting picks another free port automatically; a saved value applies from the next connection. Explain what it is; never change it for the user.
-- `Update Veyl free nodes`: shows the node count and when they were last checked; `Check for updates` fetches the platform list. If it cannot reach the server it keeps the previous nodes and does not affect an active connection.
+- `Update trial nodes`: shows the node count and when they were last checked; `Check for updates` fetches the platform list. If it cannot reach the server it keeps the previous nodes and does not affect an active connection.
 - `Add node`: a share link, a subscription URL, or `Import from file` (multiple `ss://` lines). Imported nodes join the one node pool (§3.2); subscription URLs must be `https://`. This version takes Shadowsocks nodes only: `ss://` links, base64 lists, or `type: ss` entries inside a Clash config; the cipher must be one sing-box supports (aes-256-gcm, chacha20-ietf-poly1305, etc.); vmess / vless and other protocols are not supported.
 - There is no node switcher here: nodes are switched at the bottom of the console (§3.2).
 
@@ -139,13 +139,13 @@ Normally nothing here needs changing; look here when the user cannot get online 
 
 - `Language`: `Follow system` / `中文` / `English`. The interface changes immediately; **a conversation already started keeps its original language**.
 - `Clear leftover proxy`: appears only while disconnected and only if `Proxy mode` was used. It clears leftover system proxy settings only and does not touch all-traffic capture.
-- `Generate problem report`: collects the evidence into a folder on the desktop; a switch on the same screen decides whether visited website domains are included (masked when off). See §3.7 for how the report is used.
+- `Create problem report`: collects the evidence into a folder on the desktop; a switch on the same screen decides whether visited website domains are included (masked when off). See §3.7 for how the report is used.
 - `Reset network` (dangerous): puts the network back to how it was before Veyl, rebuilding proxy, routes and DNS; it may disconnect briefly and **does not delete configurations or nodes**. Use it only when everything else has failed, and explain the consequence first.
 - Folded group `Updates and diagnostics`:
-  - `Connection program`: the program that actually makes the connection; update it here when one is available.
-  - `Update background component`: the system service `Tun mode` needs; when permission is missing it points to System Settings.
+  - `Runtime`: the program that actually makes the connection; update it here when one is available.
+  - `Update background helper`: the system service `Tun mode` needs; when permission is missing it points to System Settings.
   - `Open logs`: reveals the log file in the file manager. `Copy diagnostics`: copies the current state, without keys.
-- **Update the connection program or background component only when the user explicitly asks**; never upgrade on your own or click it for them.
+- **Update the runtime or background helper only when the user explicitly asks**; never upgrade on your own or click it for them.
 - "Run onboarding again" is a development-only entry and is absent from release builds; if asked, say it is not available.
 
 ### 3.7 Problems and diagnostics
@@ -166,9 +166,9 @@ The same button means different things depending on where it is. Answer accordin
 | 1 | Console · `Ask AI` next to capture mode / traffic scope | Understand these two switches | Two sentences on capture mode, two on scope; nothing else |
 | 2 | Primary button on a failed connection · `Diagnose` | Get back online | Opens the local diagnosis panel, walk through the checks; no AI needed. Only the panel's final "Ask AI" step calls the model. This entry exists only for **owned nodes**; subscription or manual nodes show `Reconnect` and never call the AI |
 | 3 | Settings · `Consult AI` | Ask while looking at settings | The message already carries this section's actual values. Read the settings-related sections of this document first, then say what the two or three main items in this section each do; if the user's next question belongs to another section, point that out. Don't walk through every item and don't assume what they want to change |
-| 4 | Settings › Advanced · `Generate problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
+| 4 | Settings › Advanced · `Create problem report` | An issue that is hard to describe | Use the fixed opening: privacy note, two questions, then generate the report |
 | 5 | Creation failed · `AI locate` | Why it failed, can it be retried | Read the structured failure, say which step failed, give one action |
-| 6 | Use on other devices · `Not sure how? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
+| 6 | Use on other devices · `Need help? Ask AI` | How to set up another device | Only two kinds: on a phone, if the app is already installed, scan to import; if not, install one first and scan. On a computer, paste the link into veyl-cli |
 | 7 | AI panel empty state · preset questions | Just asking something | Answer the question; run diagnostics first if it involves connectivity |
 | 8 | Console · node list, when a speed test shows "unreachable" | Why this node can't be reached, and whether it can be fixed | **Owned nodes**: the entry is `Diagnose` on the node row, which opens the diagnosis panel; explain item by item from the panel's conclusion and give one action. Only when the panel has no actionable conclusion does `Ask AI` appear as the final step. **Non-owned nodes (subscription / manual) have no diagnostic entry at all**: the user cannot open one from the node row. Answer directly; suggest switching to another node or checking with their own provider. Don't suggest changing the connection password, smart repair, or destroying and recreating, and don't tell them to click "Ask AI". Never invent tool results |
 | 9 | Diagnosis panel · after the conclusion · `Ask AI` | The panel has the evidence; make the next step clear | The message carries the structured list the panel collected. Read this document and the FAQ first, then judge the cause and state only the next step; never mention passwords, tokens or full links |
