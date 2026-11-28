@@ -246,6 +246,11 @@ export function AccountSurface({
     topupRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [topupOpen]);
 
+  // 钱包清空（登出 / 从没读到）：展开区随之不渲染，按钮不再报 aria-expanded=true。
+  useEffect(() => {
+    if (wallet === null) setTopupOpen(false);
+  }, [wallet]);
+
   // AI 指路：滚到目标块并高亮 2 秒。
   useEffect(() => {
     if (!open || !point?.row) return;
@@ -552,7 +557,10 @@ export function AccountSurface({
                         type="button"
                         className={`btn ${topupOpen ? "btn--ghost" : "btn--primary"}`}
                         aria-expanded={topupOpen}
-                        aria-controls="account-topup"
+                        aria-controls={
+                          wallet !== null ? "account-topup" : undefined
+                        }
+                        disabled={wallet === null}
                         onClick={() => setTopupOpen((value) => !value)}
                       >
                         {topupOpen
@@ -562,8 +570,9 @@ export function AccountSurface({
                     ) : null}
                   </div>
 
-                  {/* 充值档位默认收起：首次点「充值」才展开，内容常驻以便收动画。 */}
-                  {onTopUp ? (
+                  {/* 充值档位默认收起：首次点「充值」才展开，内容常驻以便收动画。
+                      钱包还没读到时不渲染：没有档位与范围，展开只会是一块空壳。 */}
+                  {onTopUp && wallet !== null ? (
                     <div
                       ref={topupRef}
                       id="account-topup"

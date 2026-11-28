@@ -329,6 +329,22 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(input.getAttribute("aria-invalid")).toBeNull();
   });
 
+  it("提示与错误文案跟着 wallet 的 min/max 走", () => {
+    renderPanel(undefined, () => {}, {
+      ...WALLET,
+      min_topup_cents: 1000,
+      max_topup_cents: 50000,
+    });
+
+    openCustom();
+    expect(screen.getByText(/^\$10–\$500，整美元/)).toBeTruthy();
+
+    const input = screen.getByLabelText("自定义金额");
+    fireEvent.change(input, { target: { value: "5" } });
+    fireEvent.blur(input);
+    expect(screen.getByText("请输入 $10–$500 的整美元金额")).toBeTruthy();
+  });
+
   it("自定义金额：wallet 的 min/max 生效", async () => {
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => TOPUP);
     renderPanel(onTopUp, () => {}, {
@@ -344,7 +360,7 @@ describe("充值面板（账户弹层内嵌）", () => {
     expect(invalid.disabled).toBe(false);
     fireEvent.click(invalid);
     expect(onTopUp).not.toHaveBeenCalled();
-    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+    expect(screen.getByText("请输入 $10–$20 的整美元金额")).toBeTruthy();
 
     fireEvent.change(input, { target: { value: "10" } });
     const submit = screen.getByRole("button", {

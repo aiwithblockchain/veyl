@@ -314,7 +314,15 @@ export function MyServerTopUp({
             className={showInvalid ? "myservers__error" : "myservers-topup__hint"}
             role={showInvalid ? "alert" : undefined}
           >
-            {showInvalid ? tr("topup.custom.invalid") : tr("topup.custom.hint")}
+            {showInvalid
+              ? tr("topup.custom.invalid", {
+                  min: wholeDollar(minCents),
+                  max: wholeDollar(maxCents),
+                })
+              : tr("topup.custom.hint", {
+                  min: wholeDollar(minCents),
+                  max: wholeDollar(maxCents),
+                })}
           </p>
 
           {wallet && denominations.length === 0 ? (

@@ -172,6 +172,61 @@ describe("账户弹层", () => {
     expect(screen.getByText("—")).toBeTruthy();
   });
 
+  it("钱包没读到：不渲染充值区，充值按钮禁用；读到后恢复", () => {
+    const base: ComponentProps<typeof AccountSurface> = {
+      open: true,
+      bridge: makeBridge(),
+      account: ACCOUNT,
+      wallet: null,
+      onTopUp: async () => TOPUP,
+      onClose: () => {},
+    };
+    const view = render(<AccountSurface {...base} />);
+
+    const topup = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
+    expect(topup.disabled).toBe(true);
+    expect(topup.getAttribute("aria-controls")).toBeNull();
+    expect(document.getElementById("account-topup")).toBeNull();
+    expect(document.querySelector(".myservers-topup__grid")).toBeNull();
+    expect(screen.queryByText(/整美元/)).toBeNull();
+
+    view.rerender(<AccountSurface {...base} wallet={WALLET} />);
+    const restored = screen.getByRole("button", { name: "充值" }) as HTMLButtonElement;
+    expect(restored.disabled).toBe(false);
+    fireEvent.click(restored);
+    expect(screen.getByRole("button", { name: "$6" })).toBeTruthy();
+  });
+
+  it("充值展开时钱包被清空：收起并消失，钱包回来也不自动展开", () => {
+    const base: ComponentProps<typeof AccountSurface> = {
+      open: true,
+      bridge: makeBridge(),
+      account: ACCOUNT,
+      wallet: WALLET,
+      onTopUp: async () => TOPUP,
+      onClose: () => {},
+    };
+    const view = render(<AccountSurface {...base} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "充值" }));
+    expect(document.getElementById("account-topup")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "收起" }).getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    view.rerender(<AccountSurface {...base} wallet={null} />);
+    expect(document.getElementById("account-topup")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "充值" }).getAttribute("aria-expanded"),
+    ).toBe("false");
+
+    view.rerender(<AccountSurface {...base} />);
+    expect(
+      screen.getByRole("button", { name: "充值" }).getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(document.getElementById("account-topup")).toBeTruthy();
+  });
+
   it("充值成功打开收银台：面板留着就地等待，主按钮让位", async () => {
     const onCheckoutOpened = vi.fn();
     const onTopUp = vi.fn(async () => TOPUP);

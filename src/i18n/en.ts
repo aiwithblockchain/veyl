@@ -1025,9 +1025,9 @@ export const en: Record<MessageKey, string> = {
   "topup.custom.label": "Custom amount",
   "topup.custom.placeholder": "36",
   "topup.custom.hint":
-    "$6–$300 in whole dollars. Payment happens in your browser; the balance updates here when you return.",
+    "{min}–{max} in whole dollars. Payment happens in your browser; the balance updates here when you return.",
   "topup.other": "Other",
-  "topup.custom.invalid": "Enter a whole-dollar amount from $6 to $300",
+  "topup.custom.invalid": "Enter a whole-dollar amount from {min} to {max}",
   "topup.custom.submit": "Top up {amount}",
   "topup.submit": "Top up",
   "topup.reopenCheckout": "Reopen checkout",

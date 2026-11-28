@@ -976,9 +976,9 @@ export const zh = {
   "topup.custom.label": "自定义金额",
   "topup.custom.placeholder": "36",
   "topup.custom.hint":
-    "$6–$300，整美元。付款在浏览器里完成，回到这里余额会自动更新。",
+    "{min}–{max}，整美元。付款在浏览器里完成，回到这里余额会自动更新。",
   "topup.other": "其他",
-  "topup.custom.invalid": "请输入 $6–$300 的整美元金额",
+  "topup.custom.invalid": "请输入 {min}–{max} 的整美元金额",
   "topup.custom.submit": "充值 {amount}",
   "topup.submit": "充值",
   "topup.reopenCheckout": "重新打开收付款页",
