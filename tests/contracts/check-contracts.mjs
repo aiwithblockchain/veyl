@@ -16,7 +16,7 @@
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..");
@@ -3134,6 +3134,87 @@ check("解释入口固定串：questions.rs 与前端字典逐字一致（契约
     if (expected !== actual) {
       problems.push(
         `${constName} 与 ${file} 不一致：Rust ${JSON.stringify(expected)} / 前端 ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+  return problems;
+});
+
+// --- 23：提示词引用的界面文案在 i18n 中存在 ---
+//
+// 提示词里用反引号引的界面词（例如按钮文案）改了界面没跟，模型就会教用户点一个
+// 不存在的按钮。允许清单只收「确实不是界面文案」的词，每项写明原因；不要拿它
+// 掩盖真实漂移。
+
+const PROMPT_COPY_ALLOWED = {
+  zh: new Map([
+    ["已付至", "工具 content 的术语，界面不出现"],
+    ["开始", "通用词，不是按钮"],
+  ]),
+  en: new Map([["Base URL", "Onboarding.tsx / Settings.tsx 里硬编码在 JSX，不走 i18n"]]),
+};
+
+function i18nCopyValues(rel) {
+  const values = new Set();
+  for (const m of read(rel).matchAll(/:\s*"((?:[^"\\]|\\.)*)"/g)) {
+    values.add(m[1]);
+    // 只还原 \" 与 \\：i18n 里还有 \n 之类，不能一并吞掉。
+    values.add(m[1].replace(/\\(["\\])/g, "$1"));
+  }
+  return values;
+}
+
+function promptFiles(lang) {
+  const dir = join(ROOT, "resources", "prompts", lang);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => join(dir, name))
+    .sort();
+}
+
+function missingPromptCopy(lang, pattern, keep) {
+  const copy = i18nCopyValues(`src/i18n/${lang}.ts`);
+  const allowed = PROMPT_COPY_ALLOWED[lang];
+  const missing = new Map();
+  for (const file of promptFiles(lang)) {
+    const text = readFileSync(file, "utf8");
+    for (const m of text.matchAll(pattern)) {
+      const word = m[1].trim();
+      if (!word || !keep(word) || copy.has(word) || allowed.has(word)) continue;
+      if (!missing.has(word)) missing.set(word, new Set());
+      missing.get(word).add(relative(ROOT, file));
+    }
+  }
+  return missing;
+}
+
+check("提示词引用的界面文案在 i18n 中存在（契约）", () => {
+  const han = /\p{Script=Han}/u;
+  const checks = [
+    [
+      "zh",
+      missingPromptCopy("zh", /`([^`\n]{2,24})`/g, (word) => han.test(word)),
+    ],
+    [
+      "en",
+      missingPromptCopy("en", /`([^`\n]{2,40})`/g, (word) => {
+        // 只挑「像界面标签」的：含字母、有空格（不是单词）、有大写（不是字段名），
+        // 且不含标点 / 路径符号。
+        if (!/[A-Za-z]/.test(word)) return false;
+        if (/[._:\/=\\"<>]/.test(word)) return false;
+        if (word === word.toLowerCase()) return false;
+        return /\s/.test(word);
+      }),
+    ],
+  ];
+  const problems = [];
+  for (const [lang, missing] of checks) {
+    const words = [...missing.keys()].sort((a, b) => a.localeCompare(b));
+    for (const word of words) {
+      const files = [...missing.get(word)].sort().join("、");
+      problems.push(
+        `${lang} 提示词引用的「${word}」不在 src/i18n/${lang}.ts：${files}`,
       );
     }
   }
