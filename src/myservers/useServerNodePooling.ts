@@ -50,6 +50,8 @@ export function useServerNodePooling({
   // 在途 / 待绑 / 已绑都用 ref：入队后重渲染会重跑 effect，用 state 会成环。
   /** 本会话已成功取过凭据的 server_id：旧 Host 不返回 local_node_id 时也不会每 10 秒重复取。 */
   const credentialedThisSession = useRef(new Set<string>());
+  /** 本会话取回的 server_id → 本地节点 id：服务器的 local_node_id 还没刷新时也能认出队列里的 id。 */
+  const fetchedNodeId = useRef(new Map<string, string>());
   const inFlight = useRef(new Set<string>());
   const queued = useRef(new Set<string>());
   const attached = useRef(new Set<string>());
@@ -97,6 +99,8 @@ export function useServerNodePooling({
     if (attachTimer.current !== null) return;
     attachTimer.current = window.setTimeout(() => {
       attachTimer.current = null;
+      // 到期时可能已经连回去了：保留队列和等待标志，回到 idle 的 effect 会再冲一次。
+      if (connectionRef.current !== "idle") return;
       waitingToFlush.current = false;
       flushRef.current();
     }, ATTACH_RETRY_COOLDOWN_MS);
@@ -121,9 +125,77 @@ export function useServerNodePooling({
     scanTimer.current = { at: earliest, id };
   };
 
+  /**
+   * 当前仍值得保留的节点 id：ready 服务器的本地节点 id、本会话取回的节点 id，
+   * 以及已在配置里的 id。服务器销毁、换机后，旧 id 会自动不在这里。
+   * 只用本地 id（`local_node_id` / 凭据返回的 id），不用控制面 `node_id`：
+   * 后者可能在本地节点行已删后残留，把死 id 一直算成「存活」。
+   */
+  const aliveNodeIds = (): Set<string> => {
+    const alive = new Set<string>();
+    for (const server of serversRef.current) {
+      if (isReady(server.state) && server.local_node_id) {
+        alive.add(server.local_node_id);
+        // 列表给出的本地 id 是权威值：同 server_id 换了节点后，凭据缓存的旧 id 不能继续算存活。
+        fetchedNodeId.current.delete(server.server_id);
+      }
+    }
+    for (const server of serversRef.current) {
+      if (!isReady(server.state) || server.local_node_id) continue;
+      const fetched = fetchedNodeId.current.get(server.server_id);
+      if (fetched) alive.add(fetched);
+    }
+    // 服务器离开 ready / 列表：旧凭据结果不能继续占着队列，也允许它回来时重新取凭据。
+    for (const [serverId] of [...fetchedNodeId.current]) {
+      const server = serversRef.current.find((item) => item.server_id === serverId);
+      if (server && isReady(server.state)) continue;
+      fetchedNodeId.current.delete(serverId);
+      credentialedThisSession.current.delete(serverId);
+    }
+    return alive;
+  };
+
+  /** 本批 attach 报 `node_not_found`：作废这些节点对应的凭据缓存，下一次扫描重新取。 */
+  const invalidateFetched = (nodeIds: string[]) => {
+    const sent = new Set(nodeIds);
+    let invalidated = false;
+    for (const [serverId, nodeId] of [...fetchedNodeId.current]) {
+      if (!sent.has(nodeId)) continue;
+      fetchedNodeId.current.delete(serverId);
+      credentialedThisSession.current.delete(serverId);
+      cooldownUntil.current.delete(serverId);
+      invalidated = true;
+    }
+    return invalidated;
+  };
+
+  /** 每次 attach 前都先清一遍队列：死 id 不能拖垮整批。 */
+  const pruneQueue = () => {
+    // 即使队列为空也要跑一次：aliveNodeIds 顺带清掉离开 ready/列表的凭据缓存。
+    const alive = aliveNodeIds();
+    if (queued.current.size === 0) return;
+    const keep = new Set(
+      pruneQueuedNodes(queued.current, alive, configuredNodeIdsRef.current),
+    );
+    for (const nodeId of [...queued.current]) {
+      if (configuredNodeIdsRef.current.has(nodeId)) {
+        // 已经在配置里：不需要再 attach，也不该占着队列。
+        queued.current.delete(nodeId);
+        sentThisSession.current.delete(nodeId);
+        attached.current.add(nodeId);
+        continue;
+      }
+      if (keep.has(nodeId)) continue;
+      queued.current.delete(nodeId);
+      sentThisSession.current.delete(nodeId);
+    }
+  };
+
   const flush = () => {
     if (connectionRef.current !== "idle") return;
     if (flushing.current || waitingToFlush.current || queued.current.size === 0) return;
+    pruneQueue();
+    if (queued.current.size === 0) return;
     const nodeIds = [...queued.current];
     flushing.current = true;
     void Promise.resolve(attachRef.current(nodeIds))
@@ -131,27 +203,16 @@ export function useServerNodePooling({
         if (!result.ok) {
           if (result.reason === "node_not_found") {
             // 队列里混进了已删除的节点：整批 attach 会一直 NOT_FOUND，
-            // 新节点就永远进不了配置。剔除死 id，只重试仍有效的。
-            const alive = new Set<string>();
-            for (const server of serversRef.current) {
-              if (!isReady(server.state)) continue;
-              const id = server.local_node_id ?? server.node_id;
-              if (id) alive.add(id);
-            }
-            const keep = new Set(
-              pruneQueuedNodes(
-                queued.current,
-                alive,
-                configuredNodeIdsRef.current,
-              ),
-            );
-            for (const nodeId of [...queued.current]) {
-              if (keep.has(nodeId)) continue;
-              queued.current.delete(nodeId);
-              sentThisSession.current.delete(nodeId);
-            }
+            // 新节点就永远进不了配置。作废这批 id 对应的凭据缓存（同 server_id
+            // 换节点后必须能拿到新 id），剔除死 id，只重试仍有效的。
+            const invalidated = invalidateFetched(nodeIds);
+            pruneQueue();
             waitingToFlush.current = false;
-            if (queued.current.size === 0) return;
+            if (queued.current.size === 0) {
+              // 没有可重试的 id 了：按冷却重新取凭据，新 id 才有机会进来。
+              if (invalidated) scheduleScan();
+              return;
+            }
             waitingToFlush.current = true;
             scheduleFlush();
             return;
@@ -185,6 +246,8 @@ export function useServerNodePooling({
   };
 
   const scan = () => {
+    // 服务器列表可能刚删掉一台：先把死 id 从队列里清掉，再决定要绑什么。
+    pruneQueue();
     const now = Date.now();
     for (const server of serversRef.current) {
       if (!isReady(server.state)) continue;
@@ -204,6 +267,20 @@ export function useServerNodePooling({
         queued.current.add(localNodeId);
         continue;
       }
+      // 列表里的 local_node_id 还没刷新，但本会话已经取回过节点：用取回的 id 补绑，
+      // 避免状态抖动把刚拿到的节点永久搁置。
+      const fetched = fetchedNodeId.current.get(server.server_id);
+      if (fetched) {
+        if (configuredNodeIdsRef.current.has(fetched)) {
+          attached.current.add(fetched);
+          continue;
+        }
+        if (attached.current.has(fetched)) continue;
+        if (sentThisSession.current.has(fetched)) continue;
+        sentThisSession.current.add(fetched);
+        queued.current.add(fetched);
+        continue;
+      }
       if (credentialedThisSession.current.has(server.server_id)) continue;
       if (inFlight.current.has(server.server_id)) continue;
       if ((cooldownUntil.current.get(server.server_id) ?? 0) > now) {
@@ -215,7 +292,14 @@ export function useServerNodePooling({
         .then((node) => {
           credentialedThisSession.current.add(server.server_id);
           cooldownUntil.current.delete(server.server_id);
-          if (node.node_id && !attached.current.has(node.node_id)) {
+          if (node.node_id) {
+            fetchedNodeId.current.set(server.server_id, node.node_id);
+          }
+          if (
+            node.node_id &&
+            !attached.current.has(node.node_id) &&
+            !configuredNodeIdsRef.current.has(node.node_id)
+          ) {
             queued.current.add(node.node_id);
             sentThisSession.current.add(node.node_id);
           }
@@ -246,14 +330,20 @@ export function useServerNodePooling({
   scanRef.current = scan;
   const flushRef = useRef(flush);
   flushRef.current = flush;
+  /** 上一次 effect 时是否在 idle：只有「刚回到 idle」才重置重试状态，冷却期内不抢跑。 */
+  const wasIdle = useRef(connection === "idle");
 
   useEffect(() => {
-    if (connection !== "idle") {
-      // 离开 idle：允许下一次回到 idle 时立即重试。
+    const idle = connection === "idle";
+    const enteredIdle = idle && !wasIdle.current;
+    wasIdle.current = idle;
+    // 离开 idle 刻意不取消 attach 定时器：让它到期时自己看到非 idle、保留等待标志，
+    // 这样「连接期间到期」不会发 attach，「回到 idle」的那次 effect 再重置并立即冲刷。
+    if (enteredIdle) {
       waitingToFlush.current = false;
       clearAttachTimer();
     }
-    // 扫描照常跑：已连接时也要先把凭据取回来入队，只是不 attach。
+    // 扫描照常跑：队列里只要有东西，scan 末尾的 flush 就会发出去。
     scanRef.current();
   }, [servers, connection]);
 

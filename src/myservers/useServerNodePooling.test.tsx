@@ -47,9 +47,11 @@ function credentialNode(nodeId = "local_node_srv_1"): MyServerCredentialNode {
 function setup({
   servers,
   connection,
+  configuredNodeIds,
 }: {
   servers: MyServer[];
   connection: VpnConnectionState;
+  configuredNodeIds?: ReadonlySet<string>;
 }) {
   const credentials = vi.fn(async () => credentialNode());
   const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
@@ -61,6 +63,7 @@ function setup({
       useServerNodePooling({
         servers: props.servers,
         connection: props.connection,
+        configuredNodeIds,
         credentials,
         attach,
       }),
@@ -164,7 +167,32 @@ describe("useServerNodePooling", () => {
     ).toEqual(["nd_alive", "nd_configured"]);
   });
 
-  it("attach 报节点不存在：剔除死 id 后只重试仍有效的节点", async () => {
+  it("队列残留已销毁节点：入池前剔除，新节点照常绑定", async () => {
+    const dead = server({ server_id: "srv_dead", local_node_id: "nd_dead" });
+    const fresh = server({ server_id: "srv_fresh", local_node_id: "nd_fresh" });
+    const credentials = vi.fn(async () => credentialNode());
+    const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    const { rerender } = renderHook(
+      (props: { servers: MyServer[]; connection: VpnConnectionState }) =>
+        useServerNodePooling({
+          servers: props.servers,
+          connection: props.connection,
+          credentials,
+          attach,
+        }),
+      { initialProps: { servers: [dead, fresh], connection: "connected" } },
+    );
+    await act(async () => {});
+    expect(attach).not.toHaveBeenCalled();
+
+    // srv_dead 被销毁：列表里只剩新节点，队列里还留着它的节点 id。
+    rerender({ servers: [fresh], connection: "idle" });
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(attach).toHaveBeenLastCalledWith(["nd_fresh"]);
+  });
+
+  it("attach 报节点不存在：期间被销毁的 id 剔除后只重试仍有效的节点", async () => {
     vi.useFakeTimers({ now: new Date(2026, 10, 19, 10, 0, 0) });
     const dead = server({
       server_id: "srv_dead",
@@ -192,17 +220,149 @@ describe("useServerNodePooling", () => {
     await act(async () => {});
     expect(attach).not.toHaveBeenCalled();
 
-    // 连接断开后冲刷：死服务器已经不在了，只剩在配置外的有效节点。
-    rerender({ servers: [alive], connection: "idle" });
+    // 断开时两台都还在列表里：整批先发出去，控制面报其中一台已不存在。
+    rerender({ servers: [dead, alive], connection: "idle" });
     await act(async () => {});
     expect(attach).toHaveBeenCalledWith(["nd_dead", "nd_alive"]);
 
-    // 冷却后重试：死 id 不该再被带上，否则整批永久失败。
+    // 重试前服务器被销毁：死 id 从队列剔除，只重试仍有效的节点。
+    rerender({ servers: [alive], connection: "idle" });
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledTimes(1);
+
     await act(async () => {
       vi.advanceTimersByTime(10_001);
     });
     await act(async () => {});
     expect(attach).toHaveBeenLastCalledWith(["nd_alive"]);
+  });
+
+  it("同一 server_id 换了节点 id：作废旧凭据并重新取到新 id", async () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 19, 10, 0, 0) });
+    const credentials = vi.fn();
+    credentials.mockResolvedValueOnce(credentialNode("nd_old"));
+    credentials.mockResolvedValueOnce(credentialNode("nd_new"));
+    const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    attach.mockResolvedValueOnce({ ok: false, reason: "node_not_found" });
+    renderHook(
+      (props: { servers: MyServer[]; connection: VpnConnectionState }) =>
+        useServerNodePooling({
+          servers: props.servers,
+          connection: props.connection,
+          credentials,
+          attach,
+        }),
+      { initialProps: { servers: [server()], connection: "idle" } },
+    );
+    await act(async () => {});
+    expect(credentials).toHaveBeenCalledTimes(1);
+    expect(attach).toHaveBeenLastCalledWith(["nd_old"]);
+
+    // 旧节点已被删：冷却重扫时必须重新取凭据，而不是拿旧 id 一直重试。
+    await act(async () => {
+      vi.advanceTimersByTime(10_001);
+    });
+    await act(async () => {});
+    expect(credentials).toHaveBeenCalledTimes(2);
+    expect(attach).toHaveBeenLastCalledWith(["nd_new"]);
+  });
+
+  it("重试定时器在连接期间到期：当次不发，回到 idle 才发新节点", async () => {
+    vi.useFakeTimers({ now: new Date(2026, 10, 19, 10, 0, 0) });
+    const credentials = vi.fn();
+    credentials.mockResolvedValueOnce(credentialNode("nd_old"));
+    credentials.mockResolvedValueOnce(credentialNode("nd_new"));
+    const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    attach.mockResolvedValueOnce({ ok: false, reason: "node_not_found" });
+    const { rerender } = renderHook(
+      (props: { servers: MyServer[]; connection: VpnConnectionState }) =>
+        useServerNodePooling({
+          servers: props.servers,
+          connection: props.connection,
+          credentials,
+          attach,
+        }),
+      { initialProps: { servers: [server()], connection: "idle" } },
+    );
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledTimes(1);
+
+    // 重试定时器还没到点就连回去了。
+    rerender({ servers: [server()], connection: "connected" });
+    await act(async () => {});
+    // 让定时器在非 idle 期间真实到期：这一次绝不能发 attach。
+    await act(async () => {
+      vi.advanceTimersByTime(10_001);
+    });
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledTimes(1);
+
+    // 回到 idle 必须再冲一次，而且带的是重新取到的新节点，不是旧 id。
+    rerender({ servers: [server()], connection: "idle" });
+    await act(async () => {});
+    expect(attach).toHaveBeenCalledTimes(2);
+    expect(attach).toHaveBeenLastCalledWith(["nd_new"]);
+  });
+
+  it("已在配置里的节点：不取凭据、不重复入队", async () => {
+    const { credentials, attach } = setup({
+      servers: [server({ local_node_id: "nd_configured" })],
+      connection: "idle",
+      configuredNodeIds: new Set(["nd_configured"]),
+    });
+    await act(async () => {});
+
+    expect(credentials).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("凭据返回的节点已在配置里：不再 attach", async () => {
+    const { credentials, attach } = setup({
+      servers: [server()],
+      connection: "idle",
+      configuredNodeIds: new Set(["local_node_srv_1"]),
+    });
+    await act(async () => {});
+
+    expect(credentials).toHaveBeenCalledTimes(1);
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("入队后节点先被别的路径绑进配置：不再重复 attach", async () => {
+    const credentials = vi.fn(async () => credentialNode());
+    const attach = vi.fn(async (): Promise<ActionResult> => ({ ok: true }));
+    const { rerender } = renderHook(
+      (props: {
+        servers: MyServer[];
+        connection: VpnConnectionState;
+        configured: ReadonlySet<string>;
+      }) =>
+        useServerNodePooling({
+          servers: props.servers,
+          connection: props.connection,
+          configuredNodeIds: props.configured,
+          credentials,
+          attach,
+        }),
+      {
+        initialProps: {
+          servers: [server({ local_node_id: "nd_queued" })],
+          connection: "connected" as VpnConnectionState,
+          configured: new Set<string>(),
+        },
+      },
+    );
+    await act(async () => {});
+    expect(attach).not.toHaveBeenCalled();
+
+    // 断开前它已经被另一条路径绑进配置：flush 前清出队列。
+    rerender({
+      servers: [server({ local_node_id: "nd_queued" })],
+      connection: "idle",
+      configured: new Set(["nd_queued"]),
+    });
+    await act(async () => {});
+    expect(attach).not.toHaveBeenCalled();
   });
 
   it("取凭据失败静默且冷却：10 秒内不重试，过后再试", async () => {
