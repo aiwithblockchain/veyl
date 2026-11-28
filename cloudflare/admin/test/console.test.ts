@@ -225,8 +225,11 @@ describe("第一屏", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
 
-    // 面板要直连 https://<IP>:32100/mcp，CSP 必须放行跨源 https，否则 fetch 在 CORS 之前就被拦掉。
-    expect(res.headers.get("content-security-policy")).toContain("connect-src 'self' https:");
+    // 面板要直连 https://<IP>:32100/mcp，CSP 必须放行该端口的跨源 https，
+    // 否则 fetch 在 CORS 之前就被拦掉。
+    expect(res.headers.get("content-security-policy")).toContain(
+      "connect-src 'self' https://*:32100",
+    );
 
     expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(body).not.toContain("<script>alert(1)</script>");
