@@ -3221,6 +3221,58 @@ check("提示词引用的界面文案在 i18n 中存在（契约）", () => {
   return problems;
 });
 
+// --- 24：内容文档版本字段 ---
+//
+// 内容文档是 AI 按需读取的知识库，版本与更新日期写在文首；两语同一份文档
+// 必须同版本同日，否则模型会给出过时的说法。system / kickoff 不参与。
+
+const CONTENT_DOC_VERSION = {
+  zh: {
+    pattern:
+      /\*\*文档版本\*\*[：:]\s*(\d+\.\d+)\s*[·・•]\s*\*\*更新\*\*[：:]\s*(\d{4}-\d{2}-\d{2})/,
+    expected: "**文档版本**：<x.y> · **更新**：<YYYY-MM-DD>",
+  },
+  en: {
+    pattern:
+      /\*\*Doc version\*\*[：:]\s*(\d+\.\d+)\s*[·・•]\s*\*\*Updated\*\*[：:]\s*(\d{4}-\d{2}-\d{2})/,
+    expected: "**Doc version**: <x.y> · **Updated**: <YYYY-MM-DD>",
+  },
+};
+
+check("内容文档版本字段（契约）", () => {
+  const problems = [];
+  const found = {};
+  const docs = ["product.md", "faq.md"];
+  for (const lang of ["zh", "en"]) {
+    const { pattern, expected } = CONTENT_DOC_VERSION[lang];
+    for (const name of docs) {
+      const rel = `resources/prompts/${lang}/${name}`;
+      const m = read(rel).match(pattern);
+      if (!m) {
+        problems.push(`${rel} 缺少版本字段，期望格式：${expected}`);
+        continue;
+      }
+      found[`${lang}/${name}`] = { version: m[1], updated: m[2] };
+    }
+  }
+  for (const name of docs) {
+    const zh = found[`zh/${name}`];
+    const en = found[`en/${name}`];
+    if (!zh || !en) continue;
+    if (zh.version !== en.version) {
+      problems.push(
+        `${name} 版本跨语言不一致：zh ${zh.version} / en ${en.version}`,
+      );
+    }
+    if (zh.updated !== en.updated) {
+      problems.push(
+        `${name} 更新日期跨语言不一致：zh ${zh.updated} / en ${en.updated}`,
+      );
+    }
+  }
+  return problems;
+});
+
 // --- 输出 ---
 
 const strict = process.env.AIVPN_CONTRACT_STRICT === "1";

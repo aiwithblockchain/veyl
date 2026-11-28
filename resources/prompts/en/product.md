@@ -2,7 +2,7 @@
 
 > **Readers**: Veyl's AI assistant. Read this when the user asks what Veyl is, how a feature works, or what a setting does.
 > **Not here**: troubleshooting network problems — see `faq.md` in the same directory.
-> **Version**: 0.1 (2026-11-21; updated together with the client)
+> **Doc version**: 1.0 · **Updated**: 2026-11-28
 
 ---
 
