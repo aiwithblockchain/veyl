@@ -14,10 +14,16 @@
   "observability": {
     "enabled": true
   },
-  // 运维看板直接读控制面的库（dev 先接上）。见 agent/docs/agent-health.md §5.6。
+  // 运维看板直接读控制面的库。运维不分环境：一个 worker 同时绑生产与 dev 两份，
+  // 界面上按环境分标签。见 agent/docs/agent-health.md §5.6。
   "d1_databases": [
     {
-      "binding": "DB",
+      "binding": "DB_PROD",
+      "database_name": "veyl-control-plane",
+      "database_id": "736d423d-47bb-435c-8d74-dfe9244c5833"
+    },
+    {
+      "binding": "DB_DEV",
       "database_name": "veyl-control-plane-dev-4",
       "database_id": "a5755c55-b1d3-41fa-a2e1-e6a6a6627824"
     }

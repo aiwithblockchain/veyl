@@ -4,8 +4,9 @@
 export interface Env {
   ACCESS_TEAM_DOMAIN?: string;
   ACCESS_AUD?: string;
-  /** 控制面的库（运维看板直接读）。见 agent/docs/agent-health.md §5.6。 */
-  DB?: D1Database;
+  /** 控制面的库（运维看板直接读）。一个 worker 同时绑生产与 dev。见 agent/docs/agent-health.md §5.6。 */
+  DB_PROD?: D1Database;
+  DB_DEV?: D1Database;
 }
 
 const CERTS_TTL_MS = 5 * 60_000;
