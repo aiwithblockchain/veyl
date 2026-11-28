@@ -36,6 +36,10 @@
     // 确认令牌确实是签给这个应用的。不是密钥，可以入库。
     "ACCESS_AUD": "71d03d7d105ddf60911c1374406918b5442cf641ed7760a08e5a18a6497bb47d"
   },
+  // Secrets（wrangler secret put，不写在此文件）：
+  // - OPS_TOKEN_SIGNING_JWK（运维只读票的 Ed25519 **私钥** JWK）。只在这里，
+  //   控制面只拿它的公钥（OPS_TOKEN_PUBLIC_JWK），两边私钥互不持有。
+  //   未设置时页面照常显示，只是点「签只读票」回 503。
   // 自定义域名要求 dessage.xyz 是本账号下的 zone。它目前托管在 GoDaddy 的 DNS 上，
   // 而 Worker 无法通过外部 CNAME 接入自定义主机名（Cloudflare 按 Host 头在自己的
   // zone 里路由）。所以先走 workers.dev，由 Access 在该地址上做门禁。

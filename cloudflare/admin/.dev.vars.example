@@ -7,3 +7,8 @@ ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
 # Access 应用的 Application Audience (AUD) Tag
 # 位置：Zero Trust → Access → Applications → 你的应用 → Overview
 ACCESS_AUD=your-application-aud-tag
+
+# 运维只读票的 Ed25519 私钥（JWK，含 d）。本地调试可以用任意一把，
+# 但要和 agent 拿到的公钥对得上，否则签出来的票会被 agent 401。
+# 生成：node -e 'crypto.subtle.generateKey({name:"Ed25519"},true,["sign","verify"]).then(async p=>{console.log(JSON.stringify(await crypto.subtle.exportKey("jwk",p.privateKey)))})'
+OPS_TOKEN_SIGNING_JWK={"kty":"OKP","crv":"Ed25519","x":"...","d":"..."}
