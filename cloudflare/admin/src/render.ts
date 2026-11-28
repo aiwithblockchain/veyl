@@ -126,15 +126,31 @@ function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value);
 }
 
-/** 证书到期只显示日期（UTC）。整个页面不加时区后缀，日期列头写 UTC。 */
-export function formatCertExpiry(seconds: number | null): { text: string; missing: boolean } {
-  if (seconds === null) return { text: "未签发", missing: true };
+const DAY_MS = 86_400_000;
+
+export interface CertExpiry {
+  text: string;
+  missing: boolean;
+  /** 剩余整天数；未签发时为 null。 */
+  days: number | null;
+  /** 剩余不足一天（含已过期）——展示成「已到期」，颜色按 danger。 */
+  expired: boolean;
+}
+
+/**
+ * 证书到期只显示日期（UTC）+ 剩余整天数。整个页面不加时区后缀，列头写 UTC。
+ * 剩余天数向下取整，所以「还剩 12 小时」是 0 天，按已到期处理。
+ */
+export function formatCertExpiry(seconds: number | null, now: number): CertExpiry {
+  if (seconds === null) return { text: "未签发", missing: true, days: null, expired: false };
   const date = new Date(seconds * 1000);
-  if (Number.isNaN(date.getTime())) return { text: "未签发", missing: true };
-  return {
-    text: `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`,
-    missing: false,
-  };
+  if (Number.isNaN(date.getTime())) {
+    return { text: "未签发", missing: true, days: null, expired: false };
+  }
+  const stamp = `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
+  const days = Math.floor((seconds * 1000 - now) / DAY_MS);
+  if (days <= 0) return { text: `${stamp} · 已到期`, missing: false, days, expired: true };
+  return { text: `${stamp} · 剩余 ${days} 天`, missing: false, days, expired: false };
 }
 
 export function formatLastSeen(ms: number | null, now: number): { text: string; missing: boolean } {
@@ -206,6 +222,7 @@ tbody tr.is-failed td{background:var(--surface-danger)}
 .mono{font-family:var(--font-mono);font-size:12px;line-height:18px}
 .id{color:var(--text-3)}
 .dim{color:var(--text-2)}
+.text3{color:var(--text-3)}
 .missing{color:var(--text-missing)}
 .num{font-variant-numeric:tabular-nums}
 .warntext{color:var(--state-warn-text)}
@@ -254,14 +271,14 @@ function rowHtml(server: LabelledServer, now: number): string {
   const issues = issuesOf(server, now);
   const primary = primaryIssue(issues);
   const failed = issues.includes("failed");
-  const cert = formatCertExpiry(server.cert_not_after);
+  const cert = formatCertExpiry(server.cert_not_after, now);
   const seen = formatLastSeen(server.last_seen_at, now);
   const address = formatAddress(server);
   const chip = stateChip(server.state);
   const version = server.agent_version?.trim() ? server.agent_version.trim() : null;
 
   // §7.5/§7.6：一行最多一个彩色元素；失败行整行变底，其余单元格一律中性。
-  const certClass = !failed && primary === "cert" ? (certExpired(server, now) ? " dangertext" : " warntext") : "";
+  const certClass = !failed && primary === "cert" ? (cert.expired ? " dangertext" : " warntext") : "";
   const seenClass = !failed && primary === "stale" ? " warntext" : "";
 
   const envChip = server.env === "prod" ? "chip-prod" : "chip-dev";
@@ -276,7 +293,7 @@ function rowHtml(server: LabelledServer, now: number): string {
   const buttonDisabled = canTicket
     ? ""
     : ' disabled title="没有 IP 或控制端口，签出来的票也用不上"';
-  const certCellClass = cert.missing ? "missing" : `dim${certClass}`;
+  const certCellClass = cert.missing ? "missing" : `text3${certClass}`;
   const seenCellClass = seen.missing ? "missing" : `dim${seenClass}`;
 
   return `<tr${failed ? ' class="is-failed"' : ""}>
@@ -292,10 +309,6 @@ function rowHtml(server: LabelledServer, now: number): string {
     server.id,
   )}"${buttonDisabled}>签只读票</button></td>
 </tr>`;
-}
-
-function certExpired(server: LabelledServer, now: number): boolean {
-  return server.cert_not_after !== null && server.cert_not_after * 1000 <= now;
 }
 
 export interface PageOptions {

@@ -236,6 +236,30 @@ describe("第一屏", () => {
     expect(body).not.toMatch(/class="[^"]*(warntext|dangertext)[^"]*">未签发/);
   });
 
+  it("证书到期列带剩余天数：729 天 / 临近 / 不足一天算已到期", async () => {
+    const db = new FakeDb();
+    const base = { account_id: "acct_1", destroyed_at: null };
+    // 多给一小时余量，避免「刚好 N 天」被秒级取整吃掉一天。
+    const at = (offsetMs: number) => Math.floor((Date.now() + offsetMs) / 1000);
+    db.servers.push(
+      { ...server({ id: "srv_far", name: "A-far", cert_not_after: at(729 * DAY + HOUR) }), ...base },
+      { ...server({ id: "srv_soon", name: "B-soon", cert_not_after: at(3 * DAY + HOUR) }), ...base },
+      { ...server({ id: "srv_zero", name: "C-zero", cert_not_after: at(12 * HOUR) }), ...base },
+      { ...server({ id: "srv_expired", name: "D-expired", cert_not_after: at(-DAY) }), ...base },
+    );
+
+    const res = await worker.fetch(request("/", { jwt: await signAccessJwt() }), envWith(db, new FakeDb()));
+    const body = await res.text();
+
+    // 远期：日期 + 间隔号 + 剩余天数，文字保持 --text-3（dim）。
+    expect(body).toMatch(/class="num text3">\d{4}-\d{2}-\d{2} · 剩余 729 天</);
+    // 7 天内：天数与日期一起用 warn。
+    expect(body).toMatch(/class="num text3 warntext">\d{4}-\d{2}-\d{2} · 剩余 3 天</);
+    // 0 天与负数都显示「已到期」，用 danger。
+    expect(body.match(/已到期/g)).toHaveLength(2);
+    expect(body).toMatch(/class="num text3 dangertext">\d{4}-\d{2}-\d{2} · 已到期</);
+  });
+
   it("建机中的节点不进待处理：只有 active 缺版本才算", async () => {
     const db = new FakeDb();
     const base = { account_id: "acct_1", destroyed_at: null };
