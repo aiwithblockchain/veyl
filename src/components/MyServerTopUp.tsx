@@ -171,7 +171,7 @@ export function MyServerTopUp({
   const busy = busyCents !== null;
   const denominations = wallet?.denominations_cents ?? [];
   const minCents = wallet?.min_topup_cents ?? 600;
-  const maxCents = wallet?.max_topup_cents ?? 30000;
+  const maxCents = wallet?.max_topup_cents ?? 50000;
   const customDollars = /^\d+$/.test(custom) ? Number(custom) : Number.NaN;
   const customCents = Number.isSafeInteger(customDollars)
     ? customDollars * 100

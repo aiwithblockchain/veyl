@@ -1929,7 +1929,7 @@ type MyServerWallet = {
   currency: "USD";
   denominations_cents: number[];  // UI 快捷档（USD 分，升序），不是支付白名单
   min_topup_cents?: number;       // 自定义最小金额（USD 分）；缺省时前端按 600 兜底
-  max_topup_cents?: number;       // 自定义最大金额（USD 分）；缺省时前端按 30000 兜底
+  max_topup_cents?: number;       // 自定义最大金额（USD 分）；缺省时前端按 50000 兜底
   daily_cents?: number;           // 每天在扣的合计（USD 分，2.85.0）；缺省 = 旧控制面，前端按列表自己求和
   remaining_days?: number | null; // 余额还能用几天（2.85.0）；null = 没有在跑的机器；缺省 = 旧 Host 没给，界面整段不显示
   updated_at: string;             // Host 读取余额的时刻（本地取）；控制面不提供
@@ -1938,7 +1938,7 @@ type MyServerWallet = {
 type MyServerTopup = {
   topup_id: string;
   checkout_url: string;           // 系统浏览器打开
-  denomination_cents: number;     // 实际充值金额（USD 分，整美元，$6–$300）
+  denomination_cents: number;     // 实际充值金额（USD 分，整美元，$6–$500）
 };
 
 ```
@@ -1950,8 +1950,8 @@ type MyServerTopup = {
 | `my_server_account {}` | **本体不联网、不刷新令牌**：`logged_in` 依据本地令牌与 `account_kind = email`。但若最近 60 秒内有控制面请求出现传输层失败（DNS / 连接失败 / 超时；**5xx 不算**），返回 `UPSTREAM_ERROR / provider_unavailable`（超时为 `TIMEOUT / timeout`），供界面区分「控制面不可达」与「未登录」；这些失败**不改 `logged_in`、不清本地令牌**。`session_expires_at` 是本地记录的 refresh 到期时间（登录 / 每次刷新成功时由 Host 按响应里的 `refresh_expires_at` 落盘）。`null` **只表示本地没有邮箱会话记录、或记录的时间不可解析**；会话已过期时仍返回到期时间（此时 `logged_in = false`），界面据此区分「已过期」和「从未登录」。**不在这里向控制面核对** |
 | `my_server_logout {}` | 调控制面 `POST /v1/auth/logout`：作废 refresh、把设备解绑到新的匿名账户；成功后清本地令牌。**离线失败不假装已退出**。服务端明确拒绝（401 `token_invalid`、403 `device_revoked` / `account_blocked`）时清本地令牌与账户标记并返回未登录态——账户被停用时用户也必须能退出去，同时发 `my-server-account-cleared`（`events.md` §4.27） |
 | `my_server_order_get { orderId }` | `GET /v1/orders/{id}`；建机期间轮询，事件不可用时同样用它兜底 |
-| `my_server_wallet {}` | `GET /v1/wallet`；返回余额、UI 快捷档（`denominations_cents`，USD 分、升序，**不是支付白名单**）与自定义充值范围（`min_topup_cents` / `max_topup_cents`，USD 分，可选；控制面缺一个就都不返回，前端按 600 / 30000 兜底）。2.85.0 增 `daily_cents`（在跑的机器的日价合计，与 App「每天约」同口径）与 `remaining_days`（余额还能用几天，`null` = 没有在跑的机器；日消耗 = 日价 + 近 7 天流量超支扣费日均，余额 ≤ 0 记 0、向下取整，见 `traffic-billing.md` §5.4）。`daily_cents` 缺省时前端回退到按列表自己求和；`remaining_days` 缺省（旧 Host）时界面不显示这一段。`updated_at` 是 Host 读取余额的时刻（本地取，控制面不提供），不是余额本身的变化时间。余额与扣费都由 Host 计算，前端不做金额运算 |
-| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Stripe Checkout 充值会话（`price_data`，后台不预建 Product / Price），返回 `checkout_url` 由系统浏览器打开；金额由服务端按 **$6–$300 的整美元**校验，不合法 → 409 `invalid_denomination`（`details` 带 `min_cents` / `max_cents` / `whole_dollars`）；同一账号一小时内的活跃充值单超过 5 笔 → 429 `topup_rate_limited`。`fake` 通道已于 2026-11-20 删除，充值只有 Stripe 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id` 与 `checkout_url`，界面据此给「重新打开」和可复制的链接 |
+| `my_server_wallet {}` | `GET /v1/wallet`；返回余额、UI 快捷档（`denominations_cents`，USD 分、升序，**不是支付白名单**）与自定义充值范围（`min_topup_cents` / `max_topup_cents`，USD 分，可选；控制面缺一个就都不返回，前端按 600 / 50000 兜底）。2.85.0 增 `daily_cents`（在跑的机器的日价合计，与 App「每天约」同口径）与 `remaining_days`（余额还能用几天，`null` = 没有在跑的机器；日消耗 = 日价 + 近 7 天流量超支扣费日均，余额 ≤ 0 记 0、向下取整，见 `traffic-billing.md` §5.4）。`daily_cents` 缺省时前端回退到按列表自己求和；`remaining_days` 缺省（旧 Host）时界面不显示这一段。`updated_at` 是 Host 读取余额的时刻（本地取，控制面不提供），不是余额本身的变化时间。余额与扣费都由 Host 计算，前端不做金额运算 |
+| `my_server_topup { denomination }` | `POST /v1/topups` 创建 Stripe Checkout 充值会话（`price_data`，后台不预建 Product / Price），返回 `checkout_url` 由系统浏览器打开；金额由服务端按 **$6–$500 的整美元**校验，不合法 → 409 `invalid_denomination`（`details` 带 `min_cents` / `max_cents` / `whole_dollars`）；同一账号一小时内的活跃充值单超过 5 笔 → 429 `topup_rate_limited`。`fake` 通道已于 2026-11-20 删除，充值只有 Stripe 一条路径。**收银台在浏览器里打不开时不能报成功**：返回 `INTERNAL / checkout_open_failed`，`details` 带 `topup_id` 与 `checkout_url`，界面据此给「重新打开」和可复制的链接 |
 | `my_server_checkout { orderId }` | **2.39.0 起：确认下单并开始建机，不扣费**，返回 `MyServerOrder`（`state = "provisioning"`）。余额 ≥ 日价 × 7 只是预检；不足 → `insufficient_balance`（带 `required_cents` / `shortfall_cents` / `min_days`），不建机、订单保持 `pending_payment`；该档位的 `regions` 不含订单地区 → `plan_unavailable_in_region`。就绪后由控制面在 enroll 回调里扣第 0 天，之后每天由 Cron 扣一天 |
 
 - **计费单位是「天」**（2026-11-16 拍板）：就绪时扣第 0 天，之后控制面每天扣一天，直到余额不足进 7 天宽限。契约里没有「月」的概念，`monthly_usd` 只是展示用的乘法。

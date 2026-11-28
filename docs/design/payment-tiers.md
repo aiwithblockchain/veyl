@@ -1,9 +1,10 @@
 # 充值档位重新设计：固定快捷档 + 自定义整数美元
 
 > 日期：2026-11-25（已定稿）
+> **2026-11-28 修订：自定义上限 $300 → $500（`MAX_TOPUP_CENTS=50000`）。** 本文旧值已按本条改齐；快捷档不变。
 > 状态：**已定稿**；本文件不改代码、不部署
 > **这是余额充值，不是服务期绑定。** 余额按天扣、余额不退、余额不足停机销毁的现有规则全部不变；充值面额只决定入账余额，不绑定机器、不引入天数或到期日。
-> 已定稿：5 个固定快捷档（$6 / $10 / $25 / $50 / $100）+ 自定义整美元（$6–$300）；没有一次性新手档、没有年付/套餐、没有折扣、没有新增字段、没有迁移。
+> 已定稿：5 个固定快捷档（$6 / $10 / $25 / $50 / $100）+ 自定义整美元（$6–$500）；没有一次性新手档、没有年付/套餐、没有折扣、没有新增字段、没有迁移。
 > 关联：`billing-notes.md`（计费模型）、`stripe-migration.md`（支付适配层）、`login-and-payment.md` §4（余额、按天扣、停机销毁）、`cloudflare/control-plane/src/topups.ts`、`src/components/MyServerTopUp.tsx`
 
 ## 0. 结论先行
@@ -11,14 +12,14 @@
 | # | 项 | 结论 |
 |---|---|---|
 | 1 | 固定快捷档 | **`600 / 1000 / 2500 / 5000 / 10000` 分（$6 / $10 / $25 / $50 / $100）**，永久保留，不是一次性；只作为 UI 快捷按钮 |
-| 2 | 自定义金额 | **整数美元，`600–30000` 分（$6–$300）**，`cents % 100 == 0`；服务端校验，不依赖快捷档列表 |
+| 2 | 自定义金额 | **整数美元，`600–50000` 分（$6–$500）**，`cents % 100 == 0`；服务端校验，不依赖快捷档列表 |
 | 3 | 一次性新手档 | **不做**：$6 是普通固定档，没有新手资格、唯一索引、新字段或迁移 |
 | 4 | 年付 / 套餐 | **不做**：没有年度档、套餐矩阵、时长、折扣或用户分层字段 |
 | 5 | 入账 | 实收 = 入账；webhook 的 `amount_total == topups.denomination_cents`、账本、`payments` 完全不动 |
 | 6 | 数据模型 | **`topups` 表一行不改**；没有迁移、没有新字段 |
 | 7 | 风控 | 邮箱验证；每账号 5 单/小时；新客户 / 大额 3DS；最低测试成本 $6 |
 
-一句话：**账户弹层里的充值块给 5 个快捷金额，再加一个 $6–$300 的整美元输入框；任何通过校验的金额都能建 Stripe Checkout，现有入账链路不动。**
+一句话：**账户弹层里的充值块给 5 个快捷金额，再加一个 $6–$500 的整美元输入框；任何通过校验的金额都能建 Stripe Checkout，现有入账链路不动。**
 
 ---
 
@@ -43,7 +44,7 @@
 | 4 | **$50.00**（5000 分） | $1.75 | 3.5% |
 | 5 | **$100.00**（10000 分） | $3.20 | 3.2% |
 | 自定义示例 | $36.00（3600 分） | $1.34 | 3.7% |
-| 上限示例 | $300.00（30000 分） | $9.00 | 3.0% |
+| 上限示例 | $500.00（50000 分） | $14.80 | 2.96% |
 
 - 手续费按美国 LLC、USD 计价、美国境内卡 `2.9% + $0.30` 计算；支付宝 / 换汇另加约 1%。
 - 余额按天扣，实际毛利取决于用户把余额花在哪种机器上；本表只列支付手续费，不再做「套餐 × 天数」矩阵。
@@ -55,11 +56,11 @@
 ## 3. 自定义金额
 
 - **整数美元**：只接受 `cents % 100 == 0`；`$5.99`、`$36.50` 这类拒绝。
-- **范围**：`600 <= cents <= 30000`（$6–$300）。
+- **范围**：`600 <= cents <= 50000`（$6–$500）。
 - **服务端校验**：`Number.isInteger(cents)`、整美元、范围三者同时满足才建会话；前端校验只是提前提示，Host / Worker 仍是最终裁判。
 - **不依赖快捷档列表**：`POST /v1/topups { denomination_cents: 3600 }` 即使 3600 不在 `TOPUP_DENOMINATIONS_CENTS` 里，也必须接受。
-- 拒绝原因统一用 `409 PRECONDITION_FAILED`、`details.reason="invalid_denomination"`，`details` 带 `min_cents`、`max_cents`、`whole_dollars: true`，客户端据此显示「$6–$300，整美元」。
-- 单笔上限 `$300`；没有余额上限；余额仍按天扣、不退不转让。
+- 拒绝原因统一用 `409 PRECONDITION_FAILED`、`details.reason="invalid_denomination"`，`details` 带 `min_cents`、`max_cents`、`whole_dollars: true`，客户端据此显示「$6–$500，整美元」。
+- 单笔上限 `$500`；没有余额上限；余额仍按天扣、不退不转让。
 
 ---
 
@@ -73,7 +74,7 @@
   "currency": "USD",
   "denominations_cents": [600, 1000, 2500, 5000, 10000],
   "min_topup_cents": 600,
-  "max_topup_cents": 30000
+  "max_topup_cents": 50000
 }
 ```
 
@@ -118,7 +119,7 @@
 
 ### 4.4 客户端与命令层
 
-- `src/agent/bridge.ts` 的 `MyServerWallet` 增加 `min_topup_cents?: number` / `max_topup_cents?: number`；旧响应缺省时新客户端按 `600` / `30000` 兜底，但以服务端返回为准。
+- `src/agent/bridge.ts` 的 `MyServerWallet` 增加 `min_topup_cents?: number` / `max_topup_cents?: number`；旧响应缺省时新客户端按 `600` / `50000` 兜底，但以服务端返回为准。
 - `src-tauri` 的 wallet 透传这两个可选字段；`my_server_topup` 不变（仍是 `{ denomination }`），不需要新增参数。
 - 契约 `docs/contracts/commands.md` 的 `my_server_wallet` 返回加两个可选字段；旧客户端可缺省，`my_server_topup` 形状不变。
 
@@ -130,21 +131,21 @@
 - 档位：一行 5 等分（高 44、gap 8）；窄窗（视口 <620px）退成 3 列，单档不低于 44 高；金额 16 mono/500，hover/focus 只换边框（`--hair-strong` / `--ink`），不做实心填充。
 - 充值块显示：
   - 5 个快捷按钮：`$6` / `$10` / `$25` / `$50` / `$100`（整美元，不带 `.00`）；
-  - 一个自定义金额输入框：`$6–$300`，整美元，占位符 `36`；
+  - 一个自定义金额输入框：`$6–$500`，整美元，占位符 `36`；
   - 提交按钮：空输入时为 `充值`（禁用）；合法时为 `充值 $X`（整额不带 `.00`）。
 - 没有分组、没有套餐 tab、没有划线价、没有「约一年」或天数文案。
 - 自定义输入校验：
   - 只允许整数美元（`^\d+$`，不接受小数点、负号、空值）；
-  - `6 <= 金额 <= 300`；
-  - 输入过程中不报错；失焦后或点过提交且值非法才显示「请输入 $6–$300 的整美元金额」并置 `aria-invalid`；清空回到中性 hint；不发起请求。
+  - `6 <= 金额 <= 500`；
+  - 输入过程中不报错；失焦后或点过提交且值非法才显示「请输入 $6–$500 的整美元金额」并置 `aria-invalid`；清空回到中性 hint；不发起请求。
 - 快捷按钮和自定义金额走同一个 `onTopUp(cents)`；Checkout 在外部浏览器打开后**账户弹层不关**，档位整块换成等待态（`topup.waiting.title`：已在浏览器打开收付款页），等待中不置灰任何控件。
 - 回到 App 时（窗口 focus 或重新可见，先到先算）强制刷新一次余额，不受 30 秒门禁限制；余额已直接到账（没有 `checkout_url`）时留在面板里给 `topup.charged`；收银台打不开时面板不关，给错误与「重新打开收付款页 / 复制链接 / 重试」。
 - 旧客户端只显示 5 个快捷按钮，仍可正常充值；新客户端多一个自定义输入框。
 - 文案 key（中英同批）：
   - `topup.custom.label`：自定义金额 / Custom amount
   - `topup.custom.placeholder`：36 / 36
-  - `topup.custom.hint`：$6–$300，整美元 / $6–$300, whole dollars
-  - `topup.custom.invalid`：请输入 $6–$300 的整美元金额 / Enter a whole-dollar amount from $6 to $300
+  - `topup.custom.hint`：$6–$500，整美元 / $6–$500, whole dollars
+  - `topup.custom.invalid`：请输入 $6–$500 的整美元金额 / Enter a whole-dollar amount from $6 to $500
   - `topup.custom.submit`：充值 {amount} / Top up {amount}
   - `topup.submit`：充值 / Top up
   - `topup.waiting.title`：已在浏览器打开收付款页 / Checkout is open in your browser
@@ -162,7 +163,7 @@
 |---|---|---|
 | `TOPUP_DENOMINATIONS_CENTS` | `"[600,1000,2500,5000,10000]"` | **仅 UI 快捷按钮**；升序；不是支付白名单 |
 | `MIN_TOPUP_CENTS` | `600` | 自定义最小金额（分） |
-| `MAX_TOPUP_CENTS` | `30000` | 自定义最大金额（分） |
+| `MAX_TOPUP_CENTS` | `50000` | 自定义最大金额（分） |
 
 - `readTopupDenominations` 继续解析 `TOPUP_DENOMINATIONS_CENTS`，但只用于 `GET /v1/wallet` 的快捷按钮；解析失败 / 为空时返回空数组并记日志，**不阻断自定义充值**。`handleTopups` 不再因为快捷档配置失败返回 503；只有 `MIN_TOPUP_CENTS` / `MAX_TOPUP_CENTS` 缺失或非法才 503。
 - `MIN_TOPUP_CENTS` / `MAX_TOPUP_CENTS` 是必需配置：必须是正整数、`MIN <= MAX`、`MIN >= 100`；缺失或非法 → `503 topup_config_unavailable`。
@@ -185,8 +186,8 @@
 |---|---|
 | 卡测试 | 邮箱验证；每账号 5 单/小时（只算 `pending + paid`）；最低金额 $6；Radar 对新客户 / 小额要求 3DS；`risk_level=highest` 拒绝 |
 | 大额拒付 | 卡支付 >$100 要求 3DS；首次大额人工复核；保留 ToS 同意、`topup_id`、开通与运行记录 |
-| 自定义金额 | 服务端只接受整美元、$6–$300；单笔上限 $300；不做余额硬上限，按月统计未消费余额 |
-| 储值类目 | 仍是 `Veyl Service Credits`；单笔 ≤$300；条款写明余额不退、不转让、不提现 |
+| 自定义金额 | 服务端只接受整美元、$6–$500；单笔上限 $500；不做余额硬上限，按月统计未消费余额 |
+| 储值类目 | 仍是 `Veyl Service Credits`；单笔 ≤$500；条款写明余额不退、不转让、不提现 |
 | 地区 | EEA / UK 继续 Radar 阻断；大额档不例外 |
 | 支付方式 | 支付宝可申请（受限类目）；微信不作为可依赖通道 |
 | 税 | 预付额度的税务口径需会计确认；本期不接 Stripe Tax，收入按实际消费确认 |
@@ -209,15 +210,15 @@
 
 ## 9. 验收标准
 
-1. `GET /v1/wallet` 返回 `denominations_cents = [600,1000,2500,5000,10000]`、`min_topup_cents=600`、`max_topup_cents=30000`；没有新手档、年付或用户分层字段。
+1. `GET /v1/wallet` 返回 `denominations_cents = [600,1000,2500,5000,10000]`、`min_topup_cents=600`、`max_topup_cents=50000`；没有新手档、年付或用户分层字段。
 2. `POST /v1/topups {denomination_cents:600}`、`1000`、`2500`、`5000`、`10000` 都能建出 `cs_…`；`topups.denomination_cents` 等于请求金额。
 3. 用测试卡付 $6 / $10 / $25 / $50 / $100：余额分别增加对应金额；`wallet_ledger` 一条 `stripe_payment`；`payments.amount_usd` 等于实收；webhook 与现有链路完全一致。
 4. `POST /v1/topups {denomination_cents:3600}`（$36，不在快捷列表）→ 建出会话；`$7`、`$123` 等整美元金额同样接受。
 5. `POST /v1/topups {denomination_cents:599}`（$5.99）→ `409`、`invalid_denomination`，不建会话。
-6. `POST /v1/topups {denomination_cents:30001}`（$300.01）→ `409`、`invalid_denomination`，不建会话。
-7. `POST /v1/topups {denomination_cents:500}`（$5）、`30100`（$301）、`3650`（$36.50）→ 全部拒绝。
+6. `POST /v1/topups {denomination_cents:50001}`（$500.01）→ `409`、`invalid_denomination`，不建会话。
+7. `POST /v1/topups {denomination_cents:500}`（$5）、`50100`（$501）、`3650`（$36.50）→ 全部拒绝。
 8. 旧客户端只拿到 5 个快捷金额，仍能正常建会话、支付、到账；不依赖新字段。
-9. 新客户端：5 个快捷按钮 + 自定义输入框；输入 `36` 可充 $36；输入 `5.99` / `300.01` 被前端拦下，不发起请求；提交按钮文案为 `充值 $X`。
+9. 新客户端：5 个快捷按钮 + 自定义输入框；输入 `36` 可充 $36；输入 `5.99` / `500.01` 被前端拦下，不发起请求；提交按钮文案为 `充值 $X`。
 10. 同一账号 1 小时内第 6 个 `pending + paid` 充值单 → `429`、`topup_rate_limited`；failed / expired 不计数。
 11. `TOPUP_DENOMINATIONS_CENTS` 配坏 / 为空 → `denominations_cents=[]`、自定义充值仍可用；`MIN_TOPUP_CENTS` / `MAX_TOPUP_CENTS` 配坏 → `503 topup_config_unavailable`。
 12. 没有迁移；`topups` 表结构不变；现有充值单、账本、`payments`、异步支付、幂等测试全绿；`npm run typecheck` 通过。
@@ -229,7 +230,7 @@
 ## 10. 已定稿
 
 - 固定快捷档：`600 / 1000 / 2500 / 5000 / 10000` 分（$6 / $10 / $25 / $50 / $100），永久保留。
-- 自定义：整数美元，`600–30000` 分（$6–$300），`cents % 100 == 0`。
+- 自定义：整数美元，`600–50000` 分（$6–$500），`cents % 100 == 0`。
 - $6 不是一次性新手档；没有新手档 / 年付 / 套餐 / 折扣 / 新增字段 / 迁移。
 - 入账沿用现有 webhook、账本与 `payments`；实收 = 入账。
 - **没有待拍板项。** 实现方按本文直接落地。

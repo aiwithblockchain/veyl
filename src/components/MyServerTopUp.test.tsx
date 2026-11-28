@@ -316,11 +316,11 @@ describe("充值面板（账户弹层内嵌）", () => {
     const input = screen.getByLabelText("自定义金额");
 
     fireEvent.change(input, { target: { value: "3" } });
-    expect(screen.queryByText("请输入 $6–$300 的整美元金额")).toBeNull();
+    expect(screen.queryByText("请输入 $6–$500 的整美元金额")).toBeNull();
     expect(input.getAttribute("aria-invalid")).toBeNull();
 
     fireEvent.blur(input);
-    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+    expect(screen.getByText("请输入 $6–$500 的整美元金额")).toBeTruthy();
     expect(input.getAttribute("aria-invalid")).toBe("true");
 
     // 清空后回到中性提示。
@@ -371,7 +371,7 @@ describe("充值面板（账户弹层内嵌）", () => {
     await waitFor(() => expect(onTopUp).toHaveBeenCalledWith(1000));
   });
 
-  it("自定义金额：默认范围下 6/300 可提交，300.01/5 被拦", async () => {
+  it("自定义金额：默认范围下 6/500 可提交，500.01/5 被拦", async () => {
     // 不走收银台（checkout_url=null），成功也不会关面板。
     const onTopUp = vi.fn(async (): Promise<MyServerTopup> => ({
       ...TOPUP,
@@ -384,7 +384,7 @@ describe("充值面板（账户弹层内嵌）", () => {
 
     for (const [value, cents] of [
       ["6", 600],
-      ["300", 30000],
+      ["500", 50000],
     ] as const) {
       fireEvent.change(input, { target: { value } });
       const button = submit();
@@ -393,12 +393,12 @@ describe("充值面板（账户弹层内嵌）", () => {
       await waitFor(() => expect(onTopUp).toHaveBeenLastCalledWith(cents));
     }
 
-    for (const value of ["5", "300.01"]) {
+    for (const value of ["5", "500.01"]) {
       fireEvent.change(input, { target: { value } });
       const button = submit();
       expect(button.disabled, value).toBe(false);
       fireEvent.click(button);
-      expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+      expect(screen.getByText("请输入 $6–$500 的整美元金额")).toBeTruthy();
     }
     expect(onTopUp).toHaveBeenCalledTimes(2);
   });
@@ -430,7 +430,7 @@ describe("充值面板（账户弹层内嵌）", () => {
       screen.getByRole("button", { name: /^充值/ }) as HTMLButtonElement,
     );
     expect(onTopUp).not.toHaveBeenCalled();
-    expect(screen.getByText("请输入 $6–$300 的整美元金额")).toBeTruthy();
+    expect(screen.getByText("请输入 $6–$500 的整美元金额")).toBeTruthy();
   });
 
   it("速率限制显示专用文案", async () => {
