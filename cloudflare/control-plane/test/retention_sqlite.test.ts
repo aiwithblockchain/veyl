@@ -4,7 +4,8 @@ import { pruneDestroyedServers, pruneOpsAudit, pruneServerTraffic, runBilling } 
 import { openMigratedDb, sqliteAvailable, type SqliteD1 } from "./helpers/sqliteD1";
 
 const DAY_MS = 24 * 3600 * 1000;
-const NOW = Date.parse("2026-11-26T00:00:00Z");
+// UTC 03:17 是运维审计清理那一轮（cron 第 17 分），runBilling 的接线用例要落在这个小时里。
+const NOW = Date.parse("2026-11-26T03:17:00Z");
 
 // Node 22 上 node:sqlite 需要 --experimental-sqlite；拿不到就跳过，不让环境差异变成红。
 const hasSqlite = sqliteAvailable();
@@ -189,6 +190,34 @@ describeSqlite("保留清理 · 真实 SQL（node:sqlite + 全部迁移）", () 
         "settle.ok",
         "destroy.ok",
       ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("运维审计一天一次：非 03 点那一轮不清理，03 点那一轮清理", async () => {
+    vi.useFakeTimers();
+    const db = await openMigratedDb();
+    try {
+      addAudit(db, "ops.ticket.issued", NOW - 400 * DAY_MS);
+      addAudit(db, "enroll.ok", NOW - 400 * DAY_MS);
+
+      vi.setSystemTime(new Date("2026-11-26T02:17:00Z"));
+      const early = await runBilling(envWith(db));
+      expect(early.opsAuditPruned).toBe(0);
+      expect(
+        db.rows<{ id: number }>("SELECT id FROM audit_log WHERE action = 'ops.ticket.issued'"),
+      ).toHaveLength(1);
+
+      vi.setSystemTime(new Date("2026-11-26T03:17:00Z"));
+      const nightly = await runBilling(envWith(db));
+      expect(nightly.opsAuditPruned).toBe(1);
+      expect(
+        db.rows<{ id: number }>("SELECT id FROM audit_log WHERE action = 'ops.ticket.issued'"),
+      ).toHaveLength(0);
+      expect(
+        db.rows<{ id: number }>("SELECT id FROM audit_log WHERE action = 'enroll.ok'"),
+      ).toHaveLength(1);
     } finally {
       db.close();
     }

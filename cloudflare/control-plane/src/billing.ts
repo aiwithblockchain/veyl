@@ -32,6 +32,8 @@ const TOKEN_PRUNE_BATCH = 1000;
 /** 运维审计保留 12 个月：只针对 `ops.` 动作，业务审计（enroll / settle / destroy…）不按时间删。 */
 const OPS_AUDIT_RETENTION_MS = 365 * DAY_MS;
 const OPS_AUDIT_PRUNE_BATCH = 1000;
+/** 选低峰时段，一天一次足够：只在 UTC 3 点那一轮跑（cron 第 17 分，即 03:17 UTC）。 */
+const OPS_AUDIT_PRUNE_HOUR = 3;
 /** 登出留下的匿名账户：过一天、确认没人引用才删。 */
 const ORPHAN_ACCOUNT_MIN_AGE_MS = DAY_MS;
 const ORPHAN_ACCOUNT_BATCH = 200;
@@ -251,7 +253,10 @@ export async function runBilling(env: BillingEnv): Promise<BillingReport> {
   report.serversPruned = await pruneDestroyedServers(env, now);
   report.tokensPruned = await pruneRefreshTokens(env, now);
   report.accountsPruned = await pruneOrphanAccounts(env, now);
-  report.opsAuditPruned = await pruneOpsAudit(env, now);
+  // 审计清理一天一次就够：闸门放在调用处，其它小时的巡检不碰 audit_log。
+  if (new Date(now).getUTCHours() === OPS_AUDIT_PRUNE_HOUR) {
+    report.opsAuditPruned = await pruneOpsAudit(env, now);
+  }
   // 事故可见性：`providerGone` 只记本轮新增，事故过去后就看不出冻了多少台。
   // 只读计数，查失败不影响这一轮计费。
   try {
