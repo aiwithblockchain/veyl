@@ -82,6 +82,8 @@ pub async fn start_agent_with_certs(
     identity: Arc<Identity>,
     server_id: &str,
     verifying_key: VerifyingKey,
+    // Read-only key from enroll; `None` when the control plane did not send one.
+    ops_verifying_key: Option<VerifyingKey>,
     rotator: Arc<dyn Rotator>,
     announce: bool,
     replay_path: Option<std::path::PathBuf>,
@@ -92,7 +94,8 @@ pub async fn start_agent_with_certs(
     let auth = match replay_path {
         Some(path) => AuthState::with_store(verifying_key, server_id, path),
         None => AuthState::new(verifying_key, server_id),
-    };
+    }
+    .with_ops_key(ops_verifying_key);
     let state = ServerState::new(Arc::new(auth), rotator, identity.clone(), metering);
     let certs = identity.certs().clone();
     let ct = CancellationToken::new();

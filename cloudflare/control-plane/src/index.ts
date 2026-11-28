@@ -35,6 +35,8 @@ export interface Env {
   /** 节点 MCP 一次性令牌的独立签名密钥与 key_id。 */
   AGENT_TOKEN_SIGNING_JWK?: string;
   AGENT_TOKEN_KEY_ID?: string;
+  /** 运维票的 Ed25519 公钥（JWK）：enroll 时下发，未配置就不下发。 */
+  OPS_TOKEN_PUBLIC_JWK?: string;
   /** 统一根证书与私钥（PEM）：agent 的叶证书由控制面签发。 */
   ROOT_CA_CERT_PEM?: string;
   ROOT_CA_KEY_PEM?: string;

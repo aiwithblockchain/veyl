@@ -42,6 +42,8 @@ export interface ServersEnv extends MaybeAuthEnv {
   /** 节点 MCP 令牌的独立签名密钥与 key_id（不与凭据签名共用）。 */
   AGENT_TOKEN_SIGNING_JWK?: string;
   AGENT_TOKEN_KEY_ID?: string;
+  /** 运维票的 Ed25519 公钥（JWK）：enroll 时下发给 agent，缺省即运维票不可用。 */
+  OPS_TOKEN_PUBLIC_JWK?: string;
   /** 期望状态下发给 agent 的 sing-box 版本与下载信息。 */
   SING_BOX_VERSION?: string;
   SING_BOX_SHA256?: string;
@@ -1235,6 +1237,36 @@ async function readEnrollCsr(
 }
 
 /**
+ * 运维公钥随 enroll 下发（双钥匙第一步）：没配、配坏都只是不发这个字段。
+ * agent 拿不到它时只接受业务票，这是正常中间状态；运维侧配置坏了不能让建机失败。
+ */
+function opsTokenPublicKey(env: ServersEnv): string | undefined {
+  const raw = env.OPS_TOKEN_PUBLIC_JWK?.trim();
+  if (!raw) return undefined;
+  try {
+    const jwk = JSON.parse(raw) as JsonWebKey;
+    // 「两个私钥互不持有」：运维私钥一旦出现在控制面环境变量里，说明配置方式错了。
+    if (jwk.d) console.warn("[servers] ops_token_public_key_has_private_material");
+
+    const key = publicJwk(raw);
+    const publicKey = JSON.parse(key) as JsonWebKey;
+    // agent 只认 Ed25519；别的钥匙发下去相当于没发，还会让新 agent 在启动时解析失败。
+    if (publicKey.kty !== "OKP" || publicKey.crv !== "Ed25519" || !publicKey.x) {
+      throw new Error(`unexpected key kty=${publicKey.kty} crv=${publicKey.crv}`);
+    }
+    // 两把钥匙相同：运维票等于全权票，能力隔离失效。agent 侧会兜住，但没有理由发下去。
+    if (env.AGENT_TOKEN_SIGNING_JWK && key === publicJwk(env.AGENT_TOKEN_SIGNING_JWK)) {
+      console.warn("[servers] ops_token_public_key_duplicate_of_business");
+      return undefined;
+    }
+    return key;
+  } catch (error) {
+    console.warn(`[servers] ops_token_public_key_invalid error=${String(error)}`);
+    return undefined;
+  }
+}
+
+/**
  * 同一 enrollment token 在 TTL 内的重放：换发新的 server_token（旧的立即失效），
  * 复用上一次下发的 host/port/password——重放不是重新签发，客户端拿到的配置不能变。
  * 这是 agent 丢 state.json 或首次 enroll 响应丢失时唯一的恢复路径，所以不做「一次性」拒绝。
@@ -1337,6 +1369,8 @@ async function reEnroll(
 
   if (cert) await recordCertIssued(env, row, cert);
 
+  const opsPublicKey = opsTokenPublicKey(env);
+
   return agentJson({
     server_id: row.id,
     server_token: serverToken,
@@ -1347,6 +1381,7 @@ async function reEnroll(
       singbox,
     },
     token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK!),
+    ...(opsPublicKey ? { ops_token_public_key: opsPublicKey } : {}),
     ...(cert ? { cert_pem: cert.cert_pem, ca_pem: cert.ca_pem } : {}),
   });
 }
@@ -1469,6 +1504,8 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
 
   if (cert) await recordCertIssued(env, row, cert);
 
+  const opsPublicKey = opsTokenPublicKey(env);
+
   return agentJson({
     server_id: row.id,
     server_token: serverToken,
@@ -1480,6 +1517,7 @@ async function agentEnroll(request: Request, env: ServersEnv): Promise<Response>
     },
     // Ed25519 公钥 JWK 字符串：agent 用它离线验桌面端的一次性令牌。
     token_public_key: publicJwk(env.AGENT_TOKEN_SIGNING_JWK),
+    ...(opsPublicKey ? { ops_token_public_key: opsPublicKey } : {}),
     ...(cert ? { cert_pem: cert.cert_pem, ca_pem: cert.ca_pem } : {}),
   });
 }

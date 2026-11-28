@@ -19,6 +19,17 @@ async function signingJwk(): Promise<string> {
   return JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey));
 }
 
+async function opsKeyPair(): Promise<{ privateJwk: string; publicJwk: JsonWebKey }> {
+  const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  return {
+    privateJwk: JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey)),
+    publicJwk: (await crypto.subtle.exportKey("jwk", pair.publicKey)) as JsonWebKey,
+  };
+}
+
 function seedServer(db: FakeD1, state = "booting") {
   db.rows("servers").push({
     id: SERVER,
@@ -306,6 +317,171 @@ describe("POST /v1/agent/enroll", () => {
       env as never,
     );
     expect(missing?.status).toBe(401);
+  });
+
+  it("配置了运维公钥：enroll 与重放响应都下发 ops_token_public_key", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    const ops = await opsKeyPair();
+    // 环境变量里放的应该是公钥；拿私钥来喂是从下一条用例才开始的错误用法。
+    const withOps = { ...env, OPS_TOKEN_PUBLIC_JWK: JSON.stringify(ops.publicJwk) };
+    seedServer(db);
+    await seedEnrollment(db);
+
+    const first = (await (await handleServers(enrollRequest(), withOps as never))!.json()) as {
+      token_public_key: string;
+      ops_token_public_key?: string;
+    };
+    expect(first.token_public_key).toBeTruthy();
+    // 只发公钥三元组：私钥参数 d 绝不能漏出去。
+    expect(JSON.parse(first.ops_token_public_key!)).toEqual({
+      kty: "OKP",
+      crv: "Ed25519",
+      x: ops.publicJwk.x,
+    });
+
+    // 重放走的是另一条返回路径（reEnroll），同样要带上。
+    const replay = (await (await handleServers(enrollRequest(), withOps as never))!.json()) as {
+      ops_token_public_key?: string;
+    };
+    expect(JSON.parse(replay.ops_token_public_key!)).toEqual(JSON.parse(first.ops_token_public_key!));
+  });
+
+  it("没配置运维公钥：只下发业务公钥，不是错误", async () => {
+    const db = new FakeD1();
+    const env = await envWith(db, await signingJwk());
+    seedServer(db);
+    await seedEnrollment(db);
+
+    const res = await handleServers(enrollRequest(), env as never);
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as Record<string, unknown>;
+    expect(body.token_public_key).toBeTruthy();
+    expect("ops_token_public_key" in body).toBe(false);
+  });
+
+  it("运维公钥配坏了：enroll 照常成功，只是不下发并记一条 warn", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      const withBadOps = { ...env, OPS_TOKEN_PUBLIC_JWK: "{not-a-jwk" };
+      seedServer(db);
+      await seedEnrollment(db);
+
+      const res = await handleServers(enrollRequest(), withBadOps as never);
+      expect(res?.status).toBe(200);
+      const body = (await res!.json()) as Record<string, unknown>;
+      expect("ops_token_public_key" in body).toBe(false);
+      expect(
+        warn.mock.calls
+          .map(([line]) => String(line))
+          .some((line) => line.includes("ops_token_public_key_invalid")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("运维公钥不是 Ed25519：下发等于让新 agent 启动失败，宁可不发", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      const ec = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+        "sign",
+        "verify",
+      ])) as CryptoKeyPair;
+      const withEcOps = {
+        ...env,
+        OPS_TOKEN_PUBLIC_JWK: JSON.stringify(await crypto.subtle.exportKey("jwk", ec.privateKey)),
+      };
+      seedServer(db);
+      await seedEnrollment(db);
+
+      const res = await handleServers(enrollRequest(), withEcOps as never);
+      expect(res?.status).toBe(200);
+      const body = (await res!.json()) as Record<string, unknown>;
+      expect("ops_token_public_key" in body).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("误把运维私钥配进环境变量：响应里也绝不含 d，并记一条 warn", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      const ops = await opsKeyPair();
+      const withPrivate = { ...env, OPS_TOKEN_PUBLIC_JWK: ops.privateJwk };
+      seedServer(db);
+      await seedEnrollment(db);
+
+      const res = await handleServers(enrollRequest(), withPrivate as never);
+      expect(res?.status).toBe(200);
+      const body = (await res!.json()) as { ops_token_public_key?: string };
+      expect(JSON.parse(body.ops_token_public_key!)).toEqual({
+        kty: "OKP",
+        crv: "Ed25519",
+        x: ops.publicJwk.x,
+      });
+      expect(body.ops_token_public_key).not.toContain('"d"');
+      expect(
+        warn.mock.calls
+          .map(([line]) => String(line))
+          .some((line) => line.includes("ops_token_public_key_has_private_material")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("运维公钥与业务公钥相同：记 warn 并拒绝下发", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      // 同一把 Ed25519 钥匙：运维票会拿到全权，能力隔离失效。
+      const withSameKey = { ...env, OPS_TOKEN_PUBLIC_JWK: env.AGENT_TOKEN_SIGNING_JWK };
+      seedServer(db);
+      await seedEnrollment(db);
+
+      const res = await handleServers(enrollRequest(), withSameKey as never);
+      expect(res?.status).toBe(200);
+      const body = (await res!.json()) as Record<string, unknown>;
+      expect("ops_token_public_key" in body).toBe(false);
+      expect(
+        warn.mock.calls
+          .map(([line]) => String(line))
+          .some((line) => line.includes("ops_token_public_key_duplicate_of_business")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("空字符串当作未配置：不下发也不告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const db = new FakeD1();
+      const env = await envWith(db, await signingJwk());
+      const withBlank = { ...env, OPS_TOKEN_PUBLIC_JWK: "   " };
+      seedServer(db);
+      await seedEnrollment(db);
+
+      const res = await handleServers(enrollRequest(), withBlank as never);
+      expect(res?.status).toBe(200);
+      const body = (await res!.json()) as Record<string, unknown>;
+      expect("ops_token_public_key" in body).toBe(false);
+      expect(
+        warn.mock.calls
+          .map(([line]) => String(line))
+          .some((line) => line.includes("ops_token_public_key")),
+      ).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

@@ -275,6 +275,8 @@ async fn main() -> Result<()> {
         identity.clone(),
         SERVER_ID,
         signing.verifying_key(),
+        // The demo exercises the business path only.
+        None,
         Arc::new(StubRotator::default()),
         false,
         None,

@@ -87,6 +87,9 @@ struct Enrolled {
     /// Set only when this call enrolled; a restored node keeps its persisted one.
     desired: Option<DesiredState>,
     token_public_key: Option<String>,
+    /// Read-only signer from enroll; `None` while the control plane has not
+    /// configured one.
+    ops_token_public_key: Option<String>,
     /// Leaf + root from the enroll response, when the control plane signed one.
     cert: Option<(String, String)>,
 }
@@ -229,10 +232,16 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         server_token,
         desired: enrolled_desired,
         token_public_key,
+        ops_token_public_key,
         cert: enroll_cert,
     } = enrolled;
     let signer = resolve_signer_pubkey(&cfg, token_public_key.as_deref())?;
-    tracing::info!(server_id = %server_id, "identity ready");
+    let ops_signer = resolve_ops_signer_pubkey(ops_token_public_key.as_deref());
+    tracing::info!(
+        server_id = %server_id,
+        ops_tickets = ops_signer.is_some(),
+        "identity ready"
+    );
 
     let mut leaf_installed = false;
     if let (Some(req), Some((cert_pem, ca_pem))) = (&enroll_request, enroll_cert.as_ref()) {
@@ -373,6 +382,7 @@ pub async fn run(config_path: &Path, log_level_override: Option<String>) -> Resu
         identity.clone(),
         &server_id,
         signer,
+        ops_signer,
         rotator,
         false,
         Some(replay_path),
@@ -661,6 +671,23 @@ fn resolve_signer_pubkey(cfg: &AgentConfig, jwk: Option<&str>) -> Result<Verifyi
     auth::parse_verifying_key_hex(hex)
 }
 
+/// The ops key comes only from enroll — never a built-in or a config fallback,
+/// so an unconfigured control plane simply means no ops tickets. A key that
+/// fails to parse is treated the same way, loudly.
+fn resolve_ops_signer_pubkey(jwk: Option<&str>) -> Option<VerifyingKey> {
+    let jwk = jwk?;
+    match auth::parse_verifying_key_jwk(jwk) {
+        Ok(key) => Some(key),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "invalid ops_token_public_key from enroll; ops tickets will not be accepted"
+            );
+            None
+        }
+    }
+}
+
 async fn detect_public_ip(metadata_url: &str) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -694,6 +721,7 @@ async fn ensure_identity(
             server_token: token.clone(),
             desired: None,
             token_public_key: state.agent_token_public_key.clone(),
+            ops_token_public_key: state.agent_ops_token_public_key.clone(),
             cert: None,
         });
     }
@@ -718,6 +746,7 @@ async fn ensure_identity(
                         singbox_version = %enrollment.desired.singbox.version.trim_start_matches('v'),
                         singbox_sha256 = %short_sha(&enrollment.desired.singbox.sha256),
                         token_public_key = enrollment.token_public_key.is_some(),
+                        ops_token_public_key = enrollment.ops_token_public_key.is_some(),
                         certificate = enrollment.cert_pem.is_some(),
                         "enrolled with the control plane"
                     );
@@ -726,6 +755,9 @@ async fn ensure_identity(
                     if let Some(jwk) = &enrollment.token_public_key {
                         state.agent_token_public_key = Some(jwk.clone());
                     }
+                    // Mirror the response exactly: a re-enroll without an ops
+                    // key must not keep trusting an older one.
+                    state.agent_ops_token_public_key = enrollment.ops_token_public_key.clone();
                     // The password is only guaranteed to be in this response; keep
                     // it so a restart survives a control-plane outage.
                     state.last_desired = Some(StoredDesired::from_desired(
@@ -742,6 +774,7 @@ async fn ensure_identity(
                         server_token: enrollment.server_token,
                         desired: Some(enrollment.desired),
                         token_public_key: enrollment.token_public_key,
+                        ops_token_public_key: enrollment.ops_token_public_key,
                         cert,
                     });
                 }

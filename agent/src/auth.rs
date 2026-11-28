@@ -6,8 +6,12 @@
 //! ```
 //!
 //! The signature covers `header.payload`. The agent verifies fully offline with
-//! the Ed25519 public key handed out by `/v1/agent/enroll` (JWK), then checks
+//! the Ed25519 public keys handed out by `/v1/agent/enroll` (JWK), then checks
 //! `exp`, `server_id`, and that the jti has not already authorized a tool call.
+//!
+//! Two keys can be trusted: the business key (every tool, jti consumed once) and
+//! the ops key (read-only tools, jti reusable). Which key verified a ticket is
+//! what grants its capability — never a field inside the ticket.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,6 +77,48 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// What a verified ticket may do. Produced only by the key that verified it,
+/// never read from the ticket's claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// The business key (the control plane's). Every tool; the jti is consumed.
+    Business,
+    /// The ops key. Read-only tools only; the jti is not consumed, because a
+    /// replay of a read has no effect and ops tickets live for an hour.
+    Ops,
+}
+
+impl Capability {
+    /// Allowlist, default deny: a tool added later is business-only until it is
+    /// named here, so a new read tool with a side effect cannot silently become
+    /// reachable with the ops key.
+    pub fn allows(self, tool: &str) -> bool {
+        match self {
+            Capability::Business => true,
+            Capability::Ops => matches!(tool, "get_status"),
+        }
+    }
+
+    /// Ops tickets skip replay tracking; see [`Capability::Ops`].
+    pub fn consumes_jti(self) -> bool {
+        matches!(self, Capability::Business)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Business => "business",
+            Capability::Ops => "ops",
+        }
+    }
+}
+
+/// A ticket that verified, plus the capability its signing key grants.
+#[derive(Debug, Clone)]
+pub struct Verified {
+    pub payload: TokenPayload,
+    pub capability: Capability,
+}
+
 pub fn mint_token(signing_key: &SigningKey, server_id: &str, jti: &str, exp: u64) -> String {
     let payload = TokenPayload {
         server_id: server_id.to_string(),
@@ -105,6 +151,9 @@ const MAX_REPLAY_ENTRIES: usize = 512;
 /// Shared verification + replay state.
 pub struct AuthState {
     verifying_key: VerifyingKey,
+    /// Read-only key from enroll; `None` means ops tickets are not accepted.
+    /// Optional in every deployment: the control plane may not have one yet.
+    ops_verifying_key: Option<VerifyingKey>,
     server_id: String,
     /// jti -> exp for tokens that have already executed a tool.
     executed: Mutex<HashMap<String, u64>>,
@@ -117,6 +166,7 @@ impl AuthState {
     pub fn new(verifying_key: VerifyingKey, server_id: impl Into<String>) -> Self {
         Self {
             verifying_key,
+            ops_verifying_key: None,
             server_id: server_id.into(),
             executed: Mutex::new(HashMap::new()),
             replay_path: None,
@@ -133,20 +183,45 @@ impl AuthState {
         let executed = load_replay(&replay_path);
         Self {
             verifying_key,
+            ops_verifying_key: None,
             server_id: server_id.into(),
             executed: Mutex::new(executed),
             replay_path: Some(replay_path),
         }
     }
 
+    /// Trust a second key for read-only ops tickets. If the control plane hands
+    /// out the same key twice it has misconfigured the deployment: accepting it
+    /// would give the business signer nothing new, but every business ticket
+    /// would still verify first, so drop it and say so once at startup.
+    pub fn with_ops_key(mut self, key: Option<VerifyingKey>) -> Self {
+        self.ops_verifying_key = match key {
+            Some(k) if k == self.verifying_key => {
+                tracing::error!(
+                    "ops_token_public_key equals token_public_key; ignoring it — ops tickets will not be accepted"
+                );
+                None
+            }
+            other => other,
+        };
+        self
+    }
+
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    pub fn has_ops_key(&self) -> bool {
+        self.ops_verifying_key.is_some()
     }
 
     /// Signature, then server binding, then expiry. Replay is checked only when
     /// a tool is about to execute (see [`Self::consume_jti`]) so that the
     /// multi-request MCP handshake can share one token.
-    pub fn verify(&self, token: &str) -> Result<TokenPayload, AuthError> {
+    ///
+    /// Business key first: every existing deployment has it, and it is the one
+    /// an ops ticket must never be mistaken for.
+    pub fn verify(&self, token: &str) -> Result<Verified, AuthError> {
         let parts: Vec<&str> = token.split('.').collect();
         if parts.len() != 3 {
             return Err(AuthError::Malformed);
@@ -167,9 +242,21 @@ impl AuthState {
             .map_err(|_| AuthError::Malformed)?;
         let sig = Signature::from_slice(&sig_bytes).map_err(|_| AuthError::Malformed)?;
         let signing_input = format!("{header_b64}.{payload_b64}");
-        self.verifying_key
+        let capability = if self
+            .verifying_key
             .verify_strict(signing_input.as_bytes(), &sig)
-            .map_err(|_| AuthError::BadSignature)?;
+            .is_ok()
+        {
+            Capability::Business
+        } else if self
+            .ops_verifying_key
+            .as_ref()
+            .is_some_and(|key| key.verify_strict(signing_input.as_bytes(), &sig).is_ok())
+        {
+            Capability::Ops
+        } else {
+            return Err(AuthError::BadSignature);
+        };
 
         let payload_bytes = URL_SAFE_NO_PAD
             .decode(payload_b64)
@@ -182,7 +269,10 @@ impl AuthState {
         if payload.exp <= now_unix() {
             return Err(AuthError::Expired);
         }
-        Ok(payload)
+        Ok(Verified {
+            payload,
+            capability,
+        })
     }
 
     /// Atomically mark this jti as used by a tool execution. The first caller
@@ -373,7 +463,7 @@ mod tests {
             .unwrap();
         let header: serde_json::Value = serde_json::from_slice(&header).unwrap();
         assert_eq!(header["alg"], "EdDSA");
-        assert_eq!(auth.verify(&token).unwrap().jti, "j1");
+        assert_eq!(auth.verify(&token).unwrap().payload.jti, "j1");
     }
 
     #[test]
@@ -384,8 +474,8 @@ mod tests {
         let mut parts: Vec<&str> = token.split('.').collect();
         parts[1] = "eyJzZXJ2ZXJfaWQiOiJzcnZfMiJ9"; // {"server_id":"srv_2"}
         assert_eq!(
-            auth.verify(&parts.join(".")),
-            Err(AuthError::BadSignature)
+            auth.verify(&parts.join(".")).unwrap_err(),
+            AuthError::BadSignature
         );
     }
 
@@ -396,7 +486,10 @@ mod tests {
         let token = mint_token(&sk, "srv_1", "j1", now_unix() + 60);
         let mut parts: Vec<&str> = token.split('.').collect();
         parts[0] = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0"; // alg=none
-        assert_eq!(auth.verify(&parts.join(".")), Err(AuthError::Malformed));
+        assert_eq!(
+            auth.verify(&parts.join(".")).unwrap_err(),
+            AuthError::Malformed
+        );
     }
 
     #[test]
@@ -404,10 +497,10 @@ mod tests {
         let sk = key();
         let auth = AuthState::new(sk.verifying_key(), "srv_1");
         let t = mint_token(&sk, "srv_1", "j1", now_unix() + 60);
-        assert_eq!(auth.verify(&t).unwrap().jti, "j1");
+        assert_eq!(auth.verify(&t).unwrap().payload.jti, "j1");
 
         let expired = mint_token(&sk, "srv_1", "j2", now_unix().saturating_sub(1));
-        assert_eq!(auth.verify(&expired), Err(AuthError::Expired));
+        assert_eq!(auth.verify(&expired).unwrap_err(), AuthError::Expired);
     }
 
     #[test]
@@ -415,9 +508,9 @@ mod tests {
         let sk = key();
         let auth = AuthState::new(sk.verifying_key(), "srv_1");
         let other = mint_token(&key(), "srv_1", "j1", now_unix() + 60);
-        assert_eq!(auth.verify(&other), Err(AuthError::BadSignature));
+        assert_eq!(auth.verify(&other).unwrap_err(), AuthError::BadSignature);
         let wrong = mint_token(&sk, "srv_2", "j1", now_unix() + 60);
-        assert_eq!(auth.verify(&wrong), Err(AuthError::WrongServer));
+        assert_eq!(auth.verify(&wrong).unwrap_err(), AuthError::WrongServer);
     }
 
     #[test]
@@ -426,7 +519,8 @@ mod tests {
         let auth = AuthState::new(sk.verifying_key(), "srv_1");
         let p = auth
             .verify(&mint_token(&sk, "srv_1", "j1", now_unix() + 60))
-            .unwrap();
+            .unwrap()
+            .payload;
         assert!(auth.consume_jti(&p).is_ok());
         assert_eq!(auth.consume_jti(&p), Err(AuthError::Replayed));
     }
@@ -470,12 +564,12 @@ mod tests {
 
         {
             let auth = AuthState::with_store(sk.verifying_key(), "srv_1", path.clone());
-            let p = auth.verify(&token).unwrap();
+            let p = auth.verify(&token).unwrap().payload;
             auth.consume_jti(&p).unwrap();
         }
         // A new process would load the same file.
         let auth = AuthState::with_store(sk.verifying_key(), "srv_1", path.clone());
-        let p = auth.verify(&token).unwrap();
+        let p = auth.verify(&token).unwrap().payload;
         assert_eq!(auth.consume_jti(&p), Err(AuthError::Replayed));
 
         #[cfg(unix)]
@@ -512,5 +606,97 @@ mod tests {
         // The soonest-to-expire entries were dropped first.
         assert!(!map.contains_key("j0"));
         assert!(map.contains_key(&format!("j{}", MAX_REPLAY_ENTRIES + 49)));
+    }
+
+    fn dual_key_state(business: &SigningKey, ops: &SigningKey) -> AuthState {
+        AuthState::new(business.verifying_key(), "srv_1").with_ops_key(Some(ops.verifying_key()))
+    }
+
+    #[test]
+    fn the_business_ticket_gets_every_tool_and_consumes_its_jti() {
+        let business = key();
+        let ops = key();
+        let auth = dual_key_state(&business, &ops);
+        let verified = auth
+            .verify(&mint_token(&business, "srv_1", "b1", now_unix() + 60))
+            .unwrap();
+        assert_eq!(verified.capability, Capability::Business);
+        for tool in ["rotate_credentials", "upgrade_singbox", "get_status"] {
+            assert!(verified.capability.allows(tool), "{tool} must be allowed");
+        }
+        assert!(verified.capability.consumes_jti());
+        assert!(auth.consume_jti(&verified.payload).is_ok());
+        assert_eq!(
+            auth.consume_jti(&verified.payload),
+            Err(AuthError::Replayed)
+        );
+    }
+
+    #[test]
+    fn the_ops_ticket_is_read_only_and_its_jti_replays() {
+        let business = key();
+        let ops = key();
+        let auth = dual_key_state(&business, &ops);
+        let token = mint_token(&ops, "srv_1", "o1", now_unix() + 60);
+
+        let first = auth.verify(&token).unwrap();
+        assert_eq!(first.capability, Capability::Ops);
+        assert!(first.capability.allows("get_status"));
+        assert!(!first.capability.allows("rotate_credentials"));
+        assert!(!first.capability.allows("upgrade_singbox"));
+        // Closed by default: a tool added later is not reachable with this key.
+        assert!(!first.capability.allows("list_something_new"));
+        assert!(!first.capability.consumes_jti());
+
+        // The same ticket keeps verifying: nothing consumed its jti.
+        let again = auth.verify(&token).unwrap();
+        assert_eq!(again.capability, Capability::Ops);
+        assert_eq!(auth.executed_count(), 0);
+    }
+
+    #[test]
+    fn both_keys_are_still_bound_to_this_server() {
+        let business = key();
+        let ops = key();
+        let auth = dual_key_state(&business, &ops);
+        assert_eq!(
+            auth.verify(&mint_token(&business, "srv_2", "b1", now_unix() + 60))
+                .unwrap_err(),
+            AuthError::WrongServer
+        );
+        assert_eq!(
+            auth.verify(&mint_token(&ops, "srv_2", "o1", now_unix() + 60))
+                .unwrap_err(),
+            AuthError::WrongServer
+        );
+    }
+
+    #[test]
+    fn an_ops_key_equal_to_the_business_key_is_ignored() {
+        let business = key();
+        let auth = AuthState::new(business.verifying_key(), "srv_1")
+            .with_ops_key(Some(business.verifying_key()));
+        assert!(!auth.has_ops_key());
+        // A ticket signed by that shared key verifies as business — it is the
+        // business key, and the ops label never existed.
+        let verified = auth
+            .verify(&mint_token(&business, "srv_1", "j1", now_unix() + 60))
+            .unwrap();
+        assert_eq!(verified.capability, Capability::Business);
+    }
+
+    #[test]
+    fn without_an_ops_key_only_the_business_ticket_verifies() {
+        let business = key();
+        let ops = key();
+        let auth = AuthState::new(business.verifying_key(), "srv_1");
+        assert!(auth
+            .verify(&mint_token(&business, "srv_1", "b1", now_unix() + 60))
+            .is_ok());
+        assert_eq!(
+            auth.verify(&mint_token(&ops, "srv_1", "o1", now_unix() + 60))
+                .unwrap_err(),
+            AuthError::BadSignature
+        );
     }
 }

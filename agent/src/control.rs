@@ -58,6 +58,11 @@ pub struct Enrollment {
     /// uses it for offline verification.
     #[serde(default)]
     pub token_public_key: Option<String>,
+    /// Public JWK for the ops signer (read-only tickets). Absent while the
+    /// control plane has not configured one — a normal intermediate state, not
+    /// an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops_token_public_key: Option<String>,
     /// Leaf signed by the shared root; absent when enroll carried no CSR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_pem: Option<String>,
@@ -72,6 +77,8 @@ impl fmt::Debug for Enrollment {
             .field("server_id", &self.server_id)
             .field("server_token", &"***")
             .field("desired", &self.desired)
+            .field("token_public_key", &self.token_public_key)
+            .field("ops_token_public_key", &self.ops_token_public_key)
             .field("cert_pem", &self.cert_pem.as_ref().map(|_| "***"))
             .field("ca_pem", &self.ca_pem.as_ref().map(|_| "***"))
             .finish()
@@ -657,8 +664,26 @@ mod tests {
         let enrollment: Enrollment = serde_json::from_value(value).unwrap();
         assert_eq!(enrollment.server_id, "srv_1");
         assert!(enrollment.token_public_key.unwrap().contains("Ed25519"));
+        assert_eq!(enrollment.ops_token_public_key, None);
         assert_eq!(enrollment.cert_pem, None);
         assert_eq!(enrollment.ca_pem, None);
+    }
+
+    #[test]
+    fn enroll_response_parses_the_optional_ops_key() {
+        let value = json!({
+            "server_id": "srv_1",
+            "server_token": "agt_abc",
+            "desired": desired(),
+            "token_public_key": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"abc\"}",
+            "ops_token_public_key": "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"def\"}"
+        });
+        let enrollment: Enrollment = serde_json::from_value(value).unwrap();
+        assert!(enrollment
+            .ops_token_public_key
+            .as_deref()
+            .unwrap()
+            .contains("def"));
     }
 
     #[test]
@@ -792,6 +817,7 @@ mod tests {
             server_token: "agt_secret".into(),
             desired: desired(),
             token_public_key: Some(r#"{"kty":"OKP","crv":"Ed25519","x":"abc"}"#.into()),
+            ops_token_public_key: Some(r#"{"kty":"OKP","crv":"Ed25519","x":"def"}"#.into()),
             cert_pem: Some("-----BEGIN CERTIFICATE-----\nleaf\n-----END CERTIFICATE-----".into()),
             ca_pem: Some("-----BEGIN CERTIFICATE-----\nroot\n-----END CERTIFICATE-----".into()),
         };

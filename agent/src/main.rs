@@ -116,6 +116,8 @@ async fn main() -> Result<()> {
                 identity,
                 &server_id,
                 verifying_key,
+                // The dev server has no ops key.
+                None,
                 Arc::new(StubRotator::default()),
                 true,
                 None,

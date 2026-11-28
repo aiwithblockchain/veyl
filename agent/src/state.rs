@@ -97,6 +97,10 @@ impl fmt::Debug for AgentState {
             .field("applied_port", &self.applied_port)
             .field("cert_fingerprint", &self.cert_fingerprint)
             .field("agent_token_public_key", &self.agent_token_public_key)
+            .field(
+                "agent_ops_token_public_key",
+                &self.agent_ops_token_public_key,
+            )
             .field("last_desired", &self.last_desired)
             .field("pending_rotation_report", &self.pending_rotation_report)
             .finish()
@@ -119,6 +123,10 @@ pub struct AgentState {
     /// after a restart.
     #[serde(default)]
     pub agent_token_public_key: Option<String>,
+    /// Public JWK for read-only ops tickets, also from enroll. `None` means the
+    /// control plane has not configured one; only business tickets are accepted.
+    #[serde(default)]
+    pub agent_ops_token_public_key: Option<String>,
     /// Last applied credentials, including the password (0600 file).
     #[serde(default)]
     pub last_desired: Option<StoredDesired>,
@@ -246,6 +254,7 @@ mod tests {
             server_id: Some("srv_1".into()),
             server_token: Some("agt_secret".into()),
             cert_fingerprint: Some("aa".into()),
+            agent_ops_token_public_key: Some(r#"{"kty":"OKP","crv":"Ed25519","x":"ops"}"#.into()),
             last_desired: Some(StoredDesired {
                 port: 30412,
                 password: "secret-password".into(),

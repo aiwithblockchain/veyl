@@ -70,6 +70,8 @@
 	// - TOKEN_SIGNING_JWK（访问令牌签名）
 	// - CREDENTIAL_SIGNING_JWK / CREDENTIAL_ENC_KEY（节点凭据签名与加密）
 	// - AGENT_TOKEN_SIGNING_JWK（节点 MCP 一次性令牌；独立密钥，不与凭据签名共用）
+	// - OPS_TOKEN_PUBLIC_JWK（运维票 Ed25519 公钥；只放公钥，私钥留在运维 worker。dev 可不设，
+	//   未设时 enroll 不下发该字段，agent 只接受业务票）
 	// - MOBILE_TOKEN_ENC_KEY（手机导出令牌加密）
 	// - STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET（dev、prod 各一套，test 与 live 不混用）
 	// - RESEND_API_KEY / RESEND_FROM_EMAIL（邮箱验证码）

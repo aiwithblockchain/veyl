@@ -313,6 +313,16 @@ fn reject_batch() -> Response {
         .into_response()
 }
 
+/// The ticket is valid but its key does not cover this tool (an ops ticket
+/// asking for a write). 403, not 401: the credential is fine, the action is not.
+fn reject_tool(tool: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "forbidden", "reason": "tool_not_permitted", "tool": tool })),
+    )
+        .into_response()
+}
+
 fn reject(err: AuthError) -> Response {
     let body = Json(json!({
         "error": "unauthorized",
@@ -416,7 +426,7 @@ async fn auth_gate(
         );
         return reject(AuthError::Missing);
     };
-    let payload = match state.auth.verify(token) {
+    let verified = match state.auth.verify(token) {
         Ok(p) => p,
         Err(e) => {
             let reason = e.code();
@@ -430,6 +440,10 @@ async fn auth_gate(
             return reject(e);
         }
     };
+    // What this ticket may do is decided by the key that verified it, never by
+    // anything the caller sent.
+    let capability = verified.capability;
+    let payload = verified.payload;
 
     let (parts, body) = req.into_parts();
     let bytes: Bytes = match axum::body::to_bytes(body, 1 << 20).await {
@@ -468,24 +482,46 @@ async fn auth_gate(
         return reject_batch();
     }
     if tool_calls == 1 {
-        if let Err(e) = state.auth.consume_jti(&payload) {
-            let reason = e.code();
+        // An ops ticket is allowed to handshake like any client, but its keys'
+        // allowlist stops at read-only tools. Refuse before consuming anything.
+        if !capability.allows(&tool) {
             tracing::warn!(
                 method = %method,
                 tool = %tool,
+                capability = capability.as_str(),
                 decision = "rejected",
-                reason,
+                reason = "tool_not_permitted",
                 elapsed_ms = started.elapsed().as_millis(),
                 "mcp request"
             );
-            return reject(e);
+            return reject_tool(&tool);
+        }
+        // Business tickets are single use; ops tickets are not (a replayed read
+        // has no effect, and they live for an hour).
+        if capability.consumes_jti() {
+            if let Err(e) = state.auth.consume_jti(&payload) {
+                let reason = e.code();
+                tracing::warn!(
+                    method = %method,
+                    tool = %tool,
+                    capability = capability.as_str(),
+                    decision = "rejected",
+                    reason,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "mcp request"
+                );
+                return reject(e);
+            }
         }
     }
 
-    let resp = next.run(Request::from_parts(parts, Body::from(bytes))).await;
+    let resp = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
     tracing::info!(
         method = %method,
         tool = %tool,
+        capability = capability.as_str(),
         decision = "allowed",
         status = resp.status().as_u16(),
         elapsed_ms = started.elapsed().as_millis(),
@@ -651,6 +687,112 @@ mod tests {
         assert_eq!(count_tool_calls(mixed).unwrap(), 1);
         assert_eq!(count_tool_calls(b"not json"), Err(()));
         assert_eq!(count_tool_calls(b"42").unwrap(), 0);
+    }
+
+    /// A rotator that counts calls: proves whether the write tool body ran.
+    #[derive(Default)]
+    struct CountingRotator {
+        rotations: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl Rotator for CountingRotator {
+        async fn rotate(&self, _reason: Option<String>) -> Result<u16, RotateError> {
+            self.rotations.fetch_add(1, Ordering::SeqCst);
+            Ok(30412)
+        }
+
+        async fn upgrade_singbox(&self) -> Result<crate::rotation::UpgradeOutcome, RotateError> {
+            Ok(crate::rotation::UpgradeOutcome {
+                installed: "0.0.0-test".into(),
+                target: "0.0.0-test".into(),
+                upgraded: false,
+            })
+        }
+
+        async fn reannounce_active(&self) {}
+    }
+
+    fn tool_call_request(token: &str, tool: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "localhost")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(Body::from(format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+            )))
+            .unwrap()
+    }
+
+    fn ticket(signing: &ed25519_dalek::SigningKey, jti: &str, ttl: u64) -> String {
+        crate::auth::mint_token(signing, "srv_1", jti, crate::auth::now_unix() + ttl)
+    }
+
+    /// The gate is what these tests assert on; the MCP service behind it may
+    /// reject a call that skipped `initialize`, which is fine.
+    #[tokio::test]
+    async fn the_auth_gate_splits_tools_by_the_key_that_signed_the_ticket() {
+        use tower::ServiceExt as _;
+
+        let business = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let ops = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let auth = AuthState::new(business.verifying_key(), "srv_1")
+            .with_ops_key(Some(ops.verifying_key()));
+        let rotator = Arc::new(CountingRotator::default());
+        let (dir, identity) = identity_for_status("dual-key");
+        let state = ServerState::new(Arc::new(auth), rotator.clone(), Arc::new(identity), None);
+        let router = mcp_router(state);
+
+        // A business ticket reaches the write tool.
+        let resp = router
+            .clone()
+            .oneshot(tool_call_request(
+                &ticket(&business, "b1", 60),
+                "rotate_credentials",
+            ))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(rotator.rotations.load(Ordering::SeqCst), 1);
+
+        // The ops ticket is refused before the tool body runs.
+        let resp = router
+            .clone()
+            .oneshot(tool_call_request(
+                &ticket(&ops, "o1", 3600),
+                "rotate_credentials",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(rotator.rotations.load(Ordering::SeqCst), 1);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reason"], "tool_not_permitted");
+
+        // The same ops ticket works repeatedly: its jti is never consumed.
+        let token = ticket(&ops, "o1", 3600);
+        let first = router
+            .clone()
+            .oneshot(tool_call_request(&token, "get_status"))
+            .await
+            .unwrap();
+        assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(first.status(), StatusCode::FORBIDDEN);
+        let second = router
+            .oneshot(tool_call_request(&token, "get_status"))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), first.status());
+        assert_ne!(second.status(), StatusCode::UNAUTHORIZED);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
