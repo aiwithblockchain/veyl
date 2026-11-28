@@ -194,27 +194,80 @@ const STATUS = {
   cert_state: "current",
   cert: { not_after: 1_795_000_000 + 3 * 86_400 },
   health: {
-    nft_read: { count: 2, last_ok_at: 1_794_999_880 },
-    report: { count: 0, last_ok_at: 0 },
+    nft_read: { count: 2, last_error: "nft 读计数失败：permission denied", last_ok_at: 1_794_999_880 },
+    report: { count: 0, last_ok_at: 1_794_999_982 },
   },
 };
 
 describe("查看健康面板", () => {
-  it("成功：渲染版本、uptime、证书、计量与 health", async () => {
+  it("成功：版本、uptime、证书、计量与健康行全部说人话", async () => {
     const { text } = await run(installer(STATUS));
 
     expect(text).toContain("节点健康");
     expect(text).toContain("0.1.9");
     expect(text).toContain("1 天 1 小时"); // 90000 秒
-    expect(text).toContain("current");
+    expect(text).toContain("正常（统一根签发）");
     expect(text).toContain("剩余 3 天");
+
+    // 计量区：不出现 observed / pending_bytes 之类的字段名。
+    expect(text).toContain("最近读网卡");
     expect(text).toContain("2 分钟前"); // last_read_at = now - 120
-    expect(text).toContain("4096");
-    expect(text).toContain("count 2");
-    expect(text).toContain("count 0");
+    expect(text).toContain("本次进程已读到");
+    expect(text).toContain("待上报");
+    expect(text).toContain("4.0 KB（4,096 字节）");
+
+    // 健康行是句子：失败带原文，正常带相对时间。
+    expect(text).toContain("读网卡");
+    expect(text).toContain("连续失败 2 次 · 最近错误：nft 读计数失败：permission denied");
+    expect(text).toContain("上报控制面");
+    expect(text).toContain("正常 · 18 秒前");
+
     expect(text).toContain("复制 curl");
     // 票不进页面文本。
     expect(text).not.toContain("tkt_value");
+
+    // 原始字段名一个都不许当标签出现。
+    for (const raw of [
+      "nft_read",
+      "report",
+      "observed",
+      "pending_bytes",
+      "consecutive_read_failures",
+      "count ",
+    ]) {
+      expect(text).not.toContain(raw);
+    }
+  });
+
+  it("健康行：没有成功记录时不假装正常，空错误不写「最近错误」", async () => {
+    const { text } = await run(
+      installer({
+        ...STATUS,
+        health: {
+          nft_read: { count: 3, last_error: "", last_ok_at: 0 },
+          report: { count: 0, last_ok_at: 0 },
+        },
+      }),
+    );
+
+    expect(text).toContain("连续失败 3 次");
+    expect(text).not.toContain("最近错误");
+    expect(text).toContain("尚无成功记录");
+    expect(text).not.toContain("正常 ·");
+  });
+
+  it("证书状态按人话显示，不再露出 current/legacy/stale/broken", async () => {
+    const cases: Array<[string, string]> = [
+      ["current", "正常（统一根签发）"],
+      ["legacy", "旧的自签证书"],
+      ["stale", "不是当前根签发（需要重签）"],
+      ["broken", "证书或私钥损坏"],
+    ];
+    for (const [state, expected] of cases) {
+      const { text } = await run(installer({ ...STATUS, cert_state: state }));
+      expect(text).toContain(expected);
+      expect(text).not.toContain(state);
+    }
   });
 
   it("401：提示票被拒绝，而不是笼统的失败", async () => {

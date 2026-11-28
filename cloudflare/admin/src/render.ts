@@ -260,6 +260,8 @@ tbody tr.is-failed td{background:var(--surface-danger)}
 .kv .k{color:var(--text-2)}
 .kv .v{color:var(--text-1);font-family:var(--font-mono);word-break:break-all}
 .kv .v.missing{color:var(--text-missing)}
+.kv .v.warntext{color:var(--state-warn-text)}
+.kv .v.dangertext{color:var(--state-danger-text)}
 .causes{margin:6px 0 0;padding-left:18px;color:var(--text-2);font-size:12px;line-height:20px}
 .note{margin:0;color:var(--text-2);font-size:13px;line-height:20px}
 .ticket{background:var(--surface);border:1px solid var(--border-strong);border-radius:6px;padding:12px 14px}

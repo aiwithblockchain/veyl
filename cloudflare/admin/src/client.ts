@@ -96,13 +96,44 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     return `${Math.floor(seconds / 86400)} 天 ${Math.floor((seconds % 86400) / 3600)} 小时`;
   }
 
-  function kv(parent: El, label: string, value: { text: string; missing: boolean }): void {
+  type Tone = "warn" | "danger";
+
+  interface PanelValue {
+    text: string;
+    missing: boolean;
+    tone?: Tone;
+  }
+
+  function kv(parent: El, label: string, value: PanelValue): void {
     const k = make("div", "k");
     k.textContent = label;
-    const v = make("div", value.missing ? "v missing" : "v");
+    const cls = value.missing ? "v missing" : value.tone ? `v ${value.tone}text` : "v";
+    const v = make("div", cls);
     v.textContent = value.text;
     parent.appendChild(k);
     parent.appendChild(v);
+  }
+
+  /** 待上报是给人看一眼的量级，不是精确账单；原文放在括号里。 */
+  function humanBytes(bytes: number): string {
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+    if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KB`;
+    return `${bytes} B`;
+  }
+
+  function healthLabel(key: string): string {
+    if (key === "nft_read") return "读网卡";
+    if (key === "report") return "上报控制面";
+    return key;
+  }
+
+  function certStateLabel(state: string): PanelValue {
+    if (state === "current") return { text: "正常（统一根签发）", missing: false };
+    if (state === "legacy") return { text: "旧的自签证书", missing: false };
+    if (state === "stale") return { text: "不是当前根签发（需要重签）", missing: false, tone: "warn" };
+    if (state === "broken") return { text: "证书或私钥损坏", missing: false, tone: "danger" };
+    return { text: state, missing: false };
   }
 
   function copyButton(curl: string, primary?: boolean): El {
@@ -200,7 +231,7 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
     kv(grid, "uptime", up === null ? { text: "—", missing: true } : { text: uptime(up), missing: false });
 
     const certState = typeof payload.cert_state === "string" ? payload.cert_state : "";
-    kv(grid, "证书状态", certState ? { text: certState, missing: false } : { text: "—", missing: true });
+    kv(grid, "证书状态", certState ? certStateLabel(certState) : { text: "—", missing: true });
 
     const cert = (payload.cert ?? null) as { not_after?: unknown } | null;
     const notAfter = cert && typeof cert.not_after === "number" ? cert.not_after : null;
@@ -218,34 +249,59 @@ export function consoleClient(doc: ClientDocument, fetchImpl: FetchLike): void {
         pending_bytes?: unknown;
       };
       kv(grid, "计量", { text: "已接入", missing: false });
-      kv(
-        grid,
-        "最近读取",
-        rel(unixNow, typeof m.last_read_at === "number" ? m.last_read_at : 0),
-      );
-      kv(grid, "observed", {
-        text: typeof m.observed === "boolean" ? String(m.observed) : "—",
-        missing: typeof m.observed !== "boolean",
-      });
-      kv(grid, "连续读取失败", {
-        text: typeof m.consecutive_read_failures === "number" ? String(m.consecutive_read_failures) : "—",
-        missing: typeof m.consecutive_read_failures !== "number",
-      });
-      kv(grid, "pending_bytes", {
-        text: typeof m.pending_bytes === "number" ? String(m.pending_bytes) : "—",
-        missing: typeof m.pending_bytes !== "number",
-      });
+      kv(grid, "最近读网卡", rel(unixNow, typeof m.last_read_at === "number" ? m.last_read_at : 0));
+
+      if (typeof m.observed === "boolean") {
+        kv(
+          grid,
+          "读取状态",
+          m.observed
+            ? { text: "本次进程已读到", missing: false }
+            : { text: "本次进程还没读到，下面是上次保存的值", missing: false },
+        );
+      }
+
+      // 连续失败只在真的发生时占一行；0 次是常态。
+      const failures =
+        typeof m.consecutive_read_failures === "number" ? m.consecutive_read_failures : 0;
+      if (failures > 0) {
+        kv(grid, "读网卡失败", { text: `连续 ${failures} 次`, missing: false, tone: "warn" });
+      }
+
+      if (typeof m.pending_bytes === "number") {
+        const pending = m.pending_bytes;
+        kv(grid, "待上报", {
+          text: `${humanBytes(pending)}（${pending.toLocaleString("en-US")} 字节）`,
+          missing: false,
+        });
+      }
     }
 
     const health = payload.health;
     if (health && typeof health === "object") {
-      const entries = health as Record<string, { count?: unknown; last_ok_at?: unknown }>;
+      const entries = health as Record<
+        string,
+        { count?: unknown; last_error?: unknown; last_ok_at?: unknown }
+      >;
       for (const key of Object.keys(entries)) {
         const entry = entries[key] ?? {};
         const count = typeof entry.count === "number" ? entry.count : null;
-        const seen = rel(unixNow, typeof entry.last_ok_at === "number" ? entry.last_ok_at : 0);
-        const parts = [`count ${count === null ? "—" : count}`, `最近成功 ${seen.text}`];
-        kv(grid, key, { text: parts.join(" · "), missing: count === null });
+        const okAt = typeof entry.last_ok_at === "number" ? entry.last_ok_at : 0;
+        const lastError = typeof entry.last_error === "string" ? entry.last_error : "";
+        let value: PanelValue;
+        if (count === null) {
+          value = { text: "—", missing: true };
+        } else if (count > 0) {
+          const base = `连续失败 ${count} 次`;
+          value = lastError
+            ? { text: `${base} · 最近错误：${lastError}`, missing: false, tone: "warn" }
+            : { text: base, missing: false, tone: "warn" };
+        } else if (okAt > 0) {
+          value = { text: `正常 · ${rel(unixNow, okAt).text}`, missing: false };
+        } else {
+          value = { text: "尚无成功记录", missing: true };
+        }
+        kv(grid, healthLabel(key), value);
       }
     }
 
