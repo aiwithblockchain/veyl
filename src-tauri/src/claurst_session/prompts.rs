@@ -7,8 +7,9 @@
 //! 2. **内容文档**（`product.md` / `faq.md`）在启动时释放到应用数据目录，
 //!    系统提示词里只写路径，AI 需要时自己用文件工具去读，不整段塞进上下文。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -110,14 +111,22 @@ pub fn release(data_dir: &Path, lang: &str) -> Released {
     let dir = data_dir.join("prompts").join(lang);
     let mut hasher = Sha256::new();
 
-    let mut files: Vec<(&str, &str)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     if let Some(text) = system(lang) {
-        files.push(("system.md", text));
+        files.push(("system.md".to_string(), text.to_string()));
     }
     if let Some(text) = kickoff(lang) {
-        files.push(("kickoff.md", text));
+        files.push(("kickoff.md".to_string(), text.to_string()));
     }
-    files.extend(content_docs(lang).iter().copied());
+    // 只有内容文档允许本地覆盖；system / kickoff 永远用随包内容。
+    for (name, bundled) in content_docs(lang).iter().copied() {
+        let overridden = read_override(data_dir, lang, name);
+        log_override_source(lang, name, overridden.is_some());
+        files.push((
+            name.to_string(),
+            overridden.unwrap_or_else(|| bundled.to_string()),
+        ));
+    }
 
     if let Err(error) = std::fs::create_dir_all(&dir) {
         log::warn!("提示词目录创建失败 {}：{error}", dir.display());
@@ -125,6 +134,7 @@ pub fn release(data_dir: &Path, lang: &str) -> Released {
     for (name, body) in &files {
         // 文件名也进哈希：改名的内容换了一份文件，版本同样该变。
         hasher.update(name.as_bytes());
+        // 覆盖内容参与哈希，覆盖换了版本就跟着变。
         hasher.update(body.as_bytes());
         write_if_changed(&dir.join(name), body);
     }
@@ -133,6 +143,38 @@ pub fn release(data_dir: &Path, lang: &str) -> Released {
         lang: lang.to_string(),
         dir,
         version: hex::encode(hasher.finalize())[..8].to_string(),
+    }
+}
+
+/// 本地覆盖只读不写：目录不存在、文件为空 / 只有空白、读取失败都退回随包内容。
+fn read_override(data_dir: &Path, lang: &str, name: &str) -> Option<String> {
+    let path = data_dir
+        .join("prompts")
+        .join("override")
+        .join(lang)
+        .join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(body) if body.trim().is_empty() => None,
+        Ok(body) => Some(body),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            log::warn!("提示词覆盖读取失败 {}：{error}", path.display());
+            None
+        }
+    }
+}
+
+static OVERRIDE_SOURCE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+
+/// 每次释放都会走到这里：只在来源变化时记一行，避免刷屏。
+fn log_override_source(lang: &str, name: &str, overridden: bool) {
+    let sources = OVERRIDE_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut sources = sources.lock().unwrap_or_else(|error| error.into_inner());
+    if sources.insert(format!("{lang}/{name}"), overridden) != Some(overridden) {
+        log::info!(
+            "内容文档来源 {lang}/{name}：{}",
+            if overridden { "本地覆盖" } else { "随包内容" }
+        );
     }
 }
 
@@ -298,6 +340,135 @@ mod tests {
         let released = release(&dir, "fr");
         assert!(!released.dir.join("system.md").exists());
         assert!(!released.dir.join("product.md").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_override(dir: &Path, lang: &str, name: &str, body: &str) {
+        let override_dir = dir.join("prompts/override").join(lang);
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join(name), body).unwrap();
+    }
+
+    /// 有覆盖：活动文件用覆盖内容，版本跟着实际内容变；没覆盖的那份仍随包。
+    #[test]
+    fn an_override_replaces_the_content_doc_and_changes_the_version() {
+        let dir = temp_dir();
+        let bundled = release(&dir, "zh");
+        write_override(&dir, "zh", "product.md", "# 本地覆盖的产品说明\n");
+
+        let released = release(&dir, "zh");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/product.md")).unwrap(),
+            "# 本地覆盖的产品说明\n"
+        );
+        assert_ne!(released.version, bundled.version, "覆盖后版本必须跟着变");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/faq.md")).unwrap(),
+            content_docs("zh")[1].1,
+            "没覆盖的 faq 仍用随包内容"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 无覆盖：两份内容文档都是随包内容，而且不会顺手创建覆盖目录。
+    #[test]
+    fn without_an_override_the_bundled_content_is_released() {
+        let dir = temp_dir();
+        release(&dir, "zh");
+        for (name, bundled) in content_docs("zh").iter().copied() {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("prompts/zh").join(name)).unwrap(),
+                bundled,
+                "{name} 没有覆盖时必须是随包内容"
+            );
+        }
+        assert!(
+            !dir.join("prompts/override").exists(),
+            "不能创建覆盖目录"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空覆盖 / 只有空白：视为没有覆盖，版本也不变。
+    #[test]
+    fn an_empty_override_falls_back_to_the_bundled_content() {
+        let dir = temp_dir();
+        let bundled = release(&dir, "zh");
+        write_override(&dir, "zh", "product.md", "  \n\t\n");
+
+        let released = release(&dir, "zh");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/product.md")).unwrap(),
+            content_docs("zh")[0].1
+        );
+        assert_eq!(released.version, bundled.version, "空覆盖等于没覆盖");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 覆盖文件被删掉：下一次释放恢复随包内容。
+    #[test]
+    fn deleting_the_override_restores_the_bundled_content() {
+        let dir = temp_dir();
+        write_override(&dir, "zh", "faq.md", "# 覆盖的 FAQ\n");
+        release(&dir, "zh");
+        std::fs::remove_file(dir.join("prompts/override/zh/faq.md")).unwrap();
+
+        release(&dir, "zh");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/faq.md")).unwrap(),
+            content_docs("zh")[1].1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 覆盖目录里的 system / kickoff 不生效：只有内容文档能覆盖。
+    #[test]
+    fn system_and_kickoff_are_never_overridden() {
+        let dir = temp_dir();
+        write_override(&dir, "zh", "system.md", "# 不该生效的系统提示词\n");
+        write_override(&dir, "zh", "kickoff.md", "# 不该生效的首启提示词\n");
+
+        release(&dir, "zh");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/system.md")).unwrap(),
+            system("zh").unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompts/zh/kickoff.md")).unwrap(),
+            kickoff("zh").unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 覆盖目录只读：释放前后不多出文件、内容不被改写。
+    #[test]
+    fn releasing_never_writes_into_the_override_directory() {
+        let dir = temp_dir();
+        write_override(&dir, "zh", "product.md", "# 覆盖内容\n");
+        let override_dir = dir.join("prompts/override/zh");
+        let names = |dir: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = names(&override_dir);
+
+        release(&dir, "zh");
+        release(&dir, "zh");
+
+        assert_eq!(before, names(&override_dir), "覆盖目录不能多出文件");
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(override_dir.join("product.md")).unwrap(),
+            "# 覆盖内容\n"
+        );
+        assert!(
+            !override_dir.join("faq.md").exists(),
+            "不能替用户补一份覆盖文件"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
